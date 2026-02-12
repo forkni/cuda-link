@@ -156,6 +156,7 @@ class CUDAIPCExtension:
         self.total_memcpy_time = 0.0
         self.total_record_event_time = 0.0
         self.total_export_time = 0.0
+        self.total_cuda_memory_time = 0.0  # Time spent in cudaMemory() call
 
         # Verbosity control - read from local Debug parameter
         try:
@@ -452,15 +453,19 @@ class CUDAIPCExtension:
         if self.verbose_performance:
             frame_start = time.perf_counter()
 
-        # Execute deferred GPU cleanup if scheduled and enough frames have passed
-        if self._pending_free_ptrs and self.frame_count >= self._deferred_free_at_frame:
-            self._deferred_free()
-
         try:
+            # Time cudaMemory() call (OpenGL→CUDA interop, suspected 4K bottleneck)
+            if self.verbose_performance:
+                cuda_mem_start = time.perf_counter()
+
             # Get TOP's CUDA memory (pass stream for proper synchronization per TD docs)
             cuda_mem = top_op.cudaMemory(
                 stream=int(self.ipc_stream.value) if self._initialized else None,
             )
+
+            if self.verbose_performance:
+                cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
+                self.total_cuda_memory_time += cuda_mem_time
 
             if cuda_mem is None:
                 self._log(f"Failed to get CUDA memory from {top_op}", force=True)
@@ -557,18 +562,29 @@ class CUDAIPCExtension:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_time += frame_time
 
+            # Detailed first-frame diagnostic (one-time, not affected by 100-frame interval)
+            if self.verbose_performance and self.frame_count == 1:
+                self._log(
+                    f"FIRST FRAME: cudaMemory={cuda_mem_time:.1f}us, "
+                    f"memcpy={memcpy_time:.1f}us, total={frame_time:.1f}us, "
+                    f"res={actual_width}x{actual_height}, size={actual_size / (1024 * 1024):.1f}MB",
+                    force=True,
+                )
+
             # Log performance metrics every 100 frames (if verbose)
             if self.verbose_performance and self.frame_count % 100 == 0:
                 avg_memcpy = self.total_memcpy_time / self.frame_count
                 avg_record = self.total_record_event_time / self.frame_count if all(self.ipc_events) else 0
                 avg_total = self.total_export_time / self.frame_count
+                avg_cuda_mem = self.total_cuda_memory_time / self.frame_count
                 sync_mode = (
                     f"GPU-Events[{self.num_slots}]" if all(self.ipc_events) else f"CPU-Sync(1/{self.sync_interval})"
                 )
 
                 log_msg = (
-                    f"Frame {self.frame_count}: wrote to slot {slot}, write_idx={self.write_idx}, "
-                    f"avg memcpy={avg_memcpy:.1f}us (CPU enqueue), record_event={avg_record:.1f}us, "
+                    f"Frame {self.frame_count}: slot {slot}, "
+                    f"avg cudaMemory={avg_cuda_mem:.1f}us, "
+                    f"avg memcpy={avg_memcpy:.1f}us, record={avg_record:.1f}us, "
                     f"total={avg_total:.1f}us, mode={sync_mode}"
                 )
 
@@ -593,10 +609,18 @@ class CUDAIPCExtension:
             traceback.print_exc()
             return False
 
+    def _check_deferred_cleanup(self) -> None:
+        """Execute deferred GPU cleanup if scheduled and enough frames have passed.
+
+        Lightweight check meant to be called from onFrameStart for minimal overhead.
+        """
+        if self._pending_free_ptrs and self.frame_count >= self._deferred_free_at_frame:
+            self._deferred_free()
+
     def _deferred_free(self) -> None:
         """Free GPU resources queued from export_frame() when deferred frame threshold is reached.
 
-        Called via run() after receiver has had time to close IPC handles.
+        Called via _check_deferred_cleanup() after receiver has had time to close IPC handles.
         """
         if not self.cuda:
             return
@@ -764,10 +788,12 @@ class CUDAIPCExtension:
     def import_frame(self, import_buffer: "TOP") -> bool:
         """Import frame from CUDA IPC into ImportBuffer (Script TOP).
 
-        MUST be called from inside ImportBuffer's onCook callback.
+        Can be called from:
+        - Inside ImportBuffer's onCook callback (TD 2023+ compatibility)
+        - Execute DAT onFrameStart with modoutsidecook enabled (TD 2025+)
 
         Args:
-            import_buffer: The ImportBuffer Script TOP operator (me inside onCook)
+            import_buffer: The ImportBuffer Script TOP operator
 
         Returns:
             True if import successful, False otherwise.
@@ -853,6 +879,35 @@ class CUDAIPCExtension:
             self._log(f"Import failed: {e}", force=True)
 
             traceback.print_exc()
+            return False
+
+    def update_receiver_resolution(self, import_buffer: "TOP") -> bool:
+        """Update ImportBuffer resolution from outside the cook cycle.
+
+        Safe to call from Execute DAT when modoutsidecook is enabled on the Script TOP (TD 2025+).
+        When modoutsidecook is NOT available, this is a no-op (resolution handled in onCook).
+
+        Args:
+            import_buffer: The ImportBuffer Script TOP operator
+
+        Returns:
+            True if resolution was updated, False if no update needed or not applicable
+        """
+        if not self._rx_needs_resolution_update:
+            return False
+
+        try:
+            import_buffer.par.outputresolution = 9  # Custom Resolution
+            import_buffer.par.resolutionw = self._rx_width
+            import_buffer.par.resolutionh = self._rx_height
+            self._rx_needs_resolution_update = False
+            self._log(
+                f"Set ImportBuffer resolution to {self._rx_width}x{self._rx_height} (from Execute DAT)",
+                force=True,
+            )
+            return True
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"Could not set ImportBuffer resolution: {e}", force=True)
             return False
 
     def initialize_receiver(self) -> bool:

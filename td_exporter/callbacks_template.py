@@ -2,54 +2,72 @@
 Template Execute DAT Callback for CUDAIPCExtension
 
 Copy this into an Execute DAT inside your .tox component.
-Enable "Frame Start" and "On Exit" toggles.
+Enable "Frame Start", "Frame End", and "On Exit" toggles.
 
-Handles both Sender and Receiver modes.
+Architecture:
+- Sender: onFrameStart=housekeeping, onFrameEnd=export (avoids 8.8ms GPU wait)
+- Receiver: onFrameStart=force-cook ImportBuffer (triggers Script TOP onCook)
 """
 
 
 def onFrameStart(frame: int) -> None:
-    """Called every frame.
+    """Called at the start of every frame.
+
+    Sender: Lightweight housekeeping (deferred GPU cleanup).
+    Receiver: Force-cook ImportBuffer (triggers Script TOP onCook).
 
     Args:
         frame: Current frame number
     """
     ext = parent().ext.CUDAIPCExtension
-
     if ext is None:
         return
 
-    # Mode parameter changes are already handled by parexecute_callbacks.py
-    # No need to re-check here (redundant eval removed for performance)
+    if ext.mode == "Sender":
+        # Check if deferred GPU cleanup is scheduled (lightweight, ~0ms normally)
+        ext._check_deferred_cleanup()
 
-    # Sender: export frame from ExportBuffer TOP
+    elif ext.mode == "Receiver":
+        import_buffer = op("ImportBuffer")
+        if import_buffer is None:
+            return
+
+        # TD 2025+: modoutsidecook enables copyCUDAMemory from Execute DAT
+        # This eliminates force-cook overhead and fixes resolution delay
+        if hasattr(import_buffer.par, "modoutsidecook") and import_buffer.par.modoutsidecook.eval():
+            # Import frame first: initialize_receiver() sets resolution flag
+            ext.import_frame(import_buffer)
+            # Resolution update after: catches flag set during initialization
+            ext.update_receiver_resolution(import_buffer)
+        else:
+            # TD 2023 fallback: force-cook triggers Script TOP onCook
+            # Resolution update happens inside onCook (1-frame delay for changes)
+            import_buffer.cook(force=True)
+
+
+def onFrameEnd(frame: int) -> None:
+    """Called at the end of every frame.
+
+    Sender: Export frame AFTER cook phase (texture already rendered on GPU).
+            cudaMemory() returns instantly instead of blocking 8.8ms waiting for GPU.
+    Receiver: Nothing (import already happened via Script TOP onCook).
+
+    Args:
+        frame: Current frame number
+    """
+    ext = parent().ext.CUDAIPCExtension
+    if ext is None:
+        return
+
     if ext.mode == "Sender":
         export_buffer = op("ExportBuffer")
         if export_buffer:
             ext.export_frame(export_buffer)
-    # Receiver: Force ImportBuffer TOP to cook (triggers onCook -> import_frame)
-    elif ext.mode == "Receiver":
-        import_buffer = op("ImportBuffer")
-        if import_buffer:
-            # Update ImportBuffer resolution if receiver initialization completed
-            if ext._rx_needs_resolution_update:
-                try:
-                    import_buffer.par.outputresolution = 9  # Custom Resolution
-                    import_buffer.par.resolutionw = ext._rx_width
-                    import_buffer.par.resolutionh = ext._rx_height
-                    ext._rx_needs_resolution_update = False
-                    ext._log(f"Set ImportBuffer resolution to {ext._rx_width}x{ext._rx_height}", force=True)
-                except (AttributeError, RuntimeError) as e:
-                    ext._log(f"Could not set ImportBuffer resolution: {e}", force=True)
-
-            # Force cook to trigger onCook callback
-            import_buffer.cook(force=True)
 
 
 def onExit() -> None:
     """Called when TouchDesigner exits or when this DAT is destroyed."""
     ext = parent().ext.CUDAIPCExtension
-
     if ext is not None:
         ext.cleanup()
 

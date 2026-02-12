@@ -92,6 +92,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExporter object at 0x...>`
 2. Paste the contents from `td_exporter/callbacks_template.py`
 3. Enable the following toggles on the **Execute DAT → Callbacks** page:
    - **Frame Start**: ON
+   - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
 **Important**: Ensure the Execute DAT references `op('input')` for the source TOP. Users will wire their actual TOP to this In TOP.
@@ -102,6 +103,21 @@ You should see: `<CUDAIPCExporter.CUDAIPCExporter object at 0x...>`
 2. This is a pass-through input that users will wire their source TOP to
 
 **Note**: The In TOP has no parameters to configure - it's purely a connection point.
+
+### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
+
+If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
+
+1. Select the `ImportBuffer` Script TOP inside the component
+2. Open the **Script TOP** parameter page
+3. Enable **Modify Outside of Cook** toggle (ON)
+
+**Benefits**:
+- Eliminates force-cook overhead (~0.03ms per frame)
+- Removes 1-frame resolution change delay
+- Simplifies data flow (Execute DAT drives import directly)
+
+**Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
 
 ### Step 7: Optional Info DAT
 

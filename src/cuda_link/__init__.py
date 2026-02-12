@@ -9,7 +9,7 @@ CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 
-__version__ = "1.0.0"
+__version__ = "0.5.0"
 __all__ = [
     "CUDAIPCImporter",
     "CUDARuntimeAPI",
