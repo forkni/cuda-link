@@ -1,0 +1,20 @@
+"""
+cuda-link - Zero-copy GPU texture sharing between processes via CUDA IPC.
+
+This package links TouchDesigner and Python processes using CUDA Inter-Process
+Communication for zero-copy GPU texture transfer. Supports PyTorch (GPU tensors),
+CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
+"""
+
+from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
+
+__version__ = "1.0.0"
+__all__ = [
+    "CUDAIPCImporter",
+    "CUDARuntimeAPI",
+    "get_cuda_runtime",
+    "CUPY_AVAILABLE",
+    "NUMPY_AVAILABLE",
+    "TORCH_AVAILABLE",
+]

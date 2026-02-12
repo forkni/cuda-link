@@ -1,0 +1,64 @@
+# .gitattributes - Git Merge Strategies
+# Created: 2025-10-03
+# Purpose: Control merge behavior for dual-branch workflow (main/development)
+# NOTE: Last matching pattern wins! Specific patterns must come AFTER general patterns.
+
+# ============================================================================
+# LINE ENDINGS
+# ============================================================================
+
+# Shell scripts must use LF line endings (fix for bash shebang interpretation)
+*.sh text eol=lf
+
+# ============================================================================
+# GENERAL PATTERNS (APPLY FIRST)
+# Use "diff3" strategy for better conflict resolution
+# ============================================================================
+
+# Python source files (general - will be overridden for tests/)
+*.py merge=diff3
+
+# Batch scripts
+*.bat merge=diff3
+
+# PowerShell scripts
+*.ps1 merge=diff3
+
+# Configuration files (general - pytest.ini will be overridden)
+*.json merge=diff3
+*.yaml merge=diff3
+*.yml merge=diff3
+*.toml merge=diff3
+*.ini merge=diff3
+*.cfg merge=diff3
+
+# Documentation (general - specific docs will be overridden)
+*.md merge=diff3
+
+# ============================================================================
+# SPECIFIC PATTERNS (OVERRIDE GENERAL)
+# ============================================================================
+
+# Changelog should combine (not diff3)
+CHANGELOG.md merge=union
+
+# DEVELOPMENT-ONLY DOCUMENTATION
+# Use "ours" strategy (keep main's version during merge)
+# These docs contain implementation details not needed in production main branch
+docs/GIT_WORKFLOW.md merge=ours
+docs/TESTING_GUIDE.md merge=ours
+docs/PRE_COMMIT_HOOKS.md merge=ours
+docs/VSCODE_SETUP.md merge=ours
+docs/GPU_MEMORY_LEAK_FIX.md merge=ours
+docs/PER_MODEL_INDICES_IMPLEMENTATION.md merge=ours
+docs/PER_MODEL_INDICES_PLAN.md merge=ours
+docs/Current_State.md merge=ours
+docs/GIT_WORKFLOW_ENHANCEMENT_PLAN.md merge=ours
+docs/GIT_WORKFLOW_CRITICAL_REVIEW.md merge=ours
+
+# ============================================================================
+# NOTES:
+# - "ours" = keep current branch's version (main keeps its version)
+# - "union" = combine both versions (useful for changelogs)
+# - "diff3" = show common ancestor in conflicts (easier resolution)
+# ============================================================================

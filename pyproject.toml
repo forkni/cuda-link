@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuda-link"
+version = "1.0.0"
+description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "StreamDiffusion Performance Team"},
+    {name = "Claude Code"}
+]
+keywords = ["cuda", "ipc", "touchdesigner", "gpu", "zero-copy", "texture-sharing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# No required dependencies - pure ctypes wrapper
+dependencies = []
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+numpy = ["numpy>=1.21"]
+cupy = ["cupy-cuda12x>=12.0"]
+all = ["cuda-link[torch,numpy,cupy]"]
+dev = [
+    "cuda-link[all]",
+    "pytest>=7.0",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/cuda-link"
+Documentation = "https://github.com/your-org/cuda-link/tree/main/docs"
+Repository = "https://github.com/your-org/cuda-link"
+Issues = "https://github.com/your-org/cuda-link/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "requires_cuda: marks tests as requiring CUDA GPU (deselect with '-m \"not requires_cuda\"')",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+"td_exporter/*" = ["N801", "N802", "N803", "N814", "F821"]  # TD naming: __delTD__, ownerComp, COMP/TOP fallbacks; C-struct naming (cudaIpcMemHandle_t); TD built-in globals (op, parent, etc.)
+"benchmarks/*" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t)
+"tests/*" = ["N802", "N806"]  # Allow test method names like test_* and test constant naming
+"src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
+".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # TODO: Enable after adding all type hints

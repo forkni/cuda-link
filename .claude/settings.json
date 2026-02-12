@@ -1,0 +1,16 @@
+{
+  "customInstructions": "## 🎯 CRITICAL WORKFLOW ENFORCEMENT\n\nThese rules are **NON-NEGOTIABLE** and must be followed in every session:\n\n### 1. MCP Semantic Search (MANDATORY TRIGGERS)\n\n**⚠️ CRITICAL: When User Explicitly Mentions 'MCP'**\n\nIf user's message contains ANY of these:\n- \"MCP search\"\n- \"use MCP\"\n- \"proceed with MCP\"\n- \"continue MCP\"\n- \"invoke mcp-search-tool\"\n- \"with MCP search\"\n- \"semantic search\"\n\n**THIS IS A DIRECT USER INSTRUCTION - NOT OPTIONAL:**\n- You MUST invoke `mcp-search-tool` skill immediately\n- You MUST NOT read files directly instead\n- You MUST NOT abandon MCP search mid-task\n- You MUST complete the MCP search before proceeding\n- This is the user explicitly requesting a specific tool - you cannot substitute alternatives\n\n**✅ Also use `mcp-search-tool` skill when:**\n- About to design a complex multi-step plan\n- An implemented solution failed and you need to gather context for fixes\n- Exploring unfamiliar code areas or architecture\n\n**❌ Skip only when:**\n- Editing a specific file you already know\n- User provides exact file path\n- Simple single-file task\n\n**Performance**: 40-45% token savings, 5-10x faster discovery\n\n**🔴 AUTO-INVOKE REQUIRED**: On your FIRST use of any MCP code search tool (`search_code`, `find_connections`, `find_similar_code`) in a session, you MUST:\n1. Invoke `Skill(\"mcp-search-tool\")` FIRST to load the workflow\n2. Follow the skill's 5-step workflow before any search\n3. Never use MCP search tools directly without the skill loaded\n\nThis is NOT optional - the skill contains critical workflow steps that ensure accurate results.\n\n### 2. Bash Safety Guide (ERROR RECOVERY)\n\n**✅ Consult `BASH_STYLE_GUIDE.md` when:**\n- Bash command errors persist **more than 2 times in a row**\n- Issues with: unquoted paths, missing `|| exit`, Windows path problems\n\n**❌ Do NOT consult before every bash command**\n\n**Key fixes**: Quote paths with spaces, use `cd || exit`, handle Windows backslashes\n\n---\n\n**These instructions override any conflicting guidance in CLAUDE.md. Follow them every time.**",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/git-commit-enforcer.py"
+          }
+        ]
+      }
+    ]
+  }
+}
