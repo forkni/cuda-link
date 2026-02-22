@@ -2,7 +2,7 @@ name: Branch Protection
 
 on:
   push:
-    branches: [development, main]
+    branches: [development, main, master]
     paths-ignore:
       - '*.toe'
       - 'TOXES/**'
@@ -10,7 +10,7 @@ on:
       - 'TD_RAG/**'
       - 'References/**'
   pull_request:
-    branches: [development, main]
+    branches: [development, main, master]
     paths-ignore:
       - '*.toe'
       - 'TOXES/**'

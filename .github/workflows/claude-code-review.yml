@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review, reopened]
     paths:
       - "**/*.py"
       - "pyproject.toml"
@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 10  # Prevent runaway workflows
     permissions:
       contents: read
-      pull-requests: write  # Required for gh pr comment to post review comments
+      pull-requests: write  # Required for plugin to post review comments
       issues: read
       id-token: write
 
@@ -40,28 +40,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "*"  # Allow all bots (including claude[bot])
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
-
-            Project context: This is a CUDA IPC library (cuda-link) for zero-copy GPU texture
-            sharing between TouchDesigner and Python via CUDA IPC handles. Key conventions:
-            - td_exporter/ uses PascalCase classes and camelCase methods (TouchDesigner convention)
-            - Library is Windows-only (ctypes binding to cudart64_12.dll)
-            - C-struct naming like cudaIpcMemHandle_t is intentional, not a lint violation
-            - Tests marked @pytest.mark.requires_cuda need a physical CUDA GPU to run
-            - CLAUDE.md is available in the repository for further style guidance
-
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
-
-          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
 
       - name: Comment on failure
         if: failure()
