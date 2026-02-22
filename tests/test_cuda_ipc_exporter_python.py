@@ -11,10 +11,8 @@ from __future__ import annotations
 import struct
 import time
 from multiprocessing.shared_memory import SharedMemory
-from typing import Generator
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Pure unit tests (no CUDA required)
@@ -61,10 +59,10 @@ def test_constructor_custom_params() -> None:
 def test_dtype_code_mapping() -> None:
     """dtype strings map to correct internal protocol codes."""
     from cuda_link.cuda_ipc_exporter import (
+        _DTYPE_CODE_MAP,
         DTYPE_FLOAT16,
         DTYPE_FLOAT32,
         DTYPE_UINT8,
-        _DTYPE_CODE_MAP,
     )
 
     assert _DTYPE_CODE_MAP["float32"] == DTYPE_FLOAT32
@@ -199,7 +197,7 @@ def test_initialize_idempotent(temp_shm_name: str, shared_memory_cleanup: list) 
 @pytest.mark.requires_cuda
 def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """SharedMemory header contains correct protocol magic 0x43495043."""
-    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter, PROTOCOL_MAGIC
+    from cuda_link.cuda_ipc_exporter import PROTOCOL_MAGIC, CUDAIPCExporter
 
     shared_memory_cleanup.append(temp_shm_name)
     exp = CUDAIPCExporter(shm_name=temp_shm_name, height=64, width=64)
@@ -218,7 +216,7 @@ def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> 
 @pytest.mark.requires_cuda
 def test_shm_protocol_num_slots(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """SharedMemory header encodes the correct num_slots value."""
-    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter, SHM_HEADER_SIZE
+    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
 
     NUM_SLOTS_OFFSET = 12
 
@@ -239,7 +237,6 @@ def test_shm_protocol_num_slots(temp_shm_name: str, shared_memory_cleanup: list)
 @pytest.mark.requires_cuda
 def test_ring_buffer_write_idx_increments(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """write_idx in SharedMemory increments after each export_frame() call."""
-    import ctypes
 
     from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
     from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
@@ -273,9 +270,8 @@ def test_ring_buffer_write_idx_increments(temp_shm_name: str, shared_memory_clea
 @pytest.mark.requires_cuda
 def test_shutdown_flag_set_on_cleanup(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """cleanup() writes shutdown flag=1 to SharedMemory before unlinking."""
-    import struct
 
-    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter, SHM_HEADER_SIZE, SLOT_SIZE
+    from cuda_link.cuda_ipc_exporter import SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExporter
 
     shared_memory_cleanup.append(temp_shm_name)
     num_slots = 2
@@ -321,11 +317,11 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
     delta is consistent with perf_counter resolution (not epoch seconds).
     """
     from cuda_link.cuda_ipc_exporter import (
-        CUDAIPCExporter,
-        SHM_HEADER_SIZE,
-        SLOT_SIZE,
-        SHUTDOWN_FLAG_SIZE,
         METADATA_SIZE,
+        SHM_HEADER_SIZE,
+        SHUTDOWN_FLAG_SIZE,
+        SLOT_SIZE,
+        CUDAIPCExporter,
     )
     from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
 
@@ -352,8 +348,7 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
 
             # Timestamp must be within [t_before, t_after + small_epsilon]
             assert t_before <= ts <= t_after + 0.001, (
-                f"Timestamp {ts:.6f} not in expected perf_counter range "
-                f"[{t_before:.6f}, {t_after + 0.001:.6f}]"
+                f"Timestamp {ts:.6f} not in expected perf_counter range [{t_before:.6f}, {t_after + 0.001:.6f}]"
             )
         finally:
             cuda.free(gpu_buf)

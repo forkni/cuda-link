@@ -136,9 +136,9 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
     try:
         # Write header (magic="CIPC", version=1, num_slots=3, write_idx=0)
         shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
-        shm.buf[4:12] = struct.pack("<Q", 1)           # version
-        shm.buf[12:16] = struct.pack("<I", 3)          # num_slots
-        shm.buf[16:20] = struct.pack("<I", 0)          # write_idx
+        shm.buf[4:12] = struct.pack("<Q", 1)  # version
+        shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
+        shm.buf[16:20] = struct.pack("<I", 0)  # write_idx
 
         # Allocate real GPU buffers and write IPC handles
         for slot in range(3):
@@ -179,9 +179,9 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
     try:
         # Write header (magic="CIPC", version=1, num_slots=3, write_idx=1)
         shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
-        shm.buf[4:12] = struct.pack("<Q", 1)           # version
-        shm.buf[12:16] = struct.pack("<I", 3)          # num_slots
-        shm.buf[16:20] = struct.pack("<I", 1)          # write_idx=1
+        shm.buf[4:12] = struct.pack("<Q", 1)  # version
+        shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
+        shm.buf[16:20] = struct.pack("<I", 1)  # write_idx=1
 
         # Write real IPC handles
         for slot in range(3):

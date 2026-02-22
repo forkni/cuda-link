@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import ctypes
 import multiprocessing
-import struct
 import time
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Shared helper: wait for SharedMemory to appear (cheap, no CUDA)
@@ -49,7 +47,17 @@ def _wait_for_shm(shm_name: str, timeout_s: float = 20.0) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _worker_producer_basic(shm_name: str, height: int, width: int, channels: int, dtype: str, fill_value: int, num_frames: int, num_slots: int, rq: object) -> None:
+def _worker_producer_basic(
+    shm_name: str,
+    height: int,
+    width: int,
+    channels: int,
+    dtype: str,
+    fill_value: int,
+    num_frames: int,
+    num_slots: int,
+    rq: object,
+) -> None:
     """Exports GPU frames via CUDAIPCExporter."""
     try:
         from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
@@ -58,9 +66,12 @@ def _worker_producer_basic(shm_name: str, height: int, width: int, channels: int
         cuda = get_cuda_runtime()
         exporter = CUDAIPCExporter(
             shm_name=shm_name,
-            height=height, width=width,
-            channels=channels, dtype=dtype,
-            num_slots=num_slots, debug=False,
+            height=height,
+            width=width,
+            channels=channels,
+            dtype=dtype,
+            num_slots=num_slots,
+            debug=False,
         )
         ok = exporter.initialize()
         if not ok:
@@ -89,10 +100,13 @@ def _worker_producer_basic(shm_name: str, height: int, width: int, channels: int
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
-def _worker_consumer_basic(shm_name: str, height: int, width: int, channels: int, dtype: str, num_frames: int, rq: object) -> None:
+def _worker_consumer_basic(
+    shm_name: str, height: int, width: int, channels: int, dtype: str, num_frames: int, rq: object
+) -> None:
     """Reads frames via CUDAIPCImporter."""
     try:
         from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
@@ -127,13 +141,17 @@ def _worker_consumer_basic(shm_name: str, height: int, width: int, channels: int
         rq.put(("OK", frames_received))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
-def _worker_consumer_verify(shm_name: str, height: int, width: int, channels: int, dtype: str, expected_fill: int, num_frames: int, rq: object) -> None:
+def _worker_consumer_verify(
+    shm_name: str, height: int, width: int, channels: int, dtype: str, expected_fill: int, num_frames: int, rq: object
+) -> None:
     """Reads frames and verifies pixel values match expected fill."""
     try:
         import numpy as np
+
         from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
 
         if not NUMPY_AVAILABLE:
@@ -167,6 +185,7 @@ def _worker_consumer_verify(shm_name: str, height: int, width: int, channels: in
         rq.put(("OK", {"frames": frames_received, "mismatches": mismatches}))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
@@ -177,9 +196,7 @@ def _worker_producer_shutdown(shm_name: str, num_frames: int, rq: object) -> Non
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
 
         cuda = get_cuda_runtime()
-        exporter = CUDAIPCExporter(
-            shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2
-        )
+        exporter = CUDAIPCExporter(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2)
         exporter.initialize()
 
         src_ptr = cuda.malloc(exporter.data_size)
@@ -195,6 +212,7 @@ def _worker_producer_shutdown(shm_name: str, num_frames: int, rq: object) -> Non
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
@@ -232,6 +250,7 @@ def _worker_consumer_shutdown(shm_name: str, rq: object) -> None:
         rq.put(("OK", {"shutdown_detected": shutdown_detected}))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
@@ -242,9 +261,7 @@ def _worker_producer_float32(shm_name: str, num_frames: int, rq: object) -> None
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
 
         cuda = get_cuda_runtime()
-        exporter = CUDAIPCExporter(
-            shm_name=shm_name, height=8, width=8, channels=4, dtype="float32", num_slots=2
-        )
+        exporter = CUDAIPCExporter(shm_name=shm_name, height=8, width=8, channels=4, dtype="float32", num_slots=2)
         exporter.initialize()
 
         src_ptr = cuda.malloc(exporter.data_size)
@@ -258,6 +275,7 @@ def _worker_producer_float32(shm_name: str, num_frames: int, rq: object) -> None
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
@@ -287,13 +305,19 @@ def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
         frame = importer.get_frame_numpy()
         importer.cleanup()
 
-        rq.put(("OK", {
-            "shape": detected_shape,
-            "dtype": detected_dtype,
-            "got_frame": frame is not None,
-        }))
+        rq.put(
+            (
+                "OK",
+                {
+                    "shape": detected_shape,
+                    "dtype": detected_dtype,
+                    "got_frame": frame is not None,
+                },
+            )
+        )
     except Exception as e:  # noqa: BLE001
         import traceback
+
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
@@ -396,8 +420,7 @@ def test_roundtrip_data_integrity(temp_shm_name: str) -> None:
         stats = ok_dicts[-1][1]
         assert stats["frames"] >= 1, "Consumer received 0 frames"
         assert stats["mismatches"] == 0, (
-            f"Data integrity failure: {stats['mismatches']}/{stats['frames']} frames "
-            f"had pixel values ≠ {fill_value}"
+            f"Data integrity failure: {stats['mismatches']}/{stats['frames']} frames had pixel values ≠ {fill_value}"
         )
 
 

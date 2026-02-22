@@ -67,7 +67,7 @@ class MockCOMP:
         self.name = name
         self.par = MockPar(**params)
 
-    def parent(self) -> "MockCOMP":
+    def parent(self) -> MockCOMP:
         return self
 
 

@@ -14,8 +14,8 @@ import pytest
 
 # Protocol v0.5.0 constants
 _MAGIC = 0x43495043  # "CIPC"
-_HEADER_SIZE = 20     # 4B magic + 8B version + 4B num_slots + 4B write_idx
-_SLOT_SIZE = 192      # 128B mem_handle + 64B event_handle
+_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
+_SLOT_SIZE = 192  # 128B mem_handle + 64B event_handle
 
 
 def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: int = 0) -> None:

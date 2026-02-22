@@ -172,3 +172,14 @@ benchmarks/
 .claude/commands/
 .claude/skills/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
+
+# Local-only docs (style guides, workflow docs, debug protocol)
+docs/AUTOMATED_GIT_WORKFLOW.md
+docs/BASH_STYLE_GUIDE.md
+docs/BATCH_STYLE_GUIDE.md
+docs/IMPLEMENTATION_SUMMARY.md
+docs/PERFORMANCE_OPTIMIZATIONS.md
+docs/PYTHON_DEBUGGING_PROTOCOL.md
+docs/PYTHON_STYLE_GUIDE_QUICK.md
+docs/PYTHON_STYLE_GUIDE.md
+docs/SHELL_STYLE_GUIDE.md
