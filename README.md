@@ -67,12 +67,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-0.6.5-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-0.6.6-py3-none-any.whl
 
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -294,16 +294,16 @@ cd cuda-ipc
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-0.6.5-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-0.6.6-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.6.5-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.

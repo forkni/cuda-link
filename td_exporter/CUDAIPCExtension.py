@@ -141,9 +141,8 @@ class CUDAIPCExtension:
         try:
             self.shm_name = ownerComp.par.Ipcmemname.eval()
         except AttributeError:
-            # Fallback to operator name if parameter doesn't exist
-            op_name = ownerComp.name if hasattr(ownerComp, "name") else "cuda_ipc_default"
-            self.shm_name = f"cuda_ipc_{op_name}"
+            # Fallback to default name if parameter doesn't exist
+            self.shm_name = "cudalink_output_ipc"
 
         # Frame tracking
         self.frame_count = 0
@@ -165,6 +164,12 @@ class CUDAIPCExtension:
             self.verbose_performance = bool(ownerComp.par.Debug.eval())
         except AttributeError:
             self.verbose_performance = False
+
+        # Apply showCustomOnly from Hidebuiltin parameter on load
+        try:
+            self.ownerComp.showCustomOnly = bool(ownerComp.par.Hidebuiltin.eval())
+        except AttributeError:
+            pass
 
         # Receiver-specific state (only used when mode='Receiver')
         self._rx_dev_ptrs = [None] * self.num_slots  # Opened IPC mem pointers

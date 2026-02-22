@@ -1,5 +1,5 @@
 """
-Template Execute DAT Callback for CUDAIPCExtension
+Execute DAT Callback for CUDAIPCExtension
 
 Copy this into an Execute DAT inside your .tox component.
 Enable "Frame Start", "Frame End", and "On Exit" toggles.

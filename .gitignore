@@ -140,7 +140,7 @@ Backup/
 
 # Old .tox versions (keep only latest release)
 TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.6.5.tox
+!TOXES/CUDAIPCLink_v0.6.6.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
@@ -165,6 +165,8 @@ CLAUDE.md
 clean_pycache.cmd
 Benchmark.toe
 Benchmark.5.toe
+CUDA_IPC_Comp.toe
+CUDA_IPC_Comp.*.toe
 
 # Reference materials (local-only)
 References/

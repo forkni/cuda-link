@@ -4,11 +4,11 @@ Imports GPU memory from TouchDesigner via CUDA IPC handles
 
 Usage:
     # PyTorch tensor (GPU, zero-copy)
-    importer = CUDAIPCImporter(shm_name="cuda_ipc_handle", shape=(512, 512, 4))
+    importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
     tensor = importer.get_frame()  # torch.Tensor on GPU
 
     # Numpy array (CPU, D2H copy)
-    importer = CUDAIPCImporter(shm_name="cuda_ipc_handle", shape=(512, 512, 4))
+    importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
     array = importer.get_frame_numpy()  # numpy array on CPU
 
 Architecture:
@@ -92,7 +92,7 @@ class CUDAIPCImporter:
 
     def __init__(
         self,
-        shm_name: str = "cuda_ipc_handle",
+        shm_name: str = "cudalink_output_ipc",
         shape: tuple[int, int, int] | None = None,
         dtype: str | None = None,
         debug: bool = False,

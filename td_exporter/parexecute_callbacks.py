@@ -2,7 +2,7 @@
 Parameter Execute DAT Callback for CUDAIPCExtension
 
 Copy this into a Parameter Execute DAT inside your .tox component.
-Enable the parameters you want to monitor (Active, Ipcmemname, Numslots, Debug, Mode).
+Enable the parameters you want to monitor (Active, Ipcmemname, Numslots, Debug, Hidebuiltin, Mode).
 
 Handles parameter changes with debug logging and triggers appropriate re-initialization.
 """
@@ -40,6 +40,9 @@ def onValueChange(par: object, prev: object) -> None:
 
     elif param_name == "Debug":
         handle_debug_change(ext, new_value, prev)
+
+    elif param_name == "Hidebuiltin":
+        handle_hidebuiltin_change(ext, new_value, prev)
 
     elif param_name == "Mode":
         handle_mode_change(ext, new_value, prev)
@@ -178,6 +181,19 @@ def handle_debug_change(ext: object, new_value: object, prev: object) -> None:
         ext._log("Debug logging ENABLED", force=True)
     else:
         ext._log("Debug logging DISABLED", force=True)
+
+
+def handle_hidebuiltin_change(ext: object, new_value: object, prev: object) -> None:
+    """Handle Hidebuiltin parameter toggle.
+
+    Args:
+        ext: CUDAIPCExtension instance
+        new_value: New hide state (bool or int)
+        prev: Previous hide state
+    """
+    new_value = bool(new_value)
+    parent().showCustomOnly = new_value
+    ext._log(f"Built-in parameters {'hidden' if new_value else 'visible'}", force=True)
 
 
 def handle_mode_change(ext: object, new_value: object, prev: object) -> None:

@@ -111,8 +111,8 @@ def test_init_fallback_memname() -> None:
 
     exporter = CUDAIPCExtension(owner)
 
-    # Should fall back to cuda_ipc_{name}
-    assert exporter.shm_name == "cuda_ipc_test_exporter"
+    # Should fall back to default name
+    assert exporter.shm_name == "cudalink_output_ipc"
 
 
 def test_init_custom_numslots() -> None:
