@@ -155,3 +155,20 @@ nul
 
 # Test artifacts
 test_timeout_manual.py
+
+# Local-only project files
+CLAUDE.md
+clean_pycache.cmd
+Benchmark.toe
+Benchmark.5.toe
+
+# Reference materials (local-only)
+References/
+
+# Benchmarks (local development only)
+benchmarks/
+
+# Claude Code commands, skills, and local docs (local-only)
+.claude/commands/
+.claude/skills/
+.claude/SLASH_COMMAND_TESTING_PROTOCOL.md

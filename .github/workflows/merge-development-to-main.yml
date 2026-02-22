@@ -1,0 +1,153 @@
+name: Merge Development to Main
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_backup:
+        description: 'Create backup tag before merge'
+        required: true
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Dry run (preview only, no actual merge)'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  merge:
+    name: Merge development → main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure merge driver
+        run: |
+          git config --global merge.ours.driver true
+          git config --global merge.ours.name "Keep ours merge driver"
+
+      - name: Verify .gitattributes exists
+        run: |
+          if [ ! -f .gitattributes ]; then
+            echo "❌ ERROR: .gitattributes not found"
+            echo "Cannot proceed with merge - missing merge strategy configuration"
+            exit 1
+          fi
+          echo "✅ .gitattributes found"
+          echo "Contents:"
+          cat .gitattributes
+
+      - name: Update branches from remote
+        run: |
+          git fetch origin development:development
+          git fetch origin main:main
+
+      - name: Create backup tag
+        if: ${{ inputs.create_backup == true && inputs.dry_run == false }}
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_TAG="backup-main-before-merge-$TIMESTAMP"
+
+          git checkout main
+          git tag "$BACKUP_TAG"
+          git push origin "$BACKUP_TAG"
+
+          echo "✅ Backup tag created: $BACKUP_TAG"
+          echo "BACKUP_TAG=$BACKUP_TAG" >> $GITHUB_ENV
+
+      - name: Preview merge (Dry Run)
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          git checkout main
+
+          echo "=== DRY RUN: Files that would change ==="
+          git diff --name-status main development || true
+
+          echo ""
+          echo "=== Commits to be merged ==="
+          git log main..development --oneline
+
+      - name: Perform merge
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          git checkout main
+
+          echo "Merging development into main..."
+          git merge --no-ff development -m "$(cat <<'EOF'
+          chore: Merge development to main
+
+          - Applied .gitattributes merge strategies
+          - Automated merge via GitHub Actions
+          EOF
+          )"
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Merge failed - conflicts detected"
+            git merge --abort
+            exit 1
+          fi
+
+          echo "✅ Merge completed successfully"
+
+      - name: Verify no local-only files were merged
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          VERIFICATION_FAILED=0
+
+          for file in CLAUDE.md MEMORY.md GEMINI.md; do
+            if git ls-files | grep -q "^$file$"; then
+              echo "❌ ERROR: $file is tracked in main branch (should be local-only)"
+              VERIFICATION_FAILED=1
+            fi
+          done
+
+          for dir in TD_RAG Backup; do
+            if git ls-files | grep -q "^$dir/"; then
+              echo "❌ ERROR: $dir/ is tracked in main branch (should be local-only)"
+              VERIFICATION_FAILED=1
+            fi
+          done
+
+          if [ $VERIFICATION_FAILED -eq 1 ]; then
+            echo ""
+            echo "Merge verification failed - rolling back"
+            git reset --hard HEAD~1
+            exit 1
+          fi
+
+          echo "✅ All local-only file exclusions verified"
+
+      - name: Push to main
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          git push origin main
+          echo "✅ Main branch updated successfully"
+
+      - name: Create merge summary
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          echo "=== MERGE SUMMARY ==="
+          echo "✅ Development → Main merge successful"
+          echo "✅ Method: Git merge with .gitattributes"
+
+          if [ -n "$BACKUP_TAG" ]; then
+            echo "✅ Backup tag: $BACKUP_TAG"
+            echo ""
+            echo "To rollback: git reset --hard $BACKUP_TAG"
+          fi
+
+          echo ""
+          echo "Changes merged:"
+          git diff --stat HEAD~1

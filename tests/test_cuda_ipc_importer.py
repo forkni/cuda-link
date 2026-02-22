@@ -126,23 +126,26 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
     """Test cleanup() closes IPC handles and SharedMemory."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    # Create fake SharedMemory with proper layout
-    shm_size = 16 + 3 * 192 + 1
+    # Create fake SharedMemory with v0.5.0 layout:
+    # 20B header (4B magic + 8B version + 4B num_slots + 4B write_idx)
+    # + 3*192B slots + 1B shutdown + 20B metadata + 8B timestamp = 625
+    shm_size = 20 + 3 * 192 + 1 + 20 + 8
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header (version=1, num_slots=3, write_idx=0)
-        shm.buf[0:8] = struct.pack("<Q", 1)
-        shm.buf[8:12] = struct.pack("<I", 3)
-        shm.buf[12:16] = struct.pack("<I", 0)
+        # Write header (magic="CIPC", version=1, num_slots=3, write_idx=0)
+        shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
+        shm.buf[4:12] = struct.pack("<Q", 1)           # version
+        shm.buf[12:16] = struct.pack("<I", 3)          # num_slots
+        shm.buf[16:20] = struct.pack("<I", 0)          # write_idx
 
         # Allocate real GPU buffers and write IPC handles
         for slot in range(3):
             ptr = cuda_runtime.malloc(1024)
             handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
-            base_offset = 16 + slot * 192
+            base_offset = 20 + slot * 192
             shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
 
         # Create importer (will open handles)
@@ -168,31 +171,32 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
     if not TORCH_AVAILABLE:
         pytest.skip("torch required for this test")
 
-    # Create fake SharedMemory
-    shm_size = 16 + 3 * 192 + 1
+    # Create fake SharedMemory with v0.5.0 layout (625 bytes for 3 slots)
+    shm_size = 20 + 3 * 192 + 1 + 20 + 8
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header
-        shm.buf[0:8] = struct.pack("<Q", 1)
-        shm.buf[8:12] = struct.pack("<I", 3)
-        shm.buf[12:16] = struct.pack("<I", 1)  # write_idx=1
+        # Write header (magic="CIPC", version=1, num_slots=3, write_idx=1)
+        shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
+        shm.buf[4:12] = struct.pack("<Q", 1)           # version
+        shm.buf[12:16] = struct.pack("<I", 3)          # num_slots
+        shm.buf[16:20] = struct.pack("<I", 1)          # write_idx=1
 
         # Write real IPC handles
         for slot in range(3):
             ptr = cuda_runtime.malloc(1024)
             handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
-            base_offset = 16 + slot * 192
+            base_offset = 20 + slot * 192
             shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
 
         # Create importer
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
 
         if importer.is_ready():
-            # Set shutdown flag
-            shutdown_offset = 16 + 3 * 192
+            # Set shutdown flag (immediately after slots in v0.5.0 layout)
+            shutdown_offset = 20 + 3 * 192
             shm.buf[shutdown_offset] = 1
 
             # get_frame() should detect shutdown and return None

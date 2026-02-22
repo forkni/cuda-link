@@ -18,7 +18,7 @@ Implemented Python hot-path optimizations to reduce per-frame CPU overhead by 4-
 
 **Files modified**:
 - `td_exporter/CUDAIPCExtension.py`
-- `importer/cuda_ipc_importer.py`
+- `src/cuda_link/cuda_ipc_importer.py`
 
 **Pattern applied**:
 ```python
@@ -45,7 +45,7 @@ if self.verbose_performance:
 
 **Files modified**:
 - `td_exporter/CUDAIPCExtension.py` — `import_frame()` lines 755-770
-- `importer/cuda_ipc_importer.py` — `_get_read_slot()`, `get_frame()`, `get_frame_numpy()`, `get_frame_cupy()`
+- `src/cuda_link/cuda_ipc_importer.py` — `_get_read_slot()`, `get_frame()`, `get_frame_numpy()`, `get_frame_cupy()`
 
 **Pattern applied**:
 ```python
@@ -169,7 +169,7 @@ except AttributeError:
 |------|--------------|---------|
 | `td_exporter/CUDAIPCExtension.py` | ~30 lines | Timing guards, struct.unpack_from/pack_into, remove imports, cache shape, simplify stream guard |
 | `td_exporter/callbacks_template.py` | ~7 lines | Remove redundant Mode check |
-| `importer/cuda_ipc_importer.py` | ~20 lines | Timing guards, struct.unpack_from |
+| `src/cuda_link/cuda_ipc_importer.py` | ~20 lines | Timing guards, struct.unpack_from |
 
 ---
 

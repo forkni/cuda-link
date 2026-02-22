@@ -6,11 +6,13 @@ Communication for zero-copy GPU texture transfer. Supports PyTorch (GPU tensors)
 CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 """
 
+from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 
-__version__ = "0.5.0"
+__version__ = "0.6.5"
 __all__ = [
+    "CUDAIPCExporter",
     "CUDAIPCImporter",
     "CUDARuntimeAPI",
     "get_cuda_runtime",

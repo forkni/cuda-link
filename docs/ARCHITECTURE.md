@@ -6,12 +6,16 @@ Technical specification of the SharedMemory protocol, ring buffer design, and GP
 
 ## System Overview
 
+The library supports **bidirectional** zero-copy GPU transfer: TD → Python (input capture) and Python → TD (AI output display).
+
+### Direction A: TouchDesigner → Python (TD is Producer)
+
 ```
 ┌─────────────────────────────────────────┐
 │   TouchDesigner Process (Producer)     │
 │                                         │
 │  ┌───────────────────────────────────┐ │
-│  │ CUDAIPCExporter Extension         │ │
+│  │ CUDAIPCExtension (Sender mode)    │ │
 │  │                                   │ │
 │  │  export_frame(top_op) every frame│ │
 │  │    ↓                              │ │
@@ -26,8 +30,8 @@ Technical specification of the SharedMemory protocol, ring buffer design, and GP
 │                 ↓                       │
 └─────────────────┼───────────────────────┘
                   │
-                  │ SharedMemory (593 bytes)
-                  │ [version + handles + metadata]
+                  │ SharedMemory (v0.5.0 protocol)
+                  │ [magic + version + handles + metadata]
                   │
 ┌─────────────────┼───────────────────────┐
 │                 ↓                       │
@@ -40,7 +44,7 @@ Technical specification of the SharedMemory protocol, ring buffer design, and GP
 │  │    ↓                              │ │
 │  │  Read write_idx from SharedMemory│ │
 │  │    ↓                              │ │
-│  │  Calculate read_slot = (write_idx-1) % N │
+│  │  read_slot = (write_idx-1) % N   │ │
 │  │    ↓                              │ │
 │  │  Wait on IPC event (GPU-side)    │ │
 │  │    ↓                              │ │
@@ -48,6 +52,46 @@ Technical specification of the SharedMemory protocol, ring buffer design, and GP
 │  └───────────────────────────────────┘ │
 └─────────────────────────────────────────┘
 ```
+
+### Direction B: Python → TouchDesigner (Python is Producer)
+
+```
+┌─────────────────────────────────────────┐
+│   Python Process (Producer)            │
+│                                         │
+│  ┌───────────────────────────────────┐ │
+│  │ CUDAIPCExporter                   │ │
+│  │                                   │ │
+│  │  export_frame(gpu_ptr, size)     │ │
+│  │    ↓                              │ │
+│  │  cudaMemcpy D2D to ring buffer   │ │
+│  │    ↓                              │ │
+│  │  cudaEventRecord (GPU signal)    │ │
+│  │    ↓                              │ │
+│  │  Update write_idx in SharedMemory│ │
+│  └───────────────────────────────────┘ │
+│                 ↓                       │
+└─────────────────┼───────────────────────┘
+                  │
+                  │ SharedMemory (v0.5.0 protocol, same layout)
+                  │
+┌─────────────────┼───────────────────────┐
+│                 ↓                       │
+│   TouchDesigner Process (Consumer)     │
+│                                         │
+│  ┌───────────────────────────────────┐ │
+│  │ CUDAIPCExtension (Receiver mode)  │ │
+│  │                                   │ │
+│  │  import_frame(script_top)        │ │
+│  │    ↓                              │ │
+│  │  Wait on IPC event (GPU-side)    │ │
+│  │    ↓                              │ │
+│  │  scriptTOP.copyCUDAMemory()      │ │
+│  └───────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+```
+
+Both directions share the **same v0.5.0 binary protocol** — the consumer is symmetric regardless of whether the producer is TD or Python.
 
 ---
 
@@ -453,9 +497,9 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 1. **Adaptive slot count**: Automatically increase slots under high load.
 2. **Multi-consumer support**: Multiple Python processes reading from one producer.
-3. **Bidirectional IPC**: Consumer → producer feedback (e.g., AI result overlay).
+3. **Timeout on IPC event wait**: Prevent consumer hang if producer crashes mid-frame.
 
 ---
 
-**Last Updated**: 2026-02-10
-**Version**: 1.1.0
+**Last Updated**: 2026-02-19
+**Version**: 1.2.0
