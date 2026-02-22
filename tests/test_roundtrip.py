@@ -19,6 +19,7 @@ from __future__ import annotations
 import ctypes
 import multiprocessing
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -327,9 +328,9 @@ def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
 
 
 def _run_pair(
-    producer_target,
+    producer_target: Callable,
     producer_args: tuple,
-    consumer_target,
+    consumer_target: Callable,
     consumer_args: tuple,
     timeout_s: float = 45.0,
 ) -> list:

@@ -10,7 +10,7 @@ This test ensures they remain byte-for-byte identical.
 from pathlib import Path
 
 
-def test_wrapper_files_are_identical():
+def test_wrapper_files_are_identical() -> None:
     """Verify TD and pip package wrappers are identical."""
     project_root = Path(__file__).parent.parent
 
@@ -35,7 +35,7 @@ def test_wrapper_files_are_identical():
     )
 
 
-def test_wrapper_line_count():
+def test_wrapper_line_count() -> None:
     """Verify wrapper is the expected size (606 lines)."""
     project_root = Path(__file__).parent.parent
     pip_wrapper = project_root / "src" / "cuda_link" / "cuda_ipc_wrapper.py"
@@ -50,7 +50,7 @@ def test_wrapper_line_count():
     )
 
 
-def test_wrapper_contains_key_definitions():
+def test_wrapper_contains_key_definitions() -> None:
     """Verify wrapper contains expected CUDA definitions."""
     project_root = Path(__file__).parent.parent
     pip_wrapper = project_root / "src" / "cuda_link" / "cuda_ipc_wrapper.py"

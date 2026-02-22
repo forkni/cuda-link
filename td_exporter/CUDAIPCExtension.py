@@ -88,7 +88,7 @@ class CUDAIPCExtension:
     - Zero CPU memory copies (GPU-direct)
     """
 
-    def __init__(self, ownerComp: COMP):
+    def __init__(self, ownerComp: COMP) -> None:
         """Initialize CUDA IPC extension (Sender or Receiver mode).
 
         Args:
