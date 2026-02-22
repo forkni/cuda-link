@@ -65,12 +65,18 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 #### Install the package:
 
 ```bash
-# Install from source (current method):
+# Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-pip install -e ".[torch]"      # Editable install with PyTorch (recommended)
-pip install -e ".[cupy]"       # With CuPy
-pip install -e ".[numpy]"      # With NumPy only
-pip install -e ".[all]"        # All output modes
+build_wheel.cmd                             # Builds dist\cuda_link-0.6.5-py3-none-any.whl
+
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[all]"     # All output modes
+
+# Option B: Editable install from source (for development — changes apply immediately):
+pip install -e ".[torch]"
+pip install -e ".[all]"
 
 # From PyPI (coming soon):
 # pip install cuda-link[torch]
@@ -280,14 +286,41 @@ cuda-link uses a **dual distribution model** to support both use cases:
 
 ### For Python Consumers (StreamDiffusion, AI/ML pipelines)
 
-**Install from source**:
+#### Method 1: Build wheel (recommended — portable, installs into any environment)
+
 ```bash
 git clone https://github.com/forkni/cuda-ipc.git
 cd cuda-ipc
-pip install -e ".[torch]"   # For PyTorch GPU tensors (recommended)
-pip install -e ".[cupy]"    # For CuPy GPU arrays
-pip install -e ".[numpy]"   # For numpy CPU arrays
+
+# Run the build script (uses PEP 517 isolated build via python -m build)
+build_wheel.cmd
+# Output: dist\cuda_link-0.6.5-py3-none-any.whl  (~30 KB)
+
+# Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.5-py3-none-any.whl[all]"     # All output modes
+
+# Force reinstall to update:
+pip install --force-reinstall "dist\cuda_link-0.6.5-py3-none-any.whl[torch]"
+```
+
+The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
+
+#### Method 2: Editable install from source (for development)
+
+```bash
+git clone https://github.com/forkni/cuda-ipc.git
+cd cuda-ipc
+pip install -e ".[torch]"   # Changes to src/cuda_link/ apply immediately, no rebuild needed
 pip install -e ".[all]"     # All output modes
+```
+
+#### Method 3: From PyPI (coming soon)
+
+```bash
+# pip install cuda-link[torch]
 ```
 
 **Usage**:
@@ -316,8 +349,8 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 
 | Use Case | TD Side | Python Side |
 |----------|---------|-------------|
-| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` Sender mode | `pip install -e ".[torch]"` |
-| **Python → TD** (AI output display) | `.tox` Receiver mode | `pip install -e ".[torch]"` |
+| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` Sender mode | `pip install dist\cuda_link-*.whl[torch]` |
+| **Python → TD** (AI output display) | `.tox` Receiver mode | `pip install dist\cuda_link-*.whl[torch]` |
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
 Both sides communicate through the 625-byte SharedMemory protocol — zero import dependencies between TD and Python code.
