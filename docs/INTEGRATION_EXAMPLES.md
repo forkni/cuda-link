@@ -27,7 +27,7 @@ Movie File In TOP → CUDAIPCExporter
 
 ```python
 import torch
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 
 # Initialize importer
 importer = CUDAIPCImporter(
@@ -98,7 +98,7 @@ Camera TOP → CUDAIPCExporter
 ```python
 import cv2
 import numpy as np
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 
 # Initialize importer
 importer = CUDAIPCImporter(
@@ -153,7 +153,7 @@ Edge Detection TOP → CUDAIPCExporter_CN
 
 ```python
 import torch
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 
 # Initialize both importers
 main_importer = CUDAIPCImporter(
@@ -223,7 +223,7 @@ Select TOP → CUDAIPCExporter
 ### Python Script (Auto-Reinitialize)
 
 ```python
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 
 # Start with initial resolution
 importer = CUDAIPCImporter(
@@ -269,7 +269,7 @@ Ensure `CUDAIPCExporter` has `callbacks` Execute DAT with `onExit()` defined (se
 ### Python Script (Shutdown Detection)
 
 ```python
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 import signal
 import sys
 
@@ -303,7 +303,7 @@ while True:
 print("Clean shutdown complete")
 ```
 
-**Key**: The importer **automatically detects** the shutdown flag at byte 592 and returns `None` from `get_frame()`.
+**Key**: The importer **automatically detects** the shutdown flag at byte 596 (for 3 slots: `20 + 3×192`) and returns `None` from `get_frame()`.
 
 ---
 
@@ -316,7 +316,7 @@ Measure IPC overhead for your specific hardware.
 
 ```python
 import time
-from importer import CUDAIPCImporter
+from cuda_link import CUDAIPCImporter
 
 importer = CUDAIPCImporter(
     shm_name="benchmark",
@@ -356,6 +356,96 @@ IPC get_frame() overhead:
   P95:    3.2 μs
   P99:    5.1 μs
 ```
+
+---
+
+## Example 7: Python → TouchDesigner (AI Output Display)
+
+### Use Case
+
+AI pipeline generates frames (e.g., diffusion model output) in Python and sends them back to
+TouchDesigner for display, compositing, or recording. This is the **reverse direction** — Python
+is the producer, TD is the consumer.
+
+### Python Side (Producer: `CUDAIPCExporter`)
+
+```python
+import torch
+from cuda_link import CUDAIPCExporter
+
+HEIGHT, WIDTH = 512, 512
+
+# Initialize exporter once (at startup)
+exporter = CUDAIPCExporter(
+    shm_name="ai_output_ipc",   # Must match TD Receiver's Ipcmemname parameter
+    height=HEIGHT,
+    width=WIDTH,
+    channels=4,                 # BGRA/RGBA
+    dtype="uint8",              # uint8 is typical for display
+    num_slots=2,                # Double-buffer (default)
+    debug=False,
+)
+exporter.initialize()
+
+# AI inference loop
+while running:
+    # --- Your model generates output_tensor: (H, W, 4) uint8 BGRA on GPU ---
+    with torch.no_grad():
+        output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
+
+    # Export to TD: ~20μs overhead (async D2D memcpy + event record)
+    exporter.export_frame(
+        gpu_ptr=output_tensor.data_ptr(),
+        size=output_tensor.nelement() * output_tensor.element_size(),
+    )
+
+exporter.cleanup()
+```
+
+Or use it as a context manager for automatic cleanup:
+
+```python
+with CUDAIPCExporter(shm_name="ai_output_ipc", height=512, width=512) as exporter:
+    exporter.initialize()
+    while running:
+        exporter.export_frame(gpu_ptr=tensor.data_ptr(), size=tensor.nbytes)
+```
+
+### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
+
+1. **Add the CUDAIPCExporter TOX** (or build from `td_exporter/CUDAIPCExtension.py`)
+2. **Set Mode parameter** to `Receiver`
+3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
+4. **Add a Script TOP** as the import target
+5. **Wire**: Script TOP → your display chain
+
+In the Script TOP's `onCook` callback:
+```python
+def onCook(scriptOp):
+    ext.CUDAIPCExtension.import_frame(scriptOp)
+```
+
+**TouchDesigner Network**:
+```
+Script TOP (receives AI frames via IPC)
+    → Composite TOP
+    → Out TOP
+```
+
+### Performance
+
+| Metric | Value |
+|--------|-------|
+| Python export overhead | ~20μs per frame |
+| TD import overhead | <1μs per frame |
+| Total IPC overhead | ~21μs per frame |
+| Maximum theoretical FPS | ~10,000 (IPC-limited) |
+| Practical FPS | Limited by AI model inference |
+
+**Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
+- AI inference: ~32ms/frame (31 FPS)
+- IPC export: ~20μs per frame (0.06% overhead)
+- TD display: 60 FPS locked (reads latest available frame)
 
 ---
 

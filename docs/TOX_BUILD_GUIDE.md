@@ -43,13 +43,19 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every 100 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
+| `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
 **For `Numslots` menu parameter**:
 - Menu Source: **Constant**
 - Menu Names: `2 3 4`
 - Menu Labels: `2 Slots 3 Slots 4 Slots`
 
-**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Ipcmemname → Active → Numslots → Debug).
+**For `Mode` menu parameter**:
+- Menu Source: **Constant**
+- Menu Names: `Sender Receiver`
+- Menu Labels: `Sender Receiver`
+
+**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Debug).
 
 ### Step 3: Create Text DATs
 
@@ -92,6 +98,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExporter object at 0x...>`
 2. Paste the contents from `td_exporter/callbacks_template.py`
 3. Enable the following toggles on the **Execute DAT → Callbacks** page:
    - **Frame Start**: ON
+   - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
 **Important**: Ensure the Execute DAT references `op('input')` for the source TOP. Users will wire their actual TOP to this In TOP.
@@ -102,6 +109,21 @@ You should see: `<CUDAIPCExporter.CUDAIPCExporter object at 0x...>`
 2. This is a pass-through input that users will wire their source TOP to
 
 **Note**: The In TOP has no parameters to configure - it's purely a connection point.
+
+### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
+
+If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
+
+1. Select the `ImportBuffer` Script TOP inside the component
+2. Open the **Script TOP** parameter page
+3. Enable **Modify Outside of Cook** toggle (ON)
+
+**Benefits**:
+- Eliminates force-cook overhead (~0.03ms per frame)
+- Removes 1-frame resolution change delay
+- Simplifies data flow (Execute DAT drives import directly)
+
+**Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
 
 ### Step 7: Optional Info DAT
 
@@ -145,13 +167,14 @@ License: MIT
 
 ### Configure Parameters
 
-1. **Ipcmemname**: Set to a unique name (e.g., `"my_project_ipc"`)
-   - This MUST match the `shm_name` in your Python `CUDAIPCImporter` code
-2. **Active**: Toggle ON to start exporting
-3. **Numslots**: Leave at 3 (optimal for most cases)
-4. **Debug**: Toggle ON to see performance metrics every 100 frames
+1. **Mode**: Set to `Sender` (exporting TD textures to Python) or `Receiver` (importing Python frames into TD)
+2. **Ipcmemname**: Set to a unique name (e.g., `"my_project_ipc"`)
+   - This MUST match the `shm_name` in your Python `CUDAIPCImporter`/`CUDAIPCExporter` code
+3. **Active**: Toggle ON to start exporting/importing
+4. **Numslots**: Leave at 3 (optimal for most cases; ignored in Receiver mode)
+5. **Debug**: Toggle ON to see performance metrics every 100 frames
 
-### Verify Operation
+### Verify Operation (Sender Mode)
 
 Open the **Textport** (Alt+T) and look for:
 
@@ -160,9 +183,21 @@ Open the **Textport** (Alt+T) and look for:
 [CUDAIPCExporter] Loaded CUDA runtime
 [CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
 [CUDAIPCExporter] Created 3 IPC buffer slots with events
-[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (617+ bytes)
+[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (625 bytes)
 [CUDAIPCExporter] Initialization complete - ready for zero-copy GPU transfer
 ```
+
+### Receiver Mode
+
+When **Mode** = `Receiver`, the component imports GPU frames from a Python `CUDAIPCExporter`:
+
+1. Set **Mode** to `Receiver`
+2. Set **Ipcmemname** to match your Python `CUDAIPCExporter`'s `shm_name`
+3. Add a **Script TOP** (name it `ImportBuffer`) inside the COMP
+4. In the Script TOP's **DAT** field, reference `script_top_callbacks.py`
+5. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
+
+The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it calls `import_frame(ImportBuffer)` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
 
 If you see errors, check:
 - CUDA 12.x is installed

@@ -6,7 +6,7 @@ Requires PyTorch to be installed.
 """
 
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-def benchmark_with_events(fn: Callable, *args, warmup: int = 3, iterations: int = 10, **kwargs) -> float:
+def benchmark_with_events(fn: Callable, *args: Any, warmup: int = 3, iterations: int = 10, **kwargs: Any) -> float:
     """
     GPU-accurate timing using CUDA events.
 
@@ -70,6 +70,7 @@ class ProfileSection:
     """
 
     def __init__(self, name: str, enabled: bool = True) -> None:
+        """Initialize profiling section with a name and optional enable flag."""
         if not TORCH_AVAILABLE:
             raise ImportError(
                 "ProfileSection requires PyTorch. Install with: pip install cuda-link[torch] or pip install torch>=2.0"

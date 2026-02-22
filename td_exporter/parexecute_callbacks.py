@@ -7,6 +7,8 @@ Enable the parameters you want to monitor (Active, Ipcmemname, Numslots, Debug, 
 Handles parameter changes with debug logging and triggers appropriate re-initialization.
 """
 
+import contextlib
+
 
 def onValueChange(par: object, prev: object) -> None:
     """Called when any monitored parameter changes.
@@ -68,6 +70,12 @@ def handle_active_change(ext: object, new_value: object, prev: object) -> None:
         # Clean up current mode resources
         ext.cleanup()
 
+    # Disable Numslots while active to prevent runtime array size mismatch.
+    # Receiver mode always keeps Numslots disabled (sender controls slot count).
+    # Sender mode: editable only when inactive.
+    with contextlib.suppress(AttributeError):
+        parent().par.Numslots.enable = not new_value and ext.mode == "Sender"
+
 
 def handle_ipcmemname_change(ext: object, new_value: object, prev: object) -> None:
     """Handle Ipcmemname parameter change.
@@ -115,6 +123,22 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
 
     if new_value == prev:
         return
+
+    # Receiver ignores manual Numslots changes — slot count comes from sender via SharedMemory.
+    # The parameter is disabled in the UI when in Receiver mode, but this guard handles
+    # any edge case where the callback fires anyway.
+    if ext.mode == "Receiver":
+        ext._log("Numslots change ignored in Receiver mode (controlled by sender)", force=True)
+        return
+
+    # Skip if component is active — Numslots should be disabled in UI, but guard
+    # against script-based changes which bypass the UI parameter enable state.
+    try:
+        if bool(ext.ownerComp.par.Active.eval()):
+            ext._log("Numslots change ignored while Active (deactivate first)", force=True)
+            return
+    except AttributeError:
+        pass
 
     # Validate slot count (2-5 slots supported)
     if new_value < 2 or new_value > 5:
