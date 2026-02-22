@@ -138,6 +138,10 @@ TD_RAG/
 # Backup .toe files
 Backup/
 
+# Old .tox versions (keep only latest release)
+TOXES/CUDAIPCLink_v*.tox
+!TOXES/CUDAIPCLink_v0.6.5.tox
+
 # AI assistant config (Gemini)
 GEMINI.md
 gemini-skills/
