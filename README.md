@@ -41,6 +41,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 **Required**: None (pure ctypes CUDA wrapper)
 
 **Optional**:
+
 - `torch>=2.0` - For zero-copy GPU tensor output (recommended for AI pipelines)
 - `cupy-cuda12x>=12.0` - For zero-copy GPU array output (CuPy/JAX workflows)
 - `numpy>=1.21` - For CPU array output (for OpenCV, etc.)
@@ -62,7 +63,7 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 
 ### 2. Python Side (Importer)
 
-#### Install the package:
+#### Install the package
 
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
@@ -82,7 +83,7 @@ pip install -e ".[all]"
 # pip install cuda-link[torch]
 ```
 
-#### Use in your Python script:
+#### Use in your Python script
 
 ```python
 from cuda_link import CUDAIPCImporter
@@ -224,24 +225,6 @@ pytest tests/ -v
 pytest tests/ -v -m "not slow"
 ```
 
-## Benchmarking
-
-```bash
-cd C:\path\to\CUDA_IPC\benchmarks
-
-# Quick benchmark
-python benchmark_cuda_ipc.py --frames 1000 --events
-
-# Specific resolution
-python benchmark_cuda_ipc.py --frames 1000 --resolution 1920x1080 --events
-
-# Check Windows CUDA IPC viability
-python test_cuda_ipc_windows.py
-
-# Stress test (10 minutes at 60 FPS)
-python benchmark_cuda_ipc.py --fps 60 --duration 600 --events
-```
-
 ## Troubleshooting
 
 ### "SharedMemory not found"
@@ -324,6 +307,7 @@ pip install -e ".[all]"     # All output modes
 ```
 
 **Usage**:
+
 ```python
 from cuda_link import CUDAIPCImporter
 
@@ -363,8 +347,5 @@ MIT License - See LICENSE file
 
 ## Credits
 
+Original implementation by Forkni (forkni@gmail.com).
 Extracted and refactored from the StreamDiffusionTD project.
-
-Original CUDA IPC implementation: StreamDiffusion Performance Team (2025-2026)
-
-Standalone component: Claude Code (2026)

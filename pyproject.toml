@@ -11,8 +11,7 @@ requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
-    {name = "StreamDiffusion Performance Team"},
-    {name = "Claude Code"}
+    {name = "forkni", email = "forkni@gmail.com"}
 ]
 keywords = ["cuda", "ipc", "touchdesigner", "gpu", "zero-copy", "texture-sharing"]
 classifiers = [
