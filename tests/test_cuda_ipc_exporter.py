@@ -16,7 +16,7 @@ import pytest
 class MockShape:
     """Mock for TOP's cuda_mem.shape."""
 
-    def __init__(self, width, height, channels):
+    def __init__(self, width: int, height: int, channels: int) -> None:
         self.width = width
         self.height = height
         self.numComps = channels
@@ -25,7 +25,7 @@ class MockShape:
 class MockCUDAMemory:
     """Mock for top_op.cudaMemory()."""
 
-    def __init__(self, width=512, height=512, channels=4, dtype_size=4):
+    def __init__(self, width: int = 512, height: int = 512, channels: int = 4, dtype_size: int = 4) -> None:
         self.ptr = 0xDEADBEEF0000  # Simulated GPU pointer
         self.shape = MockShape(width, height, channels)
         self.size = width * height * channels * dtype_size
@@ -34,10 +34,10 @@ class MockCUDAMemory:
 class MockTOP:
     """Mock for TouchDesigner TOP operator."""
 
-    def __init__(self, width=512, height=512, channels=4):
+    def __init__(self, width: int = 512, height: int = 512, channels: int = 4) -> None:
         self._cuda_mem = MockCUDAMemory(width, height, channels)
 
-    def cudaMemory(self, **kwargs):
+    def cudaMemory(self, **kwargs: object) -> MockCUDAMemory:
         """Mock cudaMemory() that accepts optional stream parameter."""
         return self._cuda_mem
 
@@ -45,17 +45,17 @@ class MockTOP:
 class MockParValue:
     """Mock for TD parameter value."""
 
-    def __init__(self, value):
+    def __init__(self, value: object) -> None:
         self._value = value
 
-    def eval(self):
+    def eval(self) -> object:
         return self._value
 
 
 class MockPar:
     """Mock for TD parameter container."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: object) -> None:
         for key, value in kwargs.items():
             setattr(self, key, MockParValue(value))
 
@@ -63,11 +63,11 @@ class MockPar:
 class MockCOMP:
     """Mock for TD COMP operator."""
 
-    def __init__(self, name="test_comp", **params):
+    def __init__(self, name: str = "test_comp", **params: object) -> None:
         self.name = name
         self.par = MockPar(**params)
 
-    def parent(self):
+    def parent(self) -> MockCOMP:
         return self
 
 
@@ -76,7 +76,7 @@ class MockCOMP:
 # =============================================================================
 
 
-def test_init_default_params():
+def test_init_default_params() -> None:
     """Test constructor with default mocked parameters."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -90,7 +90,7 @@ def test_init_default_params():
     assert not exporter._initialized
 
 
-def test_init_custom_memname():
+def test_init_custom_memname() -> None:
     """Test constructor reads Ipcmemname parameter."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -102,7 +102,7 @@ def test_init_custom_memname():
     assert exporter.shm_name == custom_name
 
 
-def test_init_fallback_memname():
+def test_init_fallback_memname() -> None:
     """Test constructor uses fallback name if parameter missing."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -111,11 +111,11 @@ def test_init_fallback_memname():
 
     exporter = CUDAIPCExtension(owner)
 
-    # Should fall back to cuda_ipc_{name}
-    assert exporter.shm_name == "cuda_ipc_test_exporter"
+    # Should fall back to default name
+    assert exporter.shm_name == "cudalink_output_ipc"
 
 
-def test_init_custom_numslots():
+def test_init_custom_numslots() -> None:
     """Test constructor reads Numslots parameter."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -129,7 +129,7 @@ def test_init_custom_numslots():
 
 
 @pytest.mark.requires_cuda
-def test_initialize_allocates_buffers(cuda_runtime, temp_shm_name, shared_memory_cleanup):
+def test_initialize_allocates_buffers(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: object) -> None:
     """Test initialize() creates GPU buffers."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -151,7 +151,7 @@ def test_initialize_allocates_buffers(cuda_runtime, temp_shm_name, shared_memory
 
 
 @pytest.mark.requires_cuda
-def test_initialize_creates_shm(cuda_runtime, temp_shm_name, shared_memory_cleanup):
+def test_initialize_creates_shm(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: object) -> None:
     """Test initialize() creates SharedMemory with correct size."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -168,8 +168,9 @@ def test_initialize_creates_shm(cuda_runtime, temp_shm_name, shared_memory_clean
     assert exporter.shm_handle is not None
 
     # Verify SharedMemory size
-    # 16 (header) + 3*192 (slots) + 1 (shutdown) = 593
-    expected_size = 16 + 3 * 192 + 1
+    # 20 (header: 4B magic + 8B version + 4B num_slots + 4B write_idx)
+    # + 3*192 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 625
+    expected_size = 20 + 3 * 192 + 1 + 20 + 8
     assert len(exporter.shm_handle.buf) >= expected_size
 
     # Cleanup
@@ -177,7 +178,7 @@ def test_initialize_creates_shm(cuda_runtime, temp_shm_name, shared_memory_clean
 
 
 @pytest.mark.requires_cuda
-def test_shm_layout_header(cuda_runtime, temp_shm_name, shared_memory_cleanup):
+def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: object) -> None:
     """Test SharedMemory header layout (version, num_slots, write_idx)."""
     import struct
 
@@ -208,7 +209,7 @@ def test_shm_layout_header(cuda_runtime, temp_shm_name, shared_memory_cleanup):
 
 
 @pytest.mark.requires_cuda
-def test_ring_buffer_rotation(cuda_runtime, temp_shm_name, shared_memory_cleanup):
+def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: object) -> None:
     """Test write_idx increments and slot cycles correctly."""
     import struct
 
@@ -260,7 +261,7 @@ def test_ring_buffer_rotation(cuda_runtime, temp_shm_name, shared_memory_cleanup
 
 
 @pytest.mark.requires_cuda
-def test_cleanup_frees_resources(cuda_runtime, temp_shm_name, shared_memory_cleanup):
+def test_cleanup_frees_resources(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: object) -> None:
     """Test cleanup() frees GPU buffers and sets shutdown flag."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -285,7 +286,7 @@ def test_cleanup_frees_resources(cuda_runtime, temp_shm_name, shared_memory_clea
     # Just verify cleanup didn't crash
 
 
-def test_get_stats_format():
+def test_get_stats_format() -> None:
     """Test get_stats() returns correct dictionary structure."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -306,7 +307,7 @@ def test_get_stats_format():
     assert "dev_ptrs" in stats
 
 
-def test_is_ready_false_before_init():
+def test_is_ready_false_before_init() -> None:
     """Test is_ready() returns False before initialization."""
     from CUDAIPCExtension import CUDAIPCExtension
 
@@ -317,7 +318,7 @@ def test_is_ready_false_before_init():
     assert not exporter.is_ready()
 
 
-def test_log_helper():
+def test_log_helper() -> None:
     """Test _log() helper method with verbosity control."""
     from CUDAIPCExtension import CUDAIPCExtension
 

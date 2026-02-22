@@ -1,0 +1,44 @@
+# Pre-commit hooks configuration
+# Installation: pip install pre-commit && pre-commit install
+
+repos:
+  # Ruff - Fast Python linter and formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.11
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: end-of-file-fixer
+        exclude: ^(Backup/|TD_RAG/|TOXES/)
+      - id: trailing-whitespace
+        exclude: ^(Backup/|TD_RAG/|TOXES/)
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+        exclude: ^(Backup/|TOXES/)
+
+  # Markdownlint
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.47.0
+    hooks:
+      - id: markdownlint
+        args: [--fix, --disable, MD013, MD033]
+        exclude: ^(CLAUDE\.md|MEMORY\.md|GEMINI\.md|TD_RAG/|Backup/)
+
+  # Mypy - Type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.14.1
+    hooks:
+      - id: mypy
+        name: mypy (type checking)
+        args: [--config-file=pyproject.toml]
+        pass_filenames: false
+        additional_dependencies: []

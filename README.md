@@ -9,11 +9,12 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 ### Key Features
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
-- **Sub-microsecond overhead** - ~0.5-2μs per frame (vs ~50-500μs for CPU SharedMemory)
-- **Ring buffer architecture** - 3-slot pipeline prevents producer/consumer blocking
+- **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
+- **Sub-microsecond overhead** - ~0.5-2μs per frame (vs ~1.5ms for CPU SharedMemory at 1080p)
+- **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
-- **Production-ready** - Tested at 60 FPS for hours, handles dynamic resolution changes
+- **Production-ready** - Tested at 30+ FPS for hours, handles dynamic resolution changes
 
 ### Performance
 
@@ -25,7 +26,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 | D2H copy (1080p RGBA float32) | ~400-600μs | Only for numpy output mode |
 | Theoretical max FPS | 10,000+ | Limited only by GPU pipeline depth |
 
-**Baseline comparison**: CPU SharedMemory requires ~1.5ms per frame for 1080p, **~750x slower** than CUDA IPC.
+**Baseline comparison**: CPU SharedMemory requires ~1.5ms per frame for 1080p RGBA float32, **~750x slower** than CUDA IPC.
 
 ## Requirements
 
@@ -64,15 +65,21 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 #### Install the package:
 
 ```bash
-# From PyPI (when published):
-pip install cuda-link[torch]   # For PyTorch tensors (recommended)
-pip install cuda-link[cupy]    # For CuPy arrays
-pip install cuda-link[numpy]   # For numpy arrays only
-pip install cuda-link[all]     # All output modes
-
-# For development (local install):
+# Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-pip install -e ".[torch]"      # Editable install with PyTorch
+build_wheel.cmd                             # Builds dist\cuda_link-0.6.6-py3-none-any.whl
+
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[all]"     # All output modes
+
+# Option B: Editable install from source (for development — changes apply immediately):
+pip install -e ".[torch]"
+pip install -e ".[all]"
+
+# From PyPI (coming soon):
+# pip install cuda-link[torch]
 ```
 
 #### Use in your Python script:
@@ -83,9 +90,10 @@ from cuda_link import CUDAIPCImporter
 # Initialize (use same name as TD's Ipcmemname parameter)
 importer = CUDAIPCImporter(
     shm_name="my_texture_ipc",
-    shape=(1080, 1920, 4),  # height, width, channels (RGBA)
-    dtype="float32",         # "float32", "float16", or "uint8"
-    debug=False
+    shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
+    dtype="float32",         # "float32", "float16", or "uint8" — or None for auto-detect
+    debug=False,
+    timeout_ms=5000.0,       # Wait up to 5s for producer to appear (default)
 )
 
 # Option 1: Get torch.Tensor (GPU, zero-copy)
@@ -100,29 +108,64 @@ if importer.is_ready():
     # Use in OpenCV, PIL, etc.:
     # cv2.imwrite("frame.png", array)
 
-# Cleanup
+# Option 3: Get CuPy array (GPU, zero-copy)
+if importer.is_ready():
+    cupy_arr = importer.get_frame_cupy()  # cupy.ndarray on GPU
+    # Use in CuPy/JAX workflows
+
+# Context manager (recommended — ensures cleanup on exit)
+with CUDAIPCImporter(shm_name="my_texture_ipc") as importer:
+    for _ in range(100):
+        tensor = importer.get_frame()
+
+# Manual cleanup
 importer.cleanup()
 ```
+
+### 3. Python → TouchDesigner (AI Output)
+
+Send AI-generated frames **back to TD** for display:
+
+```python
+from cuda_link import CUDAIPCExporter
+
+exporter = CUDAIPCExporter(
+    shm_name="ai_output_ipc",   # Must match TD Receiver's Ipcmemname parameter
+    height=512, width=512,
+    channels=4, dtype="uint8",
+    num_slots=2,                 # Ring buffer slots (double-buffering)
+)
+exporter.initialize()
+
+# Export each AI-generated frame (< 20μs overhead)
+exporter.export_frame(
+    gpu_ptr=output_tensor.data_ptr(),
+    size=output_tensor.nbytes,
+)
+
+exporter.cleanup()
+```
+
+On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
 
 ## Architecture
 
 ```
-TouchDesigner Process              Python AI Process
-─────────────────────              ──────────────────
-CUDAIPCExporter (TD Extension)     CUDAIPCImporter (Python)
-  │                                   │
-  │ export_frame(top_op)              │ get_frame() / get_frame_cupy() / get_frame_numpy()
-  │   ↓                                │   ↑
-  │ top_op.cudaMemory()               │ torch.as_tensor() / cupy.ndarray / cuda.memcpy()
-  │   ↓                                │   ↑
-  │ cudaMemcpy D2D to ring buffer     │ Waits on IPC event
-  │   ↓                                │   ↑
-  │ cudaEventRecord (GPU signal)      │ Returns tensor/array
-  │   ↓                                │
-  │ Write write_idx to SharedMemory   │
-  │   ↓                                │
-  └─→ SharedMemory (617 bytes) ←──────┘
-      [IPC handles + sync metadata]
+Direction A: TD (Producer) → Python (Consumer)
+──────────────────────────────────────────────
+CUDAIPCExtension (Sender)          CUDAIPCImporter
+  │ export_frame(top_op)             │ get_frame() / get_frame_numpy()
+  │ cudaMemcpy D2D → ring buffer    │ Waits on IPC event
+  └─→ SharedMemory ←─────────────────┘
+
+Direction B: Python (Producer) → TD (Consumer)
+───────────────────────────────────────────────
+CUDAIPCExporter                    CUDAIPCExtension (Receiver)
+  │ export_frame(gpu_ptr, size)     │ import_frame(script_top)
+  │ cudaMemcpy D2D → ring buffer    │ copyCUDAMemory()
+  └─→ SharedMemory ←─────────────────┘
+
+Both directions share the same v0.5.0 binary protocol.
 ```
 
 ### Ring Buffer (3 Slots)
@@ -136,7 +179,7 @@ The system uses a 3-slot ring buffer to allow producer and consumer to work in p
 
 This prevents blocking - producer never waits for consumer, consumer is always 1 frame behind.
 
-### SharedMemory Protocol (617+ bytes for 3 slots)
+### SharedMemory Protocol (625 bytes for 3 slots)
 
 ```
 [0-3]     magic "CIPC" (4B)       - Protocol validation (0x43495043)
@@ -148,9 +191,12 @@ Per slot (192 bytes each):
 [20+slot*192 : 148+slot*192]   cudaIpcMemHandle_t (128B) - GPU memory handle
 [148+slot*192 : 212+slot*192]  cudaIpcEventHandle_t (64B) - GPU event handle
 
-[20+NUM_SLOTS*192]  shutdown_flag (1B)  - Producer sets to 1 on exit
-[21+NUM_SLOTS*192]  metadata (20B)      - width/height/num_comps/dtype/buffer_size
+[20+NUM_SLOTS*192]        shutdown_flag (1B)   - Producer sets to 1 on exit
+[21+NUM_SLOTS*192]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
+[41+NUM_SLOTS*192]        timestamp (8B)       - Producer perf_counter() for latency
 ```
+
+For 3 slots: `20 + (3 × 192) + 1 + 20 + 8 = 625 bytes`
 
 ## Documentation
 
@@ -202,7 +248,11 @@ python benchmark_cuda_ipc.py --fps 60 --duration 600 --events
 
 **Cause**: Python importer started before TD exporter initialized.
 
-**Solution**: Ensure TD's `CUDAIPCExporter` is active before starting Python process.
+**Solution**: Ensure TD's `CUDAIPCExporter` is active before starting Python process. If starting both together, use `timeout_ms` to give the producer time to initialize:
+
+```python
+importer = CUDAIPCImporter(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
+```
 
 ### "CUDA IPC overhead > 100μs"
 
@@ -220,7 +270,15 @@ python benchmark_cuda_ipc.py --fps 60 --duration 600 --events
 
 **Cause**: Importer not cleaned up properly.
 
-**Solution**: Always call `importer.cleanup()` or use context manager pattern (future enhancement).
+**Solution**: Use the context manager pattern for automatic cleanup:
+
+```python
+with CUDAIPCImporter(shm_name="my_project_ipc") as importer:
+    # importer.cleanup() is called automatically on exit
+    tensor = importer.get_frame()
+```
+
+Or call `importer.cleanup()` explicitly in a `finally` block.
 
 ## Distribution
 
@@ -228,12 +286,41 @@ cuda-link uses a **dual distribution model** to support both use cases:
 
 ### For Python Consumers (StreamDiffusion, AI/ML pipelines)
 
-**Install via pip**:
+#### Method 1: Build wheel (recommended — portable, installs into any environment)
+
 ```bash
-pip install cuda-link[torch]   # For PyTorch GPU tensors (recommended)
-pip install cuda-link[cupy]    # For CuPy GPU arrays
-pip install cuda-link[numpy]   # For numpy CPU arrays
-pip install cuda-link[all]     # All output modes
+git clone https://github.com/forkni/cuda-ipc.git
+cd cuda-ipc
+
+# Run the build script (uses PEP 517 isolated build via python -m build)
+build_wheel.cmd
+# Output: dist\cuda_link-0.6.6-py3-none-any.whl  (~30 KB)
+
+# Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.6.6-py3-none-any.whl[all]"     # All output modes
+
+# Force reinstall to update:
+pip install --force-reinstall "dist\cuda_link-0.6.6-py3-none-any.whl[torch]"
+```
+
+The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
+
+#### Method 2: Editable install from source (for development)
+
+```bash
+git clone https://github.com/forkni/cuda-ipc.git
+cd cuda-ipc
+pip install -e ".[torch]"   # Changes to src/cuda_link/ apply immediately, no rebuild needed
+pip install -e ".[all]"     # All output modes
+```
+
+#### Method 3: From PyPI (coming soon)
+
+```bash
+# pip install cuda-link[torch]
 ```
 
 **Usage**:
@@ -262,10 +349,11 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 
 | Use Case | TD Side | Python Side |
 |----------|---------|-------------|
-| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` component | `pip install cuda-link[torch]` |
+| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` Sender mode | `pip install dist\cuda_link-*.whl[torch]` |
+| **Python → TD** (AI output display) | `.tox` Receiver mode | `pip install dist\cuda_link-*.whl[torch]` |
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
-Both sides communicate through the 617-byte SharedMemory protocol — zero import dependencies between TD and Python code.
+Both sides communicate through the 625-byte SharedMemory protocol — zero import dependencies between TD and Python code.
 
 ---
 

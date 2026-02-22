@@ -32,6 +32,8 @@ except ImportError:
 
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
 
+import contextlib
+
 from CUDAIPCWrapper import (
     cudaIpcEventHandle_t,
     cudaIpcMemHandle_t,
@@ -139,9 +141,8 @@ class CUDAIPCExtension:
         try:
             self.shm_name = ownerComp.par.Ipcmemname.eval()
         except AttributeError:
-            # Fallback to operator name if parameter doesn't exist
-            op_name = ownerComp.name if hasattr(ownerComp, "name") else "cuda_ipc_default"
-            self.shm_name = f"cuda_ipc_{op_name}"
+            # Fallback to default name if parameter doesn't exist
+            self.shm_name = "cudalink_output_ipc"
 
         # Frame tracking
         self.frame_count = 0
@@ -156,12 +157,19 @@ class CUDAIPCExtension:
         self.total_memcpy_time = 0.0
         self.total_record_event_time = 0.0
         self.total_export_time = 0.0
+        self.total_cuda_memory_time = 0.0  # Time spent in cudaMemory() call
 
         # Verbosity control - read from local Debug parameter
         try:
             self.verbose_performance = bool(ownerComp.par.Debug.eval())
         except AttributeError:
             self.verbose_performance = False
+
+        # Apply showCustomOnly from Hidebuiltin parameter on load
+        try:
+            self.ownerComp.showCustomOnly = bool(ownerComp.par.Hidebuiltin.eval())
+        except AttributeError:
+            pass
 
         # Receiver-specific state (only used when mode='Receiver')
         self._rx_dev_ptrs = [None] * self.num_slots  # Opened IPC mem pointers
@@ -178,12 +186,18 @@ class CUDAIPCExtension:
 
         # Receiver retry state
         self._rx_connect_attempts = 0
-        self._rx_max_connect_attempts = 5
-        self._rx_retry_interval_frames = 60  # Retry every 60 frames (~1 sec at 60fps)
-        self._rx_frames_since_last_retry = 60  # Start at interval to connect immediately on first call
+        self._rx_max_connect_attempts = 20
+        self._rx_backoff_intervals = [1, 2, 4, 8, 16, 32, 64, 120]  # frames (exponential)
+        self._rx_retry_interval_frames = 1  # Will be updated dynamically after failed attempts
+        self._rx_frames_since_last_retry = 0  # Start at 0; first increment yields 1 >= 1 → immediate connect
         self._rx_needs_resolution_update = False  # Flag to defer Script TOP resolution setup
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
+
+        # Disable Numslots in Receiver mode — sender controls slot count via SharedMemory
+        if self._mode == "Receiver":
+            with contextlib.suppress(AttributeError):
+                self.ownerComp.par.Numslots.enable = False
 
     @property
     def mode(self) -> str:
@@ -220,6 +234,24 @@ class CUDAIPCExtension:
         self._initialized = False
         self.frame_count = 0
 
+        # When switching to Sender: re-read num_slots from UI (receiver may have updated it)
+        # and resize sender arrays to match. cleanup() → _cleanup_sender() already reset
+        # them to [], so initialize() would resize anyway, but doing it here ensures
+        # export_frame()'s is_ready() check sees the correct array size immediately.
+        if new_mode == "Sender":
+            with contextlib.suppress(AttributeError, ValueError):
+                self.num_slots = int(self.ownerComp.par.Numslots.eval())
+            self.dev_ptrs = [None] * self.num_slots
+            self.ipc_handles = [None] * self.num_slots
+            self.ipc_events = [None] * self.num_slots
+            self.ipc_event_handles = [None] * self.num_slots
+
+        # Enable/disable Numslots based on new mode:
+        # - Sender: editable (but only when not active — initialize() will disable it on activation)
+        # - Receiver: always disabled (sender controls slot count via SharedMemory)
+        with contextlib.suppress(AttributeError):
+            self.ownerComp.par.Numslots.enable = new_mode == "Sender"
+
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
 
     def initialize(self, width: int, height: int, channels: int = 4, buffer_size: Optional[int] = None) -> bool:
@@ -237,6 +269,10 @@ class CUDAIPCExtension:
         if self._initialized:
             self._log("Already initialized")
             return True
+
+        # Lock Numslots while active — changing slot count at runtime causes array size mismatch
+        with contextlib.suppress(AttributeError):
+            self.ownerComp.par.Numslots.enable = False
 
         try:
             # Load CUDA runtime
@@ -267,6 +303,14 @@ class CUDAIPCExtension:
             alignment = 2 * 1024 * 1024  # 2 MiB
             self.buffer_size = ((raw_size + alignment - 1) // alignment) * alignment
             self.data_size = raw_size  # Store actual data size for memcpy and comparisons
+
+            # Defensive array resize: num_slots may have changed between cleanup and init
+            # (e.g. handle_numslots_change() sets num_slots after cleanup resets arrays)
+            if len(self.dev_ptrs) != self.num_slots:
+                self.dev_ptrs = [None] * self.num_slots
+                self.ipc_handles = [None] * self.num_slots
+                self.ipc_events = [None] * self.num_slots
+                self.ipc_event_handles = [None] * self.num_slots
 
             # Allocate ring buffer slots
             for slot in range(self.num_slots):
@@ -346,7 +390,7 @@ class CUDAIPCExtension:
 
         [20+NUM_SLOTS*192]  shutdown flag (1B)
         """
-        if not self.shm_handle or not all(self.ipc_handles):
+        if self.shm_handle is None or not all(self.ipc_handles):
             return
 
         # Write protocol magic number (new in this version)
@@ -400,7 +444,7 @@ class CUDAIPCExtension:
         [shutdown_offset+13 : +4] dtype_code (uint32 LE)  # 0=float32, 1=float16, 2=uint8
         [shutdown_offset+17 : +4] buffer_size (uint32 LE)
         """
-        if not self.shm_handle or self.data_size == 0:
+        if self.shm_handle is None or self.data_size == 0:
             return
 
         # Calculate metadata offset (immediately after shutdown flag)
@@ -452,15 +496,19 @@ class CUDAIPCExtension:
         if self.verbose_performance:
             frame_start = time.perf_counter()
 
-        # Execute deferred GPU cleanup if scheduled and enough frames have passed
-        if self._pending_free_ptrs and self.frame_count >= self._deferred_free_at_frame:
-            self._deferred_free()
-
         try:
+            # Time cudaMemory() call (OpenGL→CUDA interop, suspected 4K bottleneck)
+            if self.verbose_performance:
+                cuda_mem_start = time.perf_counter()
+
             # Get TOP's CUDA memory (pass stream for proper synchronization per TD docs)
             cuda_mem = top_op.cudaMemory(
                 stream=int(self.ipc_stream.value) if self._initialized else None,
             )
+
+            if self.verbose_performance:
+                cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
+                self.total_cuda_memory_time += cuda_mem_time
 
             if cuda_mem is None:
                 self._log(f"Failed to get CUDA memory from {top_op}", force=True)
@@ -557,18 +605,29 @@ class CUDAIPCExtension:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_time += frame_time
 
+            # Detailed first-frame diagnostic (one-time, not affected by 100-frame interval)
+            if self.verbose_performance and self.frame_count == 1:
+                self._log(
+                    f"FIRST FRAME: cudaMemory={cuda_mem_time:.1f}us, "
+                    f"memcpy={memcpy_time:.1f}us, total={frame_time:.1f}us, "
+                    f"res={actual_width}x{actual_height}, size={actual_size / (1024 * 1024):.1f}MB",
+                    force=True,
+                )
+
             # Log performance metrics every 100 frames (if verbose)
             if self.verbose_performance and self.frame_count % 100 == 0:
                 avg_memcpy = self.total_memcpy_time / self.frame_count
                 avg_record = self.total_record_event_time / self.frame_count if all(self.ipc_events) else 0
                 avg_total = self.total_export_time / self.frame_count
+                avg_cuda_mem = self.total_cuda_memory_time / self.frame_count
                 sync_mode = (
                     f"GPU-Events[{self.num_slots}]" if all(self.ipc_events) else f"CPU-Sync(1/{self.sync_interval})"
                 )
 
                 log_msg = (
-                    f"Frame {self.frame_count}: wrote to slot {slot}, write_idx={self.write_idx}, "
-                    f"avg memcpy={avg_memcpy:.1f}us (CPU enqueue), record_event={avg_record:.1f}us, "
+                    f"Frame {self.frame_count}: slot {slot}, "
+                    f"avg cudaMemory={avg_cuda_mem:.1f}us, "
+                    f"avg memcpy={avg_memcpy:.1f}us, record={avg_record:.1f}us, "
                     f"total={avg_total:.1f}us, mode={sync_mode}"
                 )
 
@@ -593,12 +652,20 @@ class CUDAIPCExtension:
             traceback.print_exc()
             return False
 
+    def _check_deferred_cleanup(self) -> None:
+        """Execute deferred GPU cleanup if scheduled and enough frames have passed.
+
+        Lightweight check meant to be called from onFrameStart for minimal overhead.
+        """
+        if self._pending_free_ptrs and self.frame_count >= self._deferred_free_at_frame:
+            self._deferred_free()
+
     def _deferred_free(self) -> None:
         """Free GPU resources queued from export_frame() when deferred frame threshold is reached.
 
-        Called via run() after receiver has had time to close IPC handles.
+        Called via _check_deferred_cleanup() after receiver has had time to close IPC handles.
         """
-        if not self.cuda:
+        if self.cuda is None:
             return
 
         freed_count = 0
@@ -627,6 +694,9 @@ class CUDAIPCExtension:
         """Cleanup all resources for the current mode."""
         if self._mode == "Sender":
             self._cleanup_sender()
+            # Re-enable Numslots when sender deactivates (allow editing again)
+            with contextlib.suppress(AttributeError):
+                self.ownerComp.par.Numslots.enable = True
         else:
             self.cleanup_receiver()
 
@@ -640,7 +710,7 @@ class CUDAIPCExtension:
 
     def _is_cuda_context_valid(self) -> bool:
         """Check if CUDA context is still valid (TD may destroy it before __delTD__)."""
-        if not self.cuda:
+        if self.cuda is None:
             return False
         try:
             self.cuda.cudart.cudaGetLastError()
@@ -670,6 +740,20 @@ class CUDAIPCExtension:
                 self._log("Shutdown signal sent to consumer", force=True)
             except (OSError, BufferError) as e:
                 self._log(f"Warning: Could not write shutdown signal: {e}", force=True)
+
+        # STEP 1b: Zero out IPC handle bytes so any reader sees invalid handles.
+        # On Windows, unlink() is a no-op (SharedMemory uses CreateFileMapping kernel
+        # objects), so the SharedMemory may persist with stale non-zero handles that
+        # pass the all-zero validation check. Zeroing them prevents error 201 when a
+        # new Receiver reads before the SHM is destroyed or overwritten by a new producer.
+        if self.shm_handle and self.shm_handle.buf is not None:
+            try:
+                for slot in range(self.num_slots):
+                    base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+                    self.shm_handle.buf[base_offset : base_offset + SLOT_SIZE] = b"\x00" * SLOT_SIZE
+                self._log("Zeroed IPC handle bytes in SharedMemory", force=True)
+            except (OSError, BufferError) as e:
+                self._log(f"Warning: Could not zero IPC handles: {e}", force=True)
 
         # STEP 2: Destroy IPC events (sender-side resources, safe to destroy)
         if cuda_valid and hasattr(self, "ipc_events") and self.cuda:
@@ -750,11 +834,12 @@ class CUDAIPCExtension:
             except (OSError, RuntimeError, AttributeError) as e:
                 self._log(f"Warning: Could not unlink SharedMemory: {e}", force=True)
 
-        # Reset state to prevent double-free on re-entry
-        self.dev_ptrs = [None] * self.num_slots
-        self.ipc_events = [None] * self.num_slots
-        self.ipc_handles = [None] * self.num_slots
-        self.ipc_event_handles = [None] * self.num_slots
+        # Reset state to prevent double-free on re-entry.
+        # Use empty lists — initialize() will resize to current self.num_slots.
+        self.dev_ptrs = []
+        self.ipc_events = []
+        self.ipc_handles = []
+        self.ipc_event_handles = []
         self.ipc_stream = None
         self.shm_handle = None
 
@@ -764,10 +849,12 @@ class CUDAIPCExtension:
     def import_frame(self, import_buffer: "TOP") -> bool:
         """Import frame from CUDA IPC into ImportBuffer (Script TOP).
 
-        MUST be called from inside ImportBuffer's onCook callback.
+        Can be called from:
+        - Inside ImportBuffer's onCook callback (TD 2023+ compatibility)
+        - Execute DAT onFrameStart with modoutsidecook enabled (TD 2025+)
 
         Args:
-            import_buffer: The ImportBuffer Script TOP operator (me inside onCook)
+            import_buffer: The ImportBuffer Script TOP operator
 
         Returns:
             True if import successful, False otherwise.
@@ -779,7 +866,7 @@ class CUDAIPCExtension:
         except AttributeError:
             pass
 
-        # Lazy initialization with retry logic
+        # Lazy initialization with exponential backoff retry logic
         if not self._initialized:
             self._rx_frames_since_last_retry += 1
             if self._rx_frames_since_last_retry < self._rx_retry_interval_frames:
@@ -789,8 +876,13 @@ class CUDAIPCExtension:
             self._rx_connect_attempts += 1
 
             if not self.initialize_receiver():
+                backoff_idx = min(self._rx_connect_attempts, len(self._rx_backoff_intervals) - 1)
+                self._rx_retry_interval_frames = self._rx_backoff_intervals[backoff_idx]
                 if self._rx_connect_attempts <= self._rx_max_connect_attempts:
-                    self._log(f"Waiting for sender... (attempt {self._rx_connect_attempts})")
+                    self._log(
+                        f"Waiting for sender... (attempt {self._rx_connect_attempts}, "
+                        f"next retry in {self._rx_retry_interval_frames} frames)"
+                    )
                 elif self._rx_connect_attempts == self._rx_max_connect_attempts + 1:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
@@ -855,6 +947,35 @@ class CUDAIPCExtension:
             traceback.print_exc()
             return False
 
+    def update_receiver_resolution(self, import_buffer: "TOP") -> bool:
+        """Update ImportBuffer resolution from outside the cook cycle.
+
+        Safe to call from Execute DAT when modoutsidecook is enabled on the Script TOP (TD 2025+).
+        When modoutsidecook is NOT available, this is a no-op (resolution handled in onCook).
+
+        Args:
+            import_buffer: The ImportBuffer Script TOP operator
+
+        Returns:
+            True if resolution was updated, False if no update needed or not applicable
+        """
+        if not self._rx_needs_resolution_update:
+            return False
+
+        try:
+            import_buffer.par.outputresolution = 9  # Custom Resolution
+            import_buffer.par.resolutionw = self._rx_width
+            import_buffer.par.resolutionh = self._rx_height
+            self._rx_needs_resolution_update = False
+            self._log(
+                f"Set ImportBuffer resolution to {self._rx_width}x{self._rx_height} (from Execute DAT)",
+                force=True,
+            )
+            return True
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"Could not set ImportBuffer resolution: {e}", force=True)
+            return False
+
     def initialize_receiver(self) -> bool:
         """Initialize receiver: open SharedMemory, read handles, open IPC handles.
 
@@ -863,6 +984,10 @@ class CUDAIPCExtension:
         """
         if self._initialized:
             return True
+
+        # Numslots is always disabled in Receiver mode (sender controls slot count)
+        with contextlib.suppress(AttributeError):
+            self.ownerComp.par.Numslots.enable = False
 
         try:
             self.cuda = get_cuda_runtime()
@@ -917,6 +1042,12 @@ class CUDAIPCExtension:
                 self.shm_handle = None
                 return False
 
+            # Sync UI parameter to show sender's slot count (informational only).
+            # Do NOT set self.num_slots — that's the sender-specific working value.
+            # Receiver always uses self._rx_num_slots for its own arrays.
+            with contextlib.suppress(AttributeError):
+                self.ownerComp.par.Numslots = self._rx_num_slots
+
             # Read extended metadata (if available)
             shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
             metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
@@ -964,6 +1095,33 @@ class CUDAIPCExtension:
                 self.shm_handle = None
                 return False
 
+            # Check for shutdown signal BEFORE opening IPC handles.
+            # A stale SharedMemory (producer exited cleanly) will have shutdown_flag=1
+            # and its IPC handles reference freed GPU memory → cudaIpcOpenMemHandle error 201.
+            # Mirrors CUDAIPCImporter._initialize() pattern.
+            try:
+                if self.shm_handle.buf[shutdown_offset] == 1:
+                    self._log(
+                        "Shutdown flag is set — producer has exited. "
+                        "SharedMemory contains stale IPC handles. Will retry.",
+                        force=True,
+                    )
+                    self.shm_handle.close()
+                    self.shm_handle = None
+                    return False
+            except (OSError, BufferError, IndexError) as e:
+                self._log(f"Could not read shutdown flag: {e}", force=True)
+                self.shm_handle.close()
+                self.shm_handle = None
+                return False
+
+            # Log write_idx for diagnostics (0 = no frames sent yet, handles still valid)
+            try:
+                write_idx_diag = struct.unpack_from("<I", self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
+                self._log(f"Producer write_idx={write_idx_diag} (0 = no frames sent yet)", force=True)
+            except (struct.error, ValueError):
+                pass
+
             # Initialize arrays
             self._rx_dev_ptrs = [None] * self._rx_num_slots
             self._rx_ipc_handles = [None] * self._rx_num_slots
@@ -971,11 +1129,18 @@ class CUDAIPCExtension:
 
             # Create dedicated non-blocking stream for receiver IPC operations
             # MUST happen before ipc_open_mem_handle to establish CUDA context
-            self._rx_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
-            self._log(
-                f"Created receiver stream: 0x{int(self._rx_stream.value):016x}",
-                force=True,
-            )
+            # Reuse existing stream on re-init to avoid leaks on reconnection cycles
+            if not hasattr(self, "_rx_stream") or self._rx_stream is None:
+                self._rx_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self._log(
+                    f"Created receiver stream: 0x{int(self._rx_stream.value):016x}",
+                    force=True,
+                )
+            else:
+                self._log(
+                    f"Reusing receiver stream: 0x{int(self._rx_stream.value):016x}",
+                    force=True,
+                )
 
             # Open all IPC handles (per slot)
             for slot in range(self._rx_num_slots):
@@ -983,8 +1148,35 @@ class CUDAIPCExtension:
 
                 # Read + open memory handle
                 mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 128])
+
+                # Fix #1: Validate handle is non-zero before opening.
+                # All-zero bytes mean sender wrote metadata but hasn't written IPC handles yet
+                # (race condition: metadata and handles are two separate writes).
+                if not any(mem_handle_bytes):
+                    self._log(
+                        f"Slot {slot}: IPC mem handle is all zeros - "
+                        "sender hasn't written handles yet. Will retry with backoff.",
+                        force=True,
+                    )
+                    self._cleanup_partial_receiver(slot)
+                    return False
+
                 self._rx_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-                self._rx_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self._rx_ipc_handles[slot], flags=1)
+
+                # Fix #2: Wrap ipc_open_mem_handle in try/except with diagnostic logging.
+                # Error 201 (INVALID_CONTEXT) means the GPU memory was freed by the sender
+                # (process exited/crashed) or the handle references a different CUDA device.
+                try:
+                    self._rx_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self._rx_ipc_handles[slot], flags=1)
+                except RuntimeError as e:
+                    self._log(
+                        f"Slot {slot}: cudaIpcOpenMemHandle failed: {e}. "
+                        "Possible causes: sender process exited, GPU memory freed, "
+                        "or CUDA device mismatch. Will retry with backoff.",
+                        force=True,
+                    )
+                    self._cleanup_partial_receiver(slot)
+                    return False
 
                 # Read + open event handle
                 event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 128 : base_offset + 192])
@@ -1038,8 +1230,41 @@ class CUDAIPCExtension:
             traceback.print_exc()
             return False
 
+    def _cleanup_partial_receiver(self, failed_slot: int) -> None:
+        """Cleanup partially-opened receiver resources when initialization fails mid-slot.
+
+        Called when `initialize_receiver()` fails partway through slot iteration.
+        Closes IPC handles already opened for slots 0..failed_slot-1 to prevent
+        GPU resource leaks across backoff retries.
+
+        Args:
+            failed_slot: The slot index that failed (0-based). Cleans up slots 0..failed_slot-1.
+        """
+        for i in range(failed_slot):
+            if self._rx_dev_ptrs[i] is not None:
+                try:
+                    self.cuda.ipc_close_mem_handle(self._rx_dev_ptrs[i])
+                    self._log(f"Cleaned up partial slot {i} mem handle")
+                except (RuntimeError, OSError):
+                    pass
+                self._rx_dev_ptrs[i] = None
+            if self._rx_ipc_events[i] is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.destroy_event(self._rx_ipc_events[i])
+                self._rx_ipc_events[i] = None
+
+        # Close SharedMemory so next retry re-opens fresh (avoids reading stale content)
+        if self.shm_handle is not None:
+            with contextlib.suppress(OSError, BufferError):
+                self.shm_handle.close()
+            self.shm_handle = None
+
     def cleanup_receiver(self) -> None:
         """Cleanup Receiver CUDA IPC resources."""
+        # Guard against double-cleanup (matches cleanup_sender() pattern)
+        if not self._initialized and self.shm_handle is None:
+            return
+
         # Close all IPC memory handles
         if hasattr(self, "_rx_dev_ptrs") and self.cuda:
             for slot, dev_ptr in enumerate(self._rx_dev_ptrs):
@@ -1076,9 +1301,10 @@ class CUDAIPCExtension:
                 self._log(f"Error closing SharedMemory: {e}", force=True)
 
         self.shm_handle = None
-        self._rx_dev_ptrs = [None] * self.num_slots
-        self._rx_ipc_handles = [None] * self.num_slots
-        self._rx_ipc_events = [None] * self.num_slots
+        self._rx_dev_ptrs = []
+        self._rx_ipc_handles = []
+        self._rx_ipc_events = []
+        self._rx_num_slots = 0
         self._rx_stream = None  # Prevent double-free
         self._initialized = False
         self._rx_connect_attempts = 0
@@ -1094,7 +1320,11 @@ class CUDAIPCExtension:
         if self._mode == "Sender":
             return self._initialized and all(ptr is not None for ptr in self.dev_ptrs)
         else:
-            return self._initialized and all(ptr is not None for ptr in self._rx_dev_ptrs)
+            # len() check required: all([]) returns True, which would incorrectly
+            # report ready after cleanup_receiver() resets to empty list
+            return (
+                self._initialized and len(self._rx_dev_ptrs) > 0 and all(ptr is not None for ptr in self._rx_dev_ptrs)
+            )
 
     def get_stats(self) -> dict[str, object]:
         """Get extension statistics (mode-aware).

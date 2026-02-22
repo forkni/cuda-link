@@ -4,11 +4,11 @@ Imports GPU memory from TouchDesigner via CUDA IPC handles
 
 Usage:
     # PyTorch tensor (GPU, zero-copy)
-    importer = CUDAIPCImporter(shm_name="cuda_ipc_handle", shape=(512, 512, 4))
+    importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
     tensor = importer.get_frame()  # torch.Tensor on GPU
 
     # Numpy array (CPU, D2H copy)
-    importer = CUDAIPCImporter(shm_name="cuda_ipc_handle", shape=(512, 512, 4))
+    importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
     array = importer.get_frame_numpy()  # numpy array on CPU
 
 Architecture:
@@ -92,7 +92,7 @@ class CUDAIPCImporter:
 
     def __init__(
         self,
-        shm_name: str = "cuda_ipc_handle",
+        shm_name: str = "cudalink_output_ipc",
         shape: tuple[int, int, int] | None = None,
         dtype: str | None = None,
         debug: bool = False,
@@ -251,6 +251,16 @@ class CUDAIPCImporter:
             )[0]
             logger.info(f"Ring buffer with {self.num_slots} slots (v{self.ipc_version})")
 
+            # Validate num_slots bounds (matches Receiver validation in CUDAIPCExtension)
+            if self.num_slots == 0 or self.num_slots > 10:
+                logger.error(
+                    f"Invalid num_slots={self.num_slots} read from SharedMemory. "
+                    "Protocol error or corrupted SHM (expected 1-10)."
+                )
+                self.shm_handle.close()
+                self.shm_handle = None
+                return False
+
             # Check if sender has shut down (stale SharedMemory with invalid IPC handles)
             shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
             try:
@@ -403,7 +413,9 @@ class CUDAIPCImporter:
 
         # Create wrapper with __cuda_array_interface__
         class CUDAArrayWrapper:
-            def __init__(self, interface):
+            """Minimal wrapper exposing __cuda_array_interface__ for zero-copy tensor creation."""
+
+            def __init__(self, interface: dict) -> None:
                 self.__cuda_array_interface__ = interface
 
         wrapper = CUDAArrayWrapper(cuda_array_interface)
@@ -910,7 +922,12 @@ class CUDAIPCImporter:
         """Enter context manager."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         """Exit context manager — cleanup resources."""
         self.cleanup()
         return None  # Don't suppress exceptions

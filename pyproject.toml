@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuda-link"
-version = "1.0.0"
+version = "0.6.6"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,10 +44,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/cuda-link"
-Documentation = "https://github.com/your-org/cuda-link/tree/main/docs"
-Repository = "https://github.com/your-org/cuda-link"
-Issues = "https://github.com/your-org/cuda-link/issues"
+Homepage = "https://github.com/forkni/cuda-ipc"
+Documentation = "https://github.com/forkni/cuda-ipc/tree/main/docs"
+Repository = "https://github.com/forkni/cuda-ipc"
+Issues = "https://github.com/forkni/cuda-ipc/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
