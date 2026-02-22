@@ -1,0 +1,9 @@
+checkCommands:
+  fix: ruff check --fix . && ruff format .
+  lint: pip install ruff && ruff check .
+  types: pip install mypy && mypy src/
+  test: pip install pytest && pytest tests/ -x -q -m "not requires_cuda"
+beta:
+  canApprovePullRequests: false
+  # proactive:  # Uncomment to enable automated playbooks
+  #   - playbook: ".charlie/playbooks/dependency-check.md"
