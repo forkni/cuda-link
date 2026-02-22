@@ -2,28 +2,26 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/**"
-      - "scripts/**"
-      - "tests/**"
-      - "td_exporter/**"
-      - "benchmarks/**"
-
-# Prevent multiple runs on rapid PR updates
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    types: [opened, synchronize, ready_for_review, reopened]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "src/**/*.ts"
+    #   - "src/**/*.tsx"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Prevent runaway workflows
     permissions:
       contents: read
-      pull-requests: write  # Required for gh pr comment to post review comments
+      pull-requests: read
       issues: read
       id-token: write
 
@@ -35,36 +33,12 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
-        continue-on-error: true  # Don't fail PR status if Claude has issues
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: "*"  # Allow all bots (including claude[bot])
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
 
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
-
-            Project context: This is a CUDA IPC library (cuda-link) for zero-copy GPU texture
-            sharing between TouchDesigner and Python via CUDA IPC handles. Key conventions:
-            - td_exporter/ uses PascalCase classes and camelCase methods (TouchDesigner convention)
-            - Library is Windows-only (ctypes binding to cudart64_12.dll)
-            - C-struct naming like cudaIpcMemHandle_t is intentional, not a lint violation
-            - Tests marked @pytest.mark.requires_cuda need a physical CUDA GPU to run
-            - CLAUDE.md is available in the repository for further style guidance
-
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
-
-          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
-
-      - name: Comment on failure
-        if: failure()
-        run: gh pr comment ${{ github.event.pull_request.number }} --body "Claude Code review encountered an error. Check the Actions log for details."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
