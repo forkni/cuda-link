@@ -50,7 +50,7 @@ while True:
     if not importer.is_ready():
         break
 
-    # Get frame (zero-copy, < 2μs)
+    # Get frame (zero-copy, < 5μs)
     input_tensor = importer.get_frame()  # Shape: (512, 512, 4)
 
     # Preprocess (convert RGBA → RGB, normalize)
@@ -112,7 +112,7 @@ while True:
     if not importer.is_ready():
         break
 
-    # Get frame as numpy array (D2H copy, ~400-600μs)
+    # Get frame as numpy array (D2H copy, varies by resolution — see README performance table)
     frame = importer.get_frame_numpy()  # Shape: (720, 1280, 4), uint8
 
     # Convert RGBA → BGR for OpenCV
@@ -348,13 +348,13 @@ print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} μs")
 importer.cleanup()
 ```
 
-**Expected output** (good hardware):
+**Expected output** (good hardware, PyTorch zero-copy mode):
 ```
 IPC get_frame() overhead:
-  Mean:   1.8 μs
-  Median: 1.5 μs
-  P95:    3.2 μs
-  P99:    5.1 μs
+  Mean:   3.5 μs
+  Median: 2.8 μs
+  P95:    6.0 μs
+  P99:    9.0 μs
 ```
 
 ---
@@ -393,7 +393,7 @@ while running:
     with torch.no_grad():
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
-    # Export to TD: ~20μs overhead (async D2D memcpy + event record)
+    # Export to TD: ~10-20μs overhead at 512x512 (async D2D memcpy + event record)
     exporter.export_frame(
         gpu_ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
@@ -436,9 +436,9 @@ Script TOP (receives AI frames via IPC)
 
 | Metric | Value |
 |--------|-------|
-| Python export overhead | ~20μs per frame |
-| TD import overhead | <1μs per frame |
-| Total IPC overhead | ~21μs per frame |
+| Python export overhead | ~10-20μs per frame (512x512) |
+| TD import overhead | <5μs per frame |
+| Total IPC overhead | ~15-25μs per frame (512x512) |
 | Maximum theoretical FPS | ~10,000 (IPC-limited) |
 | Practical FPS | Limited by AI model inference |
 

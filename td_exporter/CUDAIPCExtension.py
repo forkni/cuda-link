@@ -83,8 +83,8 @@ class CUDAIPCExtension:
     - Per frame: wait on GPU event, call scriptTOP.copyCUDAMemory()
 
     Performance:
-    - Sender per-frame: < 2μs (D2D copy + event record)
-    - Receiver per-frame: < 1μs (event sync + copyCUDAMemory call)
+    - Sender per-frame: ~3-8μs IPC primitives + async D2D enqueue (~60-80μs GPU-side for 1080p)
+    - Receiver per-frame: < 5μs (event sync enqueue + copyCUDAMemory call)
     - Zero CPU memory copies (GPU-direct)
     """
 

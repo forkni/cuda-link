@@ -87,7 +87,7 @@ class CUDAIPCImporter:
     Performance:
     - Initialization: ~10-100μs (one-time handle opening)
     - Per-frame (torch): < 1μs (just return existing tensor)
-    - Per-frame (numpy): ~50-500μs (GPU→CPU copy)
+    - Per-frame (numpy): ~300μs-5ms depending on resolution and dtype (GPU→CPU D2H copy)
     """
 
     def __init__(

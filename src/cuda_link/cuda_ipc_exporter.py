@@ -31,7 +31,8 @@ Architecture:
 
 Performance:
     - Initialization: ~1ms (buffer alloc + handle export)
-    - Per-frame: ~20us (async D2D memcpy + event record + write_idx update)
+    - Per-frame: ~10-20us at 512x512 (async D2D memcpy + event record + write_idx update)
+    - Per-frame: ~50-130us at 1080p (async D2D enqueue + IPC sync)
 
 Compatibility:
     - Protocol: v0.5.0 (byte-identical to CUDAIPCExtension/CUDAIPCImporter)
@@ -93,7 +94,7 @@ class CUDAIPCExporter:
 
     Performance:
     - Initialization: ~1ms (buffer alloc + handle export)
-    - Per-frame overhead: ~20us (async D2D copy + event record + write_idx update)
+    - Per-frame overhead: ~10-20us at 512x512, ~50-130us at 1080p (async D2D enqueue + IPC sync)
     - Zero CPU memory copies (GPU-direct)
     """
 

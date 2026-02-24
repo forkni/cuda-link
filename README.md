@@ -4,13 +4,13 @@ Zero-copy GPU texture transfer between TouchDesigner and Python processes using 
 
 ## Overview
 
-This component enables **zero-copy GPU texture sharing** between TouchDesigner and Python processes using CUDA Inter-Process Communication (IPC). It eliminates CPU memory copies, achieving sub-microsecond per-frame overhead for real-time AI pipelines, video processing, and other GPU-accelerated workflows.
+This component enables **zero-copy GPU texture sharing** between TouchDesigner and Python processes using CUDA Inter-Process Communication (IPC). It eliminates CPU memory copies, achieving low-microsecond IPC overhead (~3-8µs CPU-side) for real-time AI pipelines, video processing, and other GPU-accelerated workflows.
 
 ### Key Features
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Sub-microsecond overhead** - ~0.5-2μs per frame (vs ~1.5ms for CPU SharedMemory at 1080p)
+- **Low-overhead IPC** - ~3-8μs CPU-side per frame for IPC primitives; ~10-20μs total for export_frame() at 512x512 (vs ~1.5ms for CPU SharedMemory)
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -20,13 +20,16 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| Per-frame overhead | < 2μs | GPU event record + write_idx update |
+| IPC sync primitives | ~3-8μs | cudaEventRecord + write_idx + cudaStreamWaitEvent (CPU-side) |
+| export_frame() at 512x512 | ~10-20μs | Async D2D enqueue + IPC sync + protocol writes |
+| export_frame() at 1080p | ~50-130μs | Async D2D enqueue + IPC sync (GPU transfer ~60-80μs in background) |
+| D2H copy (720p uint8) | ~300-500μs | numpy output mode, PCIe bandwidth dependent |
+| D2H copy (1080p uint8) | ~1-2ms | numpy output mode, PCIe bandwidth dependent |
+| D2H copy (1080p float32) | ~3-5ms | numpy output mode, ~31.6 MB at PCIe 3.0/4.0 speeds |
 | Initialization | ~50-100μs | One-time IPC handle opening |
-| D2D memcpy (1080p RGBA float32) | ~60-80μs | GPU texture copy |
-| D2H copy (1080p RGBA float32) | ~400-600μs | Only for numpy output mode |
-| Theoretical max FPS | 10,000+ | Limited only by GPU pipeline depth |
+| Theoretical max FPS | 10,000+ | Limited by GPU pipeline depth, not IPC overhead |
 
-**Baseline comparison**: CPU SharedMemory requires ~1.5ms per frame for 1080p RGBA float32, **~750x slower** than CUDA IPC.
+**Baseline comparison**: CPU SharedMemory requires ~1.5ms per frame for 1080p RGBA float32, **~200-500x slower** than CUDA IPC per-frame overhead.
 
 ## Requirements
 
@@ -138,7 +141,7 @@ exporter = CUDAIPCExporter(
 )
 exporter.initialize()
 
-# Export each AI-generated frame (< 20μs overhead)
+# Export each AI-generated frame (~10-20μs overhead at 512x512)
 exporter.export_frame(
     gpu_ptr=output_tensor.data_ptr(),
     size=output_tensor.nbytes,
@@ -237,11 +240,11 @@ pytest tests/ -v -m "not slow"
 importer = CUDAIPCImporter(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
 ```
 
-### "CUDA IPC overhead > 100μs"
+### "CUDA IPC overhead > 200μs"
 
-**Cause**: Windows CUDA IPC may have high overhead on some driver/GPU combinations.
+**Cause**: Windows CUDA IPC `export_frame()` overhead at 1080p is typically 50-130μs (async D2D enqueue + IPC sync). Values above 200μs may indicate GPU driver overhead or contention.
 
-**Solution**: Run `python benchmarks/test_cuda_ipc_windows.py` to verify viability. If overhead is consistently > 100μs, consider using Phase 1 (CPU SharedMemory) instead.
+**Solution**: Run `python benchmarks/benchmark_roundtrip.py --resolution 1920x1080 --frames 200` to measure actual overhead on your hardware. If consistently > 200μs, consider reducing resolution or switching to CPU SharedMemory.
 
 ### "Version mismatch" or stale frames
 

@@ -248,7 +248,7 @@ else:
 
 ### Strategy: CUDA IPC Events
 
-CUDA IPC events provide **GPU-side synchronization** without CPU involvement. This is critical for sub-microsecond overhead.
+CUDA IPC events provide **GPU-side synchronization** without CPU involvement. This is critical for low-microsecond overhead.
 
 #### Producer Side (Record Event):
 
@@ -313,7 +313,7 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
 
 ### Phase 2: Steady State (Per-Frame)
 
-**Producer** (~2-5μs overhead):
+**Producer** (~2-5μs IPC overhead, plus async D2D enqueue):
 ```
 get TOP's cudaMemory() → src_ptr
 slot = write_idx % NUM_SLOTS
@@ -331,7 +331,7 @@ cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2μs (GPU-side)
 return tensors[read_slot]                        ← Zero-copy, 0μs
 ```
 
-**Total overhead**: ~3-8μs per frame (producer + consumer)
+**Total overhead**: ~3-8μs per frame for IPC primitives (producer + consumer). Full `export_frame()` call measures ~10-20μs at 512x512, ~50-130μs at 1080p, due to async D2D enqueue overhead scaling with frame size.
 
 ### Phase 3: Re-initialization
 
@@ -480,10 +480,10 @@ manipulation — solve problems this project does not have.
 | Code complexity | ~600 lines | ~1,500+ lines |
 | Allocation | 1 step (`cudaMalloc`) | 4 steps (create + reserve + map + access) |
 | API level | Runtime API (automatic context) | Driver API (manual context) |
-| Performance | <2μs overhead | Same for linear D2D |
+| Performance | ~3-8μs IPC overhead | Same for linear D2D |
 | TD compatibility | Proven | Unvalidated |
 
-**Validation**: `benchmarks/test_cuda_ipc_windows.py` confirms legacy IPC works on
+**Validation**: `benchmarks/benchmark_roundtrip.py` confirms legacy IPC works on
 Windows WDDM with CUDA 12.x. CuPy and dora-rs also use this approach.
 
 **When VMM would be needed**: If sharing `cudaArray` objects directly (opaque
