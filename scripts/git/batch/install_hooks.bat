@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM install_hooks.bat
 REM Install Git hooks from .githooks/ to .git/hooks/
 
@@ -9,6 +10,7 @@ REM Check if .git directory exists
 if not exist ".git\" (
     echo ERROR: .git directory not found
     echo This script must be run from the repository root
+    endlocal
     exit /b 1
 )
 
@@ -16,6 +18,7 @@ REM Check if .githooks directory exists
 if not exist ".githooks\" (
     echo ERROR: .githooks directory not found
     echo This repository doesn't have hook templates
+    endlocal
     exit /b 1
 )
 
@@ -30,6 +33,7 @@ if exist ".githooks\pre-commit" (
         echo ✓ pre-commit hook installed
     ) else (
         echo ✗ Failed to install pre-commit hook
+        endlocal
         exit /b 1
     )
 ) else (
@@ -61,4 +65,5 @@ echo To uninstall hooks:
 echo   del .git\hooks\pre-commit
 echo.
 
+endlocal
 pause

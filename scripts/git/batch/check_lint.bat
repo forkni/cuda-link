@@ -26,6 +26,7 @@ if defined MSYSTEM (
     echo   1. Use Windows CMD: cmd.exe /c scripts\git\check_lint.bat
     echo   2. Use shell script: scripts/git/check_lint.sh ^(in Git Bash^)
     echo.
+    endlocal
     popd 2>nul
     exit /b 1
 )
@@ -44,11 +45,13 @@ if "%LOGFILE%"=="" (
     echo This typically happens when running batch scripts from Git Bash
     echo.
     echo Please run from Windows CMD: cmd.exe /c %~f0 %*
+    endlocal
     popd
     exit /b 1
 )
 if "%REPORTFILE%"=="" (
     echo [ERROR] Failed to initialize logging - REPORTFILE variable not set
+    endlocal
     popd
     exit /b 1
 )
@@ -118,6 +121,7 @@ if !ERRORS_FOUND! EQU 0 (
     echo STATUS: SUCCESS >> "%LOGFILE%"
     echo ====================================  >> "%LOGFILE%"
     echo [LOG] Log saved: %LOGFILE%
+    endlocal
     popd
     exit /b 0
 ) else (
@@ -132,6 +136,7 @@ if !ERRORS_FOUND! EQU 0 (
     echo STATUS: FAILED >> "%LOGFILE%"
     echo ==================================== >> "%LOGFILE%"
     echo [LOG] Log saved: %LOGFILE%
+    endlocal
     popd
     exit /b 1
 )

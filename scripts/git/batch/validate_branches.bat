@@ -215,6 +215,7 @@ if %VALIDATION_PASSED% EQU 1 (
     echo   1. Run: scripts\git\merge_with_validation.bat
     echo   2. Review merge results
     echo   3. Push to remote if successful
+    endlocal
     popd
     exit /b 0
 ) else (
@@ -223,6 +224,7 @@ if %VALIDATION_PASSED% EQU 1 (
     echo.
     echo Please fix the issues above before merging
     echo DO NOT proceed with merge until all checks pass
+    endlocal
     popd
     exit /b 1
 )

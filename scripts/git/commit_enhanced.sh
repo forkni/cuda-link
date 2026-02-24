@@ -100,7 +100,6 @@ unstage_local_only_files() {
     "benchmark_results/"
     "analysis/"
     "logs/"
-    "scripts/git/"
 
     # Development tools (.gitignore lines 284-285)
     "tools/benchmark_models.py"
@@ -229,7 +228,6 @@ main() {
   if [[ ${no_venv} -eq 1 ]]; then
     # Use system-installed tools (must be on PATH)
     PYTHON_BIN=""
-    PYTHON_EXT=""
     echo "[--no-venv] Using system-installed tools (no .venv)"
     # Verify ruff is available on PATH
     if ! command -v ruff &>/dev/null; then

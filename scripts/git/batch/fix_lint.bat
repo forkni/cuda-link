@@ -33,6 +33,7 @@ if defined MSYSTEM (
     echo   1. Use Windows CMD: cmd.exe /c scripts\git\fix_lint.bat
     echo   2. Use shell script: scripts/git/fix_lint.sh ^(in Git Bash^)
     echo.
+    endlocal
     popd 2>nul
     exit /b 1
 )
@@ -51,11 +52,13 @@ if "%LOGFILE%"=="" (
     echo This typically happens when running batch scripts from Git Bash
     echo.
     echo Please run from Windows CMD: cmd.exe /c %~f0 %*
+    endlocal
     popd
     exit /b 1
 )
 if "%REPORTFILE%"=="" (
     echo [ERROR] Failed to initialize logging - REPORTFILE variable not set
+    endlocal
     popd
     exit /b 1
 )
@@ -146,6 +149,7 @@ if %ERRORLEVEL% EQU 0 (
     echo   2. Stage changes: git add .
     echo   3. Commit: scripts\git\commit_enhanced.bat "message"
     echo.
+    endlocal
     popd
     exit /b 0
 ) else (
@@ -162,6 +166,7 @@ if %ERRORLEVEL% EQU 0 (
     echo Some issues could not be auto-fixed.
     echo Please review the errors above and fix manually.
     echo.
+    endlocal
     popd
     exit /b 1
 )

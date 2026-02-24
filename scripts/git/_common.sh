@@ -178,7 +178,6 @@ log_section_start() {
 #   $1 - section_name (e.g., "RUFF CHECK", "GIT COMMIT")
 #   $2 - log_path (path to log file)
 #   $3 - exit_code (0 = passed, non-zero = failed)
-#   $4 - error_count (optional, defaults to 0)
 # Outputs:
 #   Writes formatted section footer to console and log file
 # Returns:
@@ -187,7 +186,6 @@ log_section_end() {
   local section_name="$1"
   local log_path="$2"
   local exit_code="$3"
-  local error_count="${4:-0}"
 
   local time_str duration status
   time_str=$(date +%H:%M:%S)
