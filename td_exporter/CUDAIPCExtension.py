@@ -166,10 +166,8 @@ class CUDAIPCExtension:
             self.verbose_performance = False
 
         # Apply showCustomOnly from Hidebuiltin parameter on load
-        try:
+        with contextlib.suppress(AttributeError):
             self.ownerComp.showCustomOnly = bool(ownerComp.par.Hidebuiltin.eval())
-        except AttributeError:
-            pass
 
         # Receiver-specific state (only used when mode='Receiver')
         self._rx_dev_ptrs = [None] * self.num_slots  # Opened IPC mem pointers

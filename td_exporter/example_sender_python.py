@@ -25,19 +25,18 @@ import struct
 import sys
 import time
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHM_NAME         = "cudalink_output_ipc"
-WIDTH            = 512
-HEIGHT           = 512
-DTYPE            = "uint8"       # "uint8" or "float32"
-NUM_SLOTS        = 3
-TARGET_FPS       = 60.0
-FRAMES_PER_COLOR = 30            # Hold each solid color this many frames
-REPORT_EVERY     = 150           # Print status every N frames
+SHM_NAME = "cudalink_output_ipc"
+WIDTH = 512
+HEIGHT = 512
+DTYPE = "uint8"  # "uint8" or "float32"
+NUM_SLOTS = 3
+TARGET_FPS = 60.0
+FRAMES_PER_COLOR = 30  # Hold each solid color this many frames
+REPORT_EVERY = 150  # Print status every N frames
 
 
 # ---------------------------------------------------------------------------
@@ -45,14 +44,14 @@ REPORT_EVERY     = 150           # Print status every N frames
 # ---------------------------------------------------------------------------
 
 _COLORS = [
-    (255,   0,   0, 255),   # Red
-    (  0, 255,   0, 255),   # Green
-    (  0,   0, 255, 255),   # Blue
-    (255, 255,   0, 255),   # Yellow
-    (  0, 255, 255, 255),   # Cyan
-    (255,   0, 255, 255),   # Magenta
-    (255, 255, 255, 255),   # White
-    ( 64,  64,  64, 255),   # Grey
+    (255, 0, 0, 255),  # Red
+    (0, 255, 0, 255),  # Green
+    (0, 0, 255, 255),  # Blue
+    (255, 255, 0, 255),  # Yellow
+    (0, 255, 255, 255),  # Cyan
+    (255, 0, 255, 255),  # Magenta
+    (255, 255, 255, 255),  # White
+    (64, 64, 64, 255),  # Grey
 ]
 _COLOR_NAMES = ["Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Grey"]
 
@@ -67,12 +66,12 @@ def _fill_ctypes(cuda: object, ptr: object, data_size: int, color: tuple) -> Non
     r, g, b, a = color
     if DTYPE == "uint8":
         pixel = bytes([int(r), int(g), int(b), int(a)])
-        data  = pixel * (data_size // 4)
-        buf   = (ctypes.c_uint8 * data_size).from_buffer_copy(data)
+        data = pixel * (data_size // 4)
+        buf = (ctypes.c_uint8 * data_size).from_buffer_copy(data)
     else:  # float32
         pixel = struct.pack("<4f", r / 255.0, g / 255.0, b / 255.0, a / 255.0)
-        data  = pixel * (data_size // 16)
-        buf   = (ctypes.c_uint8 * data_size).from_buffer_copy(data)
+        data = pixel * (data_size // 16)
+        buf = (ctypes.c_uint8 * data_size).from_buffer_copy(data)
 
     cuda.memcpy(
         dst=ptr,
@@ -102,7 +101,7 @@ def main() -> None:
             from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
         except ImportError:
             print(f"[sender] ERROR: cuda_link not found. Searched: {src_dir}")
-            print( "[sender]   Run: pip install cuda-link  (from the project root)")
+            print("[sender]   Run: pip install cuda-link  (from the project root)")
             sys.exit(1)
 
     cuda = get_cuda_runtime()
@@ -114,7 +113,7 @@ def main() -> None:
     print(f"  resolution: {WIDTH}x{HEIGHT}  RGBA  {DTYPE}")
     print(f"  fps target: {TARGET_FPS}")
     print()
-    print(f"  TD: CUDAIPCLink_from_Python  Mode=Receiver  Active=ON")
+    print("  TD: CUDAIPCLink_from_Python  Mode=Receiver  Active=ON")
     print()
 
     exporter = CUDAIPCExporter(
@@ -131,19 +130,19 @@ def main() -> None:
         print("[sender] ERROR: exporter.initialize() failed.")
         sys.exit(1)
 
-    print(f"[sender] Initialized — waiting for TD receiver to connect ...\n")
+    print("[sender] Initialized — waiting for TD receiver to connect ...\n")
 
-    staging_ptr    = cuda.malloc(exporter.data_size)
+    staging_ptr = cuda.malloc(exporter.data_size)
     frame_interval = 1.0 / TARGET_FPS
-    frame_count    = 0
-    start_time     = time.perf_counter()
-    last_report    = start_time
+    frame_count = 0
+    start_time = time.perf_counter()
+    last_report = start_time
 
     try:
         while True:
-            t0        = time.perf_counter()
+            t0 = time.perf_counter()
             color_idx = (frame_count // FRAMES_PER_COLOR) % len(_COLORS)
-            color     = _COLORS[color_idx]
+            color = _COLORS[color_idx]
 
             _fill_ctypes(cuda, staging_ptr, exporter.data_size, color)
             exporter.export_frame(
@@ -176,7 +175,7 @@ def main() -> None:
         total = time.perf_counter() - start_time
         avg_fps = frame_count / total if total > 0 else 0.0
         print(f"[sender] Done — {frame_count} frames in {total:.1f}s  ({avg_fps:.1f} FPS avg)")
-        print( "[sender] TD Receiver will detect shutdown on next cook.")
+        print("[sender] TD Receiver will detect shutdown on next cook.")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ TD Setup:
 import os
 import subprocess
 
-_process = None   # Sender subprocess handle
+_process = None  # Sender subprocess handle
 
 
 def onStart() -> None:
@@ -37,7 +37,7 @@ def onStart() -> None:
     script = os.path.join(project.folder, "td_exporter", "example_sender_python.py")
 
     if not os.path.isfile(script):
-        print(f"[CUDA-Link Launcher] ERROR: sender script not found:")
+        print("[CUDA-Link Launcher] ERROR: sender script not found:")
         print(f"  {script}")
         return
 
@@ -77,8 +77,7 @@ def onFrameStart(frame: int) -> None:
     if _process is not None and _process.poll() is not None:
         code = _process.returncode
         if code != 0:
-            print(f"[CUDA-Link Launcher] WARNING: sender subprocess exited"
-                  f" unexpectedly (code={code}).")
+            print(f"[CUDA-Link Launcher] WARNING: sender subprocess exited unexpectedly (code={code}).")
 
 
 def onFrameEnd(frame: int) -> None:
