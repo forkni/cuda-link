@@ -10,7 +10,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - ~3-8μs CPU-side per frame for IPC primitives; ~10-20μs total for export_frame() at 512x512 (vs ~1.5ms for CPU SharedMemory)
+- **Low-overhead IPC** - ~3-8μs CPU-side for IPC sync primitives; ~117μs for `export_frame()` in Python (WDDM); ~10-20μs within TouchDesigner's CUDA context; vs ~2.6ms for CPU SharedMemory at 1080p (see [Benchmarks](#benchmarks))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -20,16 +20,16 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| IPC sync primitives | ~3-8μs | cudaEventRecord + write_idx + cudaStreamWaitEvent (CPU-side) |
-| export_frame() at 512x512 | ~10-20μs | Async D2D enqueue + IPC sync + protocol writes |
-| export_frame() at 1080p | ~50-130μs | Async D2D enqueue + IPC sync (GPU transfer ~60-80μs in background) |
+| IPC sync primitives | ~3-8μs | cudaEventRecord + write_idx + cudaStreamWaitEvent (CPU-side only) |
+| export_frame() in TouchDesigner | ~10-20μs | Within TD's CUDA context at 512x512 |
+| export_frame() Python process | ~117-120μs | Standalone Python, WDDM kernel overhead |
 | D2H copy (720p uint8) | ~300-500μs | numpy output mode, PCIe bandwidth dependent |
 | D2H copy (1080p uint8) | ~1-2ms | numpy output mode, PCIe bandwidth dependent |
-| D2H copy (1080p float32) | ~3-5ms | numpy output mode, ~31.6 MB at PCIe 3.0/4.0 speeds |
+| D2H copy (1080p float32) | ~4ms | numpy output mode, ~31.6 MB (measured) |
 | Initialization | ~50-100μs | One-time IPC handle opening |
 | Theoretical max FPS | 10,000+ | Limited by GPU pipeline depth, not IPC overhead |
 
-**Baseline comparison**: CPU SharedMemory requires ~1.5ms per frame for 1080p RGBA float32, **~200-500x slower** than CUDA IPC per-frame overhead.
+**Baseline comparison** (measured, 1080p float32): CPU SharedMemory write averages ~2.6ms per frame. CUDA IPC `export_frame()` averages ~117µs — **~22x faster write**, **~5.8x lower E2E latency** (0.93ms vs 5.37ms). See [Benchmarks](#benchmarks) for full comparison table.
 
 ## Requirements
 
@@ -228,6 +228,50 @@ pytest tests/ -v
 pytest tests/ -v -m "not slow"
 ```
 
+## Benchmarks
+
+The `benchmarks/` directory contains a reproducible benchmark suite comparing CUDA IPC against CPU SharedMemory and NumPy array transfer without TouchDesigner.
+
+### Tier 1: Pure Python (no TD required)
+
+```bash
+# Default: 512x512, 300 frames @ 60fps
+python benchmarks/compare_all.py
+
+# Specific resolution
+python benchmarks/compare_all.py --resolution 1080p --frames 500
+
+# Sweep all standard resolutions (512x512, 720p, 1080p, 4K)
+python benchmarks/compare_all.py --sweep
+
+# Save raw comparison data as JSON
+python benchmarks/compare_all.py --resolution 1080p --save-json
+```
+
+### Results (1080p float32 RGBA, RTX GPU, Windows 11, 300 frames @ 60fps)
+
+```
+Method               Write avg    Read avg     E2E Latency    Notes
+-------------------  -----------  -----------  -------------  ----------------
+CUDA IPC             117µs        4.15ms       0.93ms         GPU zero-copy
+CPU SharedMem (Py)   2.60ms       2.48ms       5.37ms         CPU memcpy
+NumPy Transfer (Py)  2.48ms       2.58ms       5.35ms         numpy+SHM
+```
+
+**Read column**: CUDA IPC `get_frame_numpy()` incurs a D2H copy (~4ms for 31.6 MB float32). Zero-copy GPU modes (`get_frame()`, `get_frame_cupy()`) have negligible read overhead.
+
+Run individual benchmarks for per-frame CSV and full percentile stats:
+
+```bash
+python benchmarks/benchmark_roundtrip.py --resolution 1080p --frames 500 --csv results.csv
+python benchmarks/benchmark_cpu_sharedmem.py --resolution 1080p --frames 500
+python benchmarks/benchmark_numpy_transfer.py --resolution 1080p --frames 500 --with-copy
+```
+
+### Tier 2: TD-Integrated Benchmarks
+
+Run `python benchmarks/benchmark_td_metrics.py` with TouchDesigner active to measure Shared Mem Out TOP, Touch Out/In, and Spout cook times and E2E latency. TD-side logger scripts: `benchmarks/td_touchout_logger.py`, `benchmarks/td_spout_logger.py`.
+
 ## Troubleshooting
 
 ### "SharedMemory not found"
@@ -240,11 +284,11 @@ pytest tests/ -v -m "not slow"
 importer = CUDAIPCImporter(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
 ```
 
-### "CUDA IPC overhead > 200μs"
+### "CUDA IPC overhead > 500μs"
 
-**Cause**: Windows CUDA IPC `export_frame()` overhead at 1080p is typically 50-130μs (async D2D enqueue + IPC sync). Values above 200μs may indicate GPU driver overhead or contention.
+**Cause**: In standalone Python processes (WDDM), `export_frame()` typically measures ~117-120μs (async D2D enqueue + IPC sync + WDDM kernel transitions). Within TouchDesigner's CUDA context it is ~10-20μs. Values above 500μs may indicate GPU driver overhead or context contention.
 
-**Solution**: Run `python benchmarks/benchmark_roundtrip.py --resolution 1920x1080 --frames 200` to measure actual overhead on your hardware. If consistently > 200μs, consider reducing resolution or switching to CPU SharedMemory.
+**Solution**: Run `python benchmarks/compare_all.py --resolution 1080p --frames 200` to measure actual overhead and compare against CPU SharedMemory on your hardware.
 
 ### "Version mismatch" or stale frames
 
