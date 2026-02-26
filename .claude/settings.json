@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/git-commit-enforcer.py"
+            "command": "python F:/RD_PROJECTS/COMPONENTS/CUDA_IPC/.claude/hooks/git-commit-enforcer.py"
           }
         ]
       }

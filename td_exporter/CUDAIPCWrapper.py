@@ -101,6 +101,10 @@ class CUDARuntimeAPI:
         """Initialize CUDA runtime library."""
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Establish CUDA primary context on device 0 in this runtime instance.
+        # Ensures cudaIpcGetMemHandle and related IPC calls work correctly even
+        # when TouchDesigner's internal CUDA context was initialized separately.
+        self.cudart.cudaSetDevice(0)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -111,22 +115,10 @@ class CUDARuntimeAPI:
         Raises:
             RuntimeError: If CUDA runtime cannot be loaded
         """
-        # Try full paths first (for reliability)
-        dll_paths = [
-            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\cudart64_12.dll",
-            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\cudart64_12.dll",
-            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll",
-            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin\cudart64_12.dll",
-        ]
-
-        for dll_path in dll_paths:
-            if os.path.exists(dll_path):
-                try:
-                    return ctypes.CDLL(dll_path)
-                except OSError:
-                    continue
-
-        # Fallback: try by name (if in system PATH)
+        # Try by name FIRST: picks up the already-loaded cudart in this process
+        # (e.g., TD's bundled cudart loaded via its DLL search path). Sharing the
+        # same DLL instance ensures CUDA contexts are shared, which is required for
+        # IPC handle interoperability between TD's internal context and Python ctypes.
         dll_names = ["cudart64_12.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
@@ -134,10 +126,24 @@ class CUDARuntimeAPI:
             except OSError:
                 continue
 
+        # Fallback: try full toolkit paths when not already in PATH
+        dll_paths = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\cudart64_12.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\cudart64_12.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin\cudart64_12.dll",
+        ]
+        for dll_path in dll_paths:
+            if os.path.exists(dll_path):
+                try:
+                    return ctypes.CDLL(dll_path)
+                except OSError:
+                    continue
+
         raise RuntimeError(
             "Could not load CUDA runtime. Please ensure CUDA 12.x is installed.\n"
-            f"Tried paths: {dll_paths}\n"
-            f"Tried names: {dll_names}"
+            f"Tried names: {dll_names}\n"
+            f"Tried paths: {dll_paths}"
         )
 
     def _setup_function_signatures(self) -> None:
@@ -246,6 +252,14 @@ class CUDARuntimeAPI:
         # cudaMemGetInfo(size_t* free, size_t* total)
         self.cudart.cudaMemGetInfo.argtypes = [POINTER(c_size_t), POINTER(c_size_t)]
         self.cudart.cudaMemGetInfo.restype = c_int
+
+        # cudaSetDevice(int device)
+        self.cudart.cudaSetDevice.argtypes = [c_int]
+        self.cudart.cudaSetDevice.restype = c_int
+
+        # cudaGetDevice(int* device)
+        self.cudart.cudaGetDevice.argtypes = [POINTER(c_int)]
+        self.cudart.cudaGetDevice.restype = c_int
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
