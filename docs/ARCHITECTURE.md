@@ -418,6 +418,28 @@ return tensors[read_slot]                        ← Zero-copy, 0μs
 | `cudaStreamWaitEvent` | 0.5-2μs | Consumer | GPU-async |
 | **Total CPU overhead** | **~3-8μs** | Both | - |
 
+### Measured Benchmarks (Python-to-Python, Tier 1)
+
+Produced by `benchmarks/compare_all.py` (300 frames @ 60fps, `spawn` multiprocessing, WDDM, RTX GPU, Windows 11).
+
+**512x512 float32 RGBA (4 MB/frame):**
+
+| Method | Write avg | Read avg | E2E Latency |
+|---|---|---|---|
+| CUDA IPC (`export_frame()` / `get_frame_numpy()`) | 119 µs | 0.78 ms | 0.99 ms |
+| CPU SharedMemory | 361 µs | 350 µs | 1.02 ms |
+| NumPy Transfer | 387 µs | 368 µs | 1.05 ms |
+
+**1080p float32 RGBA (31.6 MB/frame):**
+
+| Method | Write avg | Read avg | E2E Latency |
+|---|---|---|---|
+| CUDA IPC | 117 µs | 4.15 ms | 0.93 ms |
+| CPU SharedMemory | 2.60 ms | 2.48 ms | 5.37 ms |
+| NumPy Transfer | 2.48 ms | 2.58 ms | 5.35 ms |
+
+> **Note**: `export_frame()` overhead in standalone Python processes (~117 µs) is higher than within TouchDesigner's CUDA context (~10-20 µs) due to WDDM kernel-mode transition cost per CUDA API call. The benchmark is useful for comparing methods relative to each other. The ~3-8µs figure in the overhead table above refers only to the IPC synchronization primitives (cudaEventRecord + write_idx update), not the full call.
+
 ### Throughput Limits
 
 **Theoretical max FPS** (ignoring application logic):
@@ -450,15 +472,23 @@ This latency is **imperceptible** for real-time applications.
 
 ## Comparison: CUDA IPC vs CPU SharedMemory
 
-| Metric | CUDA IPC | CPU SharedMemory | Speedup |
-|--------|----------|------------------|---------|
-| Per-frame overhead | ~3-8μs | ~1.5ms | **187-500x** |
-| Memory copies | 0 (GPU-GPU) | 2 (GPU→CPU, CPU→GPU) | ∞ |
-| Latency | ~16.7ms (1 frame) | ~16.7ms + 1.5ms | 1.09x |
-| Setup cost | ~50-100μs | ~10μs | 0.1-0.2x |
+Measured values from `benchmarks/compare_all.py` at 1080p float32 RGBA.
+
+| Metric | CUDA IPC | CPU SharedMemory | Ratio |
+|--------|----------|------------------|-------|
+| Write overhead (1080p) | 117 µs | 2.60 ms | **~22x faster** |
+| Read overhead (1080p, numpy) | 4.15 ms | 2.48 ms | 0.6x (D2H copy cost) |
+| E2E latency (1080p) | 0.93 ms | 5.37 ms | **~5.8x faster** |
+| IPC sync primitives only | 3-8 µs | N/A | - |
+| Memory copies | 0 (GPU D2D) | 2 (GPU→CPU, CPU→GPU) | ∞ |
+| Setup cost | ~50-100μs | ~10μs | - |
 | Platform support | Windows only | Cross-platform | - |
 
-**Conclusion**: CUDA IPC is **200-500x faster** per-frame, but Windows-only. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
+**Read overhead note**: The 4.15ms CUDA IPC read is `get_frame_numpy()` performing a 31.6 MB D2H copy. The zero-copy GPU modes (`get_frame()` → torch tensor, `get_frame_cupy()`) have negligible read overhead and are the recommended path for AI pipelines.
+
+**Write advantage**: CUDA IPC `export_frame()` is ~22x faster than CPU SharedMemory write at 1080p because the D2D memcpy is enqueued asynchronously — the call returns after scheduling the GPU work, not after it completes.
+
+**Conclusion**: CUDA IPC is **~22x faster for writes** and achieves **~5.8x lower E2E latency** at 1080p, Windows-only. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
 
 ---
 
@@ -501,5 +531,5 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 ---
 
-**Last Updated**: 2026-02-19
-**Version**: 1.2.0
+**Last Updated**: 2026-02-26
+**Version**: 1.3.0

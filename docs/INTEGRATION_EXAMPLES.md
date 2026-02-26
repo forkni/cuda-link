@@ -312,6 +312,15 @@ print("Clean shutdown complete")
 ### Use Case
 Measure IPC overhead for your specific hardware.
 
+> **Recommended**: For cross-method comparison with statistical rigor (avg, p50, p95, p99, CSV export), use the automated benchmark suite:
+> ```bash
+> python benchmarks/compare_all.py --resolution 1080p --frames 500
+> python benchmarks/compare_all.py --sweep   # all standard resolutions
+> ```
+> See [README Benchmarks section](../README.md#benchmarks) for results and Tier 2 TD-integrated benchmarks.
+
+The manual script below is useful for quick ad-hoc profiling of the consumer side against a live TD sender.
+
 ### Python Script
 
 ```python
@@ -326,12 +335,12 @@ importer = CUDAIPCImporter(
 )
 
 # Warmup
-for _ in range(100):
+for _ in range(30):
     importer.get_frame()
 
 # Benchmark
 frame_times = []
-for _ in range(1000):
+for _ in range(500):
     start = time.perf_counter()
     frame = importer.get_frame()
     elapsed = (time.perf_counter() - start) * 1_000_000  # μs
@@ -348,13 +357,22 @@ print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} μs")
 importer.cleanup()
 ```
 
-**Expected output** (good hardware, PyTorch zero-copy mode):
+**Expected output** (PyTorch zero-copy mode, TD sender, 1080p):
 ```
 IPC get_frame() overhead:
   Mean:   3.5 μs
   Median: 2.8 μs
   P95:    6.0 μs
   P99:    9.0 μs
+```
+
+**Expected output** (numpy D2H copy mode, `get_frame_numpy()`, 1080p float32):
+```
+IPC get_frame_numpy() overhead:
+  Mean:   4150 μs
+  Median: 4100 μs
+  P95:    4600 μs
+  P99:    5200 μs
 ```
 
 ---
@@ -552,5 +570,5 @@ for i in range(max_retries):
 
 ---
 
-**Last Updated**: 2026-02-09
-**Version**: 1.0.0
+**Last Updated**: 2026-02-26
+**Version**: 1.1.0
