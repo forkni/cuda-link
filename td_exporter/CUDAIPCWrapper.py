@@ -115,11 +115,14 @@ class CUDARuntimeAPI:
         Raises:
             RuntimeError: If CUDA runtime cannot be loaded
         """
-        # Try by name FIRST: picks up the already-loaded cudart in this process
-        # (e.g., TD's bundled cudart loaded via its DLL search path). Sharing the
-        # same DLL instance ensures CUDA contexts are shared, which is required for
-        # IPC handle interoperability between TD's internal context and Python ctypes.
-        dll_names = ["cudart64_12.dll", "cudart64_11.dll"]
+        # Try by name FIRST: picks up the already-loaded cudart in this process.
+        # TouchDesigner ships cudart64_110.dll (CUDA 11.0) in its bin directory.
+        # Reusing TD's already-loaded runtime instance (same DLL handle) ensures
+        # our ctypes allocations share TD's CUDA context — critical for IPC handle
+        # validity. Loading a SECOND cudart instance (e.g., toolkit 12.x) creates
+        # an independent runtime state machine that may not properly attach to the
+        # context established by TD's 11.0 runtime, producing non-IPC-eligible handles.
+        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
                 return ctypes.CDLL(name)
