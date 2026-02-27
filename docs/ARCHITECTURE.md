@@ -114,46 +114,46 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 0 (192 bytes)                                          │
+│ SLOT 0 (128 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [20-147]    cudaIpcMemHandle_t (128 bytes)                  │
+│ [20-83]     cudaIpcMemHandle_t (64 bytes)                   │
 │             GPU memory handle for IPC transfer              │
-│ [148-211]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [84-147]    cudaIpcEventHandle_t (64 bytes)                 │
 │             GPU event handle for synchronization            │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 1 (192 bytes)                                          │
+│ SLOT 1 (128 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [212-339]   cudaIpcMemHandle_t (128 bytes)                  │
-│ [340-403]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [148-211]   cudaIpcMemHandle_t (64 bytes)                   │
+│ [212-275]   cudaIpcEventHandle_t (64 bytes)                 │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 2 (192 bytes)                                          │
+│ SLOT 2 (128 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [404-531]   cudaIpcMemHandle_t (128 bytes)                  │
-│ [532-595]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [276-339]   cudaIpcMemHandle_t (64 bytes)                   │
+│ [340-403]   cudaIpcEventHandle_t (64 bytes)                 │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │ FOOTER (29 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
-│ [596]       shutdown_flag (uint8)                           │
+│ [404]       shutdown_flag (uint8)                           │
 │             Producer sets to 1 on exit                      │
-│ [597-616]   metadata (20 bytes)                             │
-│             [597-600]   width (uint32)                      │
-│             [601-604]   height (uint32)                     │
-│             [605-608]   num_comps (uint32)                  │
-│             [609-612]   dtype_code (uint32)                 │
+│ [405-424]   metadata (20 bytes)                             │
+│             [405-408]   width (uint32)                      │
+│             [409-412]   height (uint32)                     │
+│             [413-416]   num_comps (uint32)                  │
+│             [417-420]   dtype_code (uint32)                 │
 │                         0=float32, 1=float16, 2=uint8       │
-│             [613-616]   data_size (uint32)                  │
+│             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
-│ [617-624]   timestamp (float64)                             │
+│ [425-432]   timestamp (float64)                             │
 │             Producer timestamp for latency measurement      │
 └─────────────────────────────────────────────────────────────┘
 
-Total: 20 + 3*192 + 1 + 20 + 8 = 625 bytes
+Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
 ```
 
 ### Variable Slot Count Formula
@@ -169,9 +169,9 @@ timestamp_offset = 20 + (N × 192) + 1 + 20
 ```
 
 **Examples**:
-- 2 slots: 20 + 384 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
-- 3 slots: 20 + 576 + 1 + 20 + 8 = 625 bytes, shutdown at [596]
-- 4 slots: 20 + 768 + 1 + 20 + 8 = 817 bytes, shutdown at [788]
+- 2 slots: 20 + 256 + 1 + 20 + 8 = 305 bytes, shutdown at [276]
+- 3 slots: 20 + 384 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
+- 4 slots: 20 + 512 + 1 + 20 + 8 = 561 bytes, shutdown at [532]
 
 ---
 

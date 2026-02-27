@@ -22,7 +22,7 @@ CUDAEvent_t = c_uint64  # cudaEvent_t is opaque pointer (unsigned 64-bit)
 CUDAStream_t = c_uint64  # cudaStream_t is opaque pointer (unsigned 64-bit)
 
 
-# CUDA IPC Handle structure (128 bytes per NVIDIA spec)
+# CUDA IPC Handle structure (64 bytes, CUDA_IPC_HANDLE_SIZE per NVIDIA spec)
 class cudaIpcMemHandle_t(ctypes.Structure):
     """CUDA IPC memory handle structure.
 
@@ -30,7 +30,7 @@ class cudaIpcMemHandle_t(ctypes.Structure):
     SharedMemory or other IPC mechanisms to enable GPU memory sharing.
     """
 
-    _fields_ = [("internal", ctypes.c_byte * 128)]
+    _fields_ = [("internal", ctypes.c_byte * 64)]
 
 
 # CUDA IPC Event Handle structure (64 bytes per NVIDIA spec)
@@ -120,7 +120,7 @@ class CUDARuntimeAPI:
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        dll_names = ["cudart64_12.dll", "cudart64_11.dll"]
+        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)

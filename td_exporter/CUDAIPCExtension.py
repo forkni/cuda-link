@@ -51,7 +51,7 @@ NUM_SLOTS_SIZE = 4
 WRITE_IDX_OFFSET = 16
 WRITE_IDX_SIZE = 4
 SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
-SLOT_SIZE = 192  # 128B mem_handle + 64B event_handle
+SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
 METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
@@ -322,7 +322,7 @@ class CUDAIPCExtension:
 
                 # Create IPC handle for this buffer (ONCE - reuse for all frames)
                 self.ipc_handles[slot] = self.cuda.ipc_get_mem_handle(self.dev_ptrs[slot])
-                self._log(f"Created IPC handle for slot {slot} (128 bytes)")
+                self._log(f"Created IPC handle for slot {slot} (64 bytes)")
 
                 # Create IPC event for GPU-side synchronization (per-slot)
                 self.ipc_events[slot] = self.cuda.create_ipc_event()
@@ -382,11 +382,11 @@ class CUDAIPCExtension:
         [12-15]   num_slots (4B)
         [16-19]   write_idx (4B)
 
-        For each slot (192 bytes per slot):
-        [20+slot*192 : 148+slot*192]   mem_handle (128B)
-        [148+slot*192 : 212+slot*192]  event_handle (64B)
+        For each slot (128 bytes per slot):
+        [20+slot*128 : 84+slot*128]   mem_handle (64B)
+        [84+slot*128 : 148+slot*128]  event_handle (64B)
 
-        [20+NUM_SLOTS*192]  shutdown flag (1B)
+        [20+NUM_SLOTS*128]  shutdown flag (1B)
         """
         if self.shm_handle is None or not all(self.ipc_handles):
             return
@@ -415,20 +415,20 @@ class CUDAIPCExtension:
         for slot in range(self.num_slots):
             base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
 
-            # Write memory handle (128 bytes)
+            # Write memory handle (64 bytes)
             mem_handle_bytes = bytes(self.ipc_handles[slot].internal)
-            self.shm_handle.buf[base_offset : base_offset + 128] = mem_handle_bytes
+            self.shm_handle.buf[base_offset : base_offset + 64] = mem_handle_bytes
 
             # Write event handle (64 bytes) if available
             if self.ipc_event_handles[slot]:
                 event_handle_bytes = bytes(self.ipc_event_handles[slot].reserved)
-                self.shm_handle.buf[base_offset + 128 : base_offset + 192] = event_handle_bytes
+                self.shm_handle.buf[base_offset + 64 : base_offset + 128] = event_handle_bytes
                 self._log(f"Wrote slot {slot} handles: mem={len(mem_handle_bytes)}B, event={len(event_handle_bytes)}B")
             else:
                 self._log(f"Wrote slot {slot} mem handle: {len(mem_handle_bytes)}B")
 
         self._log(
-            f"Wrote all IPC handles v{new_version} to SharedMemory ({16 + self.num_slots * 192 + 1} bytes total)",
+            f"Wrote all IPC handles v{new_version} to SharedMemory ({SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE} bytes total)",
             force=True,
         )
 
@@ -1145,7 +1145,7 @@ class CUDAIPCExtension:
                 base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
 
                 # Read + open memory handle
-                mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 128])
+                mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 64])
 
                 # Fix #1: Validate handle is non-zero before opening.
                 # All-zero bytes mean sender wrote metadata but hasn't written IPC handles yet
@@ -1177,7 +1177,7 @@ class CUDAIPCExtension:
                     return False
 
                 # Read + open event handle
-                event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 128 : base_offset + 192])
+                event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 64 : base_offset + 128])
                 if any(event_handle_bytes):
                     try:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)

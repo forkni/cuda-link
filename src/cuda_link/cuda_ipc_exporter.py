@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # Protocol layout constants (must match CUDAIPCExtension and CUDAIPCImporter)
 PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
 SHM_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-SLOT_SIZE = 192  # 128B mem_handle + 64B event_handle
+SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
 METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
@@ -216,7 +216,7 @@ class CUDAIPCExporter:
 
                 # Memory handle (once at startup — reused every frame)
                 self.ipc_handles[slot] = self.cuda.ipc_get_mem_handle(self.dev_ptrs[slot])
-                logger.debug(f"Slot {slot}: created IPC mem handle (128 bytes)")
+                logger.debug(f"Slot {slot}: created IPC mem handle (64 bytes)")
 
                 # Event handle for GPU-side synchronization
                 self.ipc_events[slot] = self.cuda.create_ipc_event()
@@ -262,9 +262,9 @@ class CUDAIPCExporter:
             [12-15]  num_slots (uint32 LE)
             [16-19]  write_idx (uint32 LE) — initialized to 0
 
-        Per slot (192 bytes):
-            [base..+127]  cudaIpcMemHandle_t (128 bytes)
-            [base+128..+64] cudaIpcEventHandle_t (64 bytes)
+        Per slot (128 bytes):
+            [base..+63]   cudaIpcMemHandle_t (64 bytes)
+            [base+64..+64] cudaIpcEventHandle_t (64 bytes)
 
         Footer:
             shutdown_flag (1 byte) = 0
@@ -290,11 +290,11 @@ class CUDAIPCExporter:
             base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
 
             mem_handle_bytes = bytes(self.ipc_handles[slot].internal)
-            self.shm_handle.buf[base_offset : base_offset + 128] = mem_handle_bytes
+            self.shm_handle.buf[base_offset : base_offset + 64] = mem_handle_bytes
 
             if self.ipc_event_handles[slot]:
                 event_handle_bytes = bytes(self.ipc_event_handles[slot].reserved)
-                self.shm_handle.buf[base_offset + 128 : base_offset + 192] = event_handle_bytes
+                self.shm_handle.buf[base_offset + 64 : base_offset + 128] = event_handle_bytes
 
         # Initialize shutdown flag to 0
         shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)

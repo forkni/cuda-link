@@ -40,36 +40,36 @@ def test_header_layout_sizes() -> None:
 
 
 def test_slot_layout_sizes() -> None:
-    """Verify each slot is exactly 192 bytes (128B mem_handle + 64B event_handle)."""
-    MEM_HANDLE_SIZE = 128
+    """Verify each slot is exactly 128 bytes (64B mem_handle + 64B event_handle)."""
+    MEM_HANDLE_SIZE = 64
     EVENT_HANDLE_SIZE = 64
     SLOT_SIZE = MEM_HANDLE_SIZE + EVENT_HANDLE_SIZE
 
-    assert SLOT_SIZE == 192, f"Slot size mismatch: {SLOT_SIZE} != 192"
+    assert SLOT_SIZE == 128, f"Slot size mismatch: {SLOT_SIZE} != 128"
 
 
 def test_total_shm_size_3_slots() -> None:
     """Verify total SharedMemory size for 3 slots."""
     SHM_HEADER_SIZE = 20  # Updated from 16 (now includes 4-byte magic)
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
     num_slots = 3
 
     total_size = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE
 
-    # 20 + 3*192 + 1 = 597 bytes (was 593 with old 16-byte header)
-    assert total_size == 597, f"Total size mismatch: {total_size} != 597"
+    # 20 + 3*128 + 1 = 405 bytes
+    assert total_size == 405, f"Total size mismatch: {total_size} != 405"
 
 
 def test_total_shm_size_variable_slots() -> None:
     """Verify size formula for different slot counts."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
 
     for num_slots in [2, 3, 4, 5]:
         expected_size = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE
-        assert expected_size == 20 + num_slots * 192 + 1
+        assert expected_size == 20 + num_slots * 128 + 1
 
 
 def test_write_idx_atomic_update() -> None:
@@ -111,27 +111,27 @@ def test_version_increment() -> None:
 def test_shutdown_flag_position() -> None:
     """Verify shutdown flag is at correct offset."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     num_slots = 3
 
     shutdown_offset = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE)
 
-    # Shutdown flag at byte 596 (was 592 with old 16-byte header)
-    assert shutdown_offset == 596
+    # Shutdown flag at byte 404 (20 header + 3*128 slots)
+    assert shutdown_offset == 404
 
-    # For 4 slots: 20 + 4*192 = 788 (was 784)
-    shutdown_offset_4 = 20 + (4 * 192)
-    assert shutdown_offset_4 == 788
+    # For 4 slots: 20 + 4*128 = 532
+    shutdown_offset_4 = 20 + (4 * 128)
+    assert shutdown_offset_4 == 532
 
 
 def test_handle_bytes_extraction() -> None:
     """Verify correct extraction of handle bytes per slot."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
-    MEM_HANDLE_SIZE = 128
+    SLOT_SIZE = 128
+    MEM_HANDLE_SIZE = 64
 
-    # Simulate buffer with 3 slots (20 + 3*192 + 1 = 597 bytes)
-    buffer = bytearray(20 + 3 * 192 + 1)
+    # Simulate buffer with 3 slots (20 + 3*128 + 1 = 405 bytes)
+    buffer = bytearray(20 + 3 * 128 + 1)
 
     for slot in [0, 1, 2]:
         base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
@@ -140,7 +140,7 @@ def test_handle_bytes_extraction() -> None:
         mem_start = base_offset
         mem_end = base_offset + MEM_HANDLE_SIZE
         mem_handle_bytes = buffer[mem_start:mem_end]
-        assert len(mem_handle_bytes) == 128
+        assert len(mem_handle_bytes) == 64
 
         # Event handle extraction
         event_start = base_offset + MEM_HANDLE_SIZE
@@ -152,13 +152,13 @@ def test_handle_bytes_extraction() -> None:
 def test_slot_offset_calculation() -> None:
     """Verify slot offset calculation for ring buffer access."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
 
     # Expected offsets for 3 slots (updated for 20-byte header)
     expected_offsets = {
         0: 20,  # Slot 0: 20 (was 16)
-        1: 212,  # Slot 1: 20 + 192 (was 208)
-        2: 404,  # Slot 2: 20 + 192*2 (was 400)
+        1: 148,  # Slot 1: 20 + 128
+        2: 276,  # Slot 2: 20 + 128*2
     }
 
     for slot, expected in expected_offsets.items():
@@ -191,20 +191,20 @@ def test_read_slot_calculation() -> None:
 def test_extended_protocol_size_3_slots() -> None:
     """Verify extended protocol size includes 20-byte metadata."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
     METADATA_SIZE = 20
     num_slots = 3
 
     total = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-    # 20 + 3*192 + 1 + 20 = 617 bytes (was 613 with old 16-byte header)
-    assert total == 617, f"Extended protocol size: {total} != 617"
+    # 20 + 3*128 + 1 + 20 = 425 bytes
+    assert total == 425, f"Extended protocol size: {total} != 425"
 
 
 def test_metadata_offset_calculation() -> None:
     """Verify metadata offset is immediately after shutdown flag."""
     SHM_HEADER_SIZE = 20  # Updated from 16
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
 
     for num_slots in [2, 3, 4]:
@@ -216,9 +216,9 @@ def test_metadata_offset_calculation() -> None:
 
 def test_metadata_write_read_roundtrip() -> None:
     """Verify metadata fields can be written and read back correctly."""
-    METADATA_OFFSET = 597  # For 3 slots (was 593 with old 16-byte header)
+    METADATA_OFFSET = 405  # For 3 slots: 20 header + 3*128 slots + 1 shutdown
 
-    buffer = bytearray(617)  # Updated from 613
+    buffer = bytearray(425)  # 20 + 3*128 + 1 + 20 = 425
 
     # Write metadata
     width, height, num_comps, dtype_code, buf_size = 1920, 1080, 4, 0, 1920 * 1080 * 4 * 4
@@ -240,7 +240,7 @@ def test_metadata_write_read_roundtrip() -> None:
 def test_backward_compatibility_old_reader() -> None:
     """Verify new-format reader with magic can read extended buffer."""
     PROTOCOL_MAGIC = 0x43495043  # "CIPC"
-    buffer = bytearray(617)  # Updated from 613
+    buffer = bytearray(425)  # 20 + 3*128 + 1 + 20
 
     # Write header (new format with magic)
     buffer[0:4] = struct.pack("<I", PROTOCOL_MAGIC)
@@ -253,7 +253,7 @@ def test_backward_compatibility_old_reader() -> None:
     version = struct.unpack("<Q", bytes(buffer[4:12]))[0]
     num_slots = struct.unpack("<I", bytes(buffer[12:16]))[0]
     write_idx = struct.unpack("<I", bytes(buffer[16:20]))[0]
-    shutdown = buffer[596]  # Updated offset (was 592)
+    shutdown = buffer[404]  # 20 + 3*128 = 404
 
     assert magic == PROTOCOL_MAGIC
     assert version == 1
@@ -288,16 +288,16 @@ def test_full_protocol_size_with_timestamp() -> None:
     """Verify full protocol size includes 8-byte producer timestamp field.
 
     The full protocol layout is:
-      Header (20) + Slots (N*192) + Shutdown (1) + Metadata (20) + Timestamp (8)
-    For 3 slots: 20 + 576 + 1 + 20 + 8 = 625 bytes.
+      Header (20) + Slots (N*128) + Shutdown (1) + Metadata (20) + Timestamp (8)
+    For 3 slots: 20 + 384 + 1 + 20 + 8 = 433 bytes.
     """
     SHM_HEADER_SIZE = 20
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
     METADATA_SIZE = 20
     TIMESTAMP_SIZE = 8
 
-    for num_slots, expected_size in [(2, 433), (3, 625), (4, 817)]:
+    for num_slots, expected_size in [(2, 305), (3, 433), (4, 561)]:
         total = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
         assert total == expected_size, f"Full protocol size for {num_slots} slots: {total} != {expected_size}"
 
@@ -307,16 +307,16 @@ def test_timestamp_write_read_roundtrip() -> None:
     import time
 
     SHM_HEADER_SIZE = 20
-    SLOT_SIZE = 192
+    SLOT_SIZE = 128
     SHUTDOWN_FLAG_SIZE = 1
     METADATA_SIZE = 20
     num_slots = 3
 
     timestamp_offset = SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-    # For 3 slots: 20 + 576 + 1 + 20 = 617
-    assert timestamp_offset == 617, f"Timestamp offset for 3 slots: {timestamp_offset} != 617"
+    # For 3 slots: 20 + 384 + 1 + 20 = 425
+    assert timestamp_offset == 425, f"Timestamp offset for 3 slots: {timestamp_offset} != 425"
 
-    buffer = bytearray(625)
+    buffer = bytearray(433)
     ts = time.perf_counter()
     struct.pack_into("<d", buffer, timestamp_offset, ts)
 

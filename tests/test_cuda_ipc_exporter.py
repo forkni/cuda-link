@@ -169,8 +169,8 @@ def test_initialize_creates_shm(cuda_runtime: object, temp_shm_name: str, shared
 
     # Verify SharedMemory size
     # 20 (header: 4B magic + 8B version + 4B num_slots + 4B write_idx)
-    # + 3*192 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 625
-    expected_size = 20 + 3 * 192 + 1 + 20 + 8
+    # + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
+    expected_size = 20 + 3 * 128 + 1 + 20 + 8
     assert len(exporter.shm_handle.buf) >= expected_size
 
     # Cleanup

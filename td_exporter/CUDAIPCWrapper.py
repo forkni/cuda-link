@@ -22,7 +22,7 @@ CUDAEvent_t = c_uint64  # cudaEvent_t is opaque pointer (unsigned 64-bit)
 CUDAStream_t = c_uint64  # cudaStream_t is opaque pointer (unsigned 64-bit)
 
 
-# CUDA IPC Handle structure (128 bytes per NVIDIA spec)
+# CUDA IPC Handle structure (64 bytes, CUDA_IPC_HANDLE_SIZE per NVIDIA spec)
 class cudaIpcMemHandle_t(ctypes.Structure):
     """CUDA IPC memory handle structure.
 
@@ -30,7 +30,7 @@ class cudaIpcMemHandle_t(ctypes.Structure):
     SharedMemory or other IPC mechanisms to enable GPU memory sharing.
     """
 
-    _fields_ = [("internal", ctypes.c_byte * 128)]
+    _fields_ = [("internal", ctypes.c_byte * 64)]
 
 
 # CUDA IPC Event Handle structure (64 bytes per NVIDIA spec)
@@ -102,8 +102,9 @@ class CUDARuntimeAPI:
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
         # Establish CUDA primary context on device 0 in this runtime instance.
-        # Ensures cudaIpcGetMemHandle and related IPC calls work correctly even
-        # when TouchDesigner's internal CUDA context was initialized separately.
+        # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
+        # alongside torch (which has its own bundled cudart). Each DLL instance needs
+        # its own context initialized before IPC handle operations can succeed.
         self.cudart.cudaSetDevice(0)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
@@ -115,17 +116,16 @@ class CUDARuntimeAPI:
         Raises:
             RuntimeError: If CUDA runtime cannot be loaded
         """
-        # Try by name FIRST: picks up the already-loaded cudart in this process.
-        # TouchDesigner ships cudart64_110.dll (CUDA 11.0) in its bin directory.
-        # Reusing TD's already-loaded runtime instance (same DLL handle) ensures
-        # our ctypes allocations share TD's CUDA context — critical for IPC handle
-        # validity. Loading a SECOND cudart instance (e.g., toolkit 12.x) creates
-        # an independent runtime state machine that may not properly attach to the
-        # context established by TD's 11.0 runtime, producing non-IPC-eligible handles.
+        # Try by name FIRST: if cudart is already loaded in this process (e.g., by
+        # torch), Windows returns the cached handle — ensuring we share the same
+        # runtime instance and CUDA context. Loading by full path can create a second
+        # independent instance with its own state, breaking cross-process IPC.
         dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
-                return ctypes.CDLL(name)
+                dll = ctypes.CDLL(name)
+                self._log_dll_path(dll, name)
+                return dll
             except OSError:
                 continue
 
@@ -139,7 +139,9 @@ class CUDARuntimeAPI:
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
-                    return ctypes.CDLL(dll_path)
+                    dll = ctypes.CDLL(dll_path)
+                    self._log_dll_path(dll, dll_path)
+                    return dll
                 except OSError:
                     continue
 
@@ -148,6 +150,19 @@ class CUDARuntimeAPI:
             f"Tried names: {dll_names}\n"
             f"Tried paths: {dll_paths}"
         )
+
+    @staticmethod
+    def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
+        """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
+            ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("Loaded CUDA runtime: %s", buf.value)
+        except Exception:
+            pass
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""

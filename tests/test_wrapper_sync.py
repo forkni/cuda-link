@@ -43,9 +43,9 @@ def test_wrapper_line_count() -> None:
     content = pip_wrapper.read_text(encoding="utf-8")
     line_count = len(content.splitlines())
 
-    # Allow some flexibility (620-650 lines) for minor changes
-    assert 620 <= line_count <= 650, (
-        f"Wrapper line count ({line_count}) is outside expected range (620-650). "
+    # Allow some flexibility (640-680 lines) for minor changes
+    assert 640 <= line_count <= 680, (
+        f"Wrapper line count ({line_count}) is outside expected range (640-680). "
         "Has the wrapper changed significantly? Update this test if intentional."
     )
 

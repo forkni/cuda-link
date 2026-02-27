@@ -185,7 +185,7 @@ The system uses a 3-slot ring buffer to allow producer and consumer to work in p
 
 This prevents blocking - producer never waits for consumer, consumer is always 1 frame behind.
 
-### SharedMemory Protocol (625 bytes for 3 slots)
+### SharedMemory Protocol (433 bytes for 3 slots)
 
 ```
 [0-3]     magic "CIPC" (4B)       - Protocol validation (0x43495043)
@@ -193,16 +193,16 @@ This prevents blocking - producer never waits for consumer, consumer is always 1
 [12-15]   num_slots (4B)           - Number of ring buffer slots (3)
 [16-19]   write_idx (4B)           - Current write index (atomic counter)
 
-Per slot (192 bytes each):
-[20+slot*192 : 148+slot*192]   cudaIpcMemHandle_t (128B) - GPU memory handle
-[148+slot*192 : 212+slot*192]  cudaIpcEventHandle_t (64B) - GPU event handle
+Per slot (128 bytes each):
+[20+slot*128 : 84+slot*128]   cudaIpcMemHandle_t (64B)  - GPU memory handle
+[84+slot*128 : 148+slot*128]  cudaIpcEventHandle_t (64B) - GPU event handle
 
-[20+NUM_SLOTS*192]        shutdown_flag (1B)   - Producer sets to 1 on exit
-[21+NUM_SLOTS*192]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
-[41+NUM_SLOTS*192]        timestamp (8B)       - Producer perf_counter() for latency
+[20+NUM_SLOTS*128]        shutdown_flag (1B)   - Producer sets to 1 on exit
+[21+NUM_SLOTS*128]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
+[41+NUM_SLOTS*128]        timestamp (8B)       - Producer perf_counter() for latency
 ```
 
-For 3 slots: `20 + (3 × 192) + 1 + 20 + 8 = 625 bytes`
+For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 
 ## Documentation
 
@@ -402,7 +402,7 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 | **Python → TD** (AI output display) | `.tox` Receiver mode | `pip install dist\cuda_link-*.whl[torch]` |
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
-Both sides communicate through the 625-byte SharedMemory protocol — zero import dependencies between TD and Python code.
+Both sides communicate through the 433-byte SharedMemory protocol — zero import dependencies between TD and Python code.
 
 ---
 

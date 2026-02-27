@@ -15,7 +15,7 @@ import pytest
 # Protocol v0.5.0 constants
 _MAGIC = 0x43495043  # "CIPC"
 _HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-_SLOT_SIZE = 192  # 128B mem_handle + 64B event_handle
+_SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 
 
 def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: int = 0) -> None:
@@ -39,7 +39,7 @@ def test_producer_consumer_basic(cuda_runtime: object, temp_shm_name: str, share
     handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
     # Create SharedMemory with v0.5.0 layout
-    # 20 (header) + 3*192 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 625
+    # 20 (header) + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
     num_slots = 3
     shm_size = _HEADER_SIZE + num_slots * _SLOT_SIZE + 1 + 20 + 8
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
@@ -48,11 +48,11 @@ def test_producer_consumer_basic(cuda_runtime: object, temp_shm_name: str, share
     _write_header(shm, version=1, num_slots=num_slots, write_idx=1)
 
     # Write IPC handle to slot 0
-    shm.buf[_HEADER_SIZE : _HEADER_SIZE + 128] = bytes(handle.internal)
+    shm.buf[_HEADER_SIZE : _HEADER_SIZE + 64] = bytes(handle.internal)
 
     # Consumer: Open IPC handle in same process (Windows limitation)
     # Note: On Windows, same process IPC may fail, so we just verify the handle is valid
-    assert len(bytes(handle.internal)) == 128
+    assert len(bytes(handle.internal)) == 64
 
     # Cleanup
     cuda_runtime.free(ptr)
@@ -82,7 +82,7 @@ def test_ring_buffer_slot_cycling(cuda_runtime: object, temp_shm_name: str, shar
         handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
         base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
-        shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+        shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
     # Simulate producer writing frames
     write_sequence = [0, 1, 2, 3, 4, 5]  # 6 frames
@@ -132,7 +132,7 @@ def test_shutdown_signal_propagation(
         handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
         base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
-        shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+        shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
     # Producer sets shutdown flag (immediately after slots)
     shutdown_offset = _HEADER_SIZE + num_slots * _SLOT_SIZE
@@ -171,7 +171,7 @@ def test_version_change_reinit(cuda_runtime: object, temp_shm_name: str, shared_
         handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
         base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
-        shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+        shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
     # Consumer reads version 1 (at offset 4 in v0.5.0 header)
     version = struct.unpack("<Q", bytes(shm.buf[4:12]))[0]
@@ -191,7 +191,7 @@ def test_version_change_reinit(cuda_runtime: object, temp_shm_name: str, shared_
         handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
         base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
-        shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+        shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
     # Consumer detects version change
     new_version = struct.unpack("<Q", bytes(shm.buf[4:12]))[0]

@@ -67,7 +67,7 @@ NUM_SLOTS_SIZE = 4
 WRITE_IDX_OFFSET = 16
 WRITE_IDX_SIZE = 4
 SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
-SLOT_SIZE = 192  # 128B mem_handle + 64B event_handle
+SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
 METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
@@ -79,7 +79,7 @@ class CUDAIPCImporter:
     Python-side importer for CUDA IPC GPU memory.
 
     Responsibilities:
-    - Read 128-byte IPC handle from SharedMemory (once at startup)
+    - Read 64-byte IPC handle from SharedMemory (once at startup)
     - Open handle using cudaIpcOpenMemHandle() (once)
     - Create persistent torch.Tensor view (zero-copy) or numpy array (D2H copy)
     - Return tensor/array for each frame
@@ -324,8 +324,8 @@ class CUDAIPCImporter:
             for slot in range(self.num_slots):
                 base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
 
-                # Read memory handle (128 bytes)
-                mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 128])
+                # Read memory handle (64 bytes)
+                mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 64])
                 self.ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
 
                 # Open IPC memory handle (ONCE - expensive operation)
@@ -333,7 +333,7 @@ class CUDAIPCImporter:
                 self.dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self.ipc_handles[slot], flags=1)
 
                 # Read event handle (64 bytes)
-                event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 128 : base_offset + 192])
+                event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 64 : base_offset + 128])
                 if any(event_handle_bytes):
                     try:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)

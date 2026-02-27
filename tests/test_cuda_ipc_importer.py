@@ -128,8 +128,8 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
 
     # Create fake SharedMemory with v0.5.0 layout:
     # 20B header (4B magic + 8B version + 4B num_slots + 4B write_idx)
-    # + 3*192B slots + 1B shutdown + 20B metadata + 8B timestamp = 625
-    shm_size = 20 + 3 * 192 + 1 + 20 + 8
+    # + 3*128B slots + 1B shutdown + 20B metadata + 8B timestamp = 433
+    shm_size = 20 + 3 * 128 + 1 + 20 + 8
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
     shared_memory_cleanup.append(temp_shm_name)
 
@@ -145,8 +145,8 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
             ptr = cuda_runtime.malloc(1024)
             handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
-            base_offset = 20 + slot * 192
-            shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+            base_offset = 20 + slot * 128
+            shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
         # Create importer (will open handles)
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
@@ -188,15 +188,15 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
             ptr = cuda_runtime.malloc(1024)
             handle = cuda_runtime.ipc_get_mem_handle(ptr)
 
-            base_offset = 20 + slot * 192
-            shm.buf[base_offset : base_offset + 128] = bytes(handle.internal)
+            base_offset = 20 + slot * 128
+            shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
         # Create importer
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
 
         if importer.is_ready():
             # Set shutdown flag (immediately after slots in v0.5.0 layout)
-            shutdown_offset = 20 + 3 * 192
+            shutdown_offset = 20 + 3 * 128
             shm.buf[shutdown_offset] = 1
 
             # get_frame() should detect shutdown and return None

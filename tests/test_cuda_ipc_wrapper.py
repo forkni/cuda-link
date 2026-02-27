@@ -74,7 +74,7 @@ def test_ipc_get_mem_handle(cuda_runtime: object) -> None:
         # Get IPC handle
         handle = cuda_runtime.ipc_get_mem_handle(ptr)
         assert handle is not None
-        assert len(handle.internal) == 128  # 128-byte handle
+        assert len(handle.internal) == 64  # 64-byte handle (CUDA_IPC_HANDLE_SIZE)
 
     finally:
         cuda_runtime.free(ptr)
@@ -135,8 +135,8 @@ def test_ipc_handle_structure() -> None:
     from cuda_link.cuda_ipc_wrapper import cudaIpcMemHandle_t
 
     handle = cudaIpcMemHandle_t()
-    # Should have 128-byte internal array
-    assert len(handle.internal) == 128
+    # Should have 64-byte internal array (CUDA_IPC_HANDLE_SIZE)
+    assert len(handle.internal) == 64
 
 
 @pytest.mark.requires_cuda
