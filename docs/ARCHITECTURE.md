@@ -440,6 +440,24 @@ Produced by `benchmarks/compare_all.py` (300 frames @ 60fps, `spawn` multiproces
 
 > **Note**: `export_frame()` overhead in standalone Python processes (~117 µs) is higher than within TouchDesigner's CUDA context (~10-20 µs) due to WDDM kernel-mode transition cost per CUDA API call. The benchmark is useful for comparing methods relative to each other. The ~3-8µs figure in the overhead table above refers only to the IPC synchronization primitives (cudaEventRecord + write_idx update), not the full call.
 
+### Measured Benchmarks (TouchDesigner → Python, Tier 2)
+
+Produced by `benchmarks/benchmark_comparison.py` (300 frames @ 60fps, live TD Sender → Python `CUDAIPCImporter`, RTX 4060 Laptop, Windows 11).
+
+**512x512 float32 RGBA (4 MB/frame):**
+
+| Metric | avg | p50 | p95 | p99 | min | max |
+|---|---|---|---|---|---|---|
+| E2E latency (ms) | 0.57 | 0.58 | 1.06 | 1.20 | 0.019 | 1.422 |
+| `get_frame()` call (µs) | 30 | 21 | 69 | — | 12 | — |
+
+- **E2E latency**: wall-clock time from TD producer writing the frame (producer `perf_counter()` timestamp stored in SharedMemory) to Python consumer returning from `get_frame()`. Includes the ring-buffer slot delay and `cudaStreamWaitEvent` enqueue latency.
+- **`get_frame()` call**: consumer-side Python call time — reads `write_idx`, enqueues `cudaStreamWaitEvent`, and returns the pre-mapped tensor view. Excludes 13 out of 300 frames where a new ring-buffer slot was first accessed and required `cudaIpcOpenMemHandle` (~500µs one-time cost per new slot); including those, the overall avg is 50µs.
+- **FPS**: 60.0 sustained, 0 skipped frames.
+- **Zero CPU blocking**: `cudaStreamWaitEvent` enqueues a GPU-side dependency without polling — CPU returns immediately after the enqueue.
+
+**Key comparison**: At 512x512, E2E latency with a live TD sender (0.57ms avg) is comparable to the Python→Python roundtrip (0.99ms), confirming TD's CUDA context does not add significant pipeline overhead once IPC handles are sharing the correct runtime instance.
+
 ### Throughput Limits
 
 **Theoretical max FPS** (ignoring application logic):
@@ -472,13 +490,15 @@ This latency is **imperceptible** for real-time applications.
 
 ## Comparison: CUDA IPC vs CPU SharedMemory
 
-Measured values from `benchmarks/compare_all.py` at 1080p float32 RGBA.
+Measured values from `benchmarks/compare_all.py` at 1080p float32 RGBA (Python→Python, Tier 1).
 
 | Metric | CUDA IPC | CPU SharedMemory | Ratio |
 |--------|----------|------------------|-------|
 | Write overhead (1080p) | 117 µs | 2.60 ms | **~22x faster** |
 | Read overhead (1080p, numpy) | 4.15 ms | 2.48 ms | 0.6x (D2H copy cost) |
 | E2E latency (1080p) | 0.93 ms | 5.37 ms | **~5.8x faster** |
+| E2E latency (512x512, TD→Python) | 0.57 ms avg | — | measured, 300 frames @ 60 FPS |
+| `get_frame()` call (512x512, TD→Python) | 30 µs avg | — | measured, consumer-side only |
 | IPC sync primitives only | 3-8 µs | N/A | - |
 | Memory copies | 0 (GPU D2D) | 2 (GPU→CPU, CPU→GPU) | ∞ |
 | Setup cost | ~50-100μs | ~10μs | - |
@@ -488,7 +508,9 @@ Measured values from `benchmarks/compare_all.py` at 1080p float32 RGBA.
 
 **Write advantage**: CUDA IPC `export_frame()` is ~22x faster than CPU SharedMemory write at 1080p because the D2D memcpy is enqueued asynchronously — the call returns after scheduling the GPU work, not after it completes.
 
-**Conclusion**: CUDA IPC is **~22x faster for writes** and achieves **~5.8x lower E2E latency** at 1080p, Windows-only. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
+**TD→Python note**: The 0.57ms E2E latency (512x512) was measured with a live TD sender using `cudart64_110.dll` (TD's own CUDA 11.0 runtime shared via by-name DLL loading). Loading a second CUDA runtime instance (e.g., `cudart64_12.dll`) in TD's process causes `cudaIpcOpenMemHandle` error 400 — see `td_exporter/CUDAIPCWrapper.py` `_load_cuda_runtime()` for details.
+
+**Conclusion**: CUDA IPC is **~22x faster for writes** and achieves **~5.8x lower E2E latency** at 1080p (Python→Python), and **0.57ms E2E at 512x512** (TD→Python), Windows-only. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
 
 ---
 
@@ -532,4 +554,4 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 ---
 
 **Last Updated**: 2026-02-26
-**Version**: 1.3.0
+**Version**: 1.4.0

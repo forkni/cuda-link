@@ -10,7 +10,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - ~3-8μs CPU-side for IPC sync primitives; ~117μs for `export_frame()` in Python (WDDM); ~10-20μs within TouchDesigner's CUDA context; vs ~2.6ms for CPU SharedMemory at 1080p (see [Benchmarks](#benchmarks))
+- **Low-overhead IPC** - ~3-8μs CPU-side for IPC sync primitives; ~117μs for `export_frame()` in Python (WDDM); ~10-20μs within TouchDesigner's CUDA context; TD→Python e2e: avg 0.57ms at 512x512 (measured, 60 FPS); vs ~2.6ms for CPU SharedMemory at 1080p (see [Benchmarks](#benchmarks))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -23,6 +23,8 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 | IPC sync primitives | ~3-8μs | cudaEventRecord + write_idx + cudaStreamWaitEvent (CPU-side only) |
 | export_frame() in TouchDesigner | ~10-20μs | Within TD's CUDA context at 512x512 |
 | export_frame() Python process | ~117-120μs | Standalone Python, WDDM kernel overhead |
+| get_frame() TD→Python (consumer) | avg 30µs, p95 69µs | 512x512 float32, cudaStreamWaitEvent + tensor view (measured, 60 FPS) |
+| E2E latency TD→Python | avg 0.57ms, p95 1.06ms | 512x512 float32, producer write → consumer read (measured, 300 frames @ 60 FPS) |
 | D2H copy (720p uint8) | ~300-500μs | numpy output mode, PCIe bandwidth dependent |
 | D2H copy (1080p uint8) | ~1-2ms | numpy output mode, PCIe bandwidth dependent |
 | D2H copy (1080p float32) | ~4ms | numpy output mode, ~31.6 MB (measured) |
@@ -248,7 +250,7 @@ python benchmarks/compare_all.py --sweep
 python benchmarks/compare_all.py --resolution 1080p --save-json
 ```
 
-### Results (1080p float32 RGBA, RTX GPU, Windows 11, 300 frames @ 60fps)
+### Results — Tier 1: Pure Python (no TD, 1080p float32 RGBA, RTX GPU, Windows 11, 300 frames @ 60fps)
 
 ```
 Method               Write avg    Read avg     E2E Latency    Notes
@@ -268,7 +270,23 @@ python benchmarks/benchmark_cpu_sharedmem.py --resolution 1080p --frames 500
 python benchmarks/benchmark_numpy_transfer.py --resolution 1080p --frames 500 --with-copy
 ```
 
-### Tier 2: TD-Integrated Benchmarks
+### Results — Tier 2: TD Sender → Python Receiver (512x512 float32 RGBA, RTX 4060 Laptop, Windows 11, 300 frames @ 60fps)
+
+Measured with `benchmark_comparison.py` against a live TouchDesigner sender:
+
+```
+Metric                    avg      p50      p95      p99      min      max
+-----------------------  -------  -------  -------  -------  -------  -------
+E2E latency (ms)          0.57     0.58     1.06     1.20     0.019    1.422
+get_frame() call (us)      30       21       69       --       12       --
+```
+
+- **E2E latency**: time from TD producer writing the frame (producer timestamp) to Python consumer returning it
+- **get_frame()**: consumer-side only — `cudaStreamWaitEvent` enqueue + tensor view return; excludes periodic handle-reopen events (~13 out of 300 frames reopen a handle at ~500µs each, excluded from avg above)
+- **FPS**: 60.0 sustained, 0 skipped frames
+- **Zero CPU blocking**: GPU synchronization via `cudaStreamWaitEvent` enqueue (~0.5-2µs) — does not wait for GPU
+
+### Tier 2: TD-Integrated Benchmarks (other methods)
 
 Run `python benchmarks/benchmark_td_metrics.py` with TouchDesigner active to measure Shared Mem Out TOP, Touch Out/In, and Spout cook times and E2E latency. TD-side logger scripts: `benchmarks/td_touchout_logger.py`, `benchmarks/td_spout_logger.py`.
 
