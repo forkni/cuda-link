@@ -113,10 +113,7 @@ def create_snoop_config(
     depth: int = 1,
     enabled: bool = True,
 ) -> "object | None":
-    """Create a snoop.Config with project-appropriate defaults.
-
-    Configures color output, timestamp columns, and cheap_repr for numpy/torch
-    arrays (shows .shape and .dtype without printing full data).
+    """Create a snoop.Config with timestamp column output.
 
     Args:
         out: Output destination — file path string, or None for stderr.
@@ -144,17 +141,17 @@ def create_snoop_config(
             kwargs["out"] = out
         return _snoop.Config(**kwargs)
     except ImportError:
-        logger.warning("snoop not installed. Install with: pip install snoop")
+        logger.debug("snoop not installed; create_snoop_config() is a no-op")
         return None
 
 
 def snoop_decorator(
-    fn: "object | None" = None,
+    fn: "Callable | None" = None,
     *,
     depth: int = 1,
     watch: "tuple[str, ...]" = (),
     enabled: bool = True,
-) -> "object":
+) -> "Callable":
     """Return a @snoop decorator, or a transparent no-op if snoop is unavailable.
 
     Designed so ``@snoop_decorator`` can be left on functions in development
@@ -179,7 +176,7 @@ def snoop_decorator(
             ...
     """
 
-    def _noop(f: "object") -> "object":
+    def _noop(f: "Callable") -> "Callable":
         return f
 
     try:

@@ -304,7 +304,7 @@ class CUDAIPCImporter:
                             self.shape = (height, width, num_comps)
                             logger.info("Auto-detected shape: %s", self.shape)
                         if self.dtype is None:
-                            dtype_map = {0: "float32", 1: "float16", 2: "uint8"}
+                            dtype_map = {0: "float32", 1: "float16", 2: "uint8", 3: "uint16"}
                             self.dtype = dtype_map.get(dtype_code, "float32")
                             logger.info("Auto-detected dtype: %s", self.dtype)
                     else:

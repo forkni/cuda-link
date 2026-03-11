@@ -929,6 +929,9 @@ class CUDAIPCExtension:
 
             if self._rx_dtype_code == DTYPE_FLOAT16:
                 # copyCUDAMemory doesn't support float16 — D2H + convert + copyNumpyArray
+                if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
+                    debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
+                    return
                 import ctypes
                 from ctypes import c_void_p
 

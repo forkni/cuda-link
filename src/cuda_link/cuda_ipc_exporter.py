@@ -65,17 +65,20 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
 DTYPE_FLOAT32 = 0
 DTYPE_FLOAT16 = 1
 DTYPE_UINT8 = 2
+DTYPE_UINT16 = 3
 
 _DTYPE_CODE_MAP = {
     "float32": DTYPE_FLOAT32,
     "float16": DTYPE_FLOAT16,
     "uint8": DTYPE_UINT8,
+    "uint16": DTYPE_UINT16,
 }
 
 _DTYPE_ITEMSIZE_MAP = {
     "float32": 4,
     "float16": 2,
     "uint8": 1,
+    "uint16": 2,
 }
 
 
