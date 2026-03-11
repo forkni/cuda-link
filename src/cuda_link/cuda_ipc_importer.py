@@ -136,6 +136,7 @@ class CUDAIPCImporter:
 
         # Numpy state (pre-allocated buffer for D2H copy)
         self._numpy_buffer = None  # Reused numpy array (avoids per-frame allocation)
+        self._pinned_ptr = None  # Pinned host memory pointer (cudaMallocHost)
 
         # Frame tracking
         self.frame_count = 0
@@ -701,8 +702,22 @@ class CUDAIPCImporter:
 
         # Pre-allocate numpy buffer (reuse across frames to avoid allocation overhead)
         if self._numpy_buffer is None or self._numpy_buffer.shape != self.shape:
-            self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
-            logger.debug("Allocated numpy buffer: %s, %s", self.shape, self.dtype)
+            # Free previous pinned allocation if shape changed
+            if self._pinned_ptr is not None:
+                try:
+                    self.cuda.free_host(self._pinned_ptr)
+                except (RuntimeError, OSError) as e:
+                    logger.debug("free_host failed during reshape: %s", e)
+                self._pinned_ptr = None
+
+            try:
+                self._pinned_ptr = self.cuda.malloc_host(nbytes)
+                buf = (ctypes.c_ubyte * nbytes).from_address(self._pinned_ptr.value)
+                self._numpy_buffer = np.frombuffer(buf, dtype=self._numpy_dtype()).reshape(self.shape)
+                logger.debug("Allocated pinned numpy buffer: %s, %s", self.shape, self.dtype)
+            except (RuntimeError, OSError) as e:
+                logger.debug("cudaMallocHost failed — falling back to pageable memory: %s", e)
+                self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
 
         # Async D2H copy on dedicated stream + synchronize (CPU-blocking until copy completes)
         if self.debug:
@@ -893,6 +908,16 @@ class CUDAIPCImporter:
                         logger.info("Destroyed IPC event for slot %d", slot)
                     except (RuntimeError, OSError) as e:
                         logger.error("Error destroying event for slot %d: %s", slot, e)
+
+        # Free pinned host memory
+        if hasattr(self, "_pinned_ptr") and self._pinned_ptr is not None and self.cuda:
+            try:
+                self.cuda.free_host(self._pinned_ptr)
+                logger.debug("Freed pinned numpy buffer")
+            except (RuntimeError, OSError) as e:
+                logger.debug("free_host skipped (context gone): %s", e)
+            self._pinned_ptr = None
+            self._numpy_buffer = None
 
         # Destroy numpy stream
         if hasattr(self, "_numpy_stream") and self.cuda:

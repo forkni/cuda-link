@@ -174,6 +174,14 @@ class CUDARuntimeAPI:
         self.cudart.cudaFree.argtypes = [c_void_p]
         self.cudart.cudaFree.restype = c_int
 
+        # cudaMallocHost(void** ptr, size_t size) — allocate pinned (page-locked) host memory
+        self.cudart.cudaMallocHost.argtypes = [POINTER(c_void_p), c_size_t]
+        self.cudart.cudaMallocHost.restype = c_int
+
+        # cudaFreeHost(void* ptr) — free pinned host memory
+        self.cudart.cudaFreeHost.argtypes = [c_void_p]
+        self.cudart.cudaFreeHost.restype = c_int
+
         # cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind)
         self.cudart.cudaMemcpy.argtypes = [c_void_p, c_void_p, c_size_t, c_int]
         self.cudart.cudaMemcpy.restype = c_int
@@ -324,6 +332,38 @@ class CUDARuntimeAPI:
         """
         result = self.cudart.cudaFree(dev_ptr)
         self.check_error(result, "cudaFree")
+
+    def malloc_host(self, size: int) -> c_void_p:
+        """Allocate pinned (page-locked) host memory via cudaMallocHost.
+
+        Pinned memory enables direct DMA for D2H transfers, eliminating the
+        CUDA driver's internal staging copy that pageable memory requires.
+
+        Args:
+            size: Number of bytes to allocate
+
+        Returns:
+            Host pointer to pinned memory
+
+        Raises:
+            RuntimeError: If allocation fails
+        """
+        ptr = c_void_p()
+        result = self.cudart.cudaMallocHost(byref(ptr), size)
+        self.check_error(result, "cudaMallocHost")
+        return ptr
+
+    def free_host(self, ptr: c_void_p) -> None:
+        """Free pinned host memory allocated with malloc_host().
+
+        Args:
+            ptr: Host pointer to free
+
+        Raises:
+            RuntimeError: If free fails
+        """
+        result = self.cudart.cudaFreeHost(ptr)
+        self.check_error(result, "cudaFreeHost")
 
     def memcpy(self, dst: c_void_p, src: c_void_p, count: int, kind: int) -> None:
         """Copy memory (device-to-device, host-to-device, or device-to-host).
