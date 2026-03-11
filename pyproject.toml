@@ -40,6 +40,8 @@ dev = [
     "pytest>=7.0",
     "ruff",
     "mypy",
+    "snoop>=0.4",
+    "py-heat>=0.0.6",
 ]
 
 [project.urls]

@@ -61,6 +61,7 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 DTYPE_FLOAT32 = 0
 DTYPE_FLOAT16 = 1
 DTYPE_UINT8 = 2
+DTYPE_UINT16 = 3
 
 
 class CUDAIPCExtension:
@@ -189,6 +190,8 @@ class CUDAIPCExtension:
         self._rx_retry_interval_frames = 1  # Will be updated dynamically after failed attempts
         self._rx_frames_since_last_retry = 0  # Start at 0; first increment yields 1 >= 1 → immediate connect
         self._rx_needs_resolution_update = False  # Flag to defer Script TOP resolution setup
+        self._rx_f16_cpu_buf = None  # float16 CPU buffer for D2H conversion (float16 IPC only)
+        self._rx_f32_cpu_buf = None  # float32 CPU buffer after conversion (float16 IPC only)
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
@@ -923,12 +926,26 @@ class CUDAIPCExtension:
 
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._rx_dev_ptrs[read_slot].value
-            import_buffer.copyCUDAMemory(
-                address,
-                self._rx_buffer_size,
-                self._rx_cached_shape,
-                stream=int(self._rx_stream.value),
-            )
+
+            if self._rx_dtype_code == DTYPE_FLOAT16:
+                # copyCUDAMemory doesn't support float16 — D2H + convert + copyNumpyArray
+                import ctypes
+                from ctypes import c_void_p
+
+                cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
+                self.cuda.memcpy(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2)  # D2H kind=2
+                # kind=2 is DeviceToHost per cudaMemcpyKind enum
+                self._rx_f32_cpu_buf[:] = self._rx_f16_cpu_buf.reshape(
+                    self._rx_height, self._rx_width, self._rx_num_comps
+                ).astype("float32")
+                import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
+            else:
+                import_buffer.copyCUDAMemory(
+                    address,
+                    self._rx_buffer_size,
+                    self._rx_cached_shape,
+                    stream=int(self._rx_stream.value),
+                )
 
             self.frame_count += 1
             self._rx_last_write_idx = write_idx
@@ -1203,10 +1220,21 @@ class CUDAIPCExtension:
 
             dtype_map = {
                 DTYPE_FLOAT32: np_module.float32,
-                DTYPE_FLOAT16: np_module.float16,
+                # float16 not supported by copyCUDAMemory — handled via D2H+copyNumpyArray path
+                DTYPE_FLOAT16: np_module.float32,  # shape dtype = float32 (unused for float16 path)
                 DTYPE_UINT8: np_module.uint8,
+                DTYPE_UINT16: np_module.uint16,
             }
             np_dtype = dtype_map.get(self._rx_dtype_code, np_module.float32)
+
+            # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
+            if self._rx_dtype_code == DTYPE_FLOAT16:
+                n_elems = self._rx_width * self._rx_height * self._rx_num_comps
+                self._rx_f16_cpu_buf = np_module.zeros(n_elems, dtype=np_module.float16)
+                self._rx_f32_cpu_buf = np_module.zeros(
+                    (self._rx_height, self._rx_width, self._rx_num_comps), dtype=np_module.float32
+                )
+                self._log("float16 receiver: allocated CPU conversion buffers (D2H path)", force=True)
 
             self._rx_cached_shape = CUDAMemoryShape()
             self._rx_cached_shape.width = self._rx_width
@@ -1304,6 +1332,8 @@ class CUDAIPCExtension:
         self._rx_ipc_events = []
         self._rx_num_slots = 0
         self._rx_stream = None  # Prevent double-free
+        self._rx_f16_cpu_buf = None
+        self._rx_f32_cpu_buf = None
         self._initialized = False
         self._rx_connect_attempts = 0
         self._rx_frames_since_last_retry = 0

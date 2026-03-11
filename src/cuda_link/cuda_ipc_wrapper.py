@@ -161,7 +161,7 @@ class CUDARuntimeAPI:
             import logging as _logging
 
             _logging.getLogger(__name__).debug("Loaded CUDA runtime: %s", buf.value)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     def _setup_function_signatures(self) -> None:

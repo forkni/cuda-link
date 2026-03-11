@@ -160,6 +160,12 @@ class CUDAIPCExporter:
         self.frame_count: int = 0
         self.total_memcpy_us: float = 0.0
         self.total_export_us: float = 0.0
+        self.total_stream_wait_us: float = 0.0
+        self.total_record_event_us: float = 0.0
+        self.total_shm_write_us: float = 0.0
+
+        # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
+        self._ts_offset: int = 0
 
     # ------------------------------------------------------------------
     # Initialization
@@ -186,9 +192,9 @@ class CUDAIPCExporter:
             # Create or reuse dedicated non-blocking IPC stream
             if self.ipc_stream is None:
                 self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
-                logger.info(f"Created IPC stream: 0x{int(self.ipc_stream.value):016x}")
+                logger.info("Created IPC stream: 0x%016x", int(self.ipc_stream.value))
             else:
-                logger.debug(f"Reusing IPC stream: 0x{int(self.ipc_stream.value):016x}")
+                logger.debug("Reusing IPC stream: 0x%016x", int(self.ipc_stream.value))
 
             # Create cross-stream sync event for GPU-side producer ordering.
             # ipc_stream is non-blocking and does NOT implicitly sync with any other stream,
@@ -202,28 +208,32 @@ class CUDAIPCExporter:
             alignment = 2 * 1024 * 1024
             self.buffer_size = ((self.data_size + alignment - 1) // alignment) * alignment
             logger.info(
-                f"Buffer: {self.data_size / 1024:.1f} KB data, "
-                f"{self.buffer_size / 1024:.1f} KB aligned, "
-                f"{self.num_slots} slots"
+                "Buffer: %.1f KB data, %.1f KB aligned, %d slots",
+                self.data_size / 1024,
+                self.buffer_size / 1024,
+                self.num_slots,
             )
 
             # PHASE 1: Allocate GPU ring buffer + create IPC handles
             for slot in range(self.num_slots):
                 self.dev_ptrs[slot] = self.cuda.malloc(self.buffer_size)
                 logger.info(
-                    f"Slot {slot}: allocated {self.buffer_size / 1024:.1f} KB at 0x{self.dev_ptrs[slot].value:016x}"
+                    "Slot %d: allocated %.1f KB at 0x%016x",
+                    slot,
+                    self.buffer_size / 1024,
+                    self.dev_ptrs[slot].value,
                 )
 
                 # Memory handle (once at startup — reused every frame)
                 self.ipc_handles[slot] = self.cuda.ipc_get_mem_handle(self.dev_ptrs[slot])
-                logger.debug(f"Slot {slot}: created IPC mem handle (64 bytes)")
+                logger.debug("Slot %d: created IPC mem handle (64 bytes)", slot)
 
                 # Event handle for GPU-side synchronization
                 self.ipc_events[slot] = self.cuda.create_ipc_event()
                 self.ipc_event_handles[slot] = self.cuda.ipc_get_event_handle(self.ipc_events[slot])
-                logger.debug(f"Slot {slot}: created IPC event (64 bytes)")
+                logger.debug("Slot %d: created IPC event (64 bytes)", slot)
 
-            logger.info(f"Created {self.num_slots} IPC buffer slots with GPU-side sync")
+            logger.info("Created %d IPC buffer slots with GPU-side sync", self.num_slots)
 
             # PHASE 2: Create SharedMemory
             shm_size = (
@@ -231,21 +241,24 @@ class CUDAIPCExporter:
             )
             try:
                 self.shm_handle = SharedMemory(name=self.shm_name)
-                logger.info(f"Opened existing SharedMemory: {self.shm_name}")
+                logger.info("Opened existing SharedMemory: %s", self.shm_name)
             except FileNotFoundError:
                 self.shm_handle = SharedMemory(name=self.shm_name, create=True, size=shm_size)
-                logger.info(f"Created SharedMemory: {self.shm_name} ({shm_size} bytes)")
+                logger.info("Created SharedMemory: %s (%d bytes)", self.shm_name, shm_size)
 
             # PHASE 3: Write protocol header + IPC handles + metadata
             self._write_handles_to_shm()
             self._write_metadata_to_shm()
+
+            # Cache constant SharedMemory offsets so export_frame() avoids per-frame arithmetic
+            self._ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
             self._initialized = True
             logger.info("Initialization complete — ready for zero-copy GPU transfer")
             return True
 
         except (OSError, RuntimeError, ValueError) as e:
-            logger.error(f"Initialization failed: {e}")
+            logger.error("Initialization failed: %s", e)
             traceback.print_exc()
             return False
 
@@ -269,7 +282,7 @@ class CUDAIPCExporter:
         Footer:
             shutdown_flag (1 byte) = 0
         """
-        if not self.shm_handle or not all(self.ipc_handles):
+        if self.shm_handle is None or not all(self.ipc_handles):
             return
 
         # Increment version (detect re-initialization from consumer side)
@@ -300,7 +313,7 @@ class CUDAIPCExporter:
         shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
         struct.pack_into("<B", self.shm_handle.buf, shutdown_offset, 0)
 
-        logger.info(f"Wrote IPC handles v{new_version} to SharedMemory")
+        logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
     def _write_metadata_to_shm(self) -> None:
         """Write texture metadata to the extended protocol region.
@@ -312,7 +325,7 @@ class CUDAIPCExporter:
             +12  dtype_code (uint32)  — 0=float32, 1=float16, 2=uint8
             +16  data_size (uint32)   — actual bytes (before alignment)
         """
-        if not self.shm_handle or self.data_size == 0:
+        if self.shm_handle is None or self.data_size == 0:
             return
 
         shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
@@ -327,8 +340,13 @@ class CUDAIPCExporter:
         struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 16, self.data_size)
 
         logger.debug(
-            f"Wrote metadata: {self.width}x{self.height}x{self.channels}, "
-            f"dtype={self.dtype}({dtype_code}), data_size={self.data_size}B"
+            "Wrote metadata: %dx%dx%d, dtype=%s(%d), data_size=%dB",
+            self.width,
+            self.height,
+            self.channels,
+            self.dtype,
+            dtype_code,
+            self.data_size,
         )
 
     # ------------------------------------------------------------------
@@ -388,15 +406,18 @@ class CUDAIPCExporter:
         try:
             slot = self.write_idx % self.num_slots
 
-            if self.debug:
-                memcpy_start = time.perf_counter()
-
             # GPU-side wait: ipc_stream waits for source data to be ready (non-blocking CPU).
             # Only active if record_source_sync() was called; otherwise this is a no-op.
+            if self.debug:
+                _t = time.perf_counter()
             if self.source_sync_event is not None:
                 self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+            if self.debug:
+                self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
 
             # Async D2D copy to this slot's persistent IPC buffer
+            if self.debug:
+                memcpy_start = time.perf_counter()
             self.cuda.memcpy_async(
                 dst=self.dev_ptrs[slot],
                 src=c_void_p(gpu_ptr),
@@ -404,22 +425,25 @@ class CUDAIPCExporter:
                 kind=3,  # cudaMemcpyDeviceToDevice
                 stream=self.ipc_stream,
             )
-
             if self.debug:
-                memcpy_time = (time.perf_counter() - memcpy_start) * 1_000_000
-                self.total_memcpy_us += memcpy_time
+                self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
 
             # Record IPC event (stream-ordered, signals consumer that data is ready)
+            if self.debug:
+                _t = time.perf_counter()
             if self.ipc_events[slot]:
                 self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+            if self.debug:
+                self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
-            # Write producer timestamp (time.perf_counter() matches CUDAIPCImporter latency calc)
-            ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-            struct.pack_into("<d", self.shm_handle.buf, ts_offset, time.perf_counter())
-
-            # Advance write_idx (must happen for both event and fallback paths)
+            # Write producer timestamp + advance write_idx (two SharedMemory writes)
+            if self.debug:
+                _t = time.perf_counter()
+            struct.pack_into("<d", self.shm_handle.buf, self._ts_offset, time.perf_counter())
             self.write_idx += 1
             struct.pack_into("<I", self.shm_handle.buf, 16, self.write_idx)
+            if self.debug:
+                self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 
             self.frame_count += 1
 
@@ -428,17 +452,23 @@ class CUDAIPCExporter:
                 self.total_export_us += frame_time
 
                 if self.frame_count % 100 == 0:
-                    avg_memcpy = self.total_memcpy_us / self.frame_count
-                    avg_total = self.total_export_us / self.frame_count
+                    n = self.frame_count
                     logger.debug(
-                        f"Frame {self.frame_count}: slot={slot}, write_idx={self.write_idx}, "
-                        f"avg memcpy={avg_memcpy:.1f}µs, avg total={avg_total:.1f}µs"
+                        "Frame %d: slot=%d | stream_wait=%.1fus memcpy=%.1fus "
+                        "record_event=%.1fus shm_write=%.1fus | total=%.1fus",
+                        n,
+                        slot,
+                        self.total_stream_wait_us / n,
+                        self.total_memcpy_us / n,
+                        self.total_record_event_us / n,
+                        self.total_shm_write_us / n,
+                        self.total_export_us / n,
                     )
 
             return True
 
         except (OSError, RuntimeError) as e:
-            logger.error(f"Export failed: {e}")
+            logger.error("Export failed: %s", e)
             traceback.print_exc()
             return False
 
@@ -488,7 +518,7 @@ class CUDAIPCExporter:
                 struct.pack_into("<B", self.shm_handle.buf, shutdown_offset, 1)
                 logger.info("Shutdown signal sent to consumer")
             except (OSError, BufferError) as e:
-                logger.warning(f"Could not write shutdown signal: {e}")
+                logger.warning("Could not write shutdown signal: %s", e)
 
         # STEP 1b: Zero out IPC handle bytes so any reader sees invalid handles.
         # On Windows, unlink() is a no-op (SharedMemory uses CreateFileMapping kernel
@@ -501,7 +531,7 @@ class CUDAIPCExporter:
                     self.shm_handle.buf[base_offset : base_offset + SLOT_SIZE] = b"\x00" * SLOT_SIZE
                 logger.debug("Zeroed IPC handle bytes in SharedMemory")
             except (OSError, BufferError) as e:
-                logger.warning(f"Could not zero IPC handles: {e}")
+                logger.warning("Could not zero IPC handles: %s", e)
 
         # STEP 2: Destroy IPC events + cross-stream sync event
         if cuda_valid and self.cuda and self.ipc_events:
@@ -509,16 +539,16 @@ class CUDAIPCExporter:
                 if event:
                     try:
                         self.cuda.destroy_event(event)
-                        logger.debug(f"Destroyed IPC event slot {slot}")
+                        logger.debug("Destroyed IPC event slot %d", slot)
                     except (RuntimeError, OSError) as e:
-                        logger.error(f"Error destroying event slot {slot}: {e}")
+                        logger.error("Error destroying event slot %d: %s", slot, e)
 
         if cuda_valid and self.cuda and self.source_sync_event:
             try:
                 self.cuda.destroy_event(self.source_sync_event)
                 logger.debug("Destroyed cross-stream sync event")
             except (RuntimeError, OSError) as e:
-                logger.error(f"Error destroying sync event: {e}")
+                logger.error("Error destroying sync event: %s", e)
             self.source_sync_event = None
 
         # STEP 3: Destroy IPC stream
@@ -528,7 +558,7 @@ class CUDAIPCExporter:
                 logger.info("Destroyed IPC stream")
                 self.ipc_stream = None
             except (RuntimeError, OSError) as e:
-                logger.error(f"Error destroying IPC stream: {e}")
+                logger.error("Error destroying IPC stream: %s", e)
 
         # STEP 4: Close SharedMemory (don't unlink yet)
         if self.shm_handle:
@@ -536,7 +566,7 @@ class CUDAIPCExporter:
                 self.shm_handle.close()
                 logger.debug("Closed SharedMemory")
             except (OSError, BufferError) as e:
-                logger.error(f"Error closing SharedMemory: {e}")
+                logger.error("Error closing SharedMemory: %s", e)
             self.shm_handle = None
 
         # STEP 5: Grace period for consumer to close IPC handles
@@ -549,9 +579,9 @@ class CUDAIPCExporter:
                 if dev_ptr:
                     try:
                         self.cuda.free(dev_ptr)
-                        logger.debug(f"Freed GPU buffer slot {slot}")
+                        logger.debug("Freed GPU buffer slot %d", slot)
                     except (RuntimeError, OSError) as e:
-                        logger.error(f"Error freeing GPU buffer slot {slot}: {e}")
+                        logger.error("Error freeing GPU buffer slot %d: %s", slot, e)
 
         # STEP 7: Unlink SharedMemory (producer is owner and responsible for cleanup)
         try:
@@ -562,7 +592,7 @@ class CUDAIPCExporter:
         except FileNotFoundError:
             pass  # Already unlinked
         except (OSError, RuntimeError) as e:
-            logger.warning(f"Could not unlink SharedMemory: {e}")
+            logger.warning("Could not unlink SharedMemory: %s", e)
 
         # Reset all state to prevent double-free on re-entry
         self.dev_ptrs = [None] * self.num_slots
