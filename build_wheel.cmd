@@ -5,19 +5,19 @@ pushd "%~dp0" || exit /b 1
 REM build_wheel.cmd - Build cuda-link Python wheel for distribution
 REM
 REM Uses: python -m build --wheel  (PyPA PEP 517 standard, isolated build env)
-REM Output: dist\cuda_link-0.6.7-py3-none-any.whl
+REM Output: dist\cuda_link-0.6.8-py3-none-any.whl
 REM
 REM Usage:
 REM   Double-click or run from any terminal:
 REM     build_wheel.cmd
 REM
 REM   Then install into any Python environment:
-REM     pip install "dist\cuda_link-0.6.7-py3-none-any.whl"
-REM     pip install "dist\cuda_link-0.6.7-py3-none-any.whl[torch]"
-REM     pip install "dist\cuda_link-0.6.7-py3-none-any.whl[all]"
+REM     pip install "dist\cuda_link-0.6.8-py3-none-any.whl"
+REM     pip install "dist\cuda_link-0.6.8-py3-none-any.whl[torch]"
+REM     pip install "dist\cuda_link-0.6.8-py3-none-any.whl[all]"
 
 echo ========================================
-echo  cuda-link Wheel Builder  v0.6.7
+echo  cuda-link Wheel Builder  v0.6.8
 echo ========================================
 echo.
 
