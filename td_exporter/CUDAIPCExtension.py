@@ -935,12 +935,18 @@ class CUDAIPCExtension:
                 import ctypes
                 from ctypes import c_void_p
 
+                # Synchronize _rx_stream before D2H: cudaMemcpy uses the legacy default stream
+                # which is independent of the non-blocking _rx_stream, so we must drain it first.
+                self.cuda.stream_synchronize(self._rx_stream)
                 cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
                 self.cuda.memcpy(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2)  # D2H kind=2
                 # kind=2 is DeviceToHost per cudaMemcpyKind enum
-                self._rx_f32_cpu_buf[:] = self._rx_f16_cpu_buf.reshape(
-                    self._rx_height, self._rx_width, self._rx_num_comps
-                ).astype("float32")
+                # Convert float16→float32 in-place into preallocated buffer (no per-frame temp alloc)
+                numpy.copyto(
+                    self._rx_f32_cpu_buf,
+                    self._rx_f16_cpu_buf.reshape(self._rx_height, self._rx_width, self._rx_num_comps),
+                    casting="same_kind",
+                )
                 import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
             else:
                 import_buffer.copyCUDAMemory(

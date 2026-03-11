@@ -156,7 +156,7 @@ class CUDAIPCImporter:
 
     def _dtype_itemsize(self) -> int:
         """Get byte size per element for the configured dtype."""
-        sizes = {"float32": 4, "float16": 2, "uint8": 1}
+        sizes = {"float32": 4, "float16": 2, "uint8": 1, "uint16": 2}
         return sizes[self.dtype]
 
     def _numpy_dtype(self) -> np.dtype:
@@ -831,6 +831,10 @@ class CUDAIPCImporter:
         self.num_slots = struct.unpack(
             "<I", bytes(self.shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE])
         )[0]
+
+        # Recompute cached offsets (num_slots may have changed)
+        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
+        self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
         # Reinitialize arrays
         self.ipc_handles = [None] * self.num_slots
