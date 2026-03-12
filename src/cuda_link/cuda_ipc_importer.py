@@ -701,8 +701,12 @@ class CUDAIPCImporter:
         nbytes = height * width * channels * itemsize
 
         # Pre-allocate numpy buffer (reuse across frames to avoid allocation overhead)
-        if self._numpy_buffer is None or self._numpy_buffer.shape != self.shape:
-            # Free previous pinned allocation if shape changed
+        if (
+            self._numpy_buffer is None
+            or self._numpy_buffer.shape != self.shape
+            or self._numpy_buffer.dtype != self._numpy_dtype()
+        ):
+            # Free previous pinned allocation if shape or dtype changed
             if self._pinned_ptr is not None:
                 try:
                     self.cuda.free_host(self._pinned_ptr)
@@ -851,6 +855,29 @@ class CUDAIPCImporter:
         self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
         self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
+        # Re-read metadata (shape/dtype may have changed since last init)
+        metadata_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE
+        try:
+            width = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset : metadata_offset + 4]))[0]
+            height = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
+            num_comps = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
+            dtype_code = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16]))[0]
+            if width > 0 and height > 0 and num_comps > 0:
+                new_shape = (height, width, num_comps)
+                dtype_map = {0: "float32", 1: "float16", 2: "uint8", 3: "uint16"}
+                new_dtype = dtype_map.get(dtype_code, "float32")
+                if new_shape != self.shape or new_dtype != self.dtype:
+                    logger.info(
+                        "Metadata changed on reinit: %s %s -> %s %s",
+                        self.shape, self.dtype, new_shape, new_dtype,
+                    )
+                    self.shape = new_shape
+                    self.dtype = new_dtype
+                    self._numpy_buffer = None  # Force reallocation on next get_frame_numpy()
+                    self._pinned_ptr = None
+        except (struct.error, ValueError, IndexError) as e:
+            logger.debug("Could not re-read metadata during reinit: %s", e)
+
         # Reinitialize arrays
         self.ipc_handles = [None] * self.num_slots
         self.dev_ptrs = [None] * self.num_slots
@@ -862,15 +889,15 @@ class CUDAIPCImporter:
         for slot in range(self.num_slots):
             base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
 
-            # Read memory handle (128 bytes)
-            mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 128])
+            # Read memory handle (64 bytes)
+            mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 64])
             self.ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
 
             # Open IPC memory handle
             self.dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self.ipc_handles[slot], flags=1)
 
             # Read event handle (64 bytes)
-            event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 128 : base_offset + 192])
+            event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 64 : base_offset + 128])
             if any(event_handle_bytes):
                 try:
                     ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)

@@ -921,7 +921,9 @@ class CUDAIPCExtension:
                     0,
                 )
             else:
-                # Fallback: still use stream sync (not device sync)
+                # Fallback when no IPC event: drain the stream now.
+                # Note: float16 path will call stream_synchronize again below, but
+                # synchronizing an already-idle stream is a no-op in CUDA.
                 self.cuda.stream_synchronize(self._rx_stream)
 
             # Copy CUDA memory into ImportBuffer texture using cached shape
@@ -931,7 +933,7 @@ class CUDAIPCExtension:
                 # copyCUDAMemory doesn't support float16 — D2H + convert + copyNumpyArray
                 if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
                     debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
-                    return
+                    return False
                 import ctypes
                 from ctypes import c_void_p
 
@@ -1239,8 +1241,8 @@ class CUDAIPCExtension:
             # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
             if self._rx_dtype_code == DTYPE_FLOAT16:
                 n_elems = self._rx_width * self._rx_height * self._rx_num_comps
-                self._rx_f16_cpu_buf = np_module.zeros(n_elems, dtype=np_module.float16)
-                self._rx_f32_cpu_buf = np_module.zeros(
+                self._rx_f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
+                self._rx_f32_cpu_buf = np_module.empty(
                     (self._rx_height, self._rx_width, self._rx_num_comps), dtype=np_module.float32
                 )
                 self._log("float16 receiver: allocated CPU conversion buffers (D2H path)", force=True)
