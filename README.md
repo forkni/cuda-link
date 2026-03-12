@@ -57,7 +57,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCExporter.tox` into your TD network
+1. Drag `CUDAIPCLink_v0.6.8.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -337,8 +337,8 @@ cuda-link uses a **dual distribution model** to support both use cases:
 #### Method 1: Build wheel (recommended — portable, installs into any environment)
 
 ```bash
-git clone https://github.com/forkni/cuda-ipc.git
-cd cuda-ipc
+git clone https://github.com/forkni/cuda-link.git
+cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
@@ -359,8 +359,8 @@ The wheel is a self-contained archive — copy it anywhere and install without n
 #### Method 2: Editable install from source (for development)
 
 ```bash
-git clone https://github.com/forkni/cuda-ipc.git
-cd cuda-ipc
+git clone https://github.com/forkni/cuda-link.git
+cd cuda-link
 pip install -e ".[torch]"   # Changes to src/cuda_link/ apply immediately, no rebuild needed
 pip install -e ".[all]"     # All output modes
 ```
@@ -386,7 +386,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCExporter.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v0.6.8.tox` into your TouchDesigner network from the project root.
 
 **Option B: Build from source**
 

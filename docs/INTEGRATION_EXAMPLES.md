@@ -303,7 +303,7 @@ while True:
 print("Clean shutdown complete")
 ```
 
-**Key**: The importer **automatically detects** the shutdown flag at byte 596 (for 3 slots: `20 + 3×192`) and returns `None` from `get_frame()`.
+**Key**: The importer **automatically detects** the shutdown flag at byte 404 (for 3 slots: `20 + 3×128`) and returns `None` from `get_frame()`.
 
 ---
 

@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCExporter.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v0.6.8.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -83,14 +83,14 @@ Inside the `CUDAIPCExporter` COMP, create two Text DATs:
 1. Select the `CUDAIPCExporter` Base COMP (parent component, not the Text DAT inside)
 2. Open the **Extensions** parameter page
 3. Set **Extension 1**:
-   - **Object**: `op('CUDAIPCExporter').module.CUDAIPCExporter`
-   - **Promote**: Toggle ON (this creates `me.ext.CUDAIPCExporter` accessor)
+   - **Object**: `op('CUDAIPCExporter').module.CUDAIPCExtension`
+   - **Promote**: Toggle ON (this creates `me.ext.CUDAIPCExtension` accessor)
 
 **Verification**: Open the **Textport** (Alt+T) and type:
 ```python
-op('/project1/CUDAIPCExporter').ext.CUDAIPCExporter
+op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
 ```
-You should see: `<CUDAIPCExporter.CUDAIPCExporter object at 0x...>`
+You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 ### Step 5: Create Execute DAT Callback
 
@@ -144,9 +144,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `C:\Users\INTER\Documents\INTER_TECH\COMPONENTS\CUDA_IPC\CUDAIPCExporter.tox`
+3. Save to: `C:\Users\INTER\Documents\INTER_TECH\COMPONENTS\CUDA_IPC\CUDAIPCLink_v0.6.8.tox`
 
-**Naming convention**: Use `CUDAIPCExporter.tox` (matches component name) for clarity.
+**Naming convention**: Use `CUDAIPCLink_v0.6.8.tox` (matches component name) for clarity.
 
 ---
 
@@ -154,7 +154,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCExporter.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v0.6.8.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -183,7 +183,7 @@ Open the **Textport** (Alt+T) and look for:
 [CUDAIPCExporter] Loaded CUDA runtime
 [CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
 [CUDAIPCExporter] Created 3 IPC buffer slots with events
-[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (625 bytes)
+[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (433 bytes)
 [CUDAIPCExporter] Initialization complete - ready for zero-copy GPU transfer
 ```
 
@@ -305,7 +305,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDAIPCWrapper.py` | `td_exporter/` | CUDA runtime ctypes wrapper |
 | `CUDAIPCExtension.py` | `td_exporter/` | TD extension class (main logic) |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
-| `CUDAIPCExporter.tox` | `./` (root) | Final built .tox component |
+| `CUDAIPCLink_v0.6.8.tox` | `./` (root) | Final built .tox component |
 
 ---
 

@@ -10,7 +10,7 @@
 
 ## Overview
 
-CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~625 bytes) is exchanged through OS shared memory to coordinate access.
+CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~433 bytes) is exchanged through OS shared memory to coordinate access.
 
 The component operates in two modes: **Sender** (TouchDesigner exports textures to Python) and **Receiver** (Python sends frames back into TouchDesigner). Both directions use the same underlying protocol, so two TouchDesigner instances can also communicate directly with each other.
 
@@ -63,7 +63,7 @@ The shared memory channel carries only control data (no pixel data):
 | Texture metadata | 20 B | Width, height, components, dtype, buffer size |
 | Producer timestamp | 8 B | `perf_counter()` for latency measurement |
 
-Total for 3 slots: **625 bytes**.
+Total for 3 slots: **433 bytes**.
 
 ### Lazy Initialization
 
