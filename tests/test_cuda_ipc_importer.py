@@ -171,8 +171,8 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
     if not TORCH_AVAILABLE:
         pytest.skip("torch required for this test")
 
-    # Create fake SharedMemory with v0.5.0 layout (625 bytes for 3 slots)
-    shm_size = 20 + 3 * 192 + 1 + 20 + 8
+    # Create fake SharedMemory with v0.5.0 layout (433 bytes for 3 slots)
+    shm_size = 20 + 3 * 128 + 1 + 20 + 8
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
     shared_memory_cleanup.append(temp_shm_name)
 

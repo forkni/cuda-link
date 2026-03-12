@@ -110,17 +110,16 @@ class ProfileSection:
 
 def create_snoop_config(
     out: "str | None" = None,
-    depth: int = 1,
+    *,
     enabled: bool = True,
 ) -> "object | None":
-    """Create a snoop.Config with project-appropriate defaults.
+    """Create a snoop.Config with timestamp column output.
 
-    Configures color output, timestamp columns, and cheap_repr for numpy/torch
-    arrays (shows .shape and .dtype without printing full data).
+    Note: call-depth tracing is configured per-decorator via ``cfg.snoop(depth=N)``,
+    not at Config creation time.
 
     Args:
         out: Output destination — file path string, or None for stderr.
-        depth: How many levels of called functions to trace (default 1).
         enabled: Set to False to get a no-op config object.
 
     Returns:
@@ -128,15 +127,15 @@ def create_snoop_config(
 
     Example::
 
-        cfg = create_snoop_config(out="debug.log", depth=2)
+        cfg = create_snoop_config(out="debug.log")
         if cfg:
-            @cfg.snoop(watch=("self.write_idx",))
+            @cfg.snoop(depth=2, watch=("self.write_idx",))
             def _initialize(self): ...
     """
     try:
         import snoop as _snoop
 
-        kwargs: dict = {
+        kwargs: dict[str, object] = {
             "columns": "time",
             "enabled": enabled,
         }
@@ -144,17 +143,17 @@ def create_snoop_config(
             kwargs["out"] = out
         return _snoop.Config(**kwargs)
     except ImportError:
-        logger.warning("snoop not installed. Install with: pip install snoop")
+        logger.debug("snoop not installed; create_snoop_config() is a no-op")
         return None
 
 
 def snoop_decorator(
-    fn: "object | None" = None,
+    fn: "Callable | None" = None,
     *,
     depth: int = 1,
     watch: "tuple[str, ...]" = (),
     enabled: bool = True,
-) -> "object":
+) -> "Callable":
     """Return a @snoop decorator, or a transparent no-op if snoop is unavailable.
 
     Designed so ``@snoop_decorator`` can be left on functions in development
@@ -179,15 +178,20 @@ def snoop_decorator(
             ...
     """
 
-    def _noop(f: "object") -> "object":
+    def _noop(f: "Callable") -> "Callable":
         return f
 
     try:
         import snoop as _snoop
-
-        decorator = _noop if not enabled else _snoop(depth=depth, watch=watch) if watch else _snoop(depth=depth)
     except ImportError:
-        decorator = _noop
+        decorator: Callable = _noop
+    else:
+        if not enabled:
+            decorator = _noop
+        elif watch:
+            decorator = _snoop(depth=depth, watch=watch)
+        else:
+            decorator = _snoop(depth=depth)
 
     if fn is not None:
         # Called as @snoop_decorator with no arguments

@@ -921,7 +921,9 @@ class CUDAIPCExtension:
                     0,
                 )
             else:
-                # Fallback: still use stream sync (not device sync)
+                # Fallback when no IPC event: drain the stream now.
+                # Note: float16 path will call stream_synchronize again below, but
+                # synchronizing an already-idle stream is a no-op in CUDA.
                 self.cuda.stream_synchronize(self._rx_stream)
 
             # Copy CUDA memory into ImportBuffer texture using cached shape
@@ -929,15 +931,24 @@ class CUDAIPCExtension:
 
             if self._rx_dtype_code == DTYPE_FLOAT16:
                 # copyCUDAMemory doesn't support float16 — D2H + convert + copyNumpyArray
+                if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
+                    debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
+                    return False
                 import ctypes
                 from ctypes import c_void_p
 
+                # Synchronize _rx_stream before D2H: cudaMemcpy uses the legacy default stream
+                # which is independent of the non-blocking _rx_stream, so we must drain it first.
+                self.cuda.stream_synchronize(self._rx_stream)
                 cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
                 self.cuda.memcpy(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2)  # D2H kind=2
                 # kind=2 is DeviceToHost per cudaMemcpyKind enum
-                self._rx_f32_cpu_buf[:] = self._rx_f16_cpu_buf.reshape(
-                    self._rx_height, self._rx_width, self._rx_num_comps
-                ).astype("float32")
+                # Convert float16→float32 in-place into preallocated buffer (no per-frame temp alloc)
+                numpy.copyto(
+                    self._rx_f32_cpu_buf,
+                    self._rx_f16_cpu_buf.reshape(self._rx_height, self._rx_width, self._rx_num_comps),
+                    casting="same_kind",
+                )
                 import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
             else:
                 import_buffer.copyCUDAMemory(
@@ -1230,8 +1241,8 @@ class CUDAIPCExtension:
             # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
             if self._rx_dtype_code == DTYPE_FLOAT16:
                 n_elems = self._rx_width * self._rx_height * self._rx_num_comps
-                self._rx_f16_cpu_buf = np_module.zeros(n_elems, dtype=np_module.float16)
-                self._rx_f32_cpu_buf = np_module.zeros(
+                self._rx_f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
+                self._rx_f32_cpu_buf = np_module.empty(
                     (self._rx_height, self._rx_width, self._rx_num_comps), dtype=np_module.float32
                 )
                 self._log("float16 receiver: allocated CPU conversion buffers (D2H path)", force=True)

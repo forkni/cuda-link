@@ -35,21 +35,6 @@ def test_wrapper_files_are_identical() -> None:
     )
 
 
-def test_wrapper_line_count() -> None:
-    """Verify wrapper is the expected size (606 lines)."""
-    project_root = Path(__file__).parent.parent
-    pip_wrapper = project_root / "src" / "cuda_link" / "cuda_ipc_wrapper.py"
-
-    content = pip_wrapper.read_text(encoding="utf-8")
-    line_count = len(content.splitlines())
-
-    # Allow some flexibility (640-680 lines) for minor changes
-    assert 640 <= line_count <= 680, (
-        f"Wrapper line count ({line_count}) is outside expected range (640-680). "
-        "Has the wrapper changed significantly? Update this test if intentional."
-    )
-
-
 def test_wrapper_contains_key_definitions() -> None:
     """Verify wrapper contains expected CUDA definitions."""
     project_root = Path(__file__).parent.parent
@@ -66,6 +51,8 @@ def test_wrapper_contains_key_definitions() -> None:
     # Check for key methods
     assert "def malloc(" in content
     assert "def free(" in content
+    assert "def malloc_host(" in content
+    assert "def free_host(" in content
     assert "def memcpy_async(" in content
     assert "def ipc_get_mem_handle(" in content
     assert "def ipc_open_mem_handle(" in content

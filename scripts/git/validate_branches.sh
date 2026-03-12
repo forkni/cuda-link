@@ -13,7 +13,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Source common functions
 source "${SCRIPT_DIR}/_common.sh"
 
-main() {
+master() {
   # Initialize logging
   init_logging "validate_branches"
 
@@ -53,8 +53,8 @@ main() {
   if [[ $branch_check_exit -ne 0 ]]; then
     echo "❌ Failed to get current branch" | tee -a "$logfile"
     validation_failed=1
-  elif [[ "$current_branch" != "development" && "$current_branch" != "main" ]]; then
-    echo "❌ Must be on 'development' or 'main' branch" | tee -a "$logfile"
+  elif [[ "$current_branch" != "development" && "$current_branch" != "master" ]]; then
+    echo "❌ Must be on 'development' or 'master' branch" | tee -a "$logfile"
     echo "   Current: $current_branch" | tee -a "$logfile"
     validation_failed=1
   else
@@ -85,19 +85,19 @@ main() {
   echo "" | tee -a "$logfile"
   log_section_start "BRANCH RELATIONSHIP CHECK" "$logfile"
 
-  local dev_ahead main_ahead
-  dev_ahead=$(git rev-list --count main..development 2>/dev/null || echo "0")
-  main_ahead=$(git rev-list --count development..main 2>/dev/null || echo "0")
+  local dev_ahead master_ahead
+  dev_ahead=$(git rev-list --count master..development 2>/dev/null || echo "0")
+  master_ahead=$(git rev-list --count development..master 2>/dev/null || echo "0")
 
-  echo "Development ahead of main: $dev_ahead commits" | tee -a "$logfile"
-  echo "Main ahead of development: $main_ahead commits" | tee -a "$logfile"
+  echo "Development ahead of master: $dev_ahead commits" | tee -a "$logfile"
+  echo "Main ahead of development: $master_ahead commits" | tee -a "$logfile"
 
   if (( dev_ahead == 0 )) && [[ "${current_branch}" == "development" ]]; then
-    echo "⚠️  Warning: Development branch has no new commits vs main" | tee -a "$logfile"
+    echo "⚠️  Warning: Development branch has no new commits vs master" | tee -a "$logfile"
   fi
 
-  if (( main_ahead > 0 )) && [[ "${current_branch}" == "development" ]]; then
-    echo "⚠️  Warning: Main branch is ahead - consider merging main into development" | tee -a "$logfile"
+  if (( master_ahead > 0 )) && [[ "${current_branch}" == "development" ]]; then
+    echo "⚠️  Warning: Main branch is ahead - consider merging master into development" | tee -a "$logfile"
   fi
 
   log_section_end "BRANCH RELATIONSHIP CHECK" "$logfile" "0"
@@ -133,4 +133,4 @@ main() {
   exit $validation_failed
 }
 
-main "$@"
+master "$@"

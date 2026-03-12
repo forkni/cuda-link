@@ -97,7 +97,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 ## SharedMemory Protocol
 
-### Binary Layout (625 bytes for 3 slots)
+### Binary Layout (433 bytes for 3 slots)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -161,17 +161,17 @@ Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
 For `N` slots:
 
 ```
-Total Size = 20 + (N × 192) + 1 + 20 + 8 bytes
+Total Size = 20 + (N × 128) + 1 + 20 + 8 bytes
 
-shutdown_offset = 20 + (N × 192)
-metadata_offset = 20 + (N × 192) + 1
-timestamp_offset = 20 + (N × 192) + 1 + 20
+shutdown_offset = 20 + (N × 128)
+metadata_offset = 20 + (N × 128) + 1
+timestamp_offset = 20 + (N × 128) + 1 + 20
 ```
 
 **Examples**:
-- 2 slots: 20 + 256 + 1 + 20 + 8 = 305 bytes, shutdown at [276]
-- 3 slots: 20 + 384 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
-- 4 slots: 20 + 512 + 1 + 20 + 8 = 561 bytes, shutdown at [532]
+- 2 slots: 20 + 2×128 + 1 + 20 + 8 = 305 bytes, shutdown at [276]
+- 3 slots: 20 + 3×128 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
+- 4 slots: 20 + 4×128 + 1 + 20 + 8 = 561 bytes, shutdown at [532]
 
 ---
 
@@ -298,14 +298,14 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
 1. Allocate N GPU buffers (`cuda.malloc()`)
 2. Create IPC handles for each buffer (`cuda.ipc_get_mem_handle()`)
 3. Create IPC events for each slot (`cuda.create_ipc_event()`)
-4. Create SharedMemory (size = 16 + N*192 + 1)
+4. Create SharedMemory (size = 20 + N*128 + 29)
 5. Write version=1, num_slots=N, write_idx=0, all handles to SharedMemory
 
 **Consumer**:
 1. Open SharedMemory (retry with backoff if not ready)
 2. Read version, num_slots from header
 3. For each slot:
-   - Read IPC memory handle (128 bytes)
+   - Read IPC memory handle (64 bytes)
    - Open handle with `cuda.ipc_open_mem_handle()` → GPU pointer
    - Read IPC event handle (64 bytes)
    - Open event with `cuda.ipc_open_event_handle()` → event
@@ -393,7 +393,7 @@ return tensors[read_slot]                        ← Zero-copy, 0μs
 
 **Impact**: Consumer reads from stale GPU buffers.
 
-**Detection**: Consumer checks `shm.buf[0:8]` (version) every frame. If changed, triggers re-initialization.
+**Detection**: Consumer checks `shm.buf[4:12]` (version) every frame. If changed, triggers re-initialization.
 
 ### SharedMemory Corruption
 

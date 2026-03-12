@@ -168,6 +168,27 @@ Benchmark.5.toe
 CUDA_IPC_Comp.toe
 CUDA_IPC_Comp.*.toe
 
+# FLUX pipeline files (local-only)
+FLUX_TD_Pipeline.toe
+FLUX_TD_Pipeline.*.toe
+
+# Style guides (root-level, local-only)
+PYTHON_STYLE_GUIDE.md
+PYTHON_STYLE_GUIDE_QUICK.md
+
+# Benchmark .toe files (local-only)
+Receiver_benchmark.toe
+Receiver_benchmark.*.toe
+Sender_benchmark.toe
+Sender_benchmark.*.toe
+
+# Audit reports (local-only)
+audit_reports/
+
+# Images (local-only)
+unnamed.png
+init_heatmap.png
+
 # Reference materials (local-only)
 References/
 

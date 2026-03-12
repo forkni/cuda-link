@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# merge_with_validation.sh - Safe merge from development to main with automatic conflict resolution
-# Purpose: Merge development to main with validation and auto-resolution of known conflict patterns
+# merge_with_validation.sh - Safe merge from development to master with automatic conflict resolution
+# Purpose: Merge development to master with validation and auto-resolution of known conflict patterns
 # Usage: ./scripts/git/merge_with_validation.sh [--non-interactive]
 
 set -u
@@ -16,12 +16,12 @@ init_logging "merge_with_validation"
 # CONFIGURABLE: Documentation file patterns (bash extended regex)
 # Modify this pattern to match your project's documentation naming conventions
 # ============================================================================
-readonly ALLOWED_DOCS_PATTERN='^(ADVANCED_FEATURES_GUIDE\.md|BENCHMARKS\.md|CLAUDE_MD_TEMPLATE\.md|claude_code_config\.md|DOCUMENTATION_INDEX\.md|GIT_WORKFLOW\.md|HYBRID_SEARCH_CONFIGURATION_GUIDE\.md|INSTALLATION_GUIDE\.md|MCP_TOOLS_REFERENCE\.md|MODEL_MIGRATION_GUIDE\.md|PYTORCH_COMPATIBILITY\.md|VERSION_HISTORY\.md|.*_GUIDE\.md|.*_REFERENCE\.md|README\.md)$'
+readonly ALLOWED_DOCS_PATTERN='^(ADVANCED_FEATURES_GUIDE\.md|ARCHITECTURE\.md|BENCHMARKS\.md|CLAUDE_MD_TEMPLATE\.md|claude_code_config\.md|DOCUMENTATION_INDEX\.md|GIT_WORKFLOW\.md|HYBRID_SEARCH_CONFIGURATION_GUIDE\.md|INSTALLATION_GUIDE\.md|INTEGRATION_EXAMPLES\.md|MCP_TOOLS_REFERENCE\.md|MODEL_MIGRATION_GUIDE\.md|PYTORCH_COMPATIBILITY\.md|VERSION_HISTORY\.md|.*_GUIDE\.md|.*_REFERENCE\.md|README\.md)$'
 
 # Environment variable override for CI/automation
 DOCS_PATTERN="${CLAUDE_DOCS_PATTERN:-$ALLOWED_DOCS_PATTERN}"
 
-main() {
+master() {
   # Write log header
   {
     echo "========================================="
@@ -31,7 +31,7 @@ main() {
     echo "Working Directory: ${PROJECT_ROOT}"
   } > "$logfile"
 
-  echo "=== Safe Merge: development → main ===" | tee -a "$logfile"
+  echo "=== Safe Merge: development → master ===" | tee -a "$logfile"
   echo "" | tee -a "$logfile"
   echo "📋 Workflow Log: ${logfile}" | tee -a "$logfile"
   echo "" | tee -a "$logfile"
@@ -63,7 +63,7 @@ main() {
   log_section_end "PRE-MERGE VALIDATION" "$logfile" "0"
   echo "" | tee -a "$logfile"
 
-  # [2/7] Store current branch and checkout main
+  # [2/7] Store current branch and checkout master
   log_section_start "GIT CHECKOUT MAIN" "$logfile"
 
   local original_branch
@@ -71,9 +71,9 @@ main() {
   echo "Current branch: ${original_branch}" | tee -a "$logfile"
 
   # CRITICAL SAFEGUARD: Prevent accidental wrong-direction merge
-  if [[ "${original_branch}" == "main" ]]; then
-    echo "✗ ERROR: Already on main branch" | tee -a "$logfile"
-    echo "  This script merges development → main" | tee -a "$logfile"
+  if [[ "${original_branch}" == "master" ]]; then
+    echo "✗ ERROR: Already on master branch" | tee -a "$logfile"
+    echo "  This script merges development → master" | tee -a "$logfile"
     echo "  Current branch: ${original_branch}" | tee -a "$logfile"
     echo "  You should run this from development branch" | tee -a "$logfile"
     exit 1
@@ -95,8 +95,8 @@ main() {
     fi
   fi
 
-  if ! run_git_with_logging "GIT CHECKOUT" "$logfile" checkout main; then
-    echo "✗ Failed to checkout main branch" | tee -a "$logfile"
+  if ! run_git_with_logging "GIT CHECKOUT" "$logfile" checkout master; then
+    echo "✗ Failed to checkout master branch" | tee -a "$logfile"
     exit 1
   fi
 
@@ -121,7 +121,7 @@ main() {
   # [4/7] Perform merge
   log_section_start "GIT MERGE" "$logfile"
 
-  if run_git_with_logging "GIT MERGE DEVELOPMENT" "$logfile" merge development --no-ff -m "Merge development into main"; then
+  if run_git_with_logging "GIT MERGE DEVELOPMENT" "$logfile" merge development --no-ff -m "Merge development into master"; then
     echo "✓ Merge completed without conflicts" | tee -a "$logfile"
     log_section_end "GIT MERGE" "$logfile" "0"
     
@@ -169,9 +169,9 @@ main() {
 
     # Check if tests/ is in .gitignore
     if grep -q "^tests/\$" .gitignore 2>/dev/null; then
-      # tests/ is gitignored, should be removed from main
+      # tests/ is gitignored, should be removed from master
       if [[ -d "tests" ]]; then
-        echo "⚠ Removing tests/ directory from main branch (per .gitignore policy)" | tee -a "$logfile"
+        echo "⚠ Removing tests/ directory from master branch (per .gitignore policy)" | tee -a "$logfile"
         if git rm -r tests >> "$logfile" 2>&1; then
           echo "✓ Removed tests/ directory" | tee -a "$logfile"
           # Amend the merge commit to include the removal
@@ -181,11 +181,11 @@ main() {
           echo "  This may cause CI validation failure" | tee -a "$logfile"
         fi
       else
-        echo "✓ No tests/ directory found (correct for main branch)" | tee -a "$logfile"
+        echo "✓ No tests/ directory found (correct for master branch)" | tee -a "$logfile"
       fi
     else
       # tests/ is NOT gitignored, should be kept
-      echo "✓ tests/ is tracked in git - keeping it in main branch" | tee -a "$logfile"
+      echo "✓ tests/ is tracked in git - keeping it in master branch" | tee -a "$logfile"
     fi
 
   else
@@ -202,7 +202,7 @@ main() {
         echo "  Found modify/delete conflicts for excluded files"
         echo "  These are expected and will be auto-resolved..."
         echo ""
-        echo "  Files to be removed from main branch:"
+        echo "  Files to be removed from master branch:"
         git status --short | grep "^DU "
         echo ""
         
@@ -236,7 +236,7 @@ main() {
         unresolved=$(git diff --name-only --diff-filter=U 2>/dev/null)
         if [[ -n "$unresolved" ]]; then
             echo "" | tee -a "$logfile"
-            echo "⚠ Some conflicts remain unresolved:" | tee -a "$logfile"
+            echo "⚠ Some conflicts remaster unresolved:" | tee -a "$logfile"
             echo "$unresolved" | tee -a "$logfile"
             echo "  Continuing to validation and manual commit..." | tee -a "$logfile"
         else
@@ -314,9 +314,9 @@ main() {
 
     # Check if tests/ is in .gitignore
     if grep -q "^tests/\$" .gitignore 2>/dev/null; then
-      # tests/ is gitignored, should be removed from main
+      # tests/ is gitignored, should be removed from master
       if [[ -d "tests" ]]; then
-        echo "⚠ Removing tests/ directory from main branch (per .gitignore policy)" | tee -a "$logfile"
+        echo "⚠ Removing tests/ directory from master branch (per .gitignore policy)" | tee -a "$logfile"
         if git rm -r tests >> "$logfile" 2>&1; then
           echo "✓ Removed tests/ directory" | tee -a "$logfile"
           # Stage the removal for the upcoming commit
@@ -326,11 +326,11 @@ main() {
           echo "  This may cause CI validation failure" | tee -a "$logfile"
         fi
       else
-        echo "✓ No tests/ directory found (correct for main branch)" | tee -a "$logfile"
+        echo "✓ No tests/ directory found (correct for master branch)" | tee -a "$logfile"
       fi
     else
       # tests/ is NOT gitignored, should be kept
-      echo "✓ tests/ is tracked in git - keeping it in main branch" | tee -a "$logfile"
+      echo "✓ tests/ is tracked in git - keeping it in master branch" | tee -a "$logfile"
     fi
     echo "" | tee -a "$logfile"
 
@@ -369,7 +369,7 @@ main() {
   echo "Next steps:" | tee -a "$logfile"
   echo "  1. Review changes: git log --oneline -5" | tee -a "$logfile"
   echo "  2. Verify build: [run your build/test commands]" | tee -a "$logfile"
-  echo "  3. Push to remote: git push origin main" | tee -a "$logfile"
+  echo "  3. Push to remote: git push origin master" | tee -a "$logfile"
   echo "" | tee -a "$logfile"
   echo "  If issues found:" | tee -a "$logfile"
   echo "  - scripts/git/rollback_merge.sh" | tee -a "$logfile"
@@ -396,4 +396,4 @@ main() {
   echo "Full log: $logfile"
 }
 
-main "$@"
+master "$@"
