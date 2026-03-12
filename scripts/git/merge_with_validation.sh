@@ -16,7 +16,7 @@ init_logging "merge_with_validation"
 # CONFIGURABLE: Documentation file patterns (bash extended regex)
 # Modify this pattern to match your project's documentation naming conventions
 # ============================================================================
-readonly ALLOWED_DOCS_PATTERN='^(ADVANCED_FEATURES_GUIDE\.md|BENCHMARKS\.md|CLAUDE_MD_TEMPLATE\.md|claude_code_config\.md|DOCUMENTATION_INDEX\.md|GIT_WORKFLOW\.md|HYBRID_SEARCH_CONFIGURATION_GUIDE\.md|INSTALLATION_GUIDE\.md|MCP_TOOLS_REFERENCE\.md|MODEL_MIGRATION_GUIDE\.md|PYTORCH_COMPATIBILITY\.md|VERSION_HISTORY\.md|.*_GUIDE\.md|.*_REFERENCE\.md|README\.md)$'
+readonly ALLOWED_DOCS_PATTERN='^(ADVANCED_FEATURES_GUIDE\.md|ARCHITECTURE\.md|BENCHMARKS\.md|CLAUDE_MD_TEMPLATE\.md|claude_code_config\.md|DOCUMENTATION_INDEX\.md|GIT_WORKFLOW\.md|HYBRID_SEARCH_CONFIGURATION_GUIDE\.md|INSTALLATION_GUIDE\.md|INTEGRATION_EXAMPLES\.md|MCP_TOOLS_REFERENCE\.md|MODEL_MIGRATION_GUIDE\.md|PYTORCH_COMPATIBILITY\.md|VERSION_HISTORY\.md|.*_GUIDE\.md|.*_REFERENCE\.md|README\.md)$'
 
 # Environment variable override for CI/automation
 DOCS_PATTERN="${CLAUDE_DOCS_PATTERN:-$ALLOWED_DOCS_PATTERN}"
