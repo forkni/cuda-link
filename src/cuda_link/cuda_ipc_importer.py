@@ -869,12 +869,21 @@ class CUDAIPCImporter:
                 if new_shape != self.shape or new_dtype != self.dtype:
                     logger.info(
                         "Metadata changed on reinit: %s %s -> %s %s",
-                        self.shape, self.dtype, new_shape, new_dtype,
+                        self.shape,
+                        self.dtype,
+                        new_shape,
+                        new_dtype,
                     )
                     self.shape = new_shape
                     self.dtype = new_dtype
-                    self._numpy_buffer = None  # Force reallocation on next get_frame_numpy()
+                    # Free pinned allocation before invalidating pointer (avoids memory leak)
+                    if self._pinned_ptr is not None:
+                        try:
+                            self.cuda.free_host(self._pinned_ptr)
+                        except (RuntimeError, OSError) as e:
+                            logger.debug("free_host failed during reinit: %s", e)
                     self._pinned_ptr = None
+                    self._numpy_buffer = None  # Force reallocation on next get_frame_numpy()
         except (struct.error, ValueError, IndexError) as e:
             logger.debug("Could not re-read metadata during reinit: %s", e)
 
