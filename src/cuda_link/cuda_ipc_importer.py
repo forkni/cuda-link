@@ -171,6 +171,8 @@ class CUDAIPCImporter:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required but not installed")
         mapping = {"float32": torch.float32, "float16": torch.float16, "uint8": torch.uint8}
+        # torch.uint16 requires PyTorch >= 2.5; fall back to int16 (same 16-bit bit layout)
+        mapping["uint16"] = torch.uint16 if hasattr(torch, "uint16") else torch.int16
         return mapping[self.dtype]
 
     def _resolve_stream(self, stream: object) -> int | None:
@@ -410,6 +412,8 @@ class CUDAIPCImporter:
             typestr = "<f2"  # Little-endian float16
         elif self.dtype == "uint8":
             typestr = "|u1"  # Unsigned 8-bit integer
+        elif self.dtype == "uint16":
+            typestr = "<u2"  # Little-endian unsigned 16-bit integer
         else:
             raise ValueError(f"Unsupported dtype: {self.dtype}")
 
@@ -469,7 +473,7 @@ class CUDAIPCImporter:
         nbytes = height * width * channels * itemsize
 
         # Determine CuPy dtype
-        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8}
+        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
         cp_dtype = dtype_map.get(self.dtype)
         if cp_dtype is None:
             raise ValueError(f"Unsupported dtype for CuPy: {self.dtype}")

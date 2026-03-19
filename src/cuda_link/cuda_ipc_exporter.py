@@ -204,7 +204,7 @@ class CUDAIPCExporter:
             # so callers MUST either call record_source_sync() or torch.cuda.synchronize()
             # before export_frame(). The event enables the GPU-side-only path.
             if self.source_sync_event is None:
-                self.source_sync_event = self.cuda.create_timing_event()
+                self.source_sync_event = self.cuda.create_sync_event()
                 logger.info("Created cross-stream source sync event")
 
             # Apply 2 MiB alignment (NVIDIA requirement: prevents information disclosure)

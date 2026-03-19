@@ -571,6 +571,27 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventCreateWithFlags(timing)")
         return event
 
+    def create_sync_event(self) -> CUDAEvent_t:
+        """Create CUDA event optimized for stream ordering (NOT timing, NOT IPC).
+
+        Returns:
+            Event handle for use with stream_wait_event() ordering
+
+        Raises:
+            RuntimeError: If event creation fails
+
+        Note:
+            Uses cudaEventDisableTiming (0x02). Per NVIDIA docs this provides
+            best performance when used with cudaStreamWaitEvent() and
+            cudaEventQuery() — removes per-record timing instrumentation overhead.
+            Do not use with event_elapsed_time(); use create_timing_event() for that.
+        """
+        event = CUDAEvent_t()
+        # cudaEventDisableTiming = 0x02 — optimal for ordering-only events
+        result = self.cudart.cudaEventCreateWithFlags(byref(event), 0x02)
+        self.check_error(result, "cudaEventCreateWithFlags(sync)")
+        return event
+
     def event_elapsed_time(self, start: CUDAEvent_t, end: CUDAEvent_t) -> float:
         """Get elapsed GPU time between two events.
 
