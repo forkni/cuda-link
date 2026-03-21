@@ -986,7 +986,7 @@ class CUDAIPCExtension:
         self._initialized = False
         self._log("Sender cleanup complete", force=True)
 
-    def import_frame(self, import_buffer: "TOP") -> bool:
+    def import_frame(self, import_buffer: TOP) -> bool:
         """Import frame from CUDA IPC into ImportBuffer (Script TOP).
 
         Can be called from:
@@ -1113,7 +1113,7 @@ class CUDAIPCExtension:
             traceback.print_exc()
             return False
 
-    def update_receiver_resolution(self, import_buffer: "TOP") -> bool:
+    def update_receiver_resolution(self, import_buffer: TOP) -> bool:
         """Update ImportBuffer resolution from outside the cook cycle.
 
         Safe to call from Execute DAT when modoutsidecook is enabled on the Script TOP (TD 2025+).

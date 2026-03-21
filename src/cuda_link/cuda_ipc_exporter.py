@@ -83,8 +83,7 @@ _DTYPE_ITEMSIZE_MAP = {
 
 
 class CUDAIPCExporter:
-    """
-    Python-side exporter for CUDA IPC GPU memory.
+    """Python-side exporter for CUDA IPC GPU memory.
 
     Sends GPU frames FROM Python TO TouchDesigner via CUDA IPC.
     Pairs with CUDAIPCExtension in "Receiver" mode on the TD side.

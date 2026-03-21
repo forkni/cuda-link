@@ -5,8 +5,11 @@ Extracted subset from StreamDiffusion project.
 Requires PyTorch to be installed.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +63,7 @@ def benchmark_with_events(fn: Callable, *args: Any, warmup: int = 3, iterations:
 
 
 class ProfileSection:
-    """
-    Context manager for profiling code sections with CUDA events.
+    """Context manager for profiling code sections with CUDA events.
 
     Usage:
         with ProfileSection("UNet Forward"):
@@ -85,7 +87,7 @@ class ProfileSection:
         self.start_event = None
         self.end_event = None
 
-    def __enter__(self) -> "ProfileSection":
+    def __enter__(self) -> ProfileSection:
         """Enter profiling context and record CUDA start event."""
         if self.enabled:
             self.start_event = torch.cuda.Event(enable_timing=True)
@@ -109,10 +111,10 @@ class ProfileSection:
 
 
 def create_snoop_config(
-    out: "str | None" = None,
+    out: str | None = None,
     *,
     enabled: bool = True,
-) -> "object | None":
+) -> object | None:
     """Create a snoop.Config with timestamp column output.
 
     Note: call-depth tracing is configured per-decorator via ``cfg.snoop(depth=N)``,
@@ -148,12 +150,12 @@ def create_snoop_config(
 
 
 def snoop_decorator(
-    fn: "Callable | None" = None,
+    fn: Callable | None = None,
     *,
     depth: int = 1,
-    watch: "tuple[str, ...]" = (),
+    watch: tuple[str, ...] = (),
     enabled: bool = True,
-) -> "Callable":
+) -> Callable:
     """Return a @snoop decorator, or a transparent no-op if snoop is unavailable.
 
     Designed so ``@snoop_decorator`` can be left on functions in development
@@ -178,7 +180,7 @@ def snoop_decorator(
             ...
     """
 
-    def _noop(f: "Callable") -> "Callable":
+    def _noop(f: Callable) -> Callable:
         return f
 
     try:

@@ -75,8 +75,7 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 
 
 class CUDAIPCImporter:
-    """
-    Python-side importer for CUDA IPC GPU memory.
+    """Python-side importer for CUDA IPC GPU memory.
 
     Responsibilities:
     - Read 64-byte IPC handle from SharedMemory (once at startup)

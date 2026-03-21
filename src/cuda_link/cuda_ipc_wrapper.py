@@ -11,10 +11,11 @@ Requirements:
 - Same GPU visible to both processes
 """
 
+from __future__ import annotations
+
 import ctypes
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
-from typing import Optional
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
@@ -457,7 +458,7 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventCreateWithFlags")
         return event
 
-    def record_event(self, event: CUDAEvent_t, stream: Optional[CUDAStream_t] = None) -> None:
+    def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
         """Record event on specified stream (or default stream).
 
         Args:
@@ -702,7 +703,7 @@ class CUDARuntimeAPI:
 
 
 # Global singleton instance (lazy initialization)
-_cuda_runtime: Optional[CUDARuntimeAPI] = None
+_cuda_runtime: CUDARuntimeAPI | None = None
 
 
 def get_cuda_runtime() -> CUDARuntimeAPI:
