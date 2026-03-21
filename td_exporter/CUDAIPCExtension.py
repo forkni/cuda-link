@@ -11,12 +11,14 @@ Architecture:
     Receiver: SharedMemory -> IPC Handle -> Opened GPU Buffer -> scriptTOP.copyCUDAMemory()
 """
 
+from __future__ import annotations
+
+import contextlib
 import struct
 import time
 import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
-from typing import Optional
 
 try:
     import numpy
@@ -31,8 +33,6 @@ except ImportError:
     from typing import Any as TOP
 
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
-
-import contextlib
 
 from CUDAIPCWrapper import (
     cudaIpcEventHandle_t,
@@ -63,10 +63,14 @@ DTYPE_FLOAT16 = 1
 DTYPE_UINT8 = 2
 DTYPE_UINT16 = 3
 
+# Pixel format substrings that TD 2025 (CUDA 12.8) rejects in cudaMemory().
+# uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
+_CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
+_FMT_TRANSFORM_NAME = "dtype_converter"  # Permanent Transform TOP in network (before ExportBuffer)
+
 
 class CUDAIPCExtension:
-    """
-    TouchDesigner extension for dual-mode CUDA IPC texture sharing.
+    """TouchDesigner extension for dual-mode CUDA IPC texture sharing.
 
     Modes:
     - Sender: Export GPU textures to SharedMemory via IPC handles
@@ -190,9 +194,12 @@ class CUDAIPCExtension:
         self._rx_retry_interval_frames = 1  # Will be updated dynamically after failed attempts
         self._rx_frames_since_last_retry = 0  # Start at 0; first increment yields 1 >= 1 → immediate connect
         self._rx_needs_resolution_update = False  # Flag to defer Script TOP resolution setup
-        self._rx_f16_cpu_buf = None     # float16 CPU buffer for D2H conversion (float16 IPC only)
-        self._rx_f32_cpu_buf = None     # float32 CPU buffer after conversion (float16 IPC only)
+        self._rx_f16_cpu_buf = None  # float16 CPU buffer for D2H conversion (float16 IPC only)
+        self._rx_f32_cpu_buf = None  # float32 CPU buffer after conversion (float16 IPC only)
         self._rx_f16_pinned_ptr = None  # cudaMallocHost pointer backing _rx_f16_cpu_buf (or None if pageable)
+
+        # Format conversion state — True when dtype_converter is set to rgba32float
+        self._fmt_conv_active = False
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
@@ -216,6 +223,15 @@ class CUDAIPCExtension:
         prefix = f"[CUDAIPCExtension:{self._mode}]"
         if force or self.verbose_performance:
             print(f"{prefix} {msg}")
+
+    def _needs_format_conversion(self, top_op: TOP) -> bool:
+        """Return True if the TOP's pixel format is unsupported by cudaMemory() in TD 2025.
+
+        TD 2025 (CUDA 12.8) rejects float16 formats from cudaMemory().
+        uint8, uint16 (fixed), and float32 are supported.
+        """
+        pixel_fmt = getattr(top_op, "pixelFormat", "")
+        return any(unsupported in pixel_fmt for unsupported in _CUDA_UNSUPPORTED_PIXEL_FORMATS)
 
     def switch_mode(self, new_mode: str) -> None:
         """Switch between Sender and Receiver modes.
@@ -256,7 +272,7 @@ class CUDAIPCExtension:
 
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
 
-    def initialize(self, width: int, height: int, channels: int = 4, buffer_size: Optional[int] = None) -> bool:
+    def initialize(self, width: int, height: int, channels: int = 4, buffer_size: int | None = None) -> bool:
         """Initialize CUDA IPC resources.
 
         Args:
@@ -458,14 +474,15 @@ class CUDAIPCExtension:
         if detected_dtype is not None:
             try:
                 import numpy as _np
+
                 _dtype_to_code = {
                     _np.dtype("float32"): DTYPE_FLOAT32,
                     _np.dtype("float16"): DTYPE_FLOAT16,
-                    _np.dtype("uint8"):   DTYPE_UINT8,
-                    _np.dtype("uint16"):  DTYPE_UINT16,
+                    _np.dtype("uint8"): DTYPE_UINT8,
+                    _np.dtype("uint16"): DTYPE_UINT16,
                 }
                 dtype_code = _dtype_to_code.get(_np.dtype(detected_dtype), DTYPE_FLOAT32)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 detected_dtype = None  # Fall through to byte-ratio below
 
         if detected_dtype is None:
@@ -504,8 +521,9 @@ class CUDAIPCExtension:
             return False  # First frame — will be set during initialize()
         try:
             import numpy as _np
+
             return _np.dtype(self._detected_numpy_dtype) != _np.dtype(self._last_numpy_dtype)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _bump_version(self) -> None:
@@ -541,18 +559,69 @@ class CUDAIPCExtension:
             frame_start = time.perf_counter()
 
         try:
-            # Time cudaMemory() call (OpenGL→CUDA interop, suspected 4K bottleneck)
+            # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
+            # Always use a non-blocking stream (never None/default stream) for TD 2025 compat.
+            if self.cuda is None:
+                self.cuda = get_cuda_runtime()
+            if not hasattr(self, "ipc_stream") or self.ipc_stream is None:
+                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self._log(
+                    f"Created IPC stream (pre-init): 0x{int(self.ipc_stream.value):016x}",
+                    force=True,
+                )
+
+            # TD 2025 rejects float16 pixel formats from cudaMemory().
+            # dtype_converter Transform TOP sits before ExportBuffer — toggle its format param.
+            # Check source TOP (upstream of converter), not ExportBuffer (downstream).
+            effective_top = top_op
+            fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+            if fmt_transform is not None:
+                source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
+                if self._needs_format_conversion(source_top):
+                    if not self._fmt_conv_active:
+                        fmt_transform.par.format = "rgba32float"
+                        self._fmt_conv_active = True
+                        self._log(
+                            f"Pixel format '{getattr(source_top, 'pixelFormat', '?')}' unsupported "
+                            f"by cudaMemory() — dtype_converter set to rgba32float, skipping frame",
+                            force=True,
+                        )
+                        return False  # dtype_converter cooks next frame
+                else:
+                    if self._fmt_conv_active:
+                        fmt_transform.par.format = "useinput"
+                        self._fmt_conv_active = False
+                        self._log(
+                            "Source format CUDA-compatible — dtype_converter set to useinput",
+                            force=True,
+                        )
+                        return False  # format reverts next cook
+
+            # Time cudaMemory() call (OpenGL→CUDA interop)
             if self.verbose_performance:
                 cuda_mem_start = time.perf_counter()
 
-            # Get TOP's CUDA memory (pass stream for proper synchronization per TD docs)
-            cuda_mem = top_op.cudaMemory(
-                stream=int(self.ipc_stream.value) if self._initialized else None,
-            )
+            # Get TOP's CUDA memory — always pass a valid stream (never None)
+            try:
+                cuda_mem = effective_top.cudaMemory(
+                    stream=int(self.ipc_stream.value),
+                )
+            except BaseException as cuda_err:
+                pixel_fmt = getattr(effective_top, "pixelFormat", "unknown")
+                err_msg = f"cudaMemory() failed (pixelFormat={pixel_fmt}): {cuda_err}"
+                if err_msg != getattr(self, "_last_cuda_mem_err", ""):
+                    self._log(err_msg, force=True)
+                    self._last_cuda_mem_err = err_msg
+                return False
 
             if self.verbose_performance:
                 cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
                 self.total_cuda_memory_time += cuda_mem_time
+
+            # Reset error suppression on success
+            if getattr(self, "_last_cuda_mem_err", ""):
+                self._log("cudaMemory() recovered.", force=True)
+                self._last_cuda_mem_err = ""
 
             if cuda_mem is None:
                 self._log(f"Failed to get CUDA memory from {top_op}", force=True)
@@ -605,7 +674,7 @@ class CUDAIPCExtension:
                 self._write_metadata_to_shm()
                 self._bump_version()
                 self._log(
-                    f"Metadata changed (dtype/dimensions) without size change — updated in-place",
+                    "Metadata changed (dtype/dimensions) without size change — updated in-place",
                     force=True,
                 )
 
@@ -796,7 +865,7 @@ class CUDAIPCExtension:
         if not cuda_valid:
             self._log("CUDA context already destroyed — skipping GPU cleanup", force=True)
 
-        # STEP 1: Signal shutdown to consumer (before closing SharedMemory)
+        # Signal shutdown to consumer (before closing SharedMemory)
         if self.shm_handle and self.shm_handle.buf is not None:
             try:
                 shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
@@ -805,7 +874,7 @@ class CUDAIPCExtension:
             except (OSError, BufferError) as e:
                 self._log(f"Warning: Could not write shutdown signal: {e}", force=True)
 
-        # STEP 1b: Zero out IPC handle bytes so any reader sees invalid handles.
+        # Zero out IPC handle bytes so any reader sees invalid handles.
         # On Windows, unlink() is a no-op (SharedMemory uses CreateFileMapping kernel
         # objects), so the SharedMemory may persist with stale non-zero handles that
         # pass the all-zero validation check. Zeroing them prevents error 201 when a
@@ -819,7 +888,7 @@ class CUDAIPCExtension:
             except (OSError, BufferError) as e:
                 self._log(f"Warning: Could not zero IPC handles: {e}", force=True)
 
-        # STEP 2: Destroy IPC events (sender-side resources, safe to destroy)
+        # Destroy IPC events (sender-side resources, safe to destroy)
         if cuda_valid and hasattr(self, "ipc_events") and self.cuda:
             for slot, event in enumerate(self.ipc_events):
                 if event:
@@ -829,7 +898,7 @@ class CUDAIPCExtension:
                     except (RuntimeError, OSError) as e:
                         self._log(f"Error destroying event slot {slot}: {e}", force=True)
 
-        # STEP 2b: Destroy GPU timing events (benchmarking resources)
+        # Destroy GPU timing events (benchmarking resources)
         if cuda_valid and self.cuda:
             if hasattr(self, "_timing_start") and self._timing_start:
                 try:
@@ -848,7 +917,7 @@ class CUDAIPCExtension:
                 finally:
                     self._timing_end = None
 
-        # STEP 3: Destroy dedicated IPC stream (set to None to prevent double-free)
+        # Destroy dedicated IPC stream (set to None to prevent double-free)
         if cuda_valid and hasattr(self, "ipc_stream") and self.ipc_stream and self.cuda:
             try:
                 self.cuda.destroy_stream(self.ipc_stream)
@@ -857,7 +926,7 @@ class CUDAIPCExtension:
             except (RuntimeError, OSError) as e:
                 self._log(f"Error destroying IPC stream: {e}", force=True)
 
-        # STEP 4: Close SharedMemory (but don't unlink yet)
+        # Close SharedMemory (but don't unlink yet)
         if self.shm_handle:
             try:
                 self.shm_handle.close()
@@ -865,11 +934,11 @@ class CUDAIPCExtension:
             except (OSError, BufferError) as e:
                 self._log(f"Error closing SharedMemory: {e}", force=True)
 
-        # STEP 5: Grace period for receiver to close IPC handles
+        # Grace period for receiver to close IPC handles
         if cuda_valid:
             time.sleep(0.1)  # 100ms for receiver to detect shutdown and close handles
 
-        # STEP 6: Free GPU buffers (now safe, receiver has closed IPC handles)
+        # Free GPU buffers (now safe, receiver has closed IPC handles)
         if cuda_valid and hasattr(self, "dev_ptrs") and self.cuda:
             for slot, dev_ptr in enumerate(self.dev_ptrs):
                 if dev_ptr:
@@ -879,11 +948,17 @@ class CUDAIPCExtension:
                     except (RuntimeError, OSError) as e:
                         self._log(f"Error freeing GPU buffer slot {slot}: {e}", force=True)
 
-        # STEP 7: Free any pending deferred resources
+        # Free any pending deferred resources
         if cuda_valid and hasattr(self, "_pending_free_ptrs"):
             self._deferred_free()
 
-        # STEP 8: Unlink SharedMemory (sender is owner and should clean up)
+        # Reset dtype_converter Transform TOP to pass-through on cleanup
+        fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+        if fmt_transform is not None:
+            fmt_transform.par.format = "useinput"
+        self._fmt_conv_active = False
+
+        # Unlink SharedMemory (sender is owner and should clean up)
         if hasattr(self, "shm_name"):
             try:
                 from multiprocessing.shared_memory import SharedMemory
@@ -906,6 +981,7 @@ class CUDAIPCExtension:
         self.ipc_event_handles = []
         self.ipc_stream = None
         self.shm_handle = None
+        self._fmt_conv_active = False
 
         self._initialized = False
         self._log("Sender cleanup complete", force=True)
@@ -1311,6 +1387,7 @@ class CUDAIPCExtension:
                 self._rx_f16_pinned_ptr = None
                 try:
                     import ctypes as _ctypes
+
                     self._rx_f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
                     _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._rx_f16_pinned_ptr.value)
                     self._rx_f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
