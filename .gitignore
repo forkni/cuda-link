@@ -146,6 +146,10 @@ TOXES/CUDAIPCLink_v*.tox
 GEMINI.md
 gemini-skills/
 
+# Gemini CLI runtime artifacts (telemetry, session logs)
+.gemini/telemetry.log
+.gemini/*.log
+
 # Claude auto-memory (session-specific)
 MEMORY.md
 
