@@ -230,7 +230,7 @@ class CUDAIPCExtension:
         TD 2025 (CUDA 12.8) rejects float16 formats from cudaMemory().
         uint8, uint16 (fixed), and float32 are supported.
         """
-        pixel_fmt = getattr(top_op, "pixelFormat", "")
+        pixel_fmt = str(getattr(top_op, "pixelFormat", "")).lower()
         return any(unsupported in pixel_fmt for unsupported in _CUDA_UNSUPPORTED_PIXEL_FORMATS)
 
     def switch_mode(self, new_mode: str) -> None:
@@ -573,7 +573,6 @@ class CUDAIPCExtension:
             # TD 2025 rejects float16 pixel formats from cudaMemory().
             # dtype_converter Transform TOP sits before ExportBuffer — toggle its format param.
             # Check source TOP (upstream of converter), not ExportBuffer (downstream).
-            effective_top = top_op
             fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
             if fmt_transform is not None:
                 source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
@@ -603,11 +602,11 @@ class CUDAIPCExtension:
 
             # Get TOP's CUDA memory — always pass a valid stream (never None)
             try:
-                cuda_mem = effective_top.cudaMemory(
+                cuda_mem = top_op.cudaMemory(
                     stream=int(self.ipc_stream.value),
                 )
-            except BaseException as cuda_err:
-                pixel_fmt = getattr(effective_top, "pixelFormat", "unknown")
+            except Exception as cuda_err:
+                pixel_fmt = getattr(top_op, "pixelFormat", "unknown")
                 err_msg = f"cudaMemory() failed (pixelFormat={pixel_fmt}): {cuda_err}"
                 if err_msg != getattr(self, "_last_cuda_mem_err", ""):
                     self._log(err_msg, force=True)

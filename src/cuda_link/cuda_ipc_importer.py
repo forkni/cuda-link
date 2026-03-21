@@ -170,9 +170,15 @@ class CUDAIPCImporter:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required but not installed")
         mapping = {"float32": torch.float32, "float16": torch.float16, "uint8": torch.uint8}
-        # torch.uint16 requires PyTorch >= 2.5; fall back to int16 (same 16-bit bit layout)
-        mapping["uint16"] = torch.uint16 if hasattr(torch, "uint16") else torch.int16
-        return mapping[self.dtype]
+        if hasattr(torch, "uint16"):
+            mapping["uint16"] = torch.uint16
+        dtype = mapping.get(self.dtype)
+        if dtype is None:
+            raise RuntimeError(
+                f"dtype '{self.dtype}' requires PyTorch >= 2.5 (torch.uint16 not available). "
+                "Use get_frame_numpy() instead, or upgrade PyTorch."
+            )
+        return dtype
 
     def _resolve_stream(self, stream: object) -> int | None:
         """Extract raw CUDA stream pointer from torch/cupy stream or int.

@@ -105,7 +105,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
    - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
-**Important**: Ensure the Execute DAT references `op('input')` for the source TOP. Users will wire their actual TOP to this In TOP.
+**Important**: The `onFrameEnd` callback must call `export_frame(op('ExportBuffer'))` — passing the **post-conversion** Null TOP, not `op('input')`. The data flow through the component is: `input → dtype_converter → ExportBuffer → export_frame()`.
 
 ### Step 6: Create In TOP
 
