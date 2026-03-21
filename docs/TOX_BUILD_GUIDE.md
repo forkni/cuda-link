@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v0.6.8.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v0.7.0.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -13,7 +13,11 @@ CUDAIPCExporter (Base COMP)
 ├── CUDAIPCWrapper    (Text DAT)     ← Copy from td_exporter/CUDAIPCWrapper.py
 ├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py
 ├── callbacks         (Execute DAT)  ← Copy from td_exporter/callbacks_template.py
+├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
+├── dtype_converter   (Transform TOP) ← Pixel format auto-conversion (see Step 6c)
+├── ExportBuffer      (Null TOP)     ← Receives dtype_converter output; cudaMemory() reads from here
+├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -110,7 +114,20 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 **Note**: The In TOP has no parameters to configure - it's purely a connection point.
 
-### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
+### Step 6b: Add dtype_converter Transform TOP (Sender mode)
+
+Inside the `CUDAIPCExporter` COMP, add a **Transform TOP** named `dtype_converter`:
+
+1. Create a **Transform TOP**, rename to `dtype_converter`
+2. Set the **Pixel Format** parameter to `"Use Input"` (default — pass-through, zero overhead)
+3. Wire input: `input` In TOP → `dtype_converter`
+4. Wire output: `dtype_converter` → `ExportBuffer` (Null TOP or the node that feeds `cudaMemory()`)
+
+**Purpose**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The extension automatically detects unsupported source formats (float16) and sets `dtype_converter.par.format = "rgba32float"` on the first affected frame — skipping that one frame while the conversion takes effect. For all other formats (uint8, uint16 fixed, float32) the node stays at `"Use Input"` with zero overhead.
+
+**This node is managed automatically** — no manual format changes are needed.
+
+### Step 6c: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
 If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
 
@@ -144,9 +161,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `C:\Users\INTER\Documents\INTER_TECH\COMPONENTS\CUDA_IPC\CUDAIPCLink_v0.6.8.tox`
+3. Save to: `TOXES\CUDAIPCLink_v0.7.0.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v0.6.8.tox` (matches component name) for clarity.
+**Naming convention**: Use `CUDAIPCLink_v0.7.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -154,7 +171,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v0.6.8.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v0.7.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -244,9 +261,9 @@ else:
 
 ### CUDA runtime DLL not found
 
-**Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_12.dll not found`
+**Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
 
-**Solution**: Install CUDA Toolkit 12.x from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads). The DLL must be in your system PATH.
+**Solution**: The extension loads `cudart64_110.dll` (CUDA 11.0, bundled with TouchDesigner) first, then falls back to `cudart64_12.dll`. If TD is installed correctly this error should not occur. If it does, verify your TouchDesigner installation is intact or reinstall CUDA Toolkit 12.x from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
 ### SharedMemory already exists
 
@@ -305,7 +322,10 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDAIPCWrapper.py` | `td_exporter/` | CUDA runtime ctypes wrapper |
 | `CUDAIPCExtension.py` | `td_exporter/` | TD extension class (main logic) |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
-| `CUDAIPCLink_v0.6.8.tox` | `./` (root) | Final built .tox component |
+| `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
+| `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
+| `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
+| `CUDAIPCLink_v0.7.0.tox` | `TOXES/` | Final built .tox component |
 
 ---
 

@@ -146,7 +146,8 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 │             [409-412]   height (uint32)                     │
 │             [413-416]   num_comps (uint32)                  │
 │             [417-420]   dtype_code (uint32)                 │
-│                         0=float32, 1=float16, 2=uint8       │
+│                         0=float32, 1=float16, 2=uint8,      │
+│                         3=uint16                            │
 │             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
 │ [425-432]   timestamp (float64)                             │
@@ -310,6 +311,8 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
    - Read IPC event handle (64 bytes)
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
+
+**Note on pixel format compatibility**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The Sender extension automatically detects this and sets a permanent `dtype_converter` Transform TOP (wired before ExportBuffer) to `rgba32float`, skipping one transition frame. Supported formats without conversion: `uint8`, `uint16` (fixed), `float32`.
 
 ### Phase 2: Steady State (Per-Frame)
 
