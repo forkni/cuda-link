@@ -67,6 +67,7 @@ DTYPE_UINT16 = 3
 # uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
 _FMT_TRANSFORM_NAME = "dtype_converter"  # Permanent Transform TOP in network (before ExportBuffer)
+_EXPORT_BUFFER_NAME = "ExportBuffer"    # Null TOP downstream of dtype_converter; cudaMemory() source
 
 
 class CUDAIPCExtension:
@@ -447,6 +448,12 @@ class CUDAIPCExtension:
             else:
                 self._log(f"Wrote slot {slot} mem handle: {len(mem_handle_bytes)}B")
 
+        # Clear shutdown flag — matches CUDAIPCExporter._write_handles_to_shm() on the Python side.
+        # Without this, a stale shutdown_flag=1 from a previous session (or a race where another
+        # sender initialised after this one) would block the receiver indefinitely.
+        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
+        self.shm_handle.buf[shutdown_offset] = 0
+
         self._log(
             f"Wrote all IPC handles v{new_version} to SharedMemory ({SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE} bytes total)",
             force=True,
@@ -495,7 +502,9 @@ class CUDAIPCExtension:
             if bytes_per_comp <= 1:
                 dtype_code = DTYPE_UINT8
             elif bytes_per_comp <= 2:
-                dtype_code = DTYPE_FLOAT16
+                # dtype_converter promotes float16 → float32 upstream, so any
+                # remaining 2-byte format at this point is uint16 (fixed-point).
+                dtype_code = DTYPE_UINT16
             else:
                 dtype_code = DTYPE_FLOAT32
 
@@ -538,15 +547,21 @@ class CUDAIPCExtension:
         self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE] = struct.pack("<Q", new_version)
         self._log(f"Version bumped to {new_version} (metadata-only change)")
 
-    def export_frame(self, top_op: TOP) -> bool:
-        """Export TOP texture via CUDA IPC.
+    def export_frame(self) -> bool:
+        """Export the ExportBuffer TOP texture via CUDA IPC.
 
-        Args:
-            top_op: TouchDesigner TOP operator to export
+        Resolves ExportBuffer internally (downstream of dtype_converter) so the
+        correct post-conversion frame is always exported regardless of what the
+        caller previously passed.
 
         Returns:
             True if export successful, False otherwise
         """
+        top_op = self.ownerComp.op(_EXPORT_BUFFER_NAME)
+        if top_op is None:
+            self._log(f"'{_EXPORT_BUFFER_NAME}' not found in component", force=True)
+            return False
+
         # Check if Active parameter is enabled
         try:
             if not bool(self.ownerComp.par.Active.eval()):
@@ -725,9 +740,14 @@ class CUDAIPCExtension:
                 if self.frame_count % self.sync_interval == 0:
                     self.cuda.synchronize()
 
-            # Update write_idx in SharedMemory (must happen for both paths)
+            # Update write_idx and reassert shutdown_flag=0 in SharedMemory.
+            # The shutdown_flag write costs 1 byte and prevents a stale flag=1 from
+            # a previous cleanup (or another process that shared this SharedMemory name)
+            # from blocking the receiver.
             self.write_idx += 1
             struct.pack_into("<I", self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)
+            shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
+            self.shm_handle.buf[shutdown_offset] = 0
 
             # Frame tracking
             self.frame_count += 1
@@ -746,8 +766,8 @@ class CUDAIPCExtension:
                     force=True,
                 )
 
-            # Log performance metrics every 100 frames (if verbose)
-            if self.verbose_performance and self.frame_count % 100 == 0:
+            # Log performance metrics every 97 frames (prime — avoids aliasing with slot counts 2,4,5)
+            if self.verbose_performance and self.frame_count % 97 == 0:
                 avg_memcpy = self.total_memcpy_time / self.frame_count
                 avg_record = self.total_record_event_time / self.frame_count if all(self.ipc_events) else 0
                 avg_total = self.total_export_time / self.frame_count
@@ -982,6 +1002,15 @@ class CUDAIPCExtension:
         self.shm_handle = None
         self._fmt_conv_active = False
 
+        # Reset per-session counters so averages are accurate after reinit
+        # and slot selection starts from 0 (matching SharedMemory write_idx=0 written on init).
+        self.write_idx = 0
+        self.frame_count = 0
+        self.total_memcpy_time = 0.0
+        self.total_record_event_time = 0.0
+        self.total_export_time = 0.0
+        self.total_cuda_memory_time = 0.0
+
         self._initialized = False
         self._log("Sender cleanup complete", force=True)
 
@@ -1100,8 +1129,8 @@ class CUDAIPCExtension:
             self.frame_count += 1
             self._rx_last_write_idx = write_idx
 
-            # Debug logging
-            if self.verbose_performance and self.frame_count % 100 == 0:
+            # Debug logging (97 = prime, avoids aliasing with slot counts 2,4,5)
+            if self.verbose_performance and self.frame_count % 97 == 0:
                 self._log(f"Frame {self.frame_count}: read_slot={read_slot}, write_idx={write_idx}")
 
             return True

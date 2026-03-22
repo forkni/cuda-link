@@ -60,9 +60,7 @@ def onFrameEnd(frame: int) -> None:
         return
 
     if ext.mode == "Sender":
-        export_buffer = op("ExportBuffer")
-        if export_buffer:
-            ext.export_frame(export_buffer)
+        ext.export_frame()
 
 
 def onExit() -> None:

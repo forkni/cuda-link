@@ -57,7 +57,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v0.7.0.tox` into your TD network
+1. Drag `CUDAIPCLink_v0.7.1.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -73,12 +73,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-0.7.0-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-0.7.1-py3-none-any.whl
 
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -197,7 +197,7 @@ Per slot (128 bytes each):
 [20+slot*128 : 84+slot*128]   cudaIpcMemHandle_t (64B)  - GPU memory handle
 [84+slot*128 : 148+slot*128]  cudaIpcEventHandle_t (64B) - GPU event handle
 
-[20+NUM_SLOTS*128]        shutdown_flag (1B)   - Producer sets to 1 on exit
+[20+NUM_SLOTS*128]        shutdown_flag (1B)   - Reasserted to 0 every frame; set to 1 on exit
 [21+NUM_SLOTS*128]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
 [41+NUM_SLOTS*128]        timestamp (8B)       - Producer perf_counter() for latency
 ```
@@ -342,16 +342,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-0.7.0-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-0.7.1-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.0-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.7.1-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-0.7.0-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -386,7 +386,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v0.7.0.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v0.7.1.tox` into your TouchDesigner network from the project root.
 
 **Option B: Build from source**
 

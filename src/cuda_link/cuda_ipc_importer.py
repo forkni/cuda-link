@@ -628,7 +628,7 @@ class CUDAIPCImporter:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
-            if self.frame_count % 100 == 0:
+            if self.frame_count % 97 == 0:
                 n = self.frame_count
                 sync_mode = "GPU-Events" if all(self.ipc_events) else "CPU-Sync"
                 logger.debug(
@@ -753,7 +753,7 @@ class CUDAIPCImporter:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
-            if self.frame_count % 100 == 0:
+            if self.frame_count % 97 == 0:
                 n = self.frame_count
                 logger.debug(
                     "Frame %d (numpy): shm_read=%.1fus wait=%.1fus d2h=%.1fus total=%.1fus latency=%.2fms",

@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v0.7.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v0.7.1.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -45,7 +45,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 |------|-------|------|---------|-----------|
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_output_ipc` | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
-| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every 100 frames). |
+| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
@@ -105,7 +105,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
    - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
-**Important**: The `onFrameEnd` callback must call `export_frame(op('ExportBuffer'))` — passing the **post-conversion** Null TOP, not `op('input')`. The data flow through the component is: `input → dtype_converter → ExportBuffer → export_frame()`.
+**Important**: The `onFrameEnd` callback calls `ext.export_frame()` with no arguments. The extension resolves `ExportBuffer` internally, ensuring `cudaMemory()` always reads from the post-conversion node. The data flow through the component is: `input → dtype_converter → ExportBuffer → export_frame()`.
 
 ### Step 6: Create In TOP
 
@@ -161,9 +161,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v0.7.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v0.7.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v0.7.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v0.7.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -171,7 +171,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v0.7.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v0.7.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -189,7 +189,7 @@ License: MIT
    - This MUST match the `shm_name` in your Python `CUDAIPCImporter`/`CUDAIPCExporter` code
 3. **Active**: Toggle ON to start exporting/importing
 4. **Numslots**: Leave at 3 (optimal for most cases; ignored in Receiver mode)
-5. **Debug**: Toggle ON to see performance metrics every 100 frames
+5. **Debug**: Toggle ON to see performance metrics every ~97 frames
 
 ### Verify Operation (Sender Mode)
 
@@ -280,7 +280,7 @@ else:
 **Diagnosis**:
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
-3. Enable **Debug** in TD and look for `"Frame N: wrote to slot X"` messages every 100 frames
+3. Enable **Debug** in TD and look for `"Frame N: wrote to slot X"` messages every ~97 frames
 
 ---
 
@@ -325,7 +325,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v0.7.0.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v0.7.1.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
