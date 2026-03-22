@@ -75,8 +75,7 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 
 
 class CUDAIPCImporter:
-    """
-    Python-side importer for CUDA IPC GPU memory.
+    """Python-side importer for CUDA IPC GPU memory.
 
     Responsibilities:
     - Read 64-byte IPC handle from SharedMemory (once at startup)
@@ -171,7 +170,15 @@ class CUDAIPCImporter:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required but not installed")
         mapping = {"float32": torch.float32, "float16": torch.float16, "uint8": torch.uint8}
-        return mapping[self.dtype]
+        if hasattr(torch, "uint16"):
+            mapping["uint16"] = torch.uint16
+        dtype = mapping.get(self.dtype)
+        if dtype is None:
+            raise RuntimeError(
+                f"dtype '{self.dtype}' requires PyTorch >= 2.5 (torch.uint16 not available). "
+                "Use get_frame_numpy() instead, or upgrade PyTorch."
+            )
+        return dtype
 
     def _resolve_stream(self, stream: object) -> int | None:
         """Extract raw CUDA stream pointer from torch/cupy stream or int.
@@ -410,6 +417,8 @@ class CUDAIPCImporter:
             typestr = "<f2"  # Little-endian float16
         elif self.dtype == "uint8":
             typestr = "|u1"  # Unsigned 8-bit integer
+        elif self.dtype == "uint16":
+            typestr = "<u2"  # Little-endian unsigned 16-bit integer
         else:
             raise ValueError(f"Unsupported dtype: {self.dtype}")
 
@@ -469,7 +478,7 @@ class CUDAIPCImporter:
         nbytes = height * width * channels * itemsize
 
         # Determine CuPy dtype
-        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8}
+        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
         cp_dtype = dtype_map.get(self.dtype)
         if cp_dtype is None:
             raise ValueError(f"Unsupported dtype for CuPy: {self.dtype}")
@@ -619,7 +628,7 @@ class CUDAIPCImporter:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
-            if self.frame_count % 100 == 0:
+            if self.frame_count % 97 == 0:
                 n = self.frame_count
                 sync_mode = "GPU-Events" if all(self.ipc_events) else "CPU-Sync"
                 logger.debug(
@@ -744,7 +753,7 @@ class CUDAIPCImporter:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
-            if self.frame_count % 100 == 0:
+            if self.frame_count % 97 == 0:
                 n = self.frame_count
                 logger.debug(
                     "Frame %d (numpy): shm_read=%.1fus wait=%.1fus d2h=%.1fus total=%.1fus latency=%.2fms",

@@ -59,7 +59,7 @@ The shared memory channel carries only control data (no pixel data):
 | Write index | 4 B | Current producer slot (atomic counter) |
 | IPC mem handle × N | 128 B each | GPU memory handle per slot |
 | IPC event handle × N | 64 B each | GPU sync event handle per slot |
-| Shutdown flag | 1 B | Producer sets on exit |
+| Shutdown flag | 1 B | Reasserted to 0 every frame; set to 1 on exit |
 | Texture metadata | 20 B | Width, height, components, dtype, buffer size |
 | Producer timestamp | 8 B | `perf_counter()` for latency measurement |
 
@@ -142,7 +142,7 @@ Changing this parameter while active is silently ignored. Changing it while inac
 Enables verbose performance logging to the TouchDesigner Textport.
 
 - **Off:** Only critical errors and state changes are logged.
-- **On:** Every 100 frames, prints an average timing breakdown:
+- **On:** every ~97 frames, prints an average timing breakdown:
   - `cudaMemory` — OpenGL→CUDA interop time
   - `memcpy` — D2D memcpy enqueue time
   - `record` — IPC event record time

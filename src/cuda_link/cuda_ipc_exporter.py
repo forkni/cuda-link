@@ -83,8 +83,7 @@ _DTYPE_ITEMSIZE_MAP = {
 
 
 class CUDAIPCExporter:
-    """
-    Python-side exporter for CUDA IPC GPU memory.
+    """Python-side exporter for CUDA IPC GPU memory.
 
     Sends GPU frames FROM Python TO TouchDesigner via CUDA IPC.
     Pairs with CUDAIPCExtension in "Receiver" mode on the TD side.
@@ -169,6 +168,7 @@ class CUDAIPCExporter:
 
         # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
         self._ts_offset: int = 0
+        self._shutdown_offset: int = 0
 
     # ------------------------------------------------------------------
     # Initialization
@@ -204,7 +204,7 @@ class CUDAIPCExporter:
             # so callers MUST either call record_source_sync() or torch.cuda.synchronize()
             # before export_frame(). The event enables the GPU-side-only path.
             if self.source_sync_event is None:
-                self.source_sync_event = self.cuda.create_timing_event()
+                self.source_sync_event = self.cuda.create_sync_event()
                 logger.info("Created cross-stream source sync event")
 
             # Apply 2 MiB alignment (NVIDIA requirement: prevents information disclosure)
@@ -312,9 +312,9 @@ class CUDAIPCExporter:
                 event_handle_bytes = bytes(self.ipc_event_handles[slot].reserved)
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = event_handle_bytes
 
-        # Initialize shutdown flag to 0
-        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        struct.pack_into("<B", self.shm_handle.buf, shutdown_offset, 0)
+        # Initialize shutdown flag to 0 and cache its offset for export_frame() reassertion
+        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
+        struct.pack_into("<B", self.shm_handle.buf, self._shutdown_offset, 0)
 
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
@@ -439,12 +439,16 @@ class CUDAIPCExporter:
             if self.debug:
                 self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
-            # Write producer timestamp + advance write_idx (two SharedMemory writes)
+            # Write producer timestamp + advance write_idx + reassert shutdown_flag=0.
+            # The shutdown_flag write (1 byte) prevents a stale flag=1 from another process
+            # that shared this SharedMemory name (e.g. a TD sender that initialised first
+            # and set the flag during its cleanup) from blocking the receiver.
             if self.debug:
                 _t = time.perf_counter()
             struct.pack_into("<d", self.shm_handle.buf, self._ts_offset, time.perf_counter())
             self.write_idx += 1
             struct.pack_into("<I", self.shm_handle.buf, 16, self.write_idx)
+            self.shm_handle.buf[self._shutdown_offset] = 0
             if self.debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -454,7 +458,7 @@ class CUDAIPCExporter:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_us += frame_time
 
-                if self.frame_count % 100 == 0:
+                if self.frame_count % 97 == 0:
                     n = self.frame_count
                     logger.debug(
                         "Frame %d: slot=%d | stream_wait=%.1fus memcpy=%.1fus "

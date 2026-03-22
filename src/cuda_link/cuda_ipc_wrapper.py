@@ -11,10 +11,11 @@ Requirements:
 - Same GPU visible to both processes
 """
 
+from __future__ import annotations
+
 import ctypes
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
-from typing import Optional
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
@@ -457,7 +458,7 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventCreateWithFlags")
         return event
 
-    def record_event(self, event: CUDAEvent_t, stream: Optional[CUDAStream_t] = None) -> None:
+    def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
         """Record event on specified stream (or default stream).
 
         Args:
@@ -571,6 +572,27 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventCreateWithFlags(timing)")
         return event
 
+    def create_sync_event(self) -> CUDAEvent_t:
+        """Create CUDA event optimized for stream ordering (NOT timing, NOT IPC).
+
+        Returns:
+            Event handle for use with stream_wait_event() ordering
+
+        Raises:
+            RuntimeError: If event creation fails
+
+        Note:
+            Uses cudaEventDisableTiming (0x02). Per NVIDIA docs this provides
+            best performance when used with cudaStreamWaitEvent() and
+            cudaEventQuery() — removes per-record timing instrumentation overhead.
+            Do not use with event_elapsed_time(); use create_timing_event() for that.
+        """
+        event = CUDAEvent_t()
+        # cudaEventDisableTiming = 0x02 — optimal for ordering-only events
+        result = self.cudart.cudaEventCreateWithFlags(byref(event), 0x02)
+        self.check_error(result, "cudaEventCreateWithFlags(sync)")
+        return event
+
     def event_elapsed_time(self, start: CUDAEvent_t, end: CUDAEvent_t) -> float:
         """Get elapsed GPU time between two events.
 
@@ -681,7 +703,7 @@ class CUDARuntimeAPI:
 
 
 # Global singleton instance (lazy initialization)
-_cuda_runtime: Optional[CUDARuntimeAPI] = None
+_cuda_runtime: CUDARuntimeAPI | None = None
 
 
 def get_cuda_runtime() -> CUDARuntimeAPI:

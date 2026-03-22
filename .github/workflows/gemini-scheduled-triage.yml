@@ -100,6 +100,16 @@ jobs:
           ISSUE_COUNT="$(echo "${ISSUES}" | jq 'length')"
           echo "✅ Found ${ISSUE_COUNT} issue(s) to triage! 🎯"
 
+      - name: 'Checkout repository'
+        if: |-
+          ${{ steps.check_issues.outputs.has_issues == 'true' && steps.find_issues.outputs.issues_to_triage != '[]' }}
+        uses: 'actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8' # ratchet:actions/checkout@v6
+
+      - name: 'Create Gemini home directory'
+        if: |-
+          ${{ steps.check_issues.outputs.has_issues == 'true' && steps.find_issues.outputs.issues_to_triage != '[]' }}
+        run: mkdir -p ~/.gemini
+
       - name: 'Run Gemini Issue Analysis'
         id: 'gemini_issue_analysis'
         if: |-

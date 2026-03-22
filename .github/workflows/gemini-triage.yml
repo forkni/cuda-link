@@ -55,6 +55,16 @@ jobs:
             core.info(`Found ${labelNames.length} labels: ${labelNames.join(', ')}`);
             return labelNames;
 
+      - name: 'Checkout repository'
+        if: |-
+          ${{ steps.get_labels.outputs.available_labels != '' }}
+        uses: 'actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8' # ratchet:actions/checkout@v6
+
+      - name: 'Create Gemini home directory'
+        if: |-
+          ${{ steps.get_labels.outputs.available_labels != '' }}
+        run: mkdir -p ~/.gemini
+
       - name: 'Run Gemini issue analysis'
         id: 'gemini_analysis'
         if: |-

@@ -10,7 +10,7 @@ from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 
-__version__ = "0.6.8"
+__version__ = "0.7.1"
 __all__ = [
     "CUDAIPCExporter",
     "CUDAIPCImporter",

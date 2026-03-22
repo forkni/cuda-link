@@ -140,11 +140,15 @@ Backup/
 
 # Old .tox versions (keep only latest release)
 TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.6.8.tox
+!TOXES/CUDAIPCLink_v0.7.1.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
 gemini-skills/
+
+# Gemini CLI runtime artifacts (telemetry, session logs)
+.gemini/telemetry.log
+.gemini/*.log
 
 # Claude auto-memory (session-specific)
 MEMORY.md
