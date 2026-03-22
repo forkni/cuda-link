@@ -67,7 +67,7 @@ DTYPE_UINT16 = 3
 # uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
 _FMT_TRANSFORM_NAME = "dtype_converter"  # Permanent Transform TOP in network (before ExportBuffer)
-_EXPORT_BUFFER_NAME = "ExportBuffer"    # Null TOP downstream of dtype_converter; cudaMemory() source
+_EXPORT_BUFFER_NAME = "ExportBuffer"  # Null TOP downstream of dtype_converter; cudaMemory() source
 
 
 class CUDAIPCExtension:
