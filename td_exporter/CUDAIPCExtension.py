@@ -547,12 +547,16 @@ class CUDAIPCExtension:
         self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE] = struct.pack("<Q", new_version)
         self._log(f"Version bumped to {new_version} (metadata-only change)")
 
-    def export_frame(self) -> bool:
+    def export_frame(self, top_op: TOP | None = None) -> bool:
         """Export the ExportBuffer TOP texture via CUDA IPC.
 
         Resolves ExportBuffer internally (downstream of dtype_converter) so the
         correct post-conversion frame is always exported regardless of what the
         caller previously passed.
+
+        Args:
+            top_op: Deprecated. Accepted for backwards compatibility but ignored.
+                ExportBuffer is always resolved from ownerComp internally.
 
         Returns:
             True if export successful, False otherwise
