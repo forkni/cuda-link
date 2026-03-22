@@ -66,6 +66,11 @@ class MockCOMP:
     def __init__(self, name: str = "test_comp", **params: object) -> None:
         self.name = name
         self.par = MockPar(**params)
+        self._ops: dict = {}
+
+    def op(self, name: str) -> object:
+        """Return registered mock op or None (no TD network in tests)."""
+        return self._ops.get(name, None)
 
     def parent(self) -> MockCOMP:
         return self
@@ -227,9 +232,10 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
     # Allocate a real GPU buffer for mock TOP (can't use fake pointer for memcpy)
     real_gpu_ptr = cuda_runtime.malloc(8 * 8 * 4 * 4)  # 8x8x4 channels, float32
 
-    # Create mock TOP with real GPU pointer
+    # Create mock TOP with real GPU pointer and register as ExportBuffer
     mock_top = MockTOP(width=8, height=8, channels=4)
     mock_top._cuda_mem.ptr = real_gpu_ptr.value  # Use real GPU pointer
+    owner._ops["ExportBuffer"] = mock_top  # export_frame() resolves this internally
 
     try:
         # Export 5 frames and verify slot rotation
