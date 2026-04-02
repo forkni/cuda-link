@@ -170,7 +170,7 @@ class CUDAIPCImporter:
         """Get byte size per element for the configured dtype."""
         return _DTYPE_SIZES[self.dtype]
 
-    def _numpy_dtype(self) -> "np.dtype":
+    def _numpy_dtype(self) -> np.dtype:
         """Get numpy dtype from string dtype."""
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required but not installed")
