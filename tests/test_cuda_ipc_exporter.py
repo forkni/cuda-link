@@ -377,6 +377,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     ext = object.__new__(CUDAIPCExtension)
     ext.ownerComp = MagicMock()
     ext.ownerComp.par.Active.eval.return_value = True
+    ext._active_par = ext.ownerComp.par.Active  # cached par ref (set in __init__)
     ext.verbose_performance = False
     ext._initialized = True
     ext._mode = "Receiver"
