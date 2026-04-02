@@ -412,6 +412,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
 
     # CuPy GPU buffer (only if CuPy path is being tested)
     from unittest.mock import MagicMock as _MagicMock
+
     if use_cupy:
         ext._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
         ext._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
