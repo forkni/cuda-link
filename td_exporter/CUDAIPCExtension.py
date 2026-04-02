@@ -648,6 +648,13 @@ class CUDAIPCExtension:
             if fmt_transform is not None and not getattr(fmt_transform, "valid", True):
                 self._fmt_transform = None
                 fmt_transform = None
+            if fmt_transform is None:
+                # Lazy lookup: initialize() may not have run yet (pre-init export_frame() path).
+                # Without this, float16 sources are permanently stuck — cudaMemory() fails before
+                # auto-init at line 719 is reached. Same pattern as _export_buffer lazy fallback.
+                fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+                if fmt_transform is not None:
+                    self._fmt_transform = fmt_transform
             if fmt_transform is not None:
                 source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
                 if self._needs_format_conversion(source_top):
