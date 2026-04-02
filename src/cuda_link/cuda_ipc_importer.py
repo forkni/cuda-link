@@ -395,10 +395,6 @@ class CUDAIPCImporter:
             self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
             self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
-            # Bind hot-path methods: fast paths have zero debug-branch overhead when debug=False
-            self.get_frame = self._get_frame_debug if self.debug else self._get_frame_fast
-            self.get_frame_numpy = self._get_frame_numpy_debug if self.debug else self._get_frame_numpy_fast
-
             self._initialized = True
             logger.info("Initialization complete - ready for zero-copy GPU access")
             return True
@@ -566,60 +562,6 @@ class CUDAIPCImporter:
     def get_frame(self, stream: object | None = None) -> torch.Tensor | None:
         """Get current frame as torch.Tensor (GPU, zero-copy).
 
-        Bound to ``_get_frame_fast`` or ``_get_frame_debug`` after ``_initialize()``.
-        Falls back to ``_get_frame_debug`` if called before initialization.
-        """
-        return self._get_frame_debug(stream)
-
-    def _get_frame_fast(self, stream: object | None = None) -> torch.Tensor | None:
-        """Fast torch frame path (debug=False) — zero instrumentation overhead.
-
-        Identical logic to ``_get_frame_debug`` with all ``if self.debug`` guards removed.
-        Any change to the critical path MUST be mirrored in ``_get_frame_debug``.
-        """
-        if not TORCH_AVAILABLE:
-            raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
-        if not self._initialized:
-            logger.warning("Not initialized - call _initialize() first")
-            return None
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
-        if producer_timestamp > 0:
-            self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
-        else:
-            self.last_latency = 0.0
-        if stream is not None:
-            cuda_stream = self._resolve_stream(stream)
-            if self.ipc_events[read_slot]:
-                self.cuda.stream_wait_event(cuda_stream, self.ipc_events[read_slot], 0)
-        else:
-            try:
-                self._wait_for_slot(read_slot)
-            except TimeoutError:
-                logger.error("Producer timeout — returning None")
-                return None
-        self.frame_count += 1
-        return self.tensors[read_slot]
-
-    def _get_frame_debug(self, stream: object | None = None) -> torch.Tensor | None:
-        """Debug torch frame path (debug=True) — full per-operation timing instrumentation.
-
-        This is the reference implementation. Any change to the critical path MUST
-        also be applied to ``_get_frame_fast``.
-
         Args:
             stream: Optional CUDA stream (torch.cuda.Stream, cupy.cuda.Stream, int, or None).
                     If provided, issues cudaStreamWaitEvent on this stream
@@ -627,24 +569,22 @@ class CUDAIPCImporter:
                     cudaEventSynchronize for backward compatibility.
 
         Returns:
-            Zero-copy torch.Tensor on GPU, or None if not initialized
+            Zero-copy torch.Tensor on GPU, or None if not initialized or no new frame.
 
         Raises:
             RuntimeError: If torch is not available
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
-
-        # Start frame timer (only if debug)
-        if self.debug:
+        debug = self.debug
+        if debug:
             frame_start = time.perf_counter()
-
         if not self._initialized:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
         # Check for producer shutdown + version change + read slot (all SharedMemory reads)
-        if self.debug:
+        if debug:
             _shm_t = time.perf_counter()
         try:
             if self.shm_handle.buf[self._shutdown_offset] == 1:
@@ -664,7 +604,7 @@ class CUDAIPCImporter:
             return None  # No new frame available
 
         producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
-        if self.debug:
+        if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
         if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
@@ -673,7 +613,7 @@ class CUDAIPCImporter:
             self.last_latency = 0.0
 
         # Wait for slot to be ready (stream-ordered if stream provided, else CPU-blocking)
-        if self.debug:
+        if debug:
             wait_start = time.perf_counter()
 
         if stream is not None:
@@ -690,13 +630,13 @@ class CUDAIPCImporter:
                 logger.error("Producer timeout — returning None")
                 return None
 
-        if self.debug:
+        if debug:
             self.total_wait_event_time += (time.perf_counter() - wait_start) * 1_000_000
 
         # Frame tracking
         self.frame_count += 1
 
-        if self.debug:
+        if debug:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
@@ -719,103 +659,22 @@ class CUDAIPCImporter:
     def get_frame_numpy(self) -> np.ndarray | None:
         """Get current frame as numpy array (CPU, involves D2H copy).
 
-        Bound to ``_get_frame_numpy_fast`` or ``_get_frame_numpy_debug`` after ``_initialize()``.
-        Falls back to ``_get_frame_numpy_debug`` if called before initialization.
-        """
-        return self._get_frame_numpy_debug()
-
-    def _get_frame_numpy_fast(self) -> np.ndarray | None:
-        """Fast numpy frame path (debug=False) — zero instrumentation overhead.
-
-        Identical logic to ``_get_frame_numpy_debug`` with all ``if self.debug`` guards removed.
-        Any change to the critical path MUST be mirrored in ``_get_frame_numpy_debug``.
-        """
-        if not NUMPY_AVAILABLE:
-            raise RuntimeError("numpy is required for get_frame_numpy()")
-        if not self._initialized:
-            logger.warning("Not initialized - call _initialize() first")
-            return None
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
-        if producer_timestamp > 0:
-            self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
-        else:
-            self.last_latency = 0.0
-        height, width, channels = self.shape
-        itemsize = self._dtype_itemsize()
-        nbytes = height * width * channels * itemsize
-        if (
-            self._numpy_buffer is None
-            or self._numpy_buffer.shape != self.shape
-            or self._numpy_buffer.dtype != self._numpy_dtype()
-        ):
-            if self._pinned_ptr is not None:
-                try:
-                    self.cuda.free_host(self._pinned_ptr)
-                except (RuntimeError, OSError) as e:
-                    logger.debug("free_host failed during reshape: %s", e)
-                self._pinned_ptr = None
-            try:
-                self._pinned_ptr = self.cuda.malloc_host(nbytes)
-                buf = (ctypes.c_ubyte * nbytes).from_address(self._pinned_ptr.value)
-                self._numpy_buffer = np.frombuffer(buf, dtype=self._numpy_dtype()).reshape(self.shape)
-                logger.debug("Allocated pinned numpy buffer: %s, %s", self.shape, self.dtype)
-            except (RuntimeError, OSError) as e:
-                logger.debug("cudaMallocHost failed — falling back to pageable memory: %s", e)
-                self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
-        # See _get_frame_numpy_debug for synchronization rationale.
-        try:
-            self._wait_for_slot(read_slot)
-        except TimeoutError:
-            logger.error("Producer timeout — returning None")
-            return None
-        self.cuda.memcpy_async(
-            dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
-            src=self.dev_ptrs[read_slot],
-            count=nbytes,
-            kind=2,  # cudaMemcpyDeviceToHost
-            stream=self._numpy_stream,
-        )
-        self.cuda.stream_synchronize(self._numpy_stream)
-        self.frame_count += 1
-        return self._numpy_buffer
-
-    def _get_frame_numpy_debug(self) -> np.ndarray | None:
-        """Debug numpy frame path (debug=True) — full per-operation timing instrumentation.
-
-        This is the reference implementation. Any change to the critical path MUST
-        also be applied to ``_get_frame_numpy_fast``.
-
         Returns:
-            Numpy array on CPU, or None if not initialized
+            Numpy array on CPU, or None if not initialized or no new frame.
 
         Raises:
             RuntimeError: If numpy is not available
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
-
-        if self.debug:
+        debug = self.debug
+        if debug:
             frame_start = time.perf_counter()
-
         if not self._initialized:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        if self.debug:
+        if debug:
             _shm_t = time.perf_counter()
         try:
             if self.shm_handle.buf[self._shutdown_offset] == 1:
@@ -835,7 +694,7 @@ class CUDAIPCImporter:
             return None  # No new frame available
 
         producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
-        if self.debug:
+        if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
         if producer_timestamp > 0:
@@ -877,18 +736,18 @@ class CUDAIPCImporter:
         # the IPC event BEFORE publishing write_idx (improvement #2), so the event is always
         # pre-signaled when the consumer reads write_idx — query_event returns True on the
         # first call with no polling delay.
-        if self.debug:
+        if debug:
             _wait_t = time.perf_counter()
         try:
             self._wait_for_slot(read_slot)
         except TimeoutError:
             logger.error("Producer timeout — returning None")
             return None
-        if self.debug:
+        if debug:
             self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
 
         # Async D2H copy on dedicated stream + synchronize (CPU-blocking until copy completes)
-        if self.debug:
+        if debug:
             _d2h_t = time.perf_counter()
         self.cuda.memcpy_async(
             dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
@@ -898,13 +757,13 @@ class CUDAIPCImporter:
             stream=self._numpy_stream,
         )
         self.cuda.stream_synchronize(self._numpy_stream)
-        if self.debug:
+        if debug:
             d2h_time = (time.perf_counter() - _d2h_t) * 1_000_000
 
         # Frame tracking
         self.frame_count += 1
 
-        if self.debug:
+        if debug:
             frame_time = (time.perf_counter() - frame_start) * 1_000_000
             self.total_get_frame_time += frame_time
 
