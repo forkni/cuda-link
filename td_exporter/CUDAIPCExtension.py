@@ -222,6 +222,11 @@ class CUDAIPCExtension:
         self._fmt_conv_active = False
         # Cached dtype_converter Transform TOP reference (stable; refreshed on initialize())
         self._fmt_transform: object = None
+        # Cached ExportBuffer TOP reference — eliminates per-frame ownerComp.op() lookup (same pattern as _fmt_transform)
+        self._export_buffer: object = None
+        # Format conversion result cache — avoid .lower() + set scan when pixel format unchanged
+        self._last_pixel_fmt: str = ""
+        self._last_fmt_needs_conv: bool = False
 
         # Lazy attributes — pre-initialized here to avoid per-frame hasattr()/getattr() fallbacks
         self.ipc_stream = None  # Created on first export_frame() or initialize()
@@ -266,8 +271,13 @@ class CUDAIPCExtension:
         TD 2025 (CUDA 12.8) rejects float16 formats from cudaMemory().
         uint8, uint16 (fixed), and float32 are supported.
         """
-        pixel_fmt = str(getattr(top_op, "pixelFormat", "")).lower()
-        return any(unsupported in pixel_fmt for unsupported in _CUDA_UNSUPPORTED_PIXEL_FORMATS)
+        pixel_fmt = str(getattr(top_op, "pixelFormat", ""))
+        if pixel_fmt == self._last_pixel_fmt:
+            return self._last_fmt_needs_conv
+        self._last_pixel_fmt = pixel_fmt
+        pixel_lower = pixel_fmt.lower()
+        self._last_fmt_needs_conv = any(u in pixel_lower for u in _CUDA_UNSUPPORTED_PIXEL_FORMATS)
+        return self._last_fmt_needs_conv
 
     def switch_mode(self, new_mode: str) -> None:
         """Switch between Sender and Receiver modes.
@@ -417,6 +427,8 @@ class CUDAIPCExtension:
 
             # Cache dtype_converter TOP reference — eliminates per-frame ownerComp.op() lookup
             self._fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+            # Cache ExportBuffer TOP reference — eliminates per-frame ownerComp.op() lookup (same pattern)
+            self._export_buffer = self.ownerComp.op(_EXPORT_BUFFER_NAME)
 
             # Create GPU timing events (only when Debug is ON for benchmarking)
             if self.verbose_performance:
@@ -601,10 +613,14 @@ class CUDAIPCExtension:
         Returns:
             True if export successful, False otherwise
         """
-        top_op = self.ownerComp.op(_EXPORT_BUFFER_NAME)
+        top_op = self._export_buffer
         if top_op is None:
-            self._log(f"'{_EXPORT_BUFFER_NAME}' not found in component", force=True)
-            return False
+            # Lazy lookup: op may have been added after initialize() (e.g. dynamic network edits)
+            top_op = self.ownerComp.op(_EXPORT_BUFFER_NAME)
+            if top_op is None:
+                self._log(f"'{_EXPORT_BUFFER_NAME}' not found in component", force=True)
+                return False
+            self._export_buffer = top_op  # cache for subsequent frames
 
         # Check if Active parameter is enabled (use cached par ref to avoid 3-deep chain per frame)
         if self._active_par is not None and not bool(self._active_par.eval()):
@@ -693,7 +709,10 @@ class CUDAIPCExtension:
             actual_channels = shape.numComps
             actual_size = cuda_mem.size
             # CUDAMemoryShape.dataType returns numpy.dtype — more reliable than byte-ratio inference
-            self._detected_numpy_dtype = getattr(shape, "dataType", None)
+            try:
+                self._detected_numpy_dtype = shape.dataType
+            except AttributeError:
+                self._detected_numpy_dtype = None
 
             # Check if we need to (re)initialize
             if not self._initialized or actual_size != self.data_size:
@@ -1026,8 +1045,6 @@ class CUDAIPCExtension:
         # Unlink SharedMemory (sender is owner and should clean up)
         if hasattr(self, "shm_name"):
             try:
-                from multiprocessing.shared_memory import SharedMemory
-
                 try:
                     shm_temp = SharedMemory(name=self.shm_name)
                     shm_temp.close()
@@ -1047,6 +1064,8 @@ class CUDAIPCExtension:
         self.ipc_stream = None
         self.shm_handle = None
         self._fmt_conv_active = False
+        self._export_buffer = None
+        self._fmt_transform = None
 
         # Reset per-session counters so averages are accurate after reinit
         # and slot selection starts from 0 (matching SharedMemory write_idx=0 written on init).
@@ -1173,11 +1192,9 @@ class CUDAIPCExtension:
                     if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
                         debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
                         return False
-                    import ctypes
-                    from ctypes import c_void_p
 
                     # D2H on _rx_stream: stream_wait_event (enqueued earlier) guarantees data is ready.
-                    cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
+                    cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(c_void_p)
                     self.cuda.memcpy_async(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2, self._rx_stream)
                     self.cuda.stream_synchronize(self._rx_stream)
                     numpy.copyto(

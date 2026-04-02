@@ -288,6 +288,14 @@ class CUDARuntimeAPI:
         self.cudart.cudaGetDevice.argtypes = [POINTER(c_int)]
         self.cudart.cudaGetDevice.restype = c_int
 
+        # cudaStreamQuery(cudaStream_t stream)
+        self.cudart.cudaStreamQuery.argtypes = [CUDAStream_t]
+        self.cudart.cudaStreamQuery.restype = c_int
+
+        # cudaDeviceCanAccessPeer(int* canAccessPeer, int device, int peerDevice)
+        self.cudart.cudaDeviceCanAccessPeer.argtypes = [POINTER(c_int), c_int, c_int]
+        self.cudart.cudaDeviceCanAccessPeer.restype = c_int
+
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
 

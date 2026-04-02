@@ -49,7 +49,7 @@ import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 
-from .cuda_ipc_wrapper import cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
+from .cuda_ipc_wrapper import CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -389,8 +389,6 @@ class CUDAIPCExporter:
         (backward compatible). The caller is then responsible for their own sync.
         """
         if self.source_sync_event is not None and self.cuda is not None:
-            from .cuda_ipc_wrapper import CUDAStream_t
-
             self.cuda.record_event(self.source_sync_event, CUDAStream_t(producer_stream_handle))
 
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
