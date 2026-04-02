@@ -25,6 +25,14 @@ try:
 except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
+try:
+    import cupy as cp
+
+    CUPY_AVAILABLE = True
+except ImportError:
+    cp = None
+    CUPY_AVAILABLE = False
+
 # Import types with fallbacks
 try:
     from td import COMP, TOP, CUDAMemoryShape
@@ -63,6 +71,11 @@ DTYPE_FLOAT16 = 1
 DTYPE_UINT8 = 2
 DTYPE_UINT16 = 3
 
+# Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
+_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+
 # Pixel format substrings that TD 2025 (CUDA 12.8) rejects in cudaMemory().
 # uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
@@ -89,7 +102,7 @@ class CUDAIPCExtension:
     - Per frame: wait on GPU event, call scriptTOP.copyCUDAMemory()
 
     Performance:
-    - Sender per-frame: ~3-8μs IPC primitives + async D2D enqueue (~60-80μs GPU-side for 1080p)
+    - Sender per-frame: ~10-20μs within TD CUDA context; ~177-219μs in standalone Python (WDDM + stream_synchronize)
     - Receiver per-frame: < 5μs (event sync enqueue + copyCUDAMemory call)
     - Zero CPU memory copies (GPU-direct)
     """
@@ -150,6 +163,10 @@ class CUDAIPCExtension:
             # Fallback to default name if parameter doesn't exist
             self.shm_name = "cudalink_output_ipc"
 
+        # Cached SHM byte offsets — computed once in initialize() to avoid per-frame arithmetic
+        self._shutdown_offset = 0  # SHM_HEADER_SIZE + num_slots * SLOT_SIZE
+        self._ts_offset = 0  # _shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+
         # Frame tracking
         self.frame_count = 0
 
@@ -181,6 +198,7 @@ class CUDAIPCExtension:
         self._rx_ipc_events = [None] * self.num_slots  # Opened IPC events
         self._rx_ipc_version = 0
         self._rx_num_slots = 0
+        self._rx_shutdown_offset = 0  # Cached: SHM_HEADER_SIZE + _rx_num_slots * SLOT_SIZE
         self._rx_width = 0
         self._rx_height = 0
         self._rx_num_comps = 0
@@ -198,6 +216,7 @@ class CUDAIPCExtension:
         self._rx_f16_cpu_buf = None  # float16 CPU buffer for D2H conversion (float16 IPC only)
         self._rx_f32_cpu_buf = None  # float32 CPU buffer after conversion (float16 IPC only)
         self._rx_f16_pinned_ptr = None  # cudaMallocHost pointer backing _rx_f16_cpu_buf (or None if pageable)
+        self._rx_cupy_f32_buf = None  # float32 CuPy GPU buffer for GPU-side f16→f32 (CuPy path, float16 IPC only)
 
         # Format conversion state — True when dtype_converter is set to rgba32float
         self._fmt_conv_active = False
@@ -375,6 +394,10 @@ class CUDAIPCExtension:
 
             # Write texture metadata to extended protocol region
             self._write_metadata_to_shm()
+
+            # Cache SHM offsets: avoid recomputing these on every export_frame() call
+            self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
+            self._ts_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
             # Create GPU timing events (only when Debug is ON for benchmarking)
             if self.verbose_performance:
@@ -736,22 +759,25 @@ class CUDAIPCExtension:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
                     self.total_record_event_time += record_event_time
 
+                # Synchronize ipc_stream: ensures D2D copy + event record have completed on
+                # the GPU before write_idx is published. Guarantees the IPC event is pre-signaled
+                # when the consumer reads write_idx, so query_event() returns True immediately
+                # (no polling delay). Cost: ~D2D GPU time per frame (~13us at 512x512).
+                self.cuda.stream_synchronize(self.ipc_stream)
+
                 # Always write producer timestamp (enables consumer latency measurement)
-                timestamp_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-                struct.pack_into("<d", self.shm_handle.buf, timestamp_offset, time.perf_counter())
+                _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
             else:
                 # FALLBACK: Conditional CPU synchronization
                 if self.frame_count % self.sync_interval == 0:
                     self.cuda.synchronize()
 
-            # Update write_idx and reassert shutdown_flag=0 in SharedMemory.
-            # The shutdown_flag write costs 1 byte and prevents a stale flag=1 from
-            # a previous cleanup (or another process that shared this SharedMemory name)
-            # from blocking the receiver.
+            # Publish write_idx LAST: clear shutdown_flag first so the consumer
+            # (which reads shutdown_flag before write_idx) always sees flag=0
+            # when it detects a new frame (atomicity improvement).
             self.write_idx += 1
-            struct.pack_into("<I", self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)
-            shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-            self.shm_handle.buf[shutdown_offset] = 0
+            self.shm_handle.buf[self._shutdown_offset] = 0
+            _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)  # publish last
 
             # Frame tracking
             self.frame_count += 1
@@ -1061,14 +1087,13 @@ class CUDAIPCExtension:
 
         try:
             # Check for shutdown signal
-            shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
-            if self.shm_handle.buf[shutdown_offset] == 1:
+            if self.shm_handle.buf[self._rx_shutdown_offset] == 1:
                 self._log("Sender shutdown detected. Cleaning up.", force=True)
                 self.cleanup_receiver()
                 return False
 
             # Check for version change (sender re-initialized)
-            current_version = struct.unpack_from("<Q", self.shm_handle.buf, VERSION_OFFSET)[0]
+            current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
             if current_version != self._rx_ipc_version:
                 self._log(
                     f"Sender re-initialized (v{self._rx_ipc_version} -> v{current_version}). Reconnecting...",
@@ -1078,7 +1103,7 @@ class CUDAIPCExtension:
                 return False  # Will reinitialize on next frame
 
             # Read write_idx and calculate read slot
-            write_idx = struct.unpack_from("<I", self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
+            write_idx = _ST_U32.unpack_from(self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
             if write_idx == 0:
                 return False  # No frames written yet
 
@@ -1101,27 +1126,53 @@ class CUDAIPCExtension:
             address = self._rx_dev_ptrs[read_slot].value
 
             if self._rx_dtype_code == DTYPE_FLOAT16:
-                # copyCUDAMemory doesn't support float16 — D2H + convert + copyNumpyArray
-                if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
-                    debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
-                    return False
-                import ctypes
-                from ctypes import c_void_p
+                if CUPY_AVAILABLE and self._rx_cupy_f32_buf is not None:
+                    # GPU-side float16→float32 conversion (Ch5: minimize PCIe traffic).
+                    # stream_wait_event (enqueued above on _rx_stream) guarantees GPU data is ready.
+                    # We create a zero-copy CuPy view of the IPC pointer, run an elementwise
+                    # f16→f32 cast entirely on GPU via ExternalStream, then call copyCUDAMemory —
+                    # eliminating two PCIe roundtrips and the CPU numpy.copyto call.
+                    rx_stream_int = int(self._rx_stream.value)
+                    f16_size = self._rx_buffer_size  # original float16 byte count
+                    f32_size = f16_size * 2  # float32 = 2× bytes
 
-                # D2H on _rx_stream: stream_wait_event (enqueued earlier on _rx_stream) guarantees
-                # GPU data is ready before this copy starts. Pinned dst enables true async DMA;
-                # pageable dst falls back to synchronous per CUDA spec (still correct, just slower).
-                cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
-                self.cuda.memcpy_async(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2, self._rx_stream)
-                self.cuda.stream_synchronize(self._rx_stream)
-                # kind=2 is DeviceToHost per cudaMemcpyKind enum
-                # Convert float16→float32 in-place into preallocated buffer (no per-frame temp alloc)
-                numpy.copyto(
-                    self._rx_f32_cpu_buf,
-                    self._rx_f16_cpu_buf.reshape(self._rx_height, self._rx_width, self._rx_num_comps),
-                    casting="same_kind",
-                )
-                import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
+                    mem_f16 = cp.cuda.UnownedMemory(address, f16_size, owner=None)
+                    memptr_f16 = cp.cuda.MemoryPointer(mem_f16, 0)
+                    cupy_f16 = cp.ndarray(
+                        (self._rx_height, self._rx_width, self._rx_num_comps),
+                        dtype=cp.float16,
+                        memptr=memptr_f16,
+                    )
+                    # Run conversion on _rx_stream so copyCUDAMemory (also on _rx_stream)
+                    # automatically serializes after the elementwise cast kernel.
+                    with cp.cuda.ExternalStream(rx_stream_int):
+                        cp.copyto(self._rx_cupy_f32_buf, cupy_f16, casting="same_kind")
+
+                    import_buffer.copyCUDAMemory(
+                        self._rx_cupy_f32_buf.data.ptr,
+                        f32_size,
+                        self._rx_cached_shape,  # dataType=float32 set during initialize_receiver()
+                        stream=rx_stream_int,
+                    )
+                else:
+                    # CPU fallback: D2H + numpy convert + copyNumpyArray.
+                    # Used when CuPy is not installed or GPU buffer allocation failed.
+                    if self._rx_f16_cpu_buf is None or self._rx_f32_cpu_buf is None:
+                        debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
+                        return False
+                    import ctypes
+                    from ctypes import c_void_p
+
+                    # D2H on _rx_stream: stream_wait_event (enqueued earlier) guarantees data is ready.
+                    cpu_ptr = self._rx_f16_cpu_buf.ctypes.data_as(ctypes.c_void_p)
+                    self.cuda.memcpy_async(cpu_ptr, c_void_p(address), self._rx_buffer_size, 2, self._rx_stream)
+                    self.cuda.stream_synchronize(self._rx_stream)
+                    numpy.copyto(
+                        self._rx_f32_cpu_buf,
+                        self._rx_f16_cpu_buf.reshape(self._rx_height, self._rx_width, self._rx_num_comps),
+                        casting="same_kind",
+                    )
+                    import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
             else:
                 import_buffer.copyCUDAMemory(
                     address,
@@ -1246,8 +1297,11 @@ class CUDAIPCExtension:
             with contextlib.suppress(AttributeError):
                 self.ownerComp.par.Numslots = self._rx_num_slots
 
+            # Cache receiver shutdown offset once — avoids per-frame arithmetic in import_frame()
+            self._rx_shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
+
             # Read extended metadata (if available)
-            shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
+            shutdown_offset = self._rx_shutdown_offset
             metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
 
             # Check if SharedMemory is large enough for metadata
@@ -1434,6 +1488,22 @@ class CUDAIPCExtension:
                     (self._rx_height, self._rx_width, self._rx_num_comps), dtype=np_module.float32
                 )
 
+                # GPU-side float32 staging buffer for CuPy conversion path (avoids per-frame allocation).
+                # When CuPy is available, float16→float32 happens on GPU with zero PCIe traffic.
+                if CUPY_AVAILABLE:
+                    try:
+                        self._rx_cupy_f32_buf = cp.empty(
+                            (self._rx_height, self._rx_width, self._rx_num_comps), dtype=cp.float32
+                        )
+                        self._log(
+                            "float16 receiver: CuPy GPU float32 buffer allocated (GPU-side conversion path)", force=True
+                        )
+                    except Exception as _e:
+                        self._rx_cupy_f32_buf = None
+                        self._log(
+                            f"float16 receiver: CuPy GPU buffer alloc failed ({_e}), CPU fallback active", force=True
+                        )
+
             self._rx_cached_shape = CUDAMemoryShape()
             self._rx_cached_shape.width = self._rx_width
             self._rx_cached_shape.height = self._rx_height
@@ -1539,6 +1609,7 @@ class CUDAIPCExtension:
             self._rx_f16_pinned_ptr = None
         self._rx_f16_cpu_buf = None
         self._rx_f32_cpu_buf = None
+        self._rx_cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC
         self._initialized = False
         self._rx_connect_attempts = 0
         self._rx_frames_since_last_retry = 0

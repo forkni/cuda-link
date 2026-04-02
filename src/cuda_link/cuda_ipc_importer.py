@@ -73,6 +73,11 @@ METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B b
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 # TIMESTAMP_OFFSET calculated at runtime: SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
+# Pre-compiled struct objects for hot-path SHM reads (~50-100ns saved per call vs format-string lookup)
+_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+
 
 class CUDAIPCImporter:
     """Python-side importer for CUDA IPC GPU memory.
@@ -499,7 +504,7 @@ class CUDAIPCImporter:
         Returns:
             Slot index to read from, or None if no new frame available
         """
-        write_idx = struct.unpack_from("<I", self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
+        write_idx = _ST_U32.unpack_from(self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
 
         if write_idx == 0:
             return None  # No frames written yet
@@ -582,7 +587,7 @@ class CUDAIPCImporter:
         except (OSError, BufferError) as e:
             logger.debug("Could not read shutdown flag: %s", e)
 
-        current_version = struct.unpack_from("<Q", self.shm_handle.buf, VERSION_OFFSET)[0]
+        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
         if current_version != self.ipc_version:
             logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
             self._reinitialize()
@@ -591,7 +596,7 @@ class CUDAIPCImporter:
         if read_slot is None:
             return None  # No new frame available
 
-        producer_timestamp = struct.unpack_from("<d", self.shm_handle.buf, self._timestamp_offset)[0]
+        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
         if self.debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
@@ -656,7 +661,6 @@ class CUDAIPCImporter:
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
 
-        # Start frame timer (only if debug)
         if self.debug:
             frame_start = time.perf_counter()
 
@@ -664,7 +668,6 @@ class CUDAIPCImporter:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        # Check for producer shutdown + version change + read slot (all SharedMemory reads)
         if self.debug:
             _shm_t = time.perf_counter()
         try:
@@ -675,7 +678,7 @@ class CUDAIPCImporter:
         except (OSError, BufferError) as e:
             logger.debug("Could not read shutdown flag: %s", e)
 
-        current_version = struct.unpack_from("<Q", self.shm_handle.buf, VERSION_OFFSET)[0]
+        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
         if current_version != self.ipc_version:
             logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
             self._reinitialize()
@@ -684,27 +687,15 @@ class CUDAIPCImporter:
         if read_slot is None:
             return None  # No new frame available
 
-        producer_timestamp = struct.unpack_from("<d", self.shm_handle.buf, self._timestamp_offset)[0]
+        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
         if self.debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
-        if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
+        if producer_timestamp > 0:
             self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
         else:
             self.last_latency = 0.0
 
-        # Wait for slot to be ready (CPU-blocking poll + event query)
-        if self.debug:
-            _wait_t = time.perf_counter()
-        try:
-            self._wait_for_slot(read_slot)
-        except TimeoutError:
-            logger.error("Producer timeout — returning None")
-            return None
-        if self.debug:
-            self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
-
-        # D2H copy via CUDA memcpy (inherently not zero-copy)
         height, width, channels = self.shape
         itemsize = self._dtype_itemsize()
         nbytes = height * width * channels * itemsize
@@ -731,6 +722,23 @@ class CUDAIPCImporter:
             except (RuntimeError, OSError) as e:
                 logger.debug("cudaMallocHost failed — falling back to pageable memory: %s", e)
                 self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
+
+        # CPU-side event poll + async D2H + synchronize.
+        # Uses _wait_for_slot (query_event CPU poll) rather than stream_wait_event because
+        # cudaStreamWaitEvent on a cross-process IPC event has high kernel-mode latency on
+        # Windows (~100-300ms when followed by stream_synchronize). The producer records
+        # the IPC event BEFORE publishing write_idx (improvement #2), so the event is always
+        # pre-signaled when the consumer reads write_idx — query_event returns True on the
+        # first call with no polling delay.
+        if self.debug:
+            _wait_t = time.perf_counter()
+        try:
+            self._wait_for_slot(read_slot)
+        except TimeoutError:
+            logger.error("Producer timeout — returning None")
+            return None
+        if self.debug:
+            self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
 
         # Async D2H copy on dedicated stream + synchronize (CPU-blocking until copy completes)
         if self.debug:
@@ -798,7 +806,7 @@ class CUDAIPCImporter:
         except (OSError, BufferError) as e:
             logger.debug("Could not read shutdown flag: %s", e)
 
-        current_version = struct.unpack_from("<Q", self.shm_handle.buf, VERSION_OFFSET)[0]
+        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
         if current_version != self.ipc_version:
             logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
             self._reinitialize()
@@ -807,7 +815,7 @@ class CUDAIPCImporter:
         if read_slot is None:
             return None  # No new frame available
 
-        producer_timestamp = struct.unpack_from("<d", self.shm_handle.buf, self._timestamp_offset)[0]
+        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
         if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
             self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
         else:
