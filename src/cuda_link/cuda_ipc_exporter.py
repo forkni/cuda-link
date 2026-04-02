@@ -262,6 +262,9 @@ class CUDAIPCExporter:
             # Cache constant SharedMemory offsets so export_frame() avoids per-frame arithmetic
             self._ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
+            # Bind hot-path method: fast path has zero debug-branch overhead when debug=False
+            self.export_frame = self._export_frame_debug if self.debug else self._export_frame_fast
+
             self._initialized = True
             logger.info("Initialization complete — ready for zero-copy GPU transfer")
             return True
@@ -393,10 +396,51 @@ class CUDAIPCExporter:
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
         """Export one frame from GPU memory via IPC ring buffer.
 
-        Call this every frame after your GPU kernel produces output.
-        For correct cross-stream ordering without CPU blocking, call
-        record_source_sync(stream_handle) immediately before this.
-        The TD Receiver will pick it up within ~16ms (1 frame at 60 FPS).
+        Bound to ``_export_frame_fast`` or ``_export_frame_debug`` after ``initialize()``.
+        Falls back to ``_export_frame_debug`` if called before initialization.
+        """
+        return self._export_frame_debug(gpu_ptr, size)
+
+    def _export_frame_fast(self, gpu_ptr: int, size: int) -> bool:
+        """Fast export path (debug=False) — zero instrumentation overhead.
+
+        Identical logic to ``_export_frame_debug`` with all ``if self.debug`` guards removed.
+        Any change to the critical path MUST be mirrored in ``_export_frame_debug``.
+        """
+        if not self._initialized:
+            logger.warning("Not initialized — call initialize() first")
+            return False
+        try:
+            slot = self.write_idx % self.num_slots
+            if self.source_sync_event is not None:
+                self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+            self.cuda.memcpy_async(
+                dst=self.dev_ptrs[slot],
+                src=c_void_p(gpu_ptr),
+                count=self.data_size,
+                kind=3,  # cudaMemcpyDeviceToDevice
+                stream=self.ipc_stream,
+            )
+            if self.ipc_events[slot]:
+                self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+            # See _export_frame_debug for synchronization rationale.
+            self.cuda.stream_synchronize(self.ipc_stream)
+            self.write_idx += 1
+            _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
+            self.shm_handle.buf[self._shutdown_offset] = 0
+            _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
+            self.frame_count += 1
+            return True
+        except (OSError, RuntimeError) as e:
+            logger.error("Export failed: %s", e)
+            traceback.print_exc()
+            return False
+
+    def _export_frame_debug(self, gpu_ptr: int, size: int) -> bool:
+        """Debug export path (debug=True) — full per-operation timing instrumentation.
+
+        This is the reference implementation. Any change to the critical path MUST
+        also be applied to ``_export_frame_fast``.
 
         Args:
             gpu_ptr: Source GPU pointer (from tensor.data_ptr()).
