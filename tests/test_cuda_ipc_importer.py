@@ -208,6 +208,108 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
         shm.close()
 
 
+# ---------------------------------------------------------------------------
+# Improvement 1: Stream-ordered wait in get_frame_numpy()
+# ---------------------------------------------------------------------------
+
+
+def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1) -> object:
+    """Build a CUDAIPCImporter with manually-injected state (no real CUDA IPC handles).
+
+    CUDA IPC handles cannot be opened in the same process that created them, so tests
+    that check routing logic inject all state via MagicMock and a bytearray SHM buffer.
+    """
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from cuda_link.cuda_ipc_importer import (
+        METADATA_SIZE,
+        SHM_HEADER_SIZE,
+        SHUTDOWN_FLAG_SIZE,
+        SLOT_SIZE,
+        TIMESTAMP_SIZE,
+        CUDAIPCImporter,
+    )
+
+    # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
+    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
+    buf = bytearray(shm_size)
+    struct.pack_into("<I", buf, 0, 0x43495043)  # magic "CIPC"
+    struct.pack_into("<Q", buf, 4, 1)  # version=1
+    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
+    struct.pack_into("<I", buf, 16, 1)  # write_idx=1
+
+    # Bypass __init__ entirely, inject all attributes manually
+    imp = object.__new__(CUDAIPCImporter)
+    imp.shm_name = "mock_shm"
+    imp.shape = shape
+    imp.dtype = dtype
+    imp.debug = False
+    imp.timeout_ms = 5000.0
+    imp.num_slots = num_slots
+    imp.ipc_handles = [None] * num_slots
+    imp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
+    imp.ipc_events = [None] * num_slots
+    imp.tensors = [None] * num_slots
+    imp._wrappers = [None] * num_slots
+    imp.cupy_arrays = [None] * num_slots
+    imp.frame_count = 0
+    imp._last_write_idx = 0
+    imp.total_wait_event_time = 0.0
+    imp.total_get_frame_time = 0.0
+    imp.total_shm_read_us = 0.0
+    imp.last_latency = 0.0
+    imp.ipc_version = 1  # matches version=1 written into buf above
+    imp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
+    imp._timestamp_offset = imp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+    imp._initialized = True
+
+    # Inject mock CUDA runtime and numpy stream
+    imp.cuda = MagicMock()
+    imp._numpy_stream = MagicMock()
+
+    # Inject mock SharedMemory whose .buf is our bytearray
+    imp.shm_handle = MagicMock()
+    imp.shm_handle.buf = buf
+
+    # Pre-allocate real numpy buffer so get_frame_numpy() skips reallocation and
+    # memcpy_async receives a valid ctypes pointer
+    imp._numpy_buffer = np.zeros(shape, dtype=np.dtype(dtype))
+    imp._pinned_ptr = None
+
+    return imp
+
+
+@pytest.mark.requires_cuda
+def test_get_frame_numpy_always_uses_cpu_poll() -> None:
+    """get_frame_numpy() always uses _wait_for_slot (CPU poll) for the normal D2H path.
+
+    cudaStreamWaitEvent on cross-process IPC events has high kernel-mode IPC latency
+    on Windows (~100-300ms). The CPU poll path (query_event loop) is used unconditionally
+    because improvement #2 guarantees the event is already signaled when write_idx is read.
+    """
+    from unittest.mock import patch
+
+    for has_event in (False, True):
+        imp = _make_importer_with_mock_state(shape=(8, 8, 4), dtype="float32")
+        sentinel_event = object() if has_event else None
+        imp.ipc_events[0] = sentinel_event
+
+        poll_calls: list[int] = []
+        stream_wait_calls: list[tuple] = []
+
+        with (
+            patch.object(imp, "_wait_for_slot", side_effect=lambda s: poll_calls.append(s) or 0.0),  # noqa: B023
+            patch.object(imp.cuda, "stream_wait_event", side_effect=lambda *a: stream_wait_calls.append(a)),  # noqa: B023
+        ):
+            imp.get_frame_numpy()
+
+        assert len(poll_calls) == 1, f"has_event={has_event}: _wait_for_slot must always be called"
+        assert poll_calls[0] == 0, "Must wait on slot 0"
+        assert len(stream_wait_calls) == 0, f"has_event={has_event}: stream_wait_event must NOT be called in numpy path"
+
+
 @pytest.mark.requires_cuda
 def test_read_slot_calculation() -> None:
     """Test _get_read_slot() logic."""

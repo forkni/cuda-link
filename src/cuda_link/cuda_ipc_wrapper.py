@@ -701,6 +701,48 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaMemGetInfo")
         return free.value, total.value
 
+    def stream_query(self, stream: CUDAStream_t) -> bool:
+        """Non-blocking check if all operations on stream have completed.
+
+        Args:
+            stream: CUDA stream to query
+
+        Returns:
+            True if all stream operations have completed, False if still executing
+
+        Raises:
+            RuntimeError: If query fails with an error other than cudaErrorNotReady
+        """
+        result = self.cudart.cudaStreamQuery(stream)
+        if result == 0:  # cudaSuccess
+            return True
+        if result == 600:  # cudaErrorNotReady
+            return False
+        self.check_error(result, "cudaStreamQuery")
+        return False  # unreachable
+
+    def device_can_access_peer(self, device: int, peer_device: int) -> bool:
+        """Check if device can directly access peer_device memory via IPC/NVLink.
+
+        Useful for validating multi-GPU setups before attempting IPC handle operations.
+        On single-GPU systems or systems without peer access, cudaIpcOpenMemHandle
+        may fall back to slower paths without warning.
+
+        Args:
+            device: Source device ID
+            peer_device: Target peer device ID
+
+        Returns:
+            True if direct peer access is available, False otherwise
+
+        Raises:
+            RuntimeError: If query fails
+        """
+        can_access = c_int(0)
+        result = self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
+        self.check_error(result, "cudaDeviceCanAccessPeer")
+        return bool(can_access.value)
+
 
 # Global singleton instance (lazy initialization)
 _cuda_runtime: CUDARuntimeAPI | None = None
