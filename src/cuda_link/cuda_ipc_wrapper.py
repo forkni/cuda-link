@@ -54,6 +54,7 @@ class CUDAError:
     INVALID_DEVICE_POINTER = 17
     INVALID_DEVICE = 101
     INVALID_CONTEXT = 201  # Common in same-process IPC testing
+    NOT_READY = 600
     PEER_ACCESS_ALREADY_ENABLED = 704
 
     @staticmethod
@@ -66,6 +67,7 @@ class CUDAError:
             17: "INVALID_DEVICE_POINTER",
             101: "INVALID_DEVICE",
             201: "INVALID_CONTEXT",
+            600: "NOT_READY",
             704: "PEER_ACCESS_ALREADY_ENABLED",
         }
         return names.get(code, f"UNKNOWN_ERROR_{code}")
@@ -497,7 +499,7 @@ class CUDARuntimeAPI:
         result = self.cudart.cudaEventQuery(event)
         if result == CUDAError.SUCCESS:
             return True
-        elif result == 600:  # cudaErrorNotReady
+        elif result == CUDAError.NOT_READY:
             return False
         self.check_error(result, "cudaEventQuery")
         return False
@@ -722,9 +724,9 @@ class CUDARuntimeAPI:
             RuntimeError: If query fails with an error other than cudaErrorNotReady
         """
         result = self.cudart.cudaStreamQuery(stream)
-        if result == 0:  # cudaSuccess
+        if result == CUDAError.SUCCESS:
             return True
-        if result == 600:  # cudaErrorNotReady
+        if result == CUDAError.NOT_READY:
             return False
         self.check_error(result, "cudaStreamQuery")
         return False  # unreachable

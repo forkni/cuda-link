@@ -25,13 +25,9 @@ try:
 except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
-try:
-    import cupy as cp
-
-    CUPY_AVAILABLE = True
-except ImportError:
-    cp = None
-    CUPY_AVAILABLE = False
+# Defer CuPy import to initialize_receiver() — heavy import imposes TD startup penalty
+CUPY_AVAILABLE: bool = False
+cp = None
 
 # Import types with fallbacks
 try:
@@ -42,7 +38,7 @@ except ImportError:
 
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
 
-from CUDAIPCWrapper import (
+from CUDAIPCWrapper import (  # noqa: E402
     cudaIpcEventHandle_t,
     cudaIpcMemHandle_t,
     get_cuda_runtime,
@@ -217,6 +213,7 @@ class CUDAIPCExtension:
         self._rx_f32_cpu_buf = None  # float32 CPU buffer after conversion (float16 IPC only)
         self._rx_f16_pinned_ptr = None  # cudaMallocHost pointer backing _rx_f16_cpu_buf (or None if pageable)
         self._rx_cupy_f32_buf = None  # float32 CuPy GPU buffer for GPU-side f16→f32 (CuPy path, float16 IPC only)
+        self._rx_cupy_f16_views: list = []  # per-slot float16 CuPy views (pre-allocated, avoids per-frame alloc)
 
         # Format conversion state — True when dtype_converter is set to rgba32float
         self._fmt_conv_active = False
@@ -614,7 +611,8 @@ class CUDAIPCExtension:
             True if export successful, False otherwise
         """
         top_op = self._export_buffer
-        if top_op is None:
+        if top_op is None or not getattr(top_op, "valid", True):
+            self._export_buffer = None  # invalidate stale cache
             # Lazy lookup: op may have been added after initialize() (e.g. dynamic network edits)
             top_op = self.ownerComp.op(_EXPORT_BUFFER_NAME)
             if top_op is None:
@@ -647,6 +645,9 @@ class CUDAIPCExtension:
             # Check source TOP (upstream of converter), not ExportBuffer (downstream).
             # Use cached reference (set in initialize()) to avoid per-frame ownerComp.op() lookup.
             fmt_transform = self._fmt_transform
+            if fmt_transform is not None and not getattr(fmt_transform, "valid", True):
+                self._fmt_transform = None
+                fmt_transform = None
             if fmt_transform is not None:
                 source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
                 if self._needs_format_conversion(source_top):
@@ -1168,13 +1169,7 @@ class CUDAIPCExtension:
                     f16_size = self._rx_buffer_size  # original float16 byte count
                     f32_size = f16_size * 2  # float32 = 2× bytes
 
-                    mem_f16 = cp.cuda.UnownedMemory(address, f16_size, owner=None)
-                    memptr_f16 = cp.cuda.MemoryPointer(mem_f16, 0)
-                    cupy_f16 = cp.ndarray(
-                        (self._rx_height, self._rx_width, self._rx_num_comps),
-                        dtype=cp.float16,
-                        memptr=memptr_f16,
-                    )
+                    cupy_f16 = self._rx_cupy_f16_views[read_slot]
                     # Run conversion on _rx_stream so copyCUDAMemory (also on _rx_stream)
                     # automatically serializes after the elementwise cast kernel.
                     with cp.cuda.ExternalStream(rx_stream_int):
@@ -1520,6 +1515,16 @@ class CUDAIPCExtension:
 
                 # GPU-side float32 staging buffer for CuPy conversion path (avoids per-frame allocation).
                 # When CuPy is available, float16→float32 happens on GPU with zero PCIe traffic.
+                # Lazy import: CuPy is heavy; defer until first receiver init to avoid TD startup penalty.
+                global CUPY_AVAILABLE, cp
+                if cp is None:
+                    try:
+                        import cupy as cp  # noqa: PLC0415
+
+                        CUPY_AVAILABLE = True
+                    except ImportError:
+                        CUPY_AVAILABLE = False
+
                 if CUPY_AVAILABLE:
                     try:
                         self._rx_cupy_f32_buf = cp.empty(
@@ -1528,8 +1533,22 @@ class CUDAIPCExtension:
                         self._log(
                             "float16 receiver: CuPy GPU float32 buffer allocated (GPU-side conversion path)", force=True
                         )
+                        # Pre-create per-slot float16 views to avoid per-frame UnownedMemory allocation.
+                        self._rx_cupy_f16_views = []
+                        for _i in range(self._rx_num_slots):
+                            _ptr = self._rx_dev_ptrs[_i].value
+                            _mem = cp.cuda.UnownedMemory(_ptr, self._rx_buffer_size, owner=self)
+                            _memptr = cp.cuda.MemoryPointer(_mem, 0)
+                            self._rx_cupy_f16_views.append(
+                                cp.ndarray(
+                                    (self._rx_height, self._rx_width, self._rx_num_comps),
+                                    dtype=cp.float16,
+                                    memptr=_memptr,
+                                )
+                            )
                     except Exception as _e:
                         self._rx_cupy_f32_buf = None
+                        self._rx_cupy_f16_views = []
                         self._log(
                             f"float16 receiver: CuPy GPU buffer alloc failed ({_e}), CPU fallback active", force=True
                         )
@@ -1640,6 +1659,7 @@ class CUDAIPCExtension:
         self._rx_f16_cpu_buf = None
         self._rx_f32_cpu_buf = None
         self._rx_cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC
+        self._rx_cupy_f16_views = []
         self._initialized = False
         self._rx_connect_attempts = 0
         self._rx_frames_since_last_retry = 0

@@ -281,7 +281,6 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     return imp
 
 
-@pytest.mark.requires_cuda
 def test_get_frame_numpy_always_uses_cpu_poll() -> None:
     """get_frame_numpy() always uses _wait_for_slot (CPU poll) for the normal D2H path.
 
