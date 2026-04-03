@@ -140,7 +140,7 @@ Backup/
 
 # Old .tox versions (keep only latest release)
 TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.7.1.tox
+!TOXES/CUDAIPCLink_v0.7.3.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
@@ -205,6 +205,7 @@ benchmarks/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
 
 # Local-only docs (style guides, workflow docs, debug protocol)
+docs/OPT_1_implementation_PLAN.md
 docs/AUTOMATED_GIT_WORKFLOW.md
 docs/BASH_STYLE_GUIDE.md
 docs/BATCH_STYLE_GUIDE.md

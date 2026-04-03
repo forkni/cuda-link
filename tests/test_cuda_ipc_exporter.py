@@ -341,3 +341,133 @@ def test_log_helper() -> None:
     # Enable verbosity
     exporter.verbose_performance = True
     exporter._log("Verbose message")
+
+
+# ---------------------------------------------------------------------------
+# Improvement 4: GPU-side float16→float32 conversion in TD receiver
+# ---------------------------------------------------------------------------
+
+
+def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
+    """Build a CUDAIPCExtension (Receiver) with manually-injected float16 state.
+
+    Bypasses real CUDA/CuPy initialization to test routing logic only.
+    """
+    import struct
+    from unittest.mock import MagicMock, patch
+
+    import numpy as np
+
+    # Patch Mode parameter before construction so __init__ thinks it's Receiver
+    with patch("CUDAIPCExtension.CUPY_AVAILABLE", use_cupy):
+        from CUDAIPCExtension import DTYPE_FLOAT16, SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExtension
+
+    HEIGHT, WIDTH, COMPS = 4, 4, 4
+    NUM_SLOTS = 2
+    F16_SIZE = HEIGHT * WIDTH * COMPS * 2  # float16 = 2 bytes/elem
+
+    # Build a bytearray that looks like valid SHM (write_idx=1)
+    shm_size = SHM_HEADER_SIZE + NUM_SLOTS * SLOT_SIZE + 1 + 20 + 8
+    buf = bytearray(shm_size)
+    struct.pack_into("<I", buf, 0, 0x43495043)  # magic
+    struct.pack_into("<Q", buf, 4, 1)  # version
+    struct.pack_into("<I", buf, 12, NUM_SLOTS)  # num_slots
+    struct.pack_into("<I", buf, 16, 1)  # write_idx=1
+
+    ext = object.__new__(CUDAIPCExtension)
+    ext.ownerComp = MagicMock()
+    ext.ownerComp.par.Active.eval.return_value = True
+    ext._active_par = ext.ownerComp.par.Active  # cached par ref (set in __init__)
+    ext.verbose_performance = False
+    ext._initialized = True
+    ext._mode = "Receiver"
+    ext.frame_count = 0
+    ext._rx_last_write_idx = 0
+    ext._rx_ipc_version = 1
+    ext._rx_num_slots = NUM_SLOTS
+    ext._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
+    ext._rx_width = WIDTH
+    ext._rx_height = HEIGHT
+    ext._rx_num_comps = COMPS
+    ext._rx_dtype_code = DTYPE_FLOAT16
+    ext._rx_buffer_size = F16_SIZE
+    ext._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
+    ext._rx_dev_ptrs[0].value = 0xDEAD0000  # fake GPU ptr for slot 0
+    ext._rx_ipc_events = [MagicMock(), MagicMock()]
+    ext._rx_stream = MagicMock()
+    ext._rx_stream.value = 0x1234
+
+    # CPU fallback buffers (always allocated even in CuPy path — used as fallback)
+    ext._rx_f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
+    ext._rx_f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+    ext._rx_f16_pinned_ptr = None
+
+    # CUDAMemoryShape mock (shape for copyCUDAMemory)
+    mock_shape = MagicMock()
+    ext._rx_cached_shape = mock_shape
+
+    ext.cuda = MagicMock()
+    ext.shm_handle = MagicMock()
+    ext.shm_handle.buf = buf
+
+    # CuPy GPU buffer (only if CuPy path is being tested)
+    from unittest.mock import MagicMock as _MagicMock
+
+    if use_cupy:
+        ext._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+        ext._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
+    else:
+        ext._rx_cupy_f32_buf = None
+        ext._rx_cupy_f16_views = []
+
+    ext._rx_frames_since_last_retry = 0
+    ext._rx_connect_attempts = 0
+
+    return ext
+
+
+def test_float16_receiver_uses_cpu_fallback_when_cupy_unavailable() -> None:
+    """import_frame() uses copyNumpyArray (CPU path) when CuPy is not available."""
+    from unittest.mock import MagicMock, patch
+
+    ext = _make_receiver_with_float16_state(use_cupy=False)
+
+    import_buffer = MagicMock()
+
+    with patch("CUDAIPCExtension.CUPY_AVAILABLE", False):
+        result = ext.import_frame(import_buffer)
+
+    assert result is True
+    import_buffer.copyNumpyArray.assert_called_once()
+    import_buffer.copyCUDAMemory.assert_not_called()
+
+
+def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
+    """import_frame() uses copyCUDAMemory (GPU path) when CuPy is available.
+
+    The GPU path eliminates both PCIe roundtrips: instead of GPU→CPU→GPU it
+    performs f16→f32 conversion entirely on-device via CuPy's copyto, then
+    calls copyCUDAMemory with the resulting float32 GPU pointer.
+    """
+    from unittest.mock import MagicMock, patch
+
+    ext = _make_receiver_with_float16_state(use_cupy=True)
+
+    import_buffer = MagicMock()
+
+    # Build a minimal CuPy mock: UnownedMemory, MemoryPointer, ndarray, ExternalStream, copyto
+    mock_cp = MagicMock()
+    mock_cp.float16 = "float16"
+    mock_cp.float32 = "float32"
+    # .data.ptr on the f32 buf must return an integer (GPU pointer)
+    ext._rx_cupy_f32_buf = MagicMock()
+    ext._rx_cupy_f32_buf.data.ptr = 0xF3200000
+
+    with patch("CUDAIPCExtension.CUPY_AVAILABLE", True), patch("CUDAIPCExtension.cp", mock_cp):
+        result = ext.import_frame(import_buffer)
+
+    assert result is True
+    import_buffer.copyCUDAMemory.assert_called_once()
+    import_buffer.copyNumpyArray.assert_not_called()
+    # ExternalStream context manager must be used
+    mock_cp.cuda.ExternalStream.assert_called_once()

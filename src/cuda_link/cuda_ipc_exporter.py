@@ -31,8 +31,8 @@ Architecture:
 
 Performance:
     - Initialization: ~1ms (buffer alloc + handle export)
-    - Per-frame: ~10-20us at 512x512 (async D2D memcpy + event record + write_idx update)
-    - Per-frame: ~50-130us at 1080p (async D2D enqueue + IPC sync)
+    - Per-frame: ~177µs at 512x512 @ 60 FPS (includes producer-side stream_synchronize)
+    - Per-frame: ~219µs at 1080p @ 60 FPS (async D2D + stream_synchronize + protocol writes)
 
 Compatibility:
     - Protocol: v0.5.0 (byte-identical to CUDAIPCExtension/CUDAIPCImporter)
@@ -49,7 +49,7 @@ import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 
-from .cuda_ipc_wrapper import cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
+from .cuda_ipc_wrapper import CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,11 @@ SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
 METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
+
+# Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
+_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
 
 # Data type codes (must match CUDAIPCExtension and CUDAIPCImporter)
 DTYPE_FLOAT32 = 0
@@ -96,7 +101,7 @@ class CUDAIPCExporter:
 
     Performance:
     - Initialization: ~1ms (buffer alloc + handle export)
-    - Per-frame overhead: ~10-20us at 512x512, ~50-130us at 1080p (async D2D enqueue + IPC sync)
+    - Per-frame overhead: ~177µs at 512x512, ~219µs at 1080p @ 60 FPS (async D2D + stream_synchronize)
     - Zero CPU memory copies (GPU-direct)
     """
 
@@ -380,17 +385,10 @@ class CUDAIPCExporter:
         (backward compatible). The caller is then responsible for their own sync.
         """
         if self.source_sync_event is not None and self.cuda is not None:
-            from .cuda_ipc_wrapper import CUDAStream_t
-
             self.cuda.record_event(self.source_sync_event, CUDAStream_t(producer_stream_handle))
 
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
         """Export one frame from GPU memory via IPC ring buffer.
-
-        Call this every frame after your GPU kernel produces output.
-        For correct cross-stream ordering without CPU blocking, call
-        record_source_sync(stream_handle) immediately before this.
-        The TD Receiver will pick it up within ~16ms (1 frame at 60 FPS).
 
         Args:
             gpu_ptr: Source GPU pointer (from tensor.data_ptr()).
@@ -402,24 +400,26 @@ class CUDAIPCExporter:
         if not self._initialized:
             logger.warning("Not initialized — call initialize() first")
             return False
-
-        if self.debug:
+        if size != self.data_size:
+            logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
+            return False
+        debug = self.debug
+        if debug:
             frame_start = time.perf_counter()
-
         try:
             slot = self.write_idx % self.num_slots
 
             # GPU-side wait: ipc_stream waits for source data to be ready (non-blocking CPU).
             # Only active if record_source_sync() was called; otherwise this is a no-op.
-            if self.debug:
+            if debug:
                 _t = time.perf_counter()
             if self.source_sync_event is not None:
                 self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
-            if self.debug:
+            if debug:
                 self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
 
             # Async D2D copy to this slot's persistent IPC buffer
-            if self.debug:
+            if debug:
                 memcpy_start = time.perf_counter()
             self.cuda.memcpy_async(
                 dst=self.dev_ptrs[slot],
@@ -428,33 +428,42 @@ class CUDAIPCExporter:
                 kind=3,  # cudaMemcpyDeviceToDevice
                 stream=self.ipc_stream,
             )
-            if self.debug:
+            if debug:
                 self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
 
             # Record IPC event (stream-ordered, signals consumer that data is ready)
-            if self.debug:
+            if debug:
                 _t = time.perf_counter()
             if self.ipc_events[slot]:
                 self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
-            if self.debug:
+            if debug:
                 self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
-            # Write producer timestamp + advance write_idx + reassert shutdown_flag=0.
-            # The shutdown_flag write (1 byte) prevents a stale flag=1 from another process
-            # that shared this SharedMemory name (e.g. a TD sender that initialised first
-            # and set the flag during its cleanup) from blocking the receiver.
-            if self.debug:
+            # Synchronize ipc_stream to ensure the D2D copy + event record have EXECUTED on
+            # the GPU before publishing write_idx. Without this, the consumer's query_event()
+            # may return False (event not yet signaled) even though write_idx is visible, because
+            # the GPU executes stream operations asynchronously. Blocking here guarantees the
+            # IPC event is pre-signaled when the consumer reads write_idx, so query_event()
+            # returns True on the first call (no polling delay). Cost: ~D2D GPU time per frame
+            # (~13us at 512x512, ~100us at 1080p) — acceptable for the ordering guarantee.
+            self.cuda.stream_synchronize(self.ipc_stream)
+
+            # Write timestamp, clear shutdown_flag, then publish write_idx LAST.
+            # Ordering matters: the consumer reads shutdown_flag BEFORE write_idx, so
+            # clearing it before incrementing write_idx ensures the consumer always sees
+            # shutdown_flag=0 when it detects a new frame (atomicity improvement).
+            if debug:
                 _t = time.perf_counter()
-            struct.pack_into("<d", self.shm_handle.buf, self._ts_offset, time.perf_counter())
             self.write_idx += 1
-            struct.pack_into("<I", self.shm_handle.buf, 16, self.write_idx)
+            _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
             self.shm_handle.buf[self._shutdown_offset] = 0
-            if self.debug:
+            _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
+            if debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 
             self.frame_count += 1
 
-            if self.debug:
+            if debug:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_us += frame_time
 

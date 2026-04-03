@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v0.7.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v0.7.3.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -161,9 +161,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v0.7.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v0.7.3.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v0.7.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v0.7.3.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -171,7 +171,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v0.7.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v0.7.3.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -325,7 +325,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v0.7.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v0.7.3.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
