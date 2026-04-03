@@ -127,16 +127,22 @@
      ---
      Phase 1: Remove Producer stream_synchronize (Python only)
 
-     Step 1.1: Modify _export_frame_fast
+     Step 1.1: Modify export_frame()
 
-     File: src/cuda_link/cuda_ipc_exporter.py, line 427
+     File: src/cuda_link/cuda_ipc_exporter.py, line 449
 
      Remove self.cuda.stream_synchronize(self.ipc_stream). Update comment.
+
+     Note: As of v0.7.3, _export_frame_fast and _export_frame_debug were merged into a single export_frame()
+     method with a `debug = self.debug` local variable. There is only one stream_synchronize call to remove.
 
      Before:
      if self.ipc_events[slot]:
          self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
-     # See _export_frame_debug for synchronization rationale.
+     # Synchronize ipc_stream to ensure the D2D copy + event record have EXECUTED on
+     # the GPU before publishing write_idx. Without this, the consumer's query_event()
+     # may return False (event not yet signaled) even though write_idx is visible...
+     # Cost: ~D2D GPU time per frame (~13us at 512x512, ~100us at 1080p).
      self.cuda.stream_synchronize(self.ipc_stream)
      self.write_idx += 1
 
@@ -148,14 +154,10 @@
      # wait for the IPC event before accessing slot data.
      self.write_idx += 1
 
-     Step 1.2: Modify _export_frame_debug
+     Also remove the stream_synchronize timing from the debug branch (if debug: _t = ... self.total_sync_us +=
+     ... lines surrounding the call).
 
-     File: src/cuda_link/cuda_ipc_exporter.py, line 499
-
-     Same removal. Update the detailed rationale comment (lines 492-498) to explain the new contract. Remove
-     the stream_synchronize timing from debug instrumentation (it's no longer called).
-
-     Step 1.3: Run tests + benchmarks (producer-only change)
+     Step 1.2: Run tests + benchmarks (producer-only change)
 
      pytest tests/ -v  # All 85 tests must pass
      python benchmarks/_verify_improvements.py  # Poll counts will regress — EXPECTED
@@ -380,8 +382,8 @@
      ┌───────────────────────────────────────────┬─────────────────────────────────────────────────┬────────┐
      │                   File                    │                     Changes                     │ Phase  │
      ├───────────────────────────────────────────┼─────────────────────────────────────────────────┼────────┤
-     │ src/cuda_link/cuda_ipc_exporter.py        │ Remove sync (lines 427, 499), update comments   │ Phase  │
-     │                                           │                                                 │ 1      │
+     │ src/cuda_link/cuda_ipc_exporter.py        │ Remove sync (line 449), update comments         │ Phase  │
+     │                                           │ (export_frame merged method as of v0.7.3)       │ 1      │
      ├───────────────────────────────────────────┼─────────────────────────────────────────────────┼────────┤
      │ src/cuda_link/cuda_ipc_importer.py        │ Replace _wait_for_slot (lines 522-555), update  │ Phase  │
      │                                           │ comments (lines 864-870)                        │ 2      │

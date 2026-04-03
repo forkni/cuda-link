@@ -57,7 +57,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v0.7.1.tox` into your TD network
+1. Drag `CUDAIPCLink_v0.7.3.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -73,12 +73,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-0.7.1-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-0.7.3-py3-none-any.whl
 
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -344,16 +344,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-0.7.1-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-0.7.3-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-0.7.1-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -388,7 +388,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v0.7.1.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v0.7.3.tox` into your TouchDesigner network from the project root.
 
 **Option B: Build from source**
 
@@ -405,6 +405,19 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
 Both sides communicate through the 433-byte SharedMemory protocol — zero import dependencies between TD and Python code.
+
+---
+
+## Changelog
+
+### v0.7.3
+Maintainability & performance: merged fast/debug method pairs into single methods with local debug flag, cached operator lookups with lazy fallback, lazy CuPy import, pre-cached f16 views per slot, export size validation, named `CUDAError.NOT_READY` constant.
+
+### v0.7.2
+Performance optimizations: cached SHM offsets, pre-compiled struct objects, debug-path elimination, TD hot-path cleanup.
+
+### v0.7.1
+Initial public release with dual Sender/Receiver mode, ring buffer architecture, and triple output modes (PyTorch, CuPy, NumPy).
 
 ---
 
