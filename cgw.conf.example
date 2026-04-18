@@ -1,0 +1,213 @@
+# cgw.conf.example — All configuration options for claude-git-workflow
+#
+# Copy to .cgw.conf in your project root, or run:
+#   ./scripts/git/configure.sh
+# to auto-generate it from project scanning.
+#
+# .cgw.conf is git-ignored by default (configure.sh adds it to .gitignore).
+# Priority: environment variables > .cgw.conf > built-in defaults
+
+# ============================================================================
+# BRANCH NAMES
+# ============================================================================
+
+# Source branch — where development happens; merged into target
+# Default: development
+CGW_SOURCE_BRANCH="development"
+
+# Target branch — stable/production branch; receives merges
+# Default: main
+CGW_TARGET_BRANCH="main"
+
+# Remote name used for fetch, push, and remote-tracking-ref resolution.
+# Override with CGW_REMOTE=upstream for fork workflows.
+# Default: origin
+CGW_REMOTE="origin"
+
+# ============================================================================
+# LOCAL-ONLY FILES
+# ============================================================================
+# Space-separated list of files/directories that must NEVER be committed.
+# Entries ending with / are treated as directory prefixes.
+# commit_enhanced.sh will auto-unstage these before committing.
+# configure.sh also bakes this list into the pre-commit hook.
+#
+# Default: CLAUDE.md MEMORY.md .claude/ logs/
+# (configure.sh auto-detects project-specific additions like .env files)
+
+CGW_LOCAL_FILES="CLAUDE.md MEMORY.md .claude/ logs/"
+
+# ============================================================================
+# COMMIT MESSAGE PREFIXES
+# ============================================================================
+# Standard conventional commit prefixes are always included:
+#   feat fix docs chore test refactor style perf
+#
+# Add project-specific extras here (pipe-separated):
+# CGW_EXTRA_PREFIXES="cuda|tensorrt"    # GPU/ML project
+# CGW_EXTRA_PREFIXES="android|ios"      # Mobile project
+# CGW_EXTRA_PREFIXES="infra|deploy"     # DevOps project
+
+CGW_EXTRA_PREFIXES=""
+
+# ============================================================================
+# LINT CONFIGURATION
+# ============================================================================
+# Set CGW_LINT_CMD="" to disable lint checks entirely.
+#
+# ── Python / ruff (default) ──────────────────────────────
+CGW_LINT_CMD="ruff"
+CGW_LINT_CHECK_ARGS="check ."
+CGW_LINT_FIX_ARGS="check --fix ."
+CGW_LINT_EXCLUDES="--extend-exclude logs --extend-exclude .venv"
+CGW_FORMAT_CMD="ruff"
+CGW_FORMAT_CHECK_ARGS="format --check ."
+CGW_FORMAT_FIX_ARGS="format ."
+CGW_FORMAT_EXCLUDES="--exclude logs --exclude .venv"
+#
+# ── JavaScript / ESLint + Prettier ──────────────────────
+# CGW_LINT_CMD="eslint"
+# CGW_LINT_CHECK_ARGS="."
+# CGW_LINT_FIX_ARGS=". --fix"
+# CGW_LINT_EXCLUDES=""
+# CGW_FORMAT_CMD="prettier"
+# CGW_FORMAT_CHECK_ARGS="--check ."
+# CGW_FORMAT_FIX_ARGS="--write ."
+# CGW_FORMAT_EXCLUDES=""
+#
+# ── Go / golangci-lint ───────────────────────────────────
+# CGW_LINT_CMD="golangci-lint"
+# CGW_LINT_CHECK_ARGS="run"
+# CGW_LINT_FIX_ARGS="run --fix"
+# CGW_LINT_EXCLUDES=""
+# CGW_FORMAT_CMD="gofmt"
+# CGW_FORMAT_CHECK_ARGS="-l ."
+# CGW_FORMAT_FIX_ARGS="-w ."
+# CGW_FORMAT_EXCLUDES=""
+#
+# ── C/C++ / clang-tidy + clang-format ──────────────────
+# CGW_LINT_CMD="clang-tidy"
+# CGW_LINT_CHECK_ARGS="-p build"   # path to dir containing compile_commands.json
+# CGW_LINT_FIX_ARGS="-p build --fix"
+# CGW_LINT_EXCLUDES=""
+# CGW_FORMAT_CMD="clang-format"
+# CGW_FORMAT_CHECK_ARGS="--dry-run --Werror -r ."
+# CGW_FORMAT_FIX_ARGS="-i -r ."
+# CGW_FORMAT_EXCLUDES=""
+#
+# ── C/C++ / cppcheck + clang-format ────────────────────
+# CGW_LINT_CMD="cppcheck"
+# CGW_LINT_CHECK_ARGS="--enable=all --error-exitcode=1 ."
+# CGW_LINT_FIX_ARGS="--enable=all --error-exitcode=1 ."  # no auto-fix; same as check
+# CGW_LINT_EXCLUDES=""
+# CGW_FORMAT_CMD="clang-format"
+# CGW_FORMAT_CHECK_ARGS="--dry-run --Werror -r ."
+# CGW_FORMAT_FIX_ARGS="-i -r ."
+# CGW_FORMAT_EXCLUDES=""
+#
+# ── No linter ───────────────────────────────────────────
+# CGW_LINT_CMD=""
+# CGW_FORMAT_CMD=""
+
+# ============================================================================
+# MODIFIED-ONLY LINT FILE EXTENSIONS (check_lint.sh, fix_lint.sh)
+# ============================================================================
+# Space-separated glob patterns controlling which files are matched in
+# --modified-only mode. Override for non-Python projects.
+#
+# Default (Python):
+CGW_LINT_EXTENSIONS="*.py"
+#
+# JavaScript / TypeScript:
+# CGW_LINT_EXTENSIONS="*.js *.ts *.jsx *.tsx"
+#
+# Go:
+# CGW_LINT_EXTENSIONS="*.go"
+#
+# C / C++:
+# CGW_LINT_EXTENSIONS="*.c *.cpp *.h *.hpp"
+
+# ============================================================================
+# MERGE STRATEGY OPTIONS (merge_with_validation.sh)
+# ============================================================================
+# CGW_MERGE_CONFLICT_STYLE: Set to "diff3" to show the base version in conflict
+# markers (recommended — makes manual resolution easier).
+# Empty = git default two-way markers.
+CGW_MERGE_CONFLICT_STYLE=""
+# CGW_MERGE_CONFLICT_STYLE="diff3"
+
+# CGW_MERGE_IGNORE_WHITESPACE: Set to "1" to add -Xignore-space-change to merge.
+# Prevents false conflicts from whitespace-only differences (tabs/spaces, line endings).
+CGW_MERGE_IGNORE_WHITESPACE="0"
+
+# ============================================================================
+# MARKDOWN LINT (commit_enhanced.sh, check_lint.sh, push_validated.sh)
+# ============================================================================
+# Optional markdown linting step run in addition to CGW_LINT_CMD.
+# Set CGW_MARKDOWNLINT_CMD="" to disable (default).
+#
+# Example (markdownlint-cli2):
+# CGW_MARKDOWNLINT_CMD="markdownlint-cli2"
+# CGW_MARKDOWNLINT_ARGS="**/*.md !CLAUDE.md !MEMORY.md"
+#
+# Skip at runtime with --skip-md-lint flag or CGW_SKIP_MD_LINT=1.
+
+CGW_MARKDOWNLINT_CMD=""
+CGW_MARKDOWNLINT_ARGS="**/*.md !CLAUDE.md !MEMORY.md"
+
+# ============================================================================
+# DOCS CI VALIDATION (merge_with_validation.sh)
+# ============================================================================
+# Extended regex (bash ERE) matching allowed doc filenames in docs/.
+# Empty string = skip docs validation entirely (default).
+# Only needed if you have strict CI rules about what docs can land on target.
+#
+# Example:
+# CGW_DOCS_PATTERN="^(README\.md|.*_GUIDE\.md|.*_REFERENCE\.md|CHANGELOG\.md)$"
+
+CGW_DOCS_PATTERN=""
+
+# ============================================================================
+# DEV-ONLY FILE WARNINGS (cherry_pick_commits.sh)
+# ============================================================================
+# Space-separated paths. If a cherry-picked commit touches these files,
+# you'll get a warning (or abort in non-interactive mode).
+# Empty = no check (default).
+#
+# Example:
+# CGW_DEV_ONLY_FILES="tests/ pytest.ini docs/TESTING_GUIDE.md"
+
+CGW_DEV_ONLY_FILES=""
+
+# ============================================================================
+# TESTS DIRECTORY CLEANUP (merge_with_validation.sh)
+# ============================================================================
+# When 1: removes tests/ from target branch if "tests/" is in .gitignore.
+# When 0: leaves tests/ alone (default — most projects want tests everywhere).
+
+CGW_CLEANUP_TESTS="0"
+
+# ============================================================================
+# FORCE-PUSH PROTECTION (push_validated.sh)
+# ============================================================================
+# Space-separated branch names that require --force flag + manual confirmation
+# for force-push. Defaults to CGW_TARGET_BRANCH if not set.
+
+# CGW_PROTECTED_BRANCHES="main staging"
+
+# ============================================================================
+# MERGE MODE
+# ============================================================================
+# Controls how changes are promoted from source to target branch.
+#
+# "direct" (default): merge locally via merge_with_validation.sh.
+#                     Fast, no PR required.
+#
+# "pr":               create a GitHub PR via create_pr.sh.
+#                     Triggers Charlie CI auto-review + GitHub Actions.
+#                     Requires: gh CLI installed + authenticated.
+#
+# Use "pr" to enable CI agent review before merging to main.
+#
+CGW_MERGE_MODE="direct"
+# CGW_MERGE_MODE="pr"

@@ -23,11 +23,45 @@ from __future__ import annotations
 import ctypes
 import logging
 import struct
+import sys
 import time
 import traceback
 from multiprocessing.shared_memory import SharedMemory
 
 logger = logging.getLogger(__name__)
+
+# Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
+# The winmm DLL handle is cached at module level so the load cost is paid once.
+if sys.platform == "win32":
+    try:
+        _winmm = ctypes.WinDLL("winmm")
+    except OSError:
+        _winmm = None
+else:
+    _winmm = None
+
+
+class _HighResTimer:
+    """Context manager that requests 1ms timer resolution on Windows.
+
+    On Windows, the default system timer tick is ~15.6ms, making
+    ``time.sleep(0.0001)`` wake up 15-150x later than intended. Calling
+    ``timeBeginPeriod(1)`` drops the floor to ~1ms for the duration of the
+    with-block, then restores the default on exit. No-op on non-Windows.
+    """
+
+    __slots__ = ("_active",)
+
+    def __enter__(self) -> "_HighResTimer":
+        self._active = _winmm is not None
+        if self._active:
+            _winmm.timeBeginPeriod(1)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._active:
+            _winmm.timeEndPeriod(1)
+
 
 # Optional dependencies with fallback
 try:
@@ -104,6 +138,7 @@ class CUDAIPCImporter:
         dtype: str | None = None,
         debug: bool = False,
         timeout_ms: float = 5000.0,
+        device: int = 0,
     ):
         """Initialize CUDA IPC importer.
 
@@ -113,12 +148,16 @@ class CUDAIPCImporter:
             dtype: Data type as string: "float32", "float16", or "uint8". If None, auto-detect from metadata.
             debug: Enable verbose debug logging (default: False)
             timeout_ms: Timeout for waiting on producer events in milliseconds (default: 5000.0)
+            device: CUDA device index (default: 0). Must match the sender's device.
+                    IPC handles are device-scoped; opening a handle on the wrong device
+                    causes error 400 (cudaErrorInvalidValue).
         """
         self.shm_name = shm_name
         self.shape = shape  # May be None initially (will be auto-detected)
         self.dtype = dtype  # May be None initially (will be auto-detected)
         self.debug = debug
         self.timeout_ms = timeout_ms
+        self.device = device
 
         # CUDA runtime API
         self.cuda = None
@@ -231,9 +270,16 @@ class CUDAIPCImporter:
             return True
 
         try:
-            # Load CUDA runtime
-            self.cuda = get_cuda_runtime()
-            logger.info("Loaded CUDA runtime")
+            # Load CUDA runtime bound to the requested device
+            self.cuda = get_cuda_runtime(device=self.device)
+            actual_device = self.cuda.get_device()
+            if actual_device != self.device:
+                raise RuntimeError(
+                    f"Device mismatch: requested device {self.device} but CUDA context "
+                    f"is bound to device {actual_device}. Sender and receiver must use "
+                    "the same device index."
+                )
+            logger.info("Loaded CUDA runtime on device %d", actual_device)
 
             # Create internal stream for numpy async D2H operations
             self._numpy_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
@@ -540,16 +586,19 @@ class CUDAIPCImporter:
 
         # GPU-side synchronization if event available
         if self.ipc_events[slot]:
-            # Poll with timeout instead of blocking indefinitely
+            # Poll with timeout. On Windows the default system-timer resolution is
+            # ~15.6ms, making time.sleep(0.0001) sleep ~15ms instead of 100µs.
+            # _HighResTimer calls timeBeginPeriod(1) to drop the floor to ~1ms.
             deadline = wait_start + self.timeout_ms / 1000
-            while True:
-                if self.cuda.query_event(self.ipc_events[slot]):
-                    break
-                if time.perf_counter() >= deadline:
-                    raise TimeoutError(
-                        f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
-                    )
-                time.sleep(0.0001)  # 100µs polling interval
+            with _HighResTimer():
+                while True:
+                    if self.cuda.query_event(self.ipc_events[slot]):
+                        break
+                    if time.perf_counter() >= deadline:
+                        raise TimeoutError(
+                            f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
+                        )
+                    time.sleep(0.0001)  # 100µs nominal; ~1ms actual on Windows with high-res timer
         elif TORCH_AVAILABLE:
             # Fallback: CPU synchronization with torch
             torch.cuda.synchronize()

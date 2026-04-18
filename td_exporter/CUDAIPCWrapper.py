@@ -100,15 +100,22 @@ class CUDARuntimeAPI:
         cuda.free(dev_ptr)
     """
 
-    def __init__(self) -> None:
-        """Initialize CUDA runtime library."""
+    def __init__(self, device: int = 0) -> None:
+        """Initialize CUDA runtime library.
+
+        Args:
+            device: CUDA device index to bind. Defaults to 0.
+                    IPC handles are device-scoped; sender and receiver must
+                    use the same device or peer-access must be enabled.
+        """
+        self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
-        # Establish CUDA primary context on device 0 in this runtime instance.
+        # Establish CUDA primary context on the requested device.
         # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
         # alongside torch (which has its own bundled cudart). Each DLL instance needs
         # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(0)
+        self.cudart.cudaSetDevice(device)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -297,6 +304,14 @@ class CUDARuntimeAPI:
         # cudaDeviceCanAccessPeer(int* canAccessPeer, int device, int peerDevice)
         self.cudart.cudaDeviceCanAccessPeer.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceCanAccessPeer.restype = c_int
+
+        # cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority)
+        self.cudart.cudaDeviceGetStreamPriorityRange.argtypes = [POINTER(c_int), POINTER(c_int)]
+        self.cudart.cudaDeviceGetStreamPriorityRange.restype = c_int
+
+        # cudaStreamCreateWithPriority(cudaStream_t* pStream, unsigned int flags, int priority)
+        self.cudart.cudaStreamCreateWithPriority.argtypes = [POINTER(CUDAStream_t), c_uint, c_int]
+        self.cudart.cudaStreamCreateWithPriority.restype = c_int
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
@@ -625,6 +640,20 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventElapsedTime")
         return elapsed_ms.value
 
+    def get_device(self) -> int:
+        """Return the CUDA device index currently bound to this context.
+
+        Returns:
+            Integer device index (matches self.device if context is healthy)
+
+        Raises:
+            RuntimeError: If query fails
+        """
+        device = c_int()
+        result = self.cudart.cudaGetDevice(byref(device))
+        self.check_error(result, "cudaGetDevice")
+        return device.value
+
     def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
         """Create CUDA stream with specified flags.
 
@@ -640,6 +669,34 @@ class CUDARuntimeAPI:
         stream = CUDAStream_t()
         result = self.cudart.cudaStreamCreateWithFlags(byref(stream), flags)
         self.check_error(result, "cudaStreamCreateWithFlags")
+        return stream
+
+    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
+        """Create CUDA stream at the specified (or highest available) priority.
+
+        On CUDA, stream priority is an integer where a smaller value means
+        higher priority. cudaDeviceGetStreamPriorityRange returns [least, greatest]
+        where greatest is the most-negative value — i.e., the highest priority.
+
+        Args:
+            flags: Stream flags. Default 0x01 = cudaStreamNonBlocking.
+            priority: Stream priority. None means use highest available (greatest).
+
+        Returns:
+            CUDAStream_t: Opaque stream handle
+
+        Raises:
+            RuntimeError: If stream creation fails
+        """
+        if priority is None:
+            least = c_int()
+            greatest = c_int()
+            result = self.cudart.cudaDeviceGetStreamPriorityRange(byref(least), byref(greatest))
+            self.check_error(result, "cudaDeviceGetStreamPriorityRange")
+            priority = greatest.value
+        stream = CUDAStream_t()
+        result = self.cudart.cudaStreamCreateWithPriority(byref(stream), flags, priority)
+        self.check_error(result, "cudaStreamCreateWithPriority")
         return stream
 
     def destroy_stream(self, stream: CUDAStream_t) -> None:
@@ -758,13 +815,32 @@ class CUDARuntimeAPI:
 _cuda_runtime: CUDARuntimeAPI | None = None
 
 
-def get_cuda_runtime() -> CUDARuntimeAPI:
+def get_cuda_runtime(device: int = 0) -> CUDARuntimeAPI:
     """Get global CUDA runtime instance (singleton).
+
+    The singleton is created on first call. Subsequent calls with a *different*
+    device index will raise RuntimeError — a single process context can only
+    be bound to one device via this shared-cudart pattern.
+
+    Args:
+        device: CUDA device index (default 0). Must match across all callers
+                within the same process.
 
     Returns:
         CUDARuntimeAPI: Global CUDA runtime wrapper
+
+    Raises:
+        RuntimeError: If called with a device index that conflicts with the
+                      already-initialized singleton.
     """
     global _cuda_runtime
     if _cuda_runtime is None:
-        _cuda_runtime = CUDARuntimeAPI()
+        _cuda_runtime = CUDARuntimeAPI(device=device)
+    elif _cuda_runtime.device != device:
+        raise RuntimeError(
+            f"CUDA runtime singleton was initialized for device {_cuda_runtime.device}, "
+            f"but caller requested device {device}. A single process can only bind to "
+            "one device via the shared-cudart singleton. Create a separate "
+            "CUDARuntimeAPI(device=...) instance for multi-device use."
+        )
     return _cuda_runtime

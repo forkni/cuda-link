@@ -127,6 +127,13 @@ class CUDAIPCExtension:
         except (AttributeError, ValueError):
             self.num_slots = 3
 
+        # CUDA device index - read from parameter or default to 0.
+        # IPC handles are device-scoped; sender and receiver must use the same device.
+        try:
+            self.device = int(ownerComp.par.Cudadevice.eval())
+        except (AttributeError, ValueError):
+            self.device = 0
+
         # GPU buffer state (arrays for ring buffer)
         self.dev_ptrs = [None] * self.num_slots  # List of GPU buffer pointers
         self.buffer_size = 0  # Aligned allocation size (for cudaMalloc)
@@ -336,16 +343,16 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
-            # Load CUDA runtime
-            self.cuda = get_cuda_runtime()
-            self._log("Loaded CUDA runtime", force=True)
+            # Load CUDA runtime bound to the configured device
+            self.cuda = get_cuda_runtime(device=self.device)
+            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
 
-            # Create dedicated non-blocking stream for IPC operations (fixes TD cudaMemory() perf warning)
-            # Reuse existing stream on re-init to avoid leaks
+            # Create high-priority dedicated non-blocking stream for IPC operations.
+            # Reuse existing stream on re-init to avoid leaks.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
-                    f"Created IPC stream: 0x{int(self.ipc_stream.value):016x}",
+                    f"Created IPC stream (high-priority): 0x{int(self.ipc_stream.value):016x}",
                     force=True,
                 )
             else:
@@ -632,9 +639,9 @@ class CUDAIPCExtension:
             # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
             # Always use a non-blocking stream (never None/default stream) for TD 2025 compat.
             if self.cuda is None:
-                self.cuda = get_cuda_runtime()
+                self.cuda = get_cuda_runtime(device=self.device)
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created IPC stream (pre-init): 0x{int(self.ipc_stream.value):016x}",
                     force=True,
@@ -1271,7 +1278,8 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
-            self.cuda = get_cuda_runtime()
+            self.cuda = get_cuda_runtime(device=self.device)
+            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
 
             # Open SharedMemory (sender must have created it)
             try:
@@ -1415,7 +1423,7 @@ class CUDAIPCExtension:
             # MUST happen before ipc_open_mem_handle to establish CUDA context
             # Reuse existing stream on re-init to avoid leaks on reconnection cycles
             if not hasattr(self, "_rx_stream") or self._rx_stream is None:
-                self._rx_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self._rx_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created receiver stream: 0x{int(self._rx_stream.value):016x}",
                     force=True,
