@@ -45,6 +45,7 @@ from CUDAIPCWrapper import (  # noqa: E402
     cudaIpcMemHandle_t,
     get_cuda_runtime,
 )
+from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 
 # Protocol layout constants (named offsets, not hardcoded literals)
 PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
@@ -194,6 +195,7 @@ class CUDAIPCExtension:
         # polling delay on the consumer side). Set to "0" to skip the sync and reclaim the
         # ~13-100µs/frame cost. Mirrors Python exporter; default ON preserves current behavior.
         self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") == "1"
+        self._nvml_observer: NVMLObserver | None = None
 
         # Performance metrics
         self.total_memcpy_time = 0.0
@@ -461,6 +463,13 @@ class CUDAIPCExtension:
 
             self._initialized = True
             self._log("Initialization complete - ready for zero-copy GPU transfer", force=True)
+
+            if NVML_AVAILABLE and os.environ.get("CUDALINK_NVML", "0") == "1":
+                obs = NVMLObserver(device=self.device, enabled=True)
+                if obs.start():
+                    self._nvml_observer = obs
+                    self._log(f"NVMLObserver attached on device {self.device}", force=True)
+
             return True
 
         except (OSError, RuntimeError, ValueError) as e:
@@ -893,6 +902,22 @@ class CUDAIPCExtension:
                         # Rare: event wait/query failed
                         log_msg += f", GPU timing: {e}"
 
+                if self._nvml_observer is not None:
+                    snap = self._nvml_observer.snapshot()
+                    if snap.get("nvml_available"):
+                        log_msg += (
+                            f" | [NVML] gpu={snap.get('gpu_util_pct', '?')}%"
+                            f" mem={snap.get('mem_bw_util_pct', '?')}%"
+                            f" sm={snap.get('sm_clock_mhz', '?')}MHz"
+                            f" pcie_tx={snap.get('pcie_tx_kbps', '?')}kbps"
+                            f" pcie_rx={snap.get('pcie_rx_kbps', '?')}kbps"
+                            f" temp={snap.get('temp_c', '?')}C"
+                            f" power={snap.get('power_w', '?')}W"
+                        )
+                        reasons = snap.get("throttle_reasons") or []
+                        if reasons:
+                            log_msg += f" throttle={','.join(reasons)}"
+
                 self._log(log_msg, force=False)
 
             return True
@@ -978,6 +1003,10 @@ class CUDAIPCExtension:
         # Skip if already cleaned up (prevents double-cleanup from Active toggle + __delTD__)
         if not self._initialized and self.shm_handle is None:
             return
+
+        if self._nvml_observer is not None:
+            self._nvml_observer.stop()
+            self._nvml_observer = None
 
         cuda_valid = self._is_cuda_context_valid()
         if not cuda_valid:
