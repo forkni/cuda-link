@@ -190,11 +190,12 @@ class CUDAIPCExtension:
         # Conditional synchronization (CPU fallback)
         self.sync_interval = 10  # Sync every N frames (reduces GPU sync overhead)
 
-        # CUDALINK_EXPORT_SYNC=1 (default): CPU-blocks on ipc_stream after record_event so
-        # the IPC event is pre-signaled before write_idx is published (avoids WDDM-latency
-        # polling delay on the consumer side). Set to "0" to skip the sync and reclaim the
-        # ~13-100µs/frame cost. Mirrors Python exporter; default ON preserves current behavior.
-        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") == "1"
+        # CUDALINK_EXPORT_SYNC=0 (default): correctness is guaranteed by the receiver's
+        # cudaStreamWaitEvent(ipc_events[slot]) — no CPU block needed. Set to "1" to restore
+        # the pre-2026-04-23 blocking sync. Measured cost of "1": ~295 µs/frame dead CPU wait
+        # (A/B/C diagnostic, SESSION_LOG 2026-04-23; Handbook p3/pg56 confirmed the stream is
+        # idle at frame-end). Mirrors Python lib default "0".
+        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "0") == "1"
         # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
         # Zero overhead when unset (single predicted-false branch per region).
         self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
@@ -865,9 +866,9 @@ class CUDAIPCExtension:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
                     self.total_record_event_time += record_event_time
 
-                # CUDALINK_EXPORT_SYNC=1 (default): blocks CPU on ipc_stream to pre-signal the
-                # IPC event before write_idx is published, so query_event() returns True on the
-                # first consumer poll. Saves ~13-100µs/frame when disabled (WDDM workaround).
+                # CUDALINK_EXPORT_SYNC=1: CPU-blocks on ipc_stream after record_event.
+                # Default is now "0" (receiver cudaStreamWaitEvent guarantees correctness).
+                # Enable for regression testing or if downstream consumers rely on CPU-timing.
                 if self._export_sync:
                     if self.verbose_performance and self._export_profile:
                         _t_sync = time.perf_counter()
