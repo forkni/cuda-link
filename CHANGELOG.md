@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] — 2026-04-23
 
 ### Added
+
 - Configurable CUDA device index (`device: int = 0`) on `CUDARuntimeAPI`, `CUDAIPCExporter`,
   `CUDAIPCImporter`, and the TD extension (`Cudadevice` parameter). The `get_cuda_runtime()`
   singleton now raises `RuntimeError` when re-requested with a conflicting device.
@@ -48,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (up from ~80 at v0.7.3).
 
 ### Changed
+
 - **BREAKING (runtime default):** `CUDALINK_EXPORT_SYNC` defaults to **OFF** on the Python
   library's `export_frame()` hot path — `cudaStreamSynchronize` is no longer called
   automatically. Saves ~13–100 µs/frame. The TD extension still defaults **ON**. Set
@@ -65,10 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `src/cuda_link/cuda_ipc_wrapper.py`).
 
 ### Fixed
+
 - `.claude/settings.json` PreToolUse Bash hook path corrected
   (`F:/RD_PROJECTS/...` → `D:/cuda-link/...`).
 
 ### Internal / Docs
+
 - Explanatory comment at `src/cuda_link/cuda_ipc_importer.py` documenting the `getattr`
   fallback pattern in `cleanup()` for `__del__`-time partial-init safety.
 - `docs/OPT_1_implementation_PLAN.md` moved to local-only (untracked).

@@ -195,6 +195,13 @@ class CUDAIPCExtension:
         # polling delay on the consumer side). Set to "0" to skip the sync and reclaim the
         # ~13-100µs/frame cost. Mirrors Python exporter; default ON preserves current behavior.
         self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") == "1"
+        # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
+        # Zero overhead when unset (single predicted-false branch per region).
+        self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
+        # CUDALINK_EXPORT_FLUSH_PROBE=1: calls cudaStreamQuery after record_event when
+        # _export_sync=False. Per CUDA Handbook p3/pg56, this forces WDDM-deferred commands
+        # to submit without blocking — used to confirm the WDDM batching hypothesis.
+        self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "0") == "1"
         self._nvml_observer: NVMLObserver | None = None
 
         # Performance metrics
@@ -202,12 +209,22 @@ class CUDAIPCExtension:
         self.total_record_event_time = 0.0
         self.total_export_time = 0.0
         self.total_cuda_memory_time = 0.0  # Time spent in cudaMemory() call
+        # Profile accumulators (active only when CUDALINK_EXPORT_PROFILE=1)
+        self.total_pre_interop_us: float = 0.0  # frame_start → just before cudaMemory()
+        self.total_post_interop_us: float = 0.0  # cudaMemory() done → just before memcpy_async
+        self.total_sync_us: float = 0.0  # cudaStreamSynchronize (when _export_sync)
+        self.total_sticky_check_us: float = 0.0  # cudaPeekAtLastError per frame
+        self.total_flush_probe_us: float = 0.0  # cudaStreamQuery WDDM flush probe
+        self.total_shm_publish_us: float = 0.0  # write_idx + _release_fence + SHM pack
+        self.total_unaccounted_us: float = 0.0  # frame_time − Σ all sub-timers
 
         # Verbosity control - read from local Debug parameter
         try:
             self.verbose_performance = bool(ownerComp.par.Debug.eval())
         except AttributeError:
             self.verbose_performance = False
+        if self._export_profile:
+            self.verbose_performance = True  # profile mode requires verbose timing path
 
         # Apply showCustomOnly from Hidebuiltin parameter on load
         with contextlib.suppress(AttributeError):
@@ -659,6 +676,12 @@ class CUDAIPCExtension:
         # Start frame timer (only if verbose)
         if self.verbose_performance:
             frame_start = time.perf_counter()
+            if self._export_profile:
+                _t_pre = frame_start
+                # initialize per-frame profile locals so unaccounted calc is always defined
+                _this_pre = _this_post = _this_sync = _this_sticky = _this_fp = _this_shm = 0.0
+                # record_event_time is only set in the ipc_events path; init here for the fallback
+                record_event_time = 0.0
 
         try:
             # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
@@ -711,6 +734,9 @@ class CUDAIPCExtension:
 
             # Time cudaMemory() call (OpenGL→CUDA interop)
             if self.verbose_performance:
+                if self._export_profile:
+                    _this_pre = (time.perf_counter() - _t_pre) * 1_000_000
+                    self.total_pre_interop_us += _this_pre
                 cuda_mem_start = time.perf_counter()
 
             # Get TOP's CUDA memory — always pass a valid stream (never None)
@@ -729,6 +755,8 @@ class CUDAIPCExtension:
             if self.verbose_performance:
                 cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
                 self.total_cuda_memory_time += cuda_mem_time
+                if self._export_profile:
+                    _t_post = time.perf_counter()
 
             # Reset error suppression on success
             if self._last_cuda_mem_err:
@@ -799,6 +827,9 @@ class CUDAIPCExtension:
 
             # Time cudaMemcpyAsync D2D (non-blocking) - only if verbose
             if self.verbose_performance:
+                if self._export_profile:
+                    _this_post = (time.perf_counter() - _t_post) * 1_000_000
+                    self.total_post_interop_us += _this_post
                 memcpy_start = time.perf_counter()
                 # Record GPU timing start event (actual GPU time measurement)
                 if self._timing_start:
@@ -838,9 +869,31 @@ class CUDAIPCExtension:
                 # IPC event before write_idx is published, so query_event() returns True on the
                 # first consumer poll. Saves ~13-100µs/frame when disabled (WDDM workaround).
                 if self._export_sync:
+                    if self.verbose_performance and self._export_profile:
+                        _t_sync = time.perf_counter()
                     self.cuda.stream_synchronize(self.ipc_stream)
+                    if self.verbose_performance and self._export_profile:
+                        _this_sync = (time.perf_counter() - _t_sync) * 1_000_000
+                        self.total_sync_us += _this_sync
 
+                if self.verbose_performance and self._export_profile:
+                    _t_sticky = time.perf_counter()
                 self.cuda.check_sticky_error("export_frame")
+                if self.verbose_performance and self._export_profile:
+                    _this_sticky = (time.perf_counter() - _t_sticky) * 1_000_000
+                    self.total_sticky_check_us += _this_sticky
+
+                # WDDM deferred-submission probe: forces pending GPU work to submit without
+                # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
+                # cudaStreamQuery triggers that flush. Only active when EXPORT_FLUSH_PROBE=1
+                # and EXPORT_SYNC=0 (if sync is on, the stream is already flushed above).
+                if self._export_flush_probe and not self._export_sync:
+                    if self.verbose_performance and self._export_profile:
+                        _t_fp = time.perf_counter()
+                    self.cuda.stream_query(self.ipc_stream)
+                    if self.verbose_performance and self._export_profile:
+                        _this_fp = (time.perf_counter() - _t_fp) * 1_000_000
+                        self.total_flush_probe_us += _this_fp
 
                 # Always write producer timestamp (enables consumer latency measurement)
                 _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
@@ -852,10 +905,15 @@ class CUDAIPCExtension:
             # Publish write_idx LAST: clear shutdown_flag first so the consumer
             # (which reads shutdown_flag before write_idx) always sees flag=0
             # when it detects a new frame (atomicity improvement).
+            if self.verbose_performance and self._export_profile:
+                _t_shm = time.perf_counter()
             self.write_idx += 1
             self.shm_handle.buf[self._shutdown_offset] = 0
             _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
             _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)  # publish last
+            if self.verbose_performance and self._export_profile:
+                _this_shm = (time.perf_counter() - _t_shm) * 1_000_000
+                self.total_shm_publish_us += _this_shm
 
             # Frame tracking
             self.frame_count += 1
@@ -864,6 +922,19 @@ class CUDAIPCExtension:
             if self.verbose_performance:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_time += frame_time
+                if self._export_profile:
+                    _this_accounted = (
+                        _this_pre
+                        + cuda_mem_time
+                        + _this_post
+                        + memcpy_time
+                        + record_event_time
+                        + _this_sync
+                        + _this_sticky
+                        + _this_fp
+                        + _this_shm
+                    )
+                    self.total_unaccounted_us += frame_time - _this_accounted
 
             # Detailed first-frame diagnostic (one-time, not affected by 100-frame interval)
             if self.verbose_performance and self.frame_count == 1:
@@ -917,6 +988,27 @@ class CUDAIPCExtension:
                         reasons = snap.get("throttle_reasons") or []
                         if reasons:
                             log_msg += f" throttle={','.join(reasons)}"
+
+                if self._export_profile:
+                    avg_pre = self.total_pre_interop_us / self.frame_count
+                    avg_post = self.total_post_interop_us / self.frame_count
+                    avg_sync = self.total_sync_us / self.frame_count
+                    avg_sticky = self.total_sticky_check_us / self.frame_count
+                    avg_fp = self.total_flush_probe_us / self.frame_count
+                    avg_shm = self.total_shm_publish_us / self.frame_count
+                    avg_unacc = self.total_unaccounted_us / self.frame_count
+                    log_msg += (
+                        f" | [PROFILE] pre={avg_pre:.1f}us"
+                        f" interop={avg_cuda_mem:.1f}us"
+                        f" post={avg_post:.1f}us"
+                        f" memcpy={avg_memcpy:.1f}us"
+                        f" record={avg_record:.1f}us"
+                        f" sync={avg_sync:.1f}us"
+                        f" sticky={avg_sticky:.1f}us"
+                        f" flush_probe={avg_fp:.1f}us"
+                        f" shm={avg_shm:.1f}us"
+                        f" unacc={avg_unacc:.1f}us"
+                    )
 
                 self._log(log_msg, force=False)
 
