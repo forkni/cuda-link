@@ -1097,6 +1097,8 @@ class CUDAIPCImporter:
             self._pinned_ptr = None
             self._numpy_buffer = None
 
+        # getattr fallback: cleanup() is called from __del__ on partially-initialized
+        # instances where __init__ raised before assigning this attribute.
         if getattr(self, "_host_registered_arr", None) is not None and self.cuda:
             self._clear_host_registered()
             self._numpy_buffer = None
