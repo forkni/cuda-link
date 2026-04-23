@@ -34,7 +34,8 @@ dependencies = []
 torch = ["torch>=2.0"]
 numpy = ["numpy>=1.21"]
 cupy = ["cupy-cuda12x>=12.0"]
-all = ["cuda-link[torch,numpy,cupy]"]
+nvml = ["pynvml>=11.5"]
+all = ["cuda-link[torch,numpy,cupy,nvml]"]
 dev = [
     "cuda-link[all]",
     "pytest>=7.0",

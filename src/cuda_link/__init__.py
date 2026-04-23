@@ -9,6 +9,7 @@ CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
+from .nvml_observer import NVML_AVAILABLE, NVMLObserver
 
 __version__ = "0.7.3"
 __all__ = [
@@ -19,4 +20,6 @@ __all__ = [
     "CUPY_AVAILABLE",
     "NUMPY_AVAILABLE",
     "TORCH_AVAILABLE",
+    "NVML_AVAILABLE",
+    "NVMLObserver",
 ]

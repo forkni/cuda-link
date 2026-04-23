@@ -14,7 +14,9 @@ Architecture:
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
+import threading
 import time
 import traceback
 from ctypes import c_void_p
@@ -77,6 +79,14 @@ _ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
 _FMT_TRANSFORM_NAME = "dtype_converter"  # Permanent Transform TOP in network (before ExportBuffer)
 _EXPORT_BUFFER_NAME = "ExportBuffer"  # Null TOP downstream of dtype_converter; cudaMemory() source
+
+# C3: CPU release-fence — ensures shutdown_flag write is visible before write_idx publish.
+_fence_lock = threading.Lock()
+
+
+def _release_fence() -> None:
+    with _fence_lock:
+        pass
 
 
 class CUDAIPCExtension:
@@ -178,6 +188,12 @@ class CUDAIPCExtension:
 
         # Conditional synchronization (CPU fallback)
         self.sync_interval = 10  # Sync every N frames (reduces GPU sync overhead)
+
+        # CUDALINK_EXPORT_SYNC=1 (default): CPU-blocks on ipc_stream after record_event so
+        # the IPC event is pre-signaled before write_idx is published (avoids WDDM-latency
+        # polling delay on the consumer side). Set to "0" to skip the sync and reclaim the
+        # ~13-100µs/frame cost. Mirrors Python exporter; default ON preserves current behavior.
+        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") == "1"
 
         # Performance metrics
         self.total_memcpy_time = 0.0
@@ -809,11 +825,13 @@ class CUDAIPCExtension:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
                     self.total_record_event_time += record_event_time
 
-                # Synchronize ipc_stream: ensures D2D copy + event record have completed on
-                # the GPU before write_idx is published. Guarantees the IPC event is pre-signaled
-                # when the consumer reads write_idx, so query_event() returns True immediately
-                # (no polling delay). Cost: ~D2D GPU time per frame (~13us at 512x512).
-                self.cuda.stream_synchronize(self.ipc_stream)
+                # CUDALINK_EXPORT_SYNC=1 (default): blocks CPU on ipc_stream to pre-signal the
+                # IPC event before write_idx is published, so query_event() returns True on the
+                # first consumer poll. Saves ~13-100µs/frame when disabled (WDDM workaround).
+                if self._export_sync:
+                    self.cuda.stream_synchronize(self.ipc_stream)
+
+                self.cuda.check_sticky_error("export_frame")
 
                 # Always write producer timestamp (enables consumer latency measurement)
                 _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
@@ -827,6 +845,7 @@ class CUDAIPCExtension:
             # when it detects a new frame (atomicity improvement).
             self.write_idx += 1
             self.shm_handle.buf[self._shutdown_offset] = 0
+            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
             _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)  # publish last
 
             # Frame tracking

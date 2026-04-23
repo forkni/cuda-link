@@ -40,6 +40,19 @@ echo   !PYVER!
 echo.
 
 REM ----------------------------------------
+REM [1.5/4] Sync td_exporter/CUDAIPCWrapper.py from canonical source
+REM ----------------------------------------
+echo [1.5/4] Syncing CUDAIPCWrapper.py...
+
+python scripts\sync_td_wrapper.py
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Failed to sync td_exporter/CUDAIPCWrapper.py from src/cuda_link/cuda_ipc_wrapper.py.
+    goto :error
+)
+echo.
+
+REM ----------------------------------------
 REM [2/4] Ensure PyPA build frontend
 REM ----------------------------------------
 echo [2/4] Ensuring build tools...

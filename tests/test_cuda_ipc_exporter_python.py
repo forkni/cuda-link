@@ -389,6 +389,7 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp.dtype = dtype
     exp.num_slots = num_slots
     exp.debug = False
+    exp.device = 0
     exp.data_size = 8 * 8 * 4  # H * W * C * itemsize (uint8 = 1 byte)
     exp.write_idx = 0
     exp.frame_count = 0
@@ -400,6 +401,18 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
     exp._ts_offset = exp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
     exp._initialized = True
+    exp._export_sync = False
+
+    # C2 fields (Batch 2A)
+    exp._strict_device = False
+    exp._source_sync_device_warned = False
+    exp._ptr_device_cache = set()
+
+    # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
+    mock_attrs = MagicMock()
+    mock_attrs.type = 2  # cudaMemoryTypeDevice
+    mock_attrs.device = 0
+    exp.cuda.pointer_get_attributes.return_value = mock_attrs
 
     exp.shm_handle = MagicMock()
     exp.shm_handle.buf = bytearray(shm_size)
@@ -494,3 +507,72 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
         f"shutdown_flag write (log[{shutdown_pos}]) must precede "
         f"write_idx publish (log[{write_idx_pos}]); full log: {write_log}"
     )
+
+
+def test_release_fence_called_between_flag_and_write_idx() -> None:
+    """C3: _release_fence() is called after shutdown_flag clear and before write_idx publish.
+
+    The fence must sit between the two writes to form the mechanical release-barrier
+    guarantee. This test verifies the position using the _SpyBuf + _release_fence spy approach.
+    """
+    import struct as real_struct
+    from unittest.mock import MagicMock, patch
+
+    fence_calls: list[int] = []  # index in write_log at time of fence call
+    write_log: list[tuple] = []
+
+    class _SpyBuf(bytearray):
+        def __setitem__(self, key, val) -> None:
+            if isinstance(key, int):
+                write_log.append(("setitem", key, val))
+            super().__setitem__(key, val)
+
+    real_st_u32 = real_struct.Struct("<I")
+    real_st_f64 = real_struct.Struct("<d")
+
+    def spy_u32_pack_into(buf, offset: int, *args) -> None:
+        write_log.append(("pack_into", offset))
+        real_st_u32.pack_into(buf, offset, *args)
+
+    def spy_f64_pack_into(buf, offset: int, *args) -> None:
+        real_st_f64.pack_into(buf, offset, *args)
+
+    def spy_fence() -> None:
+        fence_calls.append(len(write_log))  # record position in log
+
+    mock_st_u32 = MagicMock()
+    mock_st_u32.pack_into.side_effect = spy_u32_pack_into
+    mock_st_f64 = MagicMock()
+    mock_st_f64.pack_into.side_effect = spy_f64_pack_into
+
+    exp = _make_exporter_with_mock_state()
+    spy_buf = _SpyBuf(len(exp.shm_handle.buf))
+    spy_buf[exp._shutdown_offset] = 1
+    write_log.clear()
+    exp.shm_handle.buf = spy_buf
+
+    with (
+        patch("cuda_link.cuda_ipc_exporter._ST_U32", mock_st_u32),
+        patch("cuda_link.cuda_ipc_exporter._ST_F64", mock_st_f64),
+        patch("cuda_link.cuda_ipc_exporter._release_fence", spy_fence),
+    ):
+        result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
+
+    assert result is True
+    assert len(fence_calls) == 1, "exactly one fence call per export_frame"
+
+    WRITE_IDX_OFFSET = 16
+    shutdown_pos = next(
+        (i for i, e in enumerate(write_log) if e[0] == "setitem" and e[1] == exp._shutdown_offset),
+        None,
+    )
+    write_idx_pos = next(
+        (i for i, e in enumerate(write_log) if e[0] == "pack_into" and e[1] == WRITE_IDX_OFFSET),
+        None,
+    )
+    fence_pos = fence_calls[0]
+
+    assert shutdown_pos is not None
+    assert write_idx_pos is not None
+    assert shutdown_pos < fence_pos, "fence must come AFTER shutdown_flag write"
+    assert fence_pos <= write_idx_pos, "fence must come BEFORE write_idx publish"

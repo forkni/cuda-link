@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import struct
 import sys
 import time
@@ -52,7 +53,7 @@ class _HighResTimer:
 
     __slots__ = ("_active",)
 
-    def __enter__(self) -> "_HighResTimer":
+    def __enter__(self) -> _HighResTimer:
         self._active = _winmm is not None
         if self._active:
             _winmm.timeBeginPeriod(1)
@@ -159,6 +160,12 @@ class CUDAIPCImporter:
         self.timeout_ms = timeout_ms
         self.device = device
 
+        # N1: spin-then-sleep configuration.
+        # Phase 1: tight cudaEventQuery spin for up to _spin_us microseconds (no sleep).
+        # Phase 2: existing time.sleep(0.0001) poll loop (unchanged).
+        # CUDALINK_WAIT_SPIN_US=0 disables Phase 1, restoring pre-batch-2 behaviour.
+        self._spin_us: int = int(os.getenv("CUDALINK_WAIT_SPIN_US", "200"))
+
         # CUDA runtime API
         self.cuda = None
         self._initialized = False
@@ -183,6 +190,8 @@ class CUDAIPCImporter:
         # Numpy state (pre-allocated buffer for D2H copy)
         self._numpy_buffer = None  # Reused numpy array (avoids per-frame allocation)
         self._pinned_ptr = None  # Pinned host memory pointer (cudaMallocHost)
+        self._host_registered_arr = None  # numpy array page-locked via cudaHostRegister (fallback)
+        self.pinned_memory_available: bool = False  # True when D2H buffer is pinned
 
         # Frame tracking
         self.frame_count = 0
@@ -193,6 +202,11 @@ class CUDAIPCImporter:
         self.total_get_frame_time = 0.0
         self.total_shm_read_us: float = 0.0
         self.last_latency = 0.0  # End-to-end latency from producer timestamp (ms)
+        # N1: spin-phase vs sleep-phase breakdown counters
+        self.total_wait_spin_us: float = 0.0  # time spent in Phase 1 (tight spin)
+        self.total_wait_sleep_us: float = 0.0  # time spent in Phase 2 (sleep poll)
+        self.wait_spin_hits: int = 0  # frames resolved in Phase 1
+        self.wait_sleep_hits: int = 0  # frames resolved in Phase 2
 
         # Cached SharedMemory offsets (computed once in _initialize(), constant thereafter)
         self._shutdown_offset: int = 0
@@ -258,6 +272,15 @@ class CUDAIPCImporter:
         raise TypeError(
             f"Unsupported stream type: {type(stream)}. Expected torch.cuda.Stream, cupy.cuda.Stream, or int."
         )
+
+    def _clear_host_registered(self) -> None:
+        """Unregister page-locked memory registered via cudaHostRegister and clear the reference."""
+        if self._host_registered_arr is not None:
+            try:
+                self.cuda.host_unregister(self._host_registered_arr.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                logger.debug("host_unregister failed: %s", e)
+            self._host_registered_arr = None
 
     def _initialize(self) -> bool:
         """Initialize CUDA IPC resources.
@@ -586,10 +609,28 @@ class CUDAIPCImporter:
 
         # GPU-side synchronization if event available
         if self.ipc_events[slot]:
-            # Poll with timeout. On Windows the default system-timer resolution is
-            # ~15.6ms, making time.sleep(0.0001) sleep ~15ms instead of 100µs.
-            # _HighResTimer calls timeBeginPeriod(1) to drop the floor to ~1ms.
             deadline = wait_start + self.timeout_ms / 1000
+
+            # Phase 1 — tight spin (no sleep): the producer records the IPC event
+            # BEFORE publishing write_idx, so the event is typically pre-signaled
+            # and query_event() returns True on the first iteration.
+            # Budget: CUDALINK_WAIT_SPIN_US (default 200µs).
+            if self._spin_us > 0:
+                spin_deadline = wait_start + self._spin_us / 1_000_000
+                while time.perf_counter() < spin_deadline:
+                    if self.cuda.query_event(self.ipc_events[slot]):
+                        spin_us = (time.perf_counter() - wait_start) * 1_000_000
+                        self.total_wait_spin_us += spin_us
+                        self.wait_spin_hits += 1
+                        return spin_us
+                    if time.perf_counter() >= deadline:
+                        raise TimeoutError(
+                            f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
+                        )
+
+            # Phase 2 — sleep poll (existing behaviour, unchanged).
+            # On Windows _HighResTimer drops sleep floor from ~15ms to ~1ms.
+            phase2_start = time.perf_counter()
             with _HighResTimer():
                 while True:
                     if self.cuda.query_event(self.ipc_events[slot]):
@@ -599,6 +640,8 @@ class CUDAIPCImporter:
                             f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
                         )
                     time.sleep(0.0001)  # 100µs nominal; ~1ms actual on Windows with high-res timer
+            self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
+            self.wait_sleep_hits += 1
         elif TORCH_AVAILABLE:
             # Fallback: CPU synchronization with torch
             torch.cuda.synchronize()
@@ -692,14 +735,19 @@ class CUDAIPCImporter:
             if self.frame_count % 97 == 0:
                 n = self.frame_count
                 sync_mode = "GPU-Events" if all(self.ipc_events) else "CPU-Sync"
+                spin_hit_pct = 100.0 * self.wait_spin_hits / n if n > 0 else 0.0
                 logger.debug(
-                    "Frame %d [%s]: shm_read=%.1fus stream_wait=%.1fus total=%.1fus latency=%.2fms",
+                    "Frame %d [%s]: shm_read=%.1fus stream_wait=%.1fus total=%.1fus "
+                    "latency=%.2fms | spin_hit=%.0f%% avg_spin=%.1fus avg_sleep=%.1fus",
                     n,
                     sync_mode,
                     self.total_shm_read_us / n,
                     self.total_wait_event_time / n,
                     self.total_get_frame_time / n,
                     self.last_latency,
+                    spin_hit_pct,
+                    self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
+                    self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
                 )
 
         # Return tensor for this slot (zero-copy, no allocation)
@@ -768,15 +816,36 @@ class CUDAIPCImporter:
                 except (RuntimeError, OSError) as e:
                     logger.debug("free_host failed during reshape: %s", e)
                 self._pinned_ptr = None
+            self._clear_host_registered()
 
             try:
                 self._pinned_ptr = self.cuda.malloc_host(nbytes)
                 buf = (ctypes.c_ubyte * nbytes).from_address(self._pinned_ptr.value)
                 self._numpy_buffer = np.frombuffer(buf, dtype=self._numpy_dtype()).reshape(self.shape)
+                self.pinned_memory_available = True
                 logger.debug("Allocated pinned numpy buffer: %s, %s", self.shape, self.dtype)
             except (RuntimeError, OSError) as e:
-                logger.debug("cudaMallocHost failed — falling back to pageable memory: %s", e)
-                self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
+                logger.warning(
+                    "cudaMallocHost failed for %d bytes (%.1f MB) — trying cudaHostRegister: %s",
+                    nbytes,
+                    nbytes / 1_048_576,
+                    e,
+                )
+                try:
+                    fallback_arr = np.empty(self.shape, dtype=self._numpy_dtype())
+                    self.cuda.host_register(fallback_arr.ctypes.data, fallback_arr.nbytes)
+                    self._host_registered_arr = fallback_arr
+                    self._numpy_buffer = fallback_arr
+                    self.pinned_memory_available = True
+                    logger.info("cudaHostRegister succeeded — using registered pinned memory")
+                except (RuntimeError, OSError) as e2:
+                    logger.warning(
+                        "cudaHostRegister also failed — falling back to pageable memory "
+                        "(expect ~2x slower D2H bandwidth): %s",
+                        e2,
+                    )
+                    self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
+                    self.pinned_memory_available = False
 
         # CPU-side event poll + async D2H + synchronize.
         # Uses _wait_for_slot (query_event CPU poll) rather than stream_wait_event because
@@ -806,6 +875,7 @@ class CUDAIPCImporter:
             stream=self._numpy_stream,
         )
         self.cuda.stream_synchronize(self._numpy_stream)
+        self.cuda.check_sticky_error("get_frame_numpy")
         if debug:
             d2h_time = (time.perf_counter() - _d2h_t) * 1_000_000
 
@@ -955,6 +1025,7 @@ class CUDAIPCImporter:
                         except (RuntimeError, OSError) as e:
                             logger.debug("free_host failed during reinit: %s", e)
                     self._pinned_ptr = None
+                    self._clear_host_registered()
                     self._numpy_buffer = None  # Force reallocation on next get_frame_numpy()
         except (struct.error, ValueError, IndexError) as e:
             logger.debug("Could not re-read metadata during reinit: %s", e)
@@ -1017,14 +1088,17 @@ class CUDAIPCImporter:
                     except (RuntimeError, OSError) as e:
                         logger.error("Error destroying event for slot %d: %s", slot, e)
 
-        # Free pinned host memory
-        if hasattr(self, "_pinned_ptr") and self._pinned_ptr is not None and self.cuda:
+        if self._pinned_ptr is not None and self.cuda:
             try:
                 self.cuda.free_host(self._pinned_ptr)
                 logger.debug("Freed pinned numpy buffer")
             except (RuntimeError, OSError) as e:
                 logger.debug("free_host skipped (context gone): %s", e)
             self._pinned_ptr = None
+            self._numpy_buffer = None
+
+        if getattr(self, "_host_registered_arr", None) is not None and self.cuda:
+            self._clear_host_registered()
             self._numpy_buffer = None
 
         # Destroy numpy stream
@@ -1083,13 +1157,23 @@ class CUDAIPCImporter:
         """
         return self._initialized and len(self.dev_ptrs) > 0 and all(ptr is not None for ptr in self.dev_ptrs)
 
+    def attach_nvml_observer(self, observer: object) -> None:
+        """Attach an NVMLObserver for GPU telemetry in get_stats().
+
+        Args:
+            observer: NVMLObserver instance (must already be started).
+        """
+        self._nvml_observer = observer
+
     def get_stats(self) -> dict[str, object]:
         """Get importer statistics.
 
         Returns:
-            Dictionary with importer stats
+            Dictionary with importer stats.
+            Includes 'nvml' sub-dict when an NVMLObserver is attached.
+            Includes N1 spin/sleep hit counters when spin budget > 0.
         """
-        return {
+        stats: dict[str, object] = {
             "initialized": self._initialized,
             "shape": self.shape,
             "dtype": self.dtype,
@@ -1106,4 +1190,12 @@ class CUDAIPCImporter:
                 if TORCH_AVAILABLE and self.tensors and self.tensors[0] is not None
                 else "N/A"
             ),
+            "wait_spin_hits": self.wait_spin_hits,
+            "wait_sleep_hits": self.wait_sleep_hits,
+            "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
+            "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
         }
+        observer = getattr(self, "_nvml_observer", None)
+        if observer is not None:
+            stats["nvml"] = observer.snapshot()
+        return stats
