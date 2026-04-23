@@ -1,70 +1,99 @@
 #!/usr/bin/env bash
-# install_hooks.sh - Install Git hooks from .githooks/ to .git/hooks/
-# Purpose: automation of git hook installation
-# Usage: ./scripts/git/install_hooks.sh
+# install_hooks.sh - Install git hooks from .githooks/ to .git/hooks/
+# Purpose: Install pre-commit hook that blocks local-only files
+# Usage: ./scripts/git/install_hooks.sh [OPTIONS]
+#
+# Globals:
+#   SCRIPT_DIR     - Directory containing this script
+#   PROJECT_ROOT   - Auto-detected git repo root (set by _config.sh)
+#   logfile        - Set by init_logging
+# Returns:
+#   0 on success, 1 on failure
 
-set -u
+set -uo pipefail
 
-# Get directory of this script to ensure we can source relative files if needed,
-# though here we mainly need project root.
-SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
-# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_common.sh"
 
 init_logging "install_hooks"
 
 main() {
-  # Write log header
+  if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+    echo "Usage: ./scripts/git/install_hooks.sh"
+    echo ""
+    echo "Install git hooks from .githooks/ to .git/hooks/."
+    echo "Installs: pre-commit (blocks local-only files, optional lint check)"
+    echo ""
+    echo "The hook file must exist at: \$PROJECT_ROOT/.githooks/pre-commit"
+    echo "Run configure.sh first to generate this file from the template."
+    echo ""
+    echo "Options:"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "To uninstall: rm .git/hooks/pre-commit"
+    echo "To bypass temporarily (not recommended): git commit --no-verify"
+    exit 0
+  fi
+
   {
     echo "========================================="
     echo "Install Hooks Log"
     echo "========================================="
     echo "Start Time: $(date)"
     echo "Working Directory: ${PROJECT_ROOT}"
-  } > "$logfile"
+  } >"$logfile"
 
   echo "=== Git Hooks Installer ===" | tee -a "$logfile"
   echo "" | tee -a "$logfile"
 
-  # Ensure execution from project root
   cd "${PROJECT_ROOT}" || {
-    echo "[ERROR] Cannot find project root" | tee -a "$logfile"
+    err "Cannot find project root"
     exit 1
   }
 
-  # Check if .git directory exists
   if [[ ! -d ".git" ]]; then
-    echo "[ERROR] .git directory not found. This script must be run from the repository root." | tee -a "$logfile"
+    err ".git directory not found. Run from repository root."
     exit 1
   fi
 
-  # Check if .githooks directory exists
   if [[ ! -d ".githooks" ]]; then
-    echo "[ERROR] .githooks directory not found. This repository doesn't have hook templates." | tee -a "$logfile"
+    err ".githooks directory not found."
+    echo "Run configure.sh first to generate hook files, or create .githooks/ manually." >&2
     exit 1
   fi
 
   log_section_start "INSTALL HOOKS" "$logfile"
 
-  # Install pre-commit hook
+  local hooks_ok=0
+
   if [[ -f ".githooks/pre-commit" ]]; then
     echo "Installing pre-commit hook..." | tee -a "$logfile"
-
-    if cp ".githooks/pre-commit" ".git/hooks/pre-commit" >> "$logfile" 2>&1; then
-      chmod +x ".git/hooks/pre-commit" >> "$logfile" 2>&1
-      echo "✓ pre-commit hook installed" | tee -a "$logfile"
-      log_section_end "INSTALL HOOKS" "$logfile" "0"
+    if cp ".githooks/pre-commit" ".git/hooks/pre-commit" >>"$logfile" 2>&1; then
+      chmod +x ".git/hooks/pre-commit" >>"$logfile" 2>&1
+      echo "  [OK] pre-commit installed" | tee -a "$logfile"
     else
-      echo "✗ Failed to install pre-commit hook" | tee -a "$logfile"
-      log_section_end "INSTALL HOOKS" "$logfile" "1"
-      exit 1
+      echo "  [FAIL] Failed to install pre-commit hook" | tee -a "$logfile"
+      hooks_ok=1
     fi
   else
-    echo "⚠ pre-commit template not found, skipping" | tee -a "$logfile"
+    err "pre-commit template not found at .githooks/pre-commit"
+    echo "Run configure.sh to generate the hook from your CGW_LOCAL_FILES config." >&2
     log_section_end "INSTALL HOOKS" "$logfile" "1"
+    exit 1
   fi
+
+  if [[ -f ".githooks/pre-push" ]]; then
+    echo "Installing pre-push hook..." | tee -a "$logfile"
+    if cp ".githooks/pre-push" ".git/hooks/pre-push" >>"$logfile" 2>&1; then
+      chmod +x ".git/hooks/pre-push" >>"$logfile" 2>&1
+      echo "  [OK] pre-push installed" | tee -a "$logfile"
+    else
+      echo "  [!] Failed to install pre-push hook (non-fatal)" | tee -a "$logfile"
+    fi
+  fi
+
+  log_section_end "INSTALL HOOKS" "$logfile" "${hooks_ok}"
+  [[ ${hooks_ok} -ne 0 ]] && exit 1
 
   echo "" | tee -a "$logfile"
   {
@@ -72,26 +101,18 @@ main() {
     echo "[INSTALL SUMMARY]"
     echo "========================================"
   } | tee -a "$logfile"
-  echo "✓ HOOKS INSTALLED SUCCESSFULLY" | tee -a "$logfile"
+  echo "HOOKS INSTALLED SUCCESSFULLY" | tee -a "$logfile"
   echo "" | tee -a "$logfile"
 
-  echo "The following hooks are now active:"
-  echo "  - pre-commit: File validation + code quality checks"
+  echo "Active hooks:"
+  echo "  - pre-commit: Blocks local-only files, optional lint check"
+  echo "  - pre-push:   Validates conventional commit format on unpushed commits"
   echo ""
-
-  echo "What this hook does:"
-  echo "  1. Prevents committing local-only files"
-  echo "  2. Validates documentation files"
-  echo "  3. Checks code quality (Python files)"
-  echo "  4. Offers auto-fix for lint errors"
+  echo "To bypass temporarily (not recommended):"
+  echo "  git commit --no-verify / git push --no-verify"
   echo ""
-
-  echo "To bypass hooks temporarily (not recommended):"
-  echo "  git commit --no-verify"
-  echo ""
-
-  echo "To uninstall hooks:"
-  echo "  rm .git/hooks/pre-commit"
+  echo "To uninstall:"
+  echo "  rm .git/hooks/pre-commit .git/hooks/pre-push"
   echo ""
 
   {
@@ -99,7 +120,6 @@ main() {
     echo "End Time: $(date)"
   } | tee -a "$logfile"
 
-  echo "" | tee -a "$logfile"
   echo "Full log: $logfile"
 }
 

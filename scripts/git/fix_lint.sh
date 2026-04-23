@@ -1,105 +1,159 @@
 #!/usr/bin/env bash
-# Auto-fix lint issues for Git Bash / Linux / macOS
-# Windows cmd.exe users: use fix_lint.bat instead
+# fix_lint.sh - Auto-fix lint issues
+# Purpose: Run lint auto-fix and formatting
+# Usage: ./scripts/git/fix_lint.sh [OPTIONS]
+#
+# Globals:
+#   SCRIPT_DIR     - Directory containing this script
+#   PROJECT_ROOT   - Auto-detected git repo root (set by _config.sh)
+#   logfile        - Set by init_logging
+#   CGW_LINT_CMD   - Lint tool to use (default: ruff; empty = skip)
+# Returns:
+#   0 on success, 1 if issues remain after fix
 
-# Get directory of this script
-SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+set -uo pipefail
 
-# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_common.sh"
 
 main() {
-  # Parse command-line arguments
   local non_interactive=0
-  if [[ "$1" == "--non-interactive" ]]; then
-    non_interactive=1
+  local modified_only=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help | -h)
+        echo "Usage: ./scripts/git/fix_lint.sh [OPTIONS]"
+        echo ""
+        echo "Auto-fix lint issues using configured lint tool."
+        echo ""
+        echo "Options:"
+        echo "  --modified-only     Only fix files modified vs HEAD"
+        echo "  --non-interactive   Skip prompts"
+        echo "  --no-venv           Use system lint tool instead of .venv"
+        echo "  -h, --help          Show this help"
+        echo ""
+        echo "Environment:"
+        echo "  CGW_NON_INTERACTIVE=1   Same as --non-interactive"
+        echo "  CGW_NO_VENV=1           Same as --no-venv"
+        echo "  (Also: CLAUDE_GIT_NON_INTERACTIVE, CLAUDE_GIT_NO_VENV)"
+        exit 0
+        ;;
+      --non-interactive)
+        non_interactive=1
+        shift
+        ;;
+      --no-venv)
+        CGW_NO_VENV=1
+        SKIP_VENV=1
+        shift
+        ;;
+      --modified-only)
+        modified_only=1
+        shift
+        ;;
+      *)
+        echo "[ERROR] Unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  [[ "${CGW_NON_INTERACTIVE:-0}" == "1" ]] && non_interactive=1
+
+  if [[ -z "${CGW_LINT_CMD}" ]]; then
+    echo "[OK] Lint fix skipped (CGW_LINT_CMD not set -- configure in .cgw.conf)"
+    exit 0
   fi
 
-  # Change to project root
   cd "${PROJECT_ROOT}" || {
-    echo "[ERROR] Cannot find project root" >&2
+    err "Cannot find project root"
     exit 1
   }
 
-  # Handle --modified-only mode
-  if [[ "$1" == "--modified-only" ]]; then
-    # Get cross-platform Python paths
-    if ! get_python_path; then
-      exit 1
-    fi
+  get_lint_exclusions
 
-    modified_py=$(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
-    if [[ -z "$modified_py" ]]; then
-      echo "[OK] No modified Python files to fix"
+  # Determine lint binary (venv or PATH)
+  local lint_cmd="${CGW_LINT_CMD}"
+  if [[ "${CGW_LINT_CMD}" == "ruff" ]]; then
+    get_python_path 2>/dev/null || true
+    if [[ -n "${PYTHON_BIN:-}" ]] && [[ -f "${PYTHON_BIN}/ruff${PYTHON_EXT:-}" ]]; then
+      lint_cmd="${PYTHON_BIN}/ruff${PYTHON_EXT:-}"
+    fi
+  fi
+
+  # Handle --modified-only mode
+  if [[ "${modified_only}" -eq 1 ]]; then
+    local modified_files
+    # CGW_LINT_EXTENSIONS controls which files are considered (default: *.py)
+    local -a lint_exts
+    read -r -a lint_exts <<<"${CGW_LINT_EXTENSIONS:-*.py}"
+    modified_files=$(git diff --name-only --diff-filter=ACMR HEAD -- "${lint_exts[@]}")
+    if [[ -z "$modified_files" ]]; then
+      echo "[OK] No modified files to fix"
       exit 0
     fi
 
     echo "=== Modified-Only Lint Fix ==="
-    echo "Files: $modified_py"
+    echo "Files: $modified_files"
     echo ""
 
-    EXIT_CODE=0
+    local EXIT_CODE=0
 
-    echo "[RUFF FIX]"
-    ${PYTHON_BIN}/ruff${PYTHON_EXT} check --fix $modified_py || EXIT_CODE=1
+    echo "[LINT FIX]"
+    # Build fix args: strip trailing path token (.) and append specific files
+    local lint_fix_cmd_args="${CGW_LINT_FIX_ARGS% *}"
+    # shellcheck disable=SC2086
+    "${lint_cmd}" ${lint_fix_cmd_args} $modified_files || EXIT_CODE=1
 
-    echo ""
-    echo "[RUFF FORMAT]"
-    ${PYTHON_BIN}/ruff${PYTHON_EXT} format $modified_py || EXIT_CODE=1
+    if [[ -n "${CGW_FORMAT_CMD}" ]]; then
+      echo ""
+      echo "[FORMAT FIX]"
+      # Build format fix args: strip trailing path token (.) and append specific files
+      local fmt_fix_cmd_args="${CGW_FORMAT_FIX_ARGS% *}"
+      # shellcheck disable=SC2086
+      "${CGW_FORMAT_CMD}" ${fmt_fix_cmd_args} $modified_files || EXIT_CODE=1
+    fi
 
     exit $EXIT_CODE
   fi
 
-  # Get cross-platform Python paths
-  if ! get_python_path; then
-    exit 1
-  fi
-
-  # Get lint exclusion patterns
-  get_lint_exclusions
-
-  # Initialize logging
+  # Full fix with logging
   init_logging "fix_lint"
 
-  # Track script start time
   local script_start
   script_start=$(date +%s)
 
-  # Write log header
   {
     echo "========================================="
     echo "Lint Auto-Fix Log"
     echo "========================================="
     echo "Start Time: $(date)"
     echo "Working Directory: ${PROJECT_ROOT}"
+    echo "Lint tool: ${CGW_LINT_CMD}"
     echo "Mode: $([ $non_interactive -eq 1 ] && echo 'Non-interactive' || echo 'Interactive')"
-  } > "$logfile"
+  } >"$logfile"
 
-  # Track any failures
   local fix_failed=0
 
-  # RUFF FIX (linting + import sorting)
-  if ! run_tool_with_logging "RUFF AUTO-FIX" "$logfile" \
-      "${PYTHON_BIN}/ruff${PYTHON_EXT}" check . --fix ${RUFF_CHECK_EXCLUDE}; then
-    echo "[!] Ruff encountered issues (some may not be auto-fixable)" | tee -a "$logfile"
+  # LINT FIX
+  # shellcheck disable=SC2086
+  if ! run_tool_with_logging "LINT AUTO-FIX" "$logfile" \
+    "${lint_cmd}" ${CGW_LINT_FIX_ARGS} ${CGW_LINT_EXCLUDES}; then
+    echo "[!] Lint tool: some issues may not be auto-fixable" | tee -a "$logfile"
     fix_failed=1
   fi
 
-  # RUFF FORMAT (replaces black)
-  if ! run_tool_with_logging "RUFF FORMAT" "$logfile" \
-      "${PYTHON_BIN}/ruff${PYTHON_EXT}" format . ${RUFF_FORMAT_EXCLUDE}; then
-    echo "[X] Ruff formatting failed" | tee -a "$logfile" >&2
-    fix_failed=1
+  # FORMAT FIX
+  if [[ -n "${CGW_FORMAT_CMD}" ]]; then
+    # shellcheck disable=SC2086
+    if ! run_tool_with_logging "FORMAT FIX" "$logfile" \
+      "${CGW_FORMAT_CMD}" ${CGW_FORMAT_FIX_ARGS} ${CGW_FORMAT_EXCLUDES}; then
+      err "Formatting failed"
+      fix_failed=1
+    fi
   fi
 
-  # MARKDOWNLINT FIX - with timestamps and output capture
-  if ! run_tool_with_logging "MARKDOWNLINT FIX" "$logfile" \
-      markdownlint-cli2 --fix ${MD_PATTERNS}; then
-    echo "[!] Markdownlint encountered issues (some may not be auto-fixable)" | tee -a "$logfile"
-  fi
-
-  # Final status message
   {
     echo ""
     echo "========================================"
@@ -107,33 +161,22 @@ main() {
     echo "========================================"
   } | tee -a "$logfile"
 
-  if (( fix_failed == 0 )); then
+  if ((fix_failed == 0)); then
     echo "[OK] All lint fixes applied successfully!" | tee -a "$logfile"
   else
-    echo "[!] Some lint tools encountered errors - check output above" | tee -a "$logfile" >&2
+    echo "[!] Some issues remain -- check output above" | tee -a "$logfile"
   fi
 
   # Run final verification
-  {
-    echo ""
-    echo "========================================"
-    echo "[FINAL VERIFICATION]"
-    echo "========================================"
-  } | tee -a "$logfile"
-
-  echo "Running final lint check..." | tee -a "$logfile"
   echo "" | tee -a "$logfile"
+  echo "Running final verification..." | tee -a "$logfile"
 
-  # Run check_lint.sh and capture its output
   if "${SCRIPT_DIR}/check_lint.sh" 2>&1 | tee -a "$logfile"; then
-    echo "" | tee -a "$logfile"
-    echo "[OK] All lint checks now pass!" | tee -a "$logfile"
+    echo "[OK] All lint checks pass!" | tee -a "$logfile"
   else
-    echo "" | tee -a "$logfile"
-    echo "[!] Some lint issues remain - manual fixes may be required" | tee -a "$logfile"
+    echo "[!] Some issues remain -- manual fixes may be required" | tee -a "$logfile"
   fi
 
-  # Calculate total duration
   local script_end total_duration
   script_end=$(date +%s)
   total_duration=$((script_end - script_start))

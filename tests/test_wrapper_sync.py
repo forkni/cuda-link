@@ -1,37 +1,47 @@
-"""Test to verify that the CUDA wrapper is synchronized between TD and pip package.
+"""Test to verify that TD-exporter copies stay in sync with canonical sources.
 
-The CUDA wrapper is intentionally duplicated:
-- td_exporter/CUDAIPCWrapper.py (TD-side, loaded as Text DAT)
-- src/cuda_link/cuda_ipc_wrapper.py (pip package, loaded as Python module)
+Duplicated pairs (byte-identical):
+  src/cuda_link/cuda_ipc_wrapper.py  <-> td_exporter/CUDAIPCWrapper.py
+  src/cuda_link/nvml_observer.py     <-> td_exporter/NVMLObserver.py
 
-This test ensures they remain byte-for-byte identical.
+Run scripts/sync_td_wrapper.py to regenerate the TD-exporter copies.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 
-def test_wrapper_files_are_identical() -> None:
-    """Verify TD and pip package wrappers are identical."""
-    project_root = Path(__file__).parent.parent
+_PROJECT_ROOT = Path(__file__).parent.parent
 
-    td_wrapper = project_root / "td_exporter" / "CUDAIPCWrapper.py"
-    pip_wrapper = project_root / "src" / "cuda_link" / "cuda_ipc_wrapper.py"
+_SYNC_PAIRS = [
+    (
+        _PROJECT_ROOT / "src" / "cuda_link" / "cuda_ipc_wrapper.py",
+        _PROJECT_ROOT / "td_exporter" / "CUDAIPCWrapper.py",
+    ),
+    (
+        _PROJECT_ROOT / "src" / "cuda_link" / "nvml_observer.py",
+        _PROJECT_ROOT / "td_exporter" / "NVMLObserver.py",
+    ),
+]
 
-    assert td_wrapper.exists(), f"TD wrapper not found: {td_wrapper}"
-    assert pip_wrapper.exists(), f"Pip wrapper not found: {pip_wrapper}"
 
-    td_content = td_wrapper.read_text(encoding="utf-8")
-    pip_content = pip_wrapper.read_text(encoding="utf-8")
+@pytest.mark.parametrize("canonical,derived", _SYNC_PAIRS, ids=["CUDAIPCWrapper", "NVMLObserver"])
+def test_td_exporter_file_is_identical(canonical: Path, derived: Path) -> None:
+    """Verify each TD-exporter copy is byte-identical to its canonical source."""
+    assert canonical.exists(), f"Canonical source not found: {canonical}"
+    assert derived.exists(), f"Derived copy not found: {derived}\nRun: python scripts/sync_td_wrapper.py"
 
-    assert td_content == pip_content, (
-        "CUDA wrapper files are out of sync!\n"
-        f"TD wrapper: {td_wrapper} ({len(td_content)} chars)\n"
-        f"Pip wrapper: {pip_wrapper} ({len(pip_content)} chars)\n"
+    canonical_content = canonical.read_text(encoding="utf-8")
+    derived_content = derived.read_text(encoding="utf-8")
+
+    assert canonical_content == derived_content, (
+        f"{derived.name} is out of sync with {canonical.name}!\n"
+        f"  canonical: {canonical} ({len(canonical_content)} chars)\n"
+        f"  derived:   {derived} ({len(derived_content)} chars)\n"
         "\n"
-        "These files must be identical. If you modified one, copy it to the other:\n"
-        f"  copy {td_wrapper} {pip_wrapper}\n"
-        "or\n"
-        f"  copy {pip_wrapper} {td_wrapper}\n"
+        "Run: python scripts/sync_td_wrapper.py"
     )
 
 

@@ -14,7 +14,9 @@ Architecture:
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
+import threading
 import time
 import traceback
 from ctypes import c_void_p
@@ -43,6 +45,7 @@ from CUDAIPCWrapper import (  # noqa: E402
     cudaIpcMemHandle_t,
     get_cuda_runtime,
 )
+from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 
 # Protocol layout constants (named offsets, not hardcoded literals)
 PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
@@ -77,6 +80,14 @@ _ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
 _FMT_TRANSFORM_NAME = "dtype_converter"  # Permanent Transform TOP in network (before ExportBuffer)
 _EXPORT_BUFFER_NAME = "ExportBuffer"  # Null TOP downstream of dtype_converter; cudaMemory() source
+
+# C3: CPU release-fence — ensures shutdown_flag write is visible before write_idx publish.
+_fence_lock = threading.Lock()
+
+
+def _release_fence() -> None:
+    with _fence_lock:
+        pass
 
 
 class CUDAIPCExtension:
@@ -127,6 +138,13 @@ class CUDAIPCExtension:
         except (AttributeError, ValueError):
             self.num_slots = 3
 
+        # CUDA device index - read from parameter or default to 0.
+        # IPC handles are device-scoped; sender and receiver must use the same device.
+        try:
+            self.device = int(ownerComp.par.Cudadevice.eval())
+        except (AttributeError, ValueError):
+            self.device = 0
+
         # GPU buffer state (arrays for ring buffer)
         self.dev_ptrs = [None] * self.num_slots  # List of GPU buffer pointers
         self.buffer_size = 0  # Aligned allocation size (for cudaMalloc)
@@ -172,17 +190,42 @@ class CUDAIPCExtension:
         # Conditional synchronization (CPU fallback)
         self.sync_interval = 10  # Sync every N frames (reduces GPU sync overhead)
 
+        # CUDALINK_EXPORT_SYNC=0 (default): correctness is guaranteed by the receiver's
+        # cudaStreamWaitEvent(ipc_events[slot]) — no CPU block needed. Set to "1" to restore
+        # the pre-2026-04-23 blocking sync. Measured cost of "1": ~295 µs/frame dead CPU wait
+        # (A/B/C diagnostic, SESSION_LOG 2026-04-23; Handbook p3/pg56 confirmed the stream is
+        # idle at frame-end). Mirrors Python lib default "0".
+        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "0") == "1"
+        # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
+        # Zero overhead when unset (single predicted-false branch per region).
+        self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
+        # CUDALINK_EXPORT_FLUSH_PROBE=1: calls cudaStreamQuery after record_event when
+        # _export_sync=False. Per CUDA Handbook p3/pg56, this forces WDDM-deferred commands
+        # to submit without blocking — used to confirm the WDDM batching hypothesis.
+        self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "0") == "1"
+        self._nvml_observer: NVMLObserver | None = None
+
         # Performance metrics
         self.total_memcpy_time = 0.0
         self.total_record_event_time = 0.0
         self.total_export_time = 0.0
         self.total_cuda_memory_time = 0.0  # Time spent in cudaMemory() call
+        # Profile accumulators (active only when CUDALINK_EXPORT_PROFILE=1)
+        self.total_pre_interop_us: float = 0.0  # frame_start → just before cudaMemory()
+        self.total_post_interop_us: float = 0.0  # cudaMemory() done → just before memcpy_async
+        self.total_sync_us: float = 0.0  # cudaStreamSynchronize (when _export_sync)
+        self.total_sticky_check_us: float = 0.0  # cudaPeekAtLastError per frame
+        self.total_flush_probe_us: float = 0.0  # cudaStreamQuery WDDM flush probe
+        self.total_shm_publish_us: float = 0.0  # write_idx + _release_fence + SHM pack
+        self.total_unaccounted_us: float = 0.0  # frame_time − Σ all sub-timers
 
         # Verbosity control - read from local Debug parameter
         try:
             self.verbose_performance = bool(ownerComp.par.Debug.eval())
         except AttributeError:
             self.verbose_performance = False
+        if self._export_profile:
+            self.verbose_performance = True  # profile mode requires verbose timing path
 
         # Apply showCustomOnly from Hidebuiltin parameter on load
         with contextlib.suppress(AttributeError):
@@ -336,16 +379,16 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
-            # Load CUDA runtime
-            self.cuda = get_cuda_runtime()
-            self._log("Loaded CUDA runtime", force=True)
+            # Load CUDA runtime bound to the configured device
+            self.cuda = get_cuda_runtime(device=self.device)
+            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
 
-            # Create dedicated non-blocking stream for IPC operations (fixes TD cudaMemory() perf warning)
-            # Reuse existing stream on re-init to avoid leaks
+            # Create high-priority dedicated non-blocking stream for IPC operations.
+            # Reuse existing stream on re-init to avoid leaks.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
-                    f"Created IPC stream: 0x{int(self.ipc_stream.value):016x}",
+                    f"Created IPC stream (high-priority): 0x{int(self.ipc_stream.value):016x}",
                     force=True,
                 )
             else:
@@ -438,6 +481,13 @@ class CUDAIPCExtension:
 
             self._initialized = True
             self._log("Initialization complete - ready for zero-copy GPU transfer", force=True)
+
+            if NVML_AVAILABLE and os.environ.get("CUDALINK_NVML", "0") == "1":
+                obs = NVMLObserver(device=self.device, enabled=True)
+                if obs.start():
+                    self._nvml_observer = obs
+                    self._log(f"NVMLObserver attached on device {self.device}", force=True)
+
             return True
 
         except (OSError, RuntimeError, ValueError) as e:
@@ -627,14 +677,20 @@ class CUDAIPCExtension:
         # Start frame timer (only if verbose)
         if self.verbose_performance:
             frame_start = time.perf_counter()
+            if self._export_profile:
+                _t_pre = frame_start
+                # initialize per-frame profile locals so unaccounted calc is always defined
+                _this_pre = _this_post = _this_sync = _this_sticky = _this_fp = _this_shm = 0.0
+                # record_event_time is only set in the ipc_events path; init here for the fallback
+                record_event_time = 0.0
 
         try:
             # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
             # Always use a non-blocking stream (never None/default stream) for TD 2025 compat.
             if self.cuda is None:
-                self.cuda = get_cuda_runtime()
+                self.cuda = get_cuda_runtime(device=self.device)
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created IPC stream (pre-init): 0x{int(self.ipc_stream.value):016x}",
                     force=True,
@@ -679,6 +735,9 @@ class CUDAIPCExtension:
 
             # Time cudaMemory() call (OpenGL→CUDA interop)
             if self.verbose_performance:
+                if self._export_profile:
+                    _this_pre = (time.perf_counter() - _t_pre) * 1_000_000
+                    self.total_pre_interop_us += _this_pre
                 cuda_mem_start = time.perf_counter()
 
             # Get TOP's CUDA memory — always pass a valid stream (never None)
@@ -697,6 +756,8 @@ class CUDAIPCExtension:
             if self.verbose_performance:
                 cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
                 self.total_cuda_memory_time += cuda_mem_time
+                if self._export_profile:
+                    _t_post = time.perf_counter()
 
             # Reset error suppression on success
             if self._last_cuda_mem_err:
@@ -767,6 +828,9 @@ class CUDAIPCExtension:
 
             # Time cudaMemcpyAsync D2D (non-blocking) - only if verbose
             if self.verbose_performance:
+                if self._export_profile:
+                    _this_post = (time.perf_counter() - _t_post) * 1_000_000
+                    self.total_post_interop_us += _this_post
                 memcpy_start = time.perf_counter()
                 # Record GPU timing start event (actual GPU time measurement)
                 if self._timing_start:
@@ -802,11 +866,35 @@ class CUDAIPCExtension:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
                     self.total_record_event_time += record_event_time
 
-                # Synchronize ipc_stream: ensures D2D copy + event record have completed on
-                # the GPU before write_idx is published. Guarantees the IPC event is pre-signaled
-                # when the consumer reads write_idx, so query_event() returns True immediately
-                # (no polling delay). Cost: ~D2D GPU time per frame (~13us at 512x512).
-                self.cuda.stream_synchronize(self.ipc_stream)
+                # CUDALINK_EXPORT_SYNC=1: CPU-blocks on ipc_stream after record_event.
+                # Default is now "0" (receiver cudaStreamWaitEvent guarantees correctness).
+                # Enable for regression testing or if downstream consumers rely on CPU-timing.
+                if self._export_sync:
+                    if self.verbose_performance and self._export_profile:
+                        _t_sync = time.perf_counter()
+                    self.cuda.stream_synchronize(self.ipc_stream)
+                    if self.verbose_performance and self._export_profile:
+                        _this_sync = (time.perf_counter() - _t_sync) * 1_000_000
+                        self.total_sync_us += _this_sync
+
+                if self.verbose_performance and self._export_profile:
+                    _t_sticky = time.perf_counter()
+                self.cuda.check_sticky_error("export_frame")
+                if self.verbose_performance and self._export_profile:
+                    _this_sticky = (time.perf_counter() - _t_sticky) * 1_000_000
+                    self.total_sticky_check_us += _this_sticky
+
+                # WDDM deferred-submission probe: forces pending GPU work to submit without
+                # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
+                # cudaStreamQuery triggers that flush. Only active when EXPORT_FLUSH_PROBE=1
+                # and EXPORT_SYNC=0 (if sync is on, the stream is already flushed above).
+                if self._export_flush_probe and not self._export_sync:
+                    if self.verbose_performance and self._export_profile:
+                        _t_fp = time.perf_counter()
+                    self.cuda.stream_query(self.ipc_stream)
+                    if self.verbose_performance and self._export_profile:
+                        _this_fp = (time.perf_counter() - _t_fp) * 1_000_000
+                        self.total_flush_probe_us += _this_fp
 
                 # Always write producer timestamp (enables consumer latency measurement)
                 _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
@@ -818,9 +906,15 @@ class CUDAIPCExtension:
             # Publish write_idx LAST: clear shutdown_flag first so the consumer
             # (which reads shutdown_flag before write_idx) always sees flag=0
             # when it detects a new frame (atomicity improvement).
+            if self.verbose_performance and self._export_profile:
+                _t_shm = time.perf_counter()
             self.write_idx += 1
             self.shm_handle.buf[self._shutdown_offset] = 0
+            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
             _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)  # publish last
+            if self.verbose_performance and self._export_profile:
+                _this_shm = (time.perf_counter() - _t_shm) * 1_000_000
+                self.total_shm_publish_us += _this_shm
 
             # Frame tracking
             self.frame_count += 1
@@ -829,6 +923,19 @@ class CUDAIPCExtension:
             if self.verbose_performance:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self.total_export_time += frame_time
+                if self._export_profile:
+                    _this_accounted = (
+                        _this_pre
+                        + cuda_mem_time
+                        + _this_post
+                        + memcpy_time
+                        + record_event_time
+                        + _this_sync
+                        + _this_sticky
+                        + _this_fp
+                        + _this_shm
+                    )
+                    self.total_unaccounted_us += frame_time - _this_accounted
 
             # Detailed first-frame diagnostic (one-time, not affected by 100-frame interval)
             if self.verbose_performance and self.frame_count == 1:
@@ -866,6 +973,43 @@ class CUDAIPCExtension:
                     except RuntimeError as e:
                         # Rare: event wait/query failed
                         log_msg += f", GPU timing: {e}"
+
+                if self._nvml_observer is not None:
+                    snap = self._nvml_observer.snapshot()
+                    if snap.get("nvml_available"):
+                        log_msg += (
+                            f" | [NVML] gpu={snap.get('gpu_util_pct', '?')}%"
+                            f" mem={snap.get('mem_bw_util_pct', '?')}%"
+                            f" sm={snap.get('sm_clock_mhz', '?')}MHz"
+                            f" pcie_tx={snap.get('pcie_tx_kbps', '?')}kbps"
+                            f" pcie_rx={snap.get('pcie_rx_kbps', '?')}kbps"
+                            f" temp={snap.get('temp_c', '?')}C"
+                            f" power={snap.get('power_w', '?')}W"
+                        )
+                        reasons = snap.get("throttle_reasons") or []
+                        if reasons:
+                            log_msg += f" throttle={','.join(reasons)}"
+
+                if self._export_profile:
+                    avg_pre = self.total_pre_interop_us / self.frame_count
+                    avg_post = self.total_post_interop_us / self.frame_count
+                    avg_sync = self.total_sync_us / self.frame_count
+                    avg_sticky = self.total_sticky_check_us / self.frame_count
+                    avg_fp = self.total_flush_probe_us / self.frame_count
+                    avg_shm = self.total_shm_publish_us / self.frame_count
+                    avg_unacc = self.total_unaccounted_us / self.frame_count
+                    log_msg += (
+                        f" | [PROFILE] pre={avg_pre:.1f}us"
+                        f" interop={avg_cuda_mem:.1f}us"
+                        f" post={avg_post:.1f}us"
+                        f" memcpy={avg_memcpy:.1f}us"
+                        f" record={avg_record:.1f}us"
+                        f" sync={avg_sync:.1f}us"
+                        f" sticky={avg_sticky:.1f}us"
+                        f" flush_probe={avg_fp:.1f}us"
+                        f" shm={avg_shm:.1f}us"
+                        f" unacc={avg_unacc:.1f}us"
+                    )
 
                 self._log(log_msg, force=False)
 
@@ -952,6 +1096,10 @@ class CUDAIPCExtension:
         # Skip if already cleaned up (prevents double-cleanup from Active toggle + __delTD__)
         if not self._initialized and self.shm_handle is None:
             return
+
+        if self._nvml_observer is not None:
+            self._nvml_observer.stop()
+            self._nvml_observer = None
 
         cuda_valid = self._is_cuda_context_valid()
         if not cuda_valid:
@@ -1271,7 +1419,8 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
-            self.cuda = get_cuda_runtime()
+            self.cuda = get_cuda_runtime(device=self.device)
+            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
 
             # Open SharedMemory (sender must have created it)
             try:
@@ -1415,7 +1564,7 @@ class CUDAIPCExtension:
             # MUST happen before ipc_open_mem_handle to establish CUDA context
             # Reuse existing stream on re-init to avoid leaks on reconnection cycles
             if not hasattr(self, "_rx_stream") or self._rx_stream is None:
-                self._rx_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+                self._rx_stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created receiver stream: 0x{int(self._rx_stream.value):016x}",
                     force=True,

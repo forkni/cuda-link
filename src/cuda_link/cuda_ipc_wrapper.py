@@ -14,8 +14,11 @@ Requirements:
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
+
+_logger = logging.getLogger(__name__)
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
@@ -42,6 +45,25 @@ class cudaIpcEventHandle_t(ctypes.Structure):
     """
 
     _fields_ = [("reserved", ctypes.c_byte * 64)]
+
+
+# CUDA pointer attributes — memory type and owning device for a GPU pointer
+class cudaPointerAttributes(ctypes.Structure):
+    """Result of cudaPointerGetAttributes.
+
+    Useful for validating that a caller-supplied GPU pointer belongs to the
+    expected device before issuing D2D operations (C2 affinity check).
+
+    .type values: 0=unregistered, 1=host, 2=device, 3=managed
+    .device: GPU index that owns the allocation
+    """
+
+    _fields_ = [
+        ("type", c_int),  # cudaMemoryType enum (2 = cudaMemoryTypeDevice)
+        ("device", c_int),  # GPU device index owning this allocation
+        ("devicePointer", c_void_p),
+        ("hostPointer", c_void_p),
+    ]
 
 
 # CUDA Error codes (subset)
@@ -100,15 +122,31 @@ class CUDARuntimeAPI:
         cuda.free(dev_ptr)
     """
 
-    def __init__(self) -> None:
-        """Initialize CUDA runtime library."""
+    def __init__(self, device: int = 0) -> None:
+        """Initialize CUDA runtime library.
+
+        Args:
+            device: CUDA device index to bind. Defaults to 0.
+                    IPC handles are device-scoped; sender and receiver must
+                    use the same device or peer-access must be enabled.
+        """
+        self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
-        # Establish CUDA primary context on device 0 in this runtime instance.
+        # Establish CUDA primary context on the requested device.
         # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
         # alongside torch (which has its own bundled cudart). Each DLL instance needs
         # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(0)
+        self.cudart.cudaSetDevice(device)
+
+        if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
+            _logger.warning(
+                "CUDA_LAUNCH_BLOCKING=1 is set — all CUDA operations are serialized. "
+                "This causes ~30x slower frame rates and should only be used for debugging."
+            )
+
+        # Default ON; set CUDALINK_STICKY_ERROR_CHECK=0 to skip the cudaPeekAtLastError call.
+        self._sticky_check_enabled: bool = os.environ.get("CUDALINK_STICKY_ERROR_CHECK", "1") != "0"
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -161,9 +199,7 @@ class CUDARuntimeAPI:
             buf = ctypes.create_unicode_buffer(260)
             # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
             ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("Loaded CUDA runtime: %s", buf.value)
+            _logger.debug("Loaded CUDA runtime: %s", buf.value)
         except Exception:  # noqa: BLE001
             pass
 
@@ -254,6 +290,18 @@ class CUDARuntimeAPI:
         self.cudart.cudaGetLastError.argtypes = []
         self.cudart.cudaGetLastError.restype = c_int
 
+        # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
+        self.cudart.cudaPeekAtLastError.argtypes = []
+        self.cudart.cudaPeekAtLastError.restype = c_int
+
+        # cudaHostRegister(void* ptr, size_t size, unsigned int flags) — page-lock existing host memory
+        self.cudart.cudaHostRegister.argtypes = [c_void_p, c_size_t, c_uint]
+        self.cudart.cudaHostRegister.restype = c_int
+
+        # cudaHostUnregister(void* ptr) — unregister page-locked host memory
+        self.cudart.cudaHostUnregister.argtypes = [c_void_p]
+        self.cudart.cudaHostUnregister.restype = c_int
+
         # cudaGetErrorString(cudaError_t error)
         self.cudart.cudaGetErrorString.argtypes = [c_int]
         self.cudart.cudaGetErrorString.restype = ctypes.c_char_p
@@ -298,6 +346,18 @@ class CUDARuntimeAPI:
         self.cudart.cudaDeviceCanAccessPeer.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceCanAccessPeer.restype = c_int
 
+        # cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority)
+        self.cudart.cudaDeviceGetStreamPriorityRange.argtypes = [POINTER(c_int), POINTER(c_int)]
+        self.cudart.cudaDeviceGetStreamPriorityRange.restype = c_int
+
+        # cudaStreamCreateWithPriority(cudaStream_t* pStream, unsigned int flags, int priority)
+        self.cudart.cudaStreamCreateWithPriority.argtypes = [POINTER(CUDAStream_t), c_uint, c_int]
+        self.cudart.cudaStreamCreateWithPriority.restype = c_int
+
+        # cudaPointerGetAttributes(cudaPointerAttributes* attributes, const void* ptr)
+        self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
+        self.cudart.cudaPointerGetAttributes.restype = c_int
+
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
 
@@ -312,6 +372,66 @@ class CUDARuntimeAPI:
             error_str = self.cudart.cudaGetErrorString(result).decode("utf-8")
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
+
+    def peek_at_last_error(self) -> int:
+        """Non-destructively read the thread-local sticky CUDA error.
+
+        Returns SUCCESS (0) normally. A non-zero value means a prior async
+        operation (memcpy, kernel) failed and the error was not yet consumed.
+        Unlike cudaGetLastError this does NOT clear the latched error state.
+        """
+        return int(self.cudart.cudaPeekAtLastError())
+
+    def check_sticky_error(self, context: str) -> None:
+        """Warn and raise if a sticky CUDA error is latched from a prior async op.
+
+        No-op when CUDALINK_STICKY_ERROR_CHECK=0. Enabled by default.
+        Use peek_at_last_error() directly for the raw value without raising.
+        """
+        if not self._sticky_check_enabled:
+            return
+        code = int(self.cudart.cudaPeekAtLastError())
+        if code != CUDAError.SUCCESS:
+            error_str = self.cudart.cudaGetErrorString(code).decode("utf-8")
+            _logger.warning(
+                "Sticky CUDA error detected after %s: %s (code %d). "
+                "The CUDA context is poisoned — restart the process. "
+                "Set CUDALINK_STICKY_ERROR_CHECK=0 to disable this check.",
+                context,
+                error_str,
+                code,
+            )
+            raise RuntimeError(
+                f"Sticky CUDA error after {context}: {error_str} (code {code}). "
+                "The CUDA context is poisoned. Restart the process or set "
+                "CUDALINK_STICKY_ERROR_CHECK=0 to disable this check."
+            )
+
+    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
+        """Page-lock an existing host allocation via cudaHostRegister.
+
+        Args:
+            ptr: Host pointer as integer (e.g., arr.ctypes.data)
+            size: Number of bytes to register
+            flags: Registration flags (0=default, 1=portable, 2=mapped, 4=write-combined)
+
+        Raises:
+            RuntimeError: If registration fails
+        """
+        result = self.cudart.cudaHostRegister(c_void_p(ptr), c_size_t(size), c_uint(flags))
+        self.check_error(result, "cudaHostRegister")
+
+    def host_unregister(self, ptr: int) -> None:
+        """Unregister a page-locked host allocation registered with host_register().
+
+        Args:
+            ptr: Host pointer as integer (same value passed to host_register())
+
+        Raises:
+            RuntimeError: If unregistration fails
+        """
+        result = self.cudart.cudaHostUnregister(c_void_p(ptr))
+        self.check_error(result, "cudaHostUnregister")
 
     # High-level API
 
@@ -625,6 +745,20 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaEventElapsedTime")
         return elapsed_ms.value
 
+    def get_device(self) -> int:
+        """Return the CUDA device index currently bound to this context.
+
+        Returns:
+            Integer device index (matches self.device if context is healthy)
+
+        Raises:
+            RuntimeError: If query fails
+        """
+        device = c_int()
+        result = self.cudart.cudaGetDevice(byref(device))
+        self.check_error(result, "cudaGetDevice")
+        return device.value
+
     def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
         """Create CUDA stream with specified flags.
 
@@ -640,6 +774,34 @@ class CUDARuntimeAPI:
         stream = CUDAStream_t()
         result = self.cudart.cudaStreamCreateWithFlags(byref(stream), flags)
         self.check_error(result, "cudaStreamCreateWithFlags")
+        return stream
+
+    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
+        """Create CUDA stream at the specified (or highest available) priority.
+
+        On CUDA, stream priority is an integer where a smaller value means
+        higher priority. cudaDeviceGetStreamPriorityRange returns [least, greatest]
+        where greatest is the most-negative value — i.e., the highest priority.
+
+        Args:
+            flags: Stream flags. Default 0x01 = cudaStreamNonBlocking.
+            priority: Stream priority. None means use highest available (greatest).
+
+        Returns:
+            CUDAStream_t: Opaque stream handle
+
+        Raises:
+            RuntimeError: If stream creation fails
+        """
+        if priority is None:
+            least = c_int()
+            greatest = c_int()
+            result = self.cudart.cudaDeviceGetStreamPriorityRange(byref(least), byref(greatest))
+            self.check_error(result, "cudaDeviceGetStreamPriorityRange")
+            priority = greatest.value
+        stream = CUDAStream_t()
+        result = self.cudart.cudaStreamCreateWithPriority(byref(stream), flags, priority)
+        self.check_error(result, "cudaStreamCreateWithPriority")
         return stream
 
     def destroy_stream(self, stream: CUDAStream_t) -> None:
@@ -731,6 +893,23 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaStreamQuery")
         return False  # unreachable
 
+    def pointer_get_attributes(self, ptr: int) -> cudaPointerAttributes:
+        """Query memory type and owning device for a GPU pointer.
+
+        Args:
+            ptr: GPU pointer as integer (e.g., tensor.data_ptr())
+
+        Returns:
+            cudaPointerAttributes with .type (2=device, 3=managed) and .device (GPU index)
+
+        Raises:
+            RuntimeError: If query fails (e.g., unregistered host pointer passed)
+        """
+        attrs = cudaPointerAttributes()
+        result = self.cudart.cudaPointerGetAttributes(byref(attrs), c_void_p(ptr))
+        self.check_error(result, "cudaPointerGetAttributes")
+        return attrs
+
     def device_can_access_peer(self, device: int, peer_device: int) -> bool:
         """Check if device can directly access peer_device memory via IPC/NVLink.
 
@@ -758,13 +937,32 @@ class CUDARuntimeAPI:
 _cuda_runtime: CUDARuntimeAPI | None = None
 
 
-def get_cuda_runtime() -> CUDARuntimeAPI:
+def get_cuda_runtime(device: int = 0) -> CUDARuntimeAPI:
     """Get global CUDA runtime instance (singleton).
+
+    The singleton is created on first call. Subsequent calls with a *different*
+    device index will raise RuntimeError — a single process context can only
+    be bound to one device via this shared-cudart pattern.
+
+    Args:
+        device: CUDA device index (default 0). Must match across all callers
+                within the same process.
 
     Returns:
         CUDARuntimeAPI: Global CUDA runtime wrapper
+
+    Raises:
+        RuntimeError: If called with a device index that conflicts with the
+                      already-initialized singleton.
     """
     global _cuda_runtime
     if _cuda_runtime is None:
-        _cuda_runtime = CUDARuntimeAPI()
+        _cuda_runtime = CUDARuntimeAPI(device=device)
+    elif _cuda_runtime.device != device:
+        raise RuntimeError(
+            f"CUDA runtime singleton was initialized for device {_cuda_runtime.device}, "
+            f"but caller requested device {device}. A single process can only bind to "
+            "one device via the shared-cudart singleton. Create a separate "
+            "CUDARuntimeAPI(device=...) instance for multi-device use."
+        )
     return _cuda_runtime

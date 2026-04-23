@@ -43,7 +43,9 @@ Compatibility:
 from __future__ import annotations
 
 import logging
+import os
 import struct
+import threading
 import time
 import traceback
 from ctypes import c_void_p
@@ -86,6 +88,18 @@ _DTYPE_ITEMSIZE_MAP = {
     "uint16": 2,
 }
 
+# C3: CPU release-fence between shutdown_flag write and write_idx publish.
+# On x86/x64 the hardware guarantees TSO (total-store-order) for plain stores,
+# but CPython makes no compiler-level ordering guarantee between two separate
+# bytearray writes. threading.Lock acquire/release issues OS-level memory barriers
+# on all supported platforms, providing the needed release semantics. Cost: ~80ns.
+_fence_lock = threading.Lock()
+
+
+def _release_fence() -> None:
+    with _fence_lock:
+        pass
+
 
 class CUDAIPCExporter:
     """Python-side exporter for CUDA IPC GPU memory.
@@ -114,6 +128,7 @@ class CUDAIPCExporter:
         dtype: str = "uint8",
         num_slots: int = 2,
         debug: bool = False,
+        device: int = 0,
     ) -> None:
         """Initialize CUDA IPC exporter.
 
@@ -125,6 +140,8 @@ class CUDAIPCExporter:
             dtype: Data type string: "float32", "float16", or "uint8" (default: "uint8").
             num_slots: Ring buffer slot count (default: 2 for double-buffering). Range: 1-10.
             debug: Enable verbose per-frame performance logging.
+            device: CUDA device index to use (default: 0). Sender and receiver must
+                    use the same device; IPC handles are device-scoped.
 
         Raises:
             ValueError: If dtype is unsupported or num_slots is out of range.
@@ -141,6 +158,12 @@ class CUDAIPCExporter:
         self.dtype = dtype
         self.num_slots = num_slots
         self.debug = debug
+        self.device = device
+
+        # CUDALINK_EXPORT_SYNC=1 restores the old behaviour of blocking the CPU on
+        # ipc_stream after each record_event(). Default off: the ~13-100µs sync is
+        # redundant for consumers using the stream-ordered get_frame(stream=...) path.
+        self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "0") == "1"
 
         # Derived sizes
         itemsize = _DTYPE_ITEMSIZE_MAP[dtype]
@@ -175,6 +198,13 @@ class CUDAIPCExporter:
         self._ts_offset: int = 0
         self._shutdown_offset: int = 0
 
+        # C2: device-affinity validation
+        # CUDALINK_STRICT_DEVICE=1 raises ValueError on mismatch; default warns+continues.
+        self._strict_device: bool = os.getenv("CUDALINK_STRICT_DEVICE", "0") == "1"
+        self._source_sync_device_warned: bool = False  # emit at most one log per instance
+        # Cache of ptr values already validated (capped at 8 — covers typical buffer-rotation)
+        self._ptr_device_cache: set[int] = set()
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -193,14 +223,24 @@ class CUDAIPCExporter:
             return True
 
         try:
-            # Load CUDA runtime
-            self.cuda = get_cuda_runtime()
-            logger.info("Loaded CUDA runtime")
+            # Load CUDA runtime bound to the requested device
+            self.cuda = get_cuda_runtime(device=self.device)
+            actual_device = self.cuda.get_device()
+            if actual_device != self.device:
+                raise RuntimeError(
+                    f"Device mismatch: requested device {self.device} but CUDA context "
+                    f"is bound to device {actual_device}. Ensure no other code calls "
+                    "cudaSetDevice() with a different index before initialize()."
+                )
+            logger.info("Loaded CUDA runtime on device %d", actual_device)
 
-            # Create or reuse dedicated non-blocking IPC stream
+            # Create or reuse dedicated high-priority non-blocking IPC stream.
+            # cudaStreamNonBlocking (0x01) prevents the default stream from
+            # implicitly synchronising with this stream. Highest priority ensures
+            # the D2D memcpy preempts lower-priority compute work in the TD context.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
-                logger.info("Created IPC stream: 0x%016x", int(self.ipc_stream.value))
+                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
+                logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
             else:
                 logger.debug("Reusing IPC stream: 0x%016x", int(self.ipc_stream.value))
 
@@ -385,6 +425,22 @@ class CUDAIPCExporter:
         (backward compatible). The caller is then responsible for their own sync.
         """
         if self.source_sync_event is not None and self.cuda is not None:
+            # C2: opportunistic stream-device check. CUDA Runtime < 12.8 has no
+            # cudaStreamGetDevice; we validate via the current context device instead.
+            # Emitted at most once per exporter instance to avoid log spam.
+            if not self._source_sync_device_warned:
+                current_device = self.cuda.get_device()
+                if current_device != self.device:
+                    msg = (
+                        f"record_source_sync: current CUDA device ({current_device}) "
+                        f"does not match exporter device ({self.device}). "
+                        "Call cudaSetDevice(device) before creating your producer stream. "
+                        "Set CUDALINK_STRICT_DEVICE=1 to raise instead of warn."
+                    )
+                    if self._strict_device:
+                        raise ValueError(msg)
+                    logger.error(msg)
+                    self._source_sync_device_warned = True
             self.cuda.record_event(self.source_sync_event, CUDAStream_t(producer_stream_handle))
 
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
@@ -408,6 +464,32 @@ class CUDAIPCExporter:
             frame_start = time.perf_counter()
         try:
             slot = self.write_idx % self.num_slots
+
+            # C2: validate source pointer's device and memory type on first appearance.
+            # Cache keyed by pointer integer (cap at 8 to cover typical buffer-rotation).
+            gpu_ptr_int = gpu_ptr if isinstance(gpu_ptr, int) else int(gpu_ptr)
+            if gpu_ptr_int not in self._ptr_device_cache:
+                attrs = self.cuda.pointer_get_attributes(gpu_ptr_int)
+                if attrs.type not in (2, 3):  # 2=device, 3=managed (both valid for D2D)
+                    msg = (
+                        f"export_frame: gpu_ptr 0x{gpu_ptr_int:016x} is not device/managed "
+                        f"memory (type={attrs.type}). Pass a GPU-resident pointer. "
+                        "Set CUDALINK_STRICT_DEVICE=1 to raise instead of warn."
+                    )
+                    if self._strict_device:
+                        raise ValueError(msg)
+                    logger.error(msg)
+                elif attrs.device != self.device:
+                    msg = (
+                        f"export_frame: gpu_ptr 0x{gpu_ptr_int:016x} belongs to device "
+                        f"{attrs.device}, but exporter is bound to device {self.device}. "
+                        "Set CUDALINK_STRICT_DEVICE=1 to raise instead of warn."
+                    )
+                    if self._strict_device:
+                        raise ValueError(msg)
+                    logger.error(msg)
+                if len(self._ptr_device_cache) < 8:
+                    self._ptr_device_cache.add(gpu_ptr_int)
 
             # GPU-side wait: ipc_stream waits for source data to be ready (non-blocking CPU).
             # Only active if record_source_sync() was called; otherwise this is a no-op.
@@ -439,14 +521,21 @@ class CUDAIPCExporter:
             if debug:
                 self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
-            # Synchronize ipc_stream to ensure the D2D copy + event record have EXECUTED on
-            # the GPU before publishing write_idx. Without this, the consumer's query_event()
-            # may return False (event not yet signaled) even though write_idx is visible, because
-            # the GPU executes stream operations asynchronously. Blocking here guarantees the
-            # IPC event is pre-signaled when the consumer reads write_idx, so query_event()
-            # returns True on the first call (no polling delay). Cost: ~D2D GPU time per frame
-            # (~13us at 512x512, ~100us at 1080p) — acceptable for the ordering guarantee.
-            self.cuda.stream_synchronize(self.ipc_stream)
+            # Optional CPU-blocking sync after record_event. Disabled by default.
+            #
+            # When enabled (CUDALINK_EXPORT_SYNC=1): blocks the CPU until the GPU has
+            # executed the memcpy + record_event, guaranteeing query_event() returns True
+            # on the first poll. Cost: ~13µs @ 512², ~100µs @ 1080p per frame.
+            #
+            # When disabled (default): the GPU event is recorded asynchronously.
+            # Consumers using the stream-ordered path (get_frame(stream=...)) issue
+            # cudaStreamWaitEvent, which correctly waits for the event-record to execute
+            # regardless of whether the CPU has synced. The _wait_for_slot() timeout
+            # guards the polling path. Skipping this sync saves ~13-100µs/frame.
+            if self._export_sync:
+                self.cuda.stream_synchronize(self.ipc_stream)
+
+            self.cuda.check_sticky_error("export_frame")
 
             # Write timestamp, clear shutdown_flag, then publish write_idx LAST.
             # Ordering matters: the consumer reads shutdown_flag BEFORE write_idx, so
@@ -457,6 +546,7 @@ class CUDAIPCExporter:
             self.write_idx += 1
             _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
             self.shm_handle.buf[self._shutdown_offset] = 0
+            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
             _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
             if debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
@@ -589,15 +679,33 @@ class CUDAIPCExporter:
         if cuda_valid:
             time.sleep(0.1)  # 100ms for consumer to detect shutdown and close handles
 
-        # STEP 6: Free GPU buffers (safe now that consumer has closed handles)
+        # STEP 6: Free GPU buffers (safe now that consumer has closed handles).
+        # cudaFree on an IPC-exported pointer blocks until all receivers call
+        # cudaIpcCloseMemHandle. On Windows WDDM, a crashed receiver that never
+        # closed its handle will cause cudaFree to hang indefinitely. We run each
+        # free in a daemon thread with a 0.5 s watchdog; on timeout we log and
+        # continue — the OS reclaims VRAM when the process exits regardless.
         if cuda_valid and self.cuda and self.dev_ptrs:
             for slot, dev_ptr in enumerate(self.dev_ptrs):
                 if dev_ptr:
-                    try:
-                        self.cuda.free(dev_ptr)
-                        logger.debug("Freed GPU buffer slot %d", slot)
-                    except (RuntimeError, OSError) as e:
-                        logger.error("Error freeing GPU buffer slot %d: %s", slot, e)
+
+                    def _free(ptr: c_void_p, s: int = slot) -> None:
+                        try:
+                            self.cuda.free(ptr)
+                            logger.debug("Freed GPU buffer slot %d", s)
+                        except (RuntimeError, OSError) as e:
+                            logger.error("Error freeing GPU buffer slot %d: %s", s, e)
+
+                    t = threading.Thread(target=_free, args=(dev_ptr,), daemon=True)
+                    t.start()
+                    t.join(timeout=0.5)
+                    if t.is_alive():
+                        logger.warning(
+                            "cudaFree slot %d timed out (0x%016x) — receiver may not have closed "
+                            "the IPC handle. Leaking GPU memory; OS will reclaim on process exit.",
+                            slot,
+                            dev_ptr.value,
+                        )
 
         # STEP 7: Unlink SharedMemory (producer is owner and responsible for cleanup)
         try:
@@ -654,15 +762,24 @@ class CUDAIPCExporter:
         """
         return self._initialized and all(ptr is not None for ptr in self.dev_ptrs)
 
+    def attach_nvml_observer(self, observer: object) -> None:
+        """Attach an NVMLObserver for GPU telemetry in get_stats().
+
+        Args:
+            observer: NVMLObserver instance (must already be started).
+        """
+        self._nvml_observer = observer
+
     def get_stats(self) -> dict:
         """Get exporter statistics for monitoring.
 
         Returns:
             Dictionary with current exporter state and performance metrics.
+            Includes an 'nvml' sub-dict when an NVMLObserver is attached.
         """
         avg_memcpy = self.total_memcpy_us / self.frame_count if self.frame_count > 0 else 0.0
         avg_total = self.total_export_us / self.frame_count if self.frame_count > 0 else 0.0
-        return {
+        stats: dict = {
             "initialized": self._initialized,
             "shm_name": self.shm_name,
             "resolution": f"{self.width}x{self.height}x{self.channels}",
@@ -676,3 +793,7 @@ class CUDAIPCExporter:
             "avg_total_us": avg_total,
             "dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self.dev_ptrs],
         }
+        observer = getattr(self, "_nvml_observer", None)
+        if observer is not None:
+            stats["nvml"] = observer.snapshot()
+        return stats
