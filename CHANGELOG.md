@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-04-23
+
+### Added
+
+- `CUDALINK_EXPORT_PROFILE=1` env var (TD extension, default OFF): enables 9 fine-grained
+  per-region sub-timers in `export_frame` (`pre_interop`, `interop`, `post_interop`,
+  `memcpy`, `record`, `sync`, `sticky_check`, `flush_probe`, `shm_publish`, `unacc`);
+  columns appended to the 97-frame periodic stats line as `[PROFILE] pre=…us …`.
+  Force-enables `verbose_performance` when set. Zero overhead when unset (~400 ns/frame
+  when on). Used to close out the `export_frame` ~4190 µs gap diagnostic
+  (SESSION_LOG 2026-04-23).
+- `CUDALINK_EXPORT_FLUSH_PROBE=1` env var (TD extension, default OFF): inserts a
+  non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when
+  `EXPORT_SYNC=0`. Per CUDA Handbook p3/pg56. Diagnostic-only — retained on-tree for
+  future use; the WDDM-batching hypothesis it was designed to test was refuted by data.
+
+### Changed
+
+- **TD: `CUDALINK_EXPORT_SYNC` default flipped `"1"` → `"0"`** (`td_exporter/CUDAIPCExtension.py`).
+  Saves ~295 µs/frame of redundant CPU blocking; correctness is already guaranteed by the
+  receiver's `cudaStreamWaitEvent(ipc_events[slot])`. Set `CUDALINK_EXPORT_SYNC=1` to restore
+  prior behavior. Diagnostic details: SESSION_LOG 2026-04-23 (`export_frame` gap analysis,
+  A/B/C experiment). This aligns TD's default with the Python lib default (`"0"`).
+
+### Fixed
+
+- `src/cuda_link/__init__.py` `__version__` bumped from stale `"0.7.3"` to `"0.9.0"`
+  (was not updated during the v0.8.0 release; now in sync with `pyproject.toml`).
+
 ## [0.8.0] — 2026-04-23
 
 ### Added

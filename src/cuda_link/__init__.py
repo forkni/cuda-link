@@ -11,7 +11,7 @@ from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE,
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 from .nvml_observer import NVML_AVAILABLE, NVMLObserver
 
-__version__ = "0.7.3"
+__version__ = "0.9.0"
 __all__ = [
     "CUDAIPCExporter",
     "CUDAIPCImporter",
