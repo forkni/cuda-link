@@ -86,6 +86,7 @@ class NVMLObserver:
         temp_c                          (from nvmlDeviceGetTemperature)
         power_w, power_limit_w          (from nvmlDeviceGetPowerUsage)
         throttle_reasons                (decoded bitmask list)
+        driver_model                    "WDDM" / "TCC" / "MCDM" (Windows only; absent on Linux)
     """
 
     def __init__(self, device: int = 0, enabled: bool | None = None) -> None:
@@ -103,6 +104,7 @@ class NVMLObserver:
             self.enabled = enabled
         self._handle = None
         self._started = False
+        self._driver_model: str | None = None
 
     def start(self) -> bool:
         """Initialize NVML and open device handle.
@@ -117,6 +119,16 @@ class NVMLObserver:
         try:
             _nvml_init()
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device)
+            with contextlib.suppress(pynvml.NVMLError):
+                # Raises NVMLError_NotSupported on Linux (driver-model is Windows-only).
+                _model = pynvml.nvmlDeviceGetCurrentDriverModel(self._handle)
+                _names = {
+                    pynvml.NVML_DRIVER_WDDM: "WDDM",
+                    pynvml.NVML_DRIVER_WDM: "TCC",
+                }
+                if hasattr(pynvml, "NVML_DRIVER_MCDM"):
+                    _names[pynvml.NVML_DRIVER_MCDM] = "MCDM"
+                self._driver_model = _names.get(_model, f"unknown({_model})")
             self._started = True
             return True
         except Exception:  # noqa: BLE001
@@ -189,5 +201,8 @@ class NVMLObserver:
             out["throttle_reasons"] = _decode_throttle(bitmask)
         except pynvml.NVMLError:
             pass
+
+        if self._driver_model is not None:
+            out["driver_model"] = self._driver_model
 
         return out
