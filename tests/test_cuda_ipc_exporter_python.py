@@ -56,18 +56,21 @@ def test_constructor_custom_params() -> None:
     assert exp.debug is True
 
 
-def test_dtype_code_mapping() -> None:
-    """dtype strings map to correct internal protocol codes."""
+def test_kind_bits_mapping() -> None:
+    """dtype strings map to correct (format_kind, bits, flags) wire encoding."""
     from cuda_link.cuda_ipc_exporter import (
-        _DTYPE_CODE_MAP,
-        DTYPE_FLOAT16,
-        DTYPE_FLOAT32,
-        DTYPE_UINT8,
+        FLAGS_BFLOAT16,
+        FORMAT_KIND_FLOAT,
+        FORMAT_KIND_UNSIGNED,
+        _DTYPE_TO_KIND_BITS,
     )
 
-    assert _DTYPE_CODE_MAP["float32"] == DTYPE_FLOAT32
-    assert _DTYPE_CODE_MAP["float16"] == DTYPE_FLOAT16
-    assert _DTYPE_CODE_MAP["uint8"] == DTYPE_UINT8
+    assert _DTYPE_TO_KIND_BITS["float32"] == (FORMAT_KIND_FLOAT, 32, 0)
+    assert _DTYPE_TO_KIND_BITS["float16"] == (FORMAT_KIND_FLOAT, 16, 0)
+    assert _DTYPE_TO_KIND_BITS["uint8"] == (FORMAT_KIND_UNSIGNED, 8, 0)
+    assert _DTYPE_TO_KIND_BITS["uint16"] == (FORMAT_KIND_UNSIGNED, 16, 0)
+    # bfloat16 flag must not collide with any standard mapping
+    assert FLAGS_BFLOAT16 == 0x0001
 
 
 def test_dtype_itemsize_mapping() -> None:
@@ -196,7 +199,7 @@ def test_initialize_idempotent(temp_shm_name: str, shared_memory_cleanup: list) 
 
 @pytest.mark.requires_cuda
 def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> None:
-    """SharedMemory header contains correct protocol magic 0x43495043."""
+    """SharedMemory header contains correct protocol magic 0x43495044 ('CIPD')."""
     from cuda_link.cuda_ipc_exporter import PROTOCOL_MAGIC, CUDAIPCExporter
 
     shared_memory_cleanup.append(temp_shm_name)

@@ -104,7 +104,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 │ HEADER (20 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
 │ [0-3]     magic (uint32, little-endian)                     │
-│           Protocol validation: 0x43495043 ("CIPC")          │
+│           Protocol validation: 0x43495044 ("CIPD")          │
 │ [4-11]    version (uint64, little-endian)                   │
 │           Increments on producer re-initialization          │
 │ [12-15]   num_slots (uint32, little-endian)                 │
@@ -145,9 +145,13 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 │             [405-408]   width (uint32)                      │
 │             [409-412]   height (uint32)                     │
 │             [413-416]   num_comps (uint32)                  │
-│             [417-420]   dtype_code (uint32)                 │
-│                         0=float32, 1=float16, 2=uint8,      │
-│                         3=uint16                            │
+│             [417]       format_kind (uint8)                 │
+│                         cudaChannelFormatKind:              │
+│                         0=Signed, 1=Unsigned, 2=Float       │
+│             [418]       bits_per_comp (uint8) — 8/16/32/64  │
+│             [419-420]   flags (uint16 LE)                   │
+│                         bit 0: bfloat16 (kind=Float,bits=16)│
+│                         bits 1-15: reserved=0               │
 │             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
 │ [425-432]   timestamp (float64)                             │

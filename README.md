@@ -188,7 +188,7 @@ This prevents blocking - producer never waits for consumer, consumer is always 1
 ### SharedMemory Protocol (433 bytes for 3 slots)
 
 ```
-[0-3]     magic "CIPC" (4B)       - Protocol validation (0x43495043)
+[0-3]     magic "CIPD" (4B)       - Protocol validation (0x43495044)
 [4-11]    version (8B)             - Increments on TD re-initialization
 [12-15]   num_slots (4B)           - Number of ring buffer slots (3)
 [16-19]   write_idx (4B)           - Current write index (atomic counter)

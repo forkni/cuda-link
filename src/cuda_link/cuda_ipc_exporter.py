@@ -56,29 +56,31 @@ from .cuda_ipc_wrapper import CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime
 logger = logging.getLogger(__name__)
 
 # Protocol layout constants (must match CUDAIPCExtension and CUDAIPCImporter)
-PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
+PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
 SHM_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
 SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
+METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
 
 # Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_U32 = struct.Struct("<I")   # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")   # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")   # float64 LE (timestamp)
+_ST_BBH = struct.Struct("<BBH") # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
 
-# Data type codes (must match CUDAIPCExtension and CUDAIPCImporter)
-DTYPE_FLOAT32 = 0
-DTYPE_FLOAT16 = 1
-DTYPE_UINT8 = 2
-DTYPE_UINT16 = 3
+# CUDA-aligned dtype encoding (cudaChannelFormatKind values):
+FORMAT_KIND_SIGNED = 0    # cudaChannelFormatKindSigned
+FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned
+FORMAT_KIND_FLOAT = 2     # cudaChannelFormatKindFloat
+FLAGS_BFLOAT16 = 0x0001   # flag bit: bfloat16 (kind=Float, bits=16)
 
-_DTYPE_CODE_MAP = {
-    "float32": DTYPE_FLOAT32,
-    "float16": DTYPE_FLOAT16,
-    "uint8": DTYPE_UINT8,
-    "uint16": DTYPE_UINT16,
+# Map dtype string → (format_kind, bits_per_component, flags)
+_DTYPE_TO_KIND_BITS: dict[str, tuple[int, int, int]] = {
+    "float32": (FORMAT_KIND_FLOAT,    32, 0),
+    "float16": (FORMAT_KIND_FLOAT,    16, 0),
+    "uint8":   (FORMAT_KIND_UNSIGNED,  8, 0),
+    "uint16":  (FORMAT_KIND_UNSIGNED, 16, 0),
 }
 
 _DTYPE_ITEMSIZE_MAP = {
@@ -146,8 +148,8 @@ class CUDAIPCExporter:
         Raises:
             ValueError: If dtype is unsupported or num_slots is out of range.
         """
-        if dtype not in _DTYPE_CODE_MAP:
-            raise ValueError(f"Unsupported dtype: {dtype!r}. Must be one of {list(_DTYPE_CODE_MAP)}")
+        if dtype not in _DTYPE_TO_KIND_BITS:
+            raise ValueError(f"Unsupported dtype: {dtype!r}. Must be one of {list(_DTYPE_TO_KIND_BITS)}")
         if not (0 < num_slots <= 10):
             raise ValueError(f"num_slots must be 1-10, got {num_slots}")
 
@@ -318,7 +320,7 @@ class CUDAIPCExporter:
         """Write v0.5.0 protocol header + IPC handles to SharedMemory.
 
         Layout:
-            [0-3]    magic (uint32 LE) = 0x43495043
+            [0-3]    magic (uint32 LE) = 0x43495044
             [4-11]   version (uint64 LE) — incremented on each init
             [12-15]  num_slots (uint32 LE)
             [16-19]  write_idx (uint32 LE) — initialized to 0
@@ -367,11 +369,13 @@ class CUDAIPCExporter:
         """Write texture metadata to the extended protocol region.
 
         Layout (20 bytes after shutdown flag):
-            +0   width (uint32)
-            +4   height (uint32)
-            +8   num_comps (uint32)
-            +12  dtype_code (uint32)  — 0=float32, 1=float16, 2=uint8
-            +16  data_size (uint32)   — actual bytes (before alignment)
+            +0   width         (uint32)
+            +4   height        (uint32)
+            +8   num_comps     (uint32)
+            +12  format_kind   (uint8)   — cudaChannelFormatKind: 0=Signed,1=Unsigned,2=Float
+            +13  bits_per_comp (uint8)   — 8/16/32/64
+            +14  flags         (uint16)  — bit0=bfloat16; rest reserved=0
+            +16  data_size     (uint32)  — actual bytes (before 2MiB alignment)
         """
         if self.shm_handle is None or self.data_size == 0:
             return
@@ -379,21 +383,23 @@ class CUDAIPCExporter:
         shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
         metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
 
-        dtype_code = _DTYPE_CODE_MAP[self.dtype]
+        kind, bits, flags = _DTYPE_TO_KIND_BITS[self.dtype]
 
         struct.pack_into("<I", self.shm_handle.buf, metadata_offset, self.width)
         struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 4, self.height)
         struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 8, self.channels)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 12, dtype_code)
+        _ST_BBH.pack_into(self.shm_handle.buf, metadata_offset + 12, kind, bits, flags)
         struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 16, self.data_size)
 
         logger.debug(
-            "Wrote metadata: %dx%dx%d, dtype=%s(%d), data_size=%dB",
+            "Wrote metadata: %dx%dx%d, dtype=%s (kind=%d bits=%d flags=0x%04x), data_size=%dB",
             self.width,
             self.height,
             self.channels,
             self.dtype,
-            dtype_code,
+            kind,
+            bits,
+            flags,
             self.data_size,
         )
 

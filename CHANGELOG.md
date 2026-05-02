@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-05-02
+
+### BREAKING CHANGES
+
+- **Wire protocol incompatible with v0.9.x** — `PROTOCOL_MAGIC` bumped from `0x43495043`
+  ("CIPC") to `0x43495044` ("CIPD"). Old senders/receivers will fail-fast at the magic check
+  with "Protocol magic mismatch" and refuse to operate. Update both TD extension and Python
+  package together.
+
+### Changed
+
+- **dtype encoding redesigned** — the 4-byte `dtype_code` enum at metadata+12 is replaced
+  by a CUDA-aligned self-describing encoding: `format_kind` (uint8, `cudaChannelFormatKind`),
+  `bits_per_component` (uint8), `flags` (uint16, bit 0 = bfloat16). Sender derives
+  `bits_per_component` from `data_size / (W*H*C)` (authoritative — can no longer be silently
+  wrong). Receiver validates `W*H*C*(bits/8) == data_size` and refuses init on mismatch.
+  Fixes a bug where TD's `CUDAMemoryShape.dataType` could misreport the dtype (float32 for
+  a uint8 buffer), causing a 4× size mismatch and "Source memory size is not large enough"
+  errors at non-square resolutions like 576×1024 and 1550×288.
+
 ## [0.9.0] — 2026-04-23
 
 ### Added

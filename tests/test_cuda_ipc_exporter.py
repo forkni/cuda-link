@@ -204,7 +204,7 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
     num_slots = struct.unpack("<I", bytes(exporter.shm_handle.buf[12:16]))[0]
     write_idx = struct.unpack("<I", bytes(exporter.shm_handle.buf[16:20]))[0]
 
-    assert magic == 0x43495043  # "CIPC" magic number
+    assert magic == 0x43495044  # "CIPD" magic number
     assert version >= 1  # Should be at least 1 after initialization
     assert num_slots == 3
     assert write_idx == 0  # Initially 0
@@ -360,7 +360,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
 
     # Patch Mode parameter before construction so __init__ thinks it's Receiver
     with patch("CUDAIPCExtension.CUPY_AVAILABLE", use_cupy):
-        from CUDAIPCExtension import DTYPE_FLOAT16, SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExtension
+        from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExtension
 
     HEIGHT, WIDTH, COMPS = 4, 4, 4
     NUM_SLOTS = 2
@@ -369,7 +369,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     # Build a bytearray that looks like valid SHM (write_idx=1)
     shm_size = SHM_HEADER_SIZE + NUM_SLOTS * SLOT_SIZE + 1 + 20 + 8
     buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495043)  # magic
+    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
     struct.pack_into("<Q", buf, 4, 1)  # version
     struct.pack_into("<I", buf, 12, NUM_SLOTS)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1
@@ -389,7 +389,9 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     ext._rx_width = WIDTH
     ext._rx_height = HEIGHT
     ext._rx_num_comps = COMPS
-    ext._rx_dtype_code = DTYPE_FLOAT16
+    ext._rx_format_kind = FORMAT_KIND_FLOAT
+    ext._rx_bits_per_comp = 16
+    ext._rx_flags = 0
     ext._rx_buffer_size = F16_SIZE
     ext._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
     ext._rx_dev_ptrs[0].value = 0xDEAD0000  # fake GPU ptr for slot 0
