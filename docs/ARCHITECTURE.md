@@ -410,6 +410,16 @@ return tensors[read_slot]                        ← Zero-copy, 0μs
 
 **Prevention**: Use dedicated `Ipcmemname` per exporter instance, avoid manual access.
 
+### Cross-Process Error Attribution
+
+**Important**: `cudaPeekAtLastError` / `cudaGetLastError` only inspect the CUDA context of the **calling process**. A GPU memory fault or async kernel error in the **producer** process will **not** propagate to the consumer process via the IPC event mechanism.
+
+**What the consumer observes**: a delayed or absent IPC event (timeout in `_wait_for_slot`), not a CUDA error code.
+
+**Where the error surfaces**: the producer's own per-frame sticky-error check (`check_sticky_error`, controlled by `CUDALINK_STICKY_ERROR_CHECK`, default ON) will catch the fault on the next producer frame and raise there.
+
+**Debugging guideline**: when the consumer reports a timeout or stall, check the **producer process logs first** — the root fault is almost always on the producer side.
+
 ---
 
 ## Performance Characteristics

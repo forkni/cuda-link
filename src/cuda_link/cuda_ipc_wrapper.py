@@ -470,6 +470,10 @@ class CUDARuntimeAPI:
         Pinned memory enables direct DMA for D2H transfers, eliminating the
         CUDA driver's internal staging copy that pageable memory requires.
 
+        Note: this project is single-GPU by construction (get_cuda_runtime rejects
+        a second device). Multi-GPU would require cudaHostAlloc with
+        cudaHostAllocPortable for cross-device visibility (Handbook §5.1).
+
         Args:
             size: Number of bytes to allocate
 
