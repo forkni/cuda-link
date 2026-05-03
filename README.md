@@ -57,7 +57,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v0.7.3.tox` into your TD network
+1. Drag `CUDAIPCLink_v1.0.1.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -388,7 +388,11 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v0.7.3.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v1.0.1.tox` into your TouchDesigner network from the project root.
+
+> **Older versions:** Previous `.tox` releases are available as downloadable assets on the
+> [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
+> matching the TouchDesigner build you target.
 
 **Option B: Build from source**
 
