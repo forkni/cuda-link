@@ -272,6 +272,8 @@ class CUDAIPCExtension:
         self._rx_connect_attempts = 0
         self._rx_max_connect_attempts = 20
         self._rx_backoff_intervals = [1, 2, 4, 8, 16, 32, 64, 120]  # frames (exponential)
+        # Reset to 0 each time _initialized flips True; first 5 import_frame() calls get timing logs.
+        self._diag_frames_since_reinit: int = 0
         self._rx_retry_interval_frames = 1  # Will be updated dynamically after failed attempts
         self._rx_frames_since_last_retry = 0  # Start at 0; first increment yields 1 >= 1 → immediate connect
         self._rx_needs_resolution_update = False  # Flag to defer Script TOP resolution setup
@@ -1465,6 +1467,12 @@ class CUDAIPCExtension:
 
             read_slot = (write_idx - 1) % self._rx_num_slots
 
+            _diag = self._diag_frames_since_reinit < 5
+            _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
+            if _diag:
+                self._diag_frames_since_reinit += 1
+                _t_event = time.perf_counter()
+
             # Wait on IPC event for this slot (stream-ordered, non-blocking to CPU)
             if self._rx_ipc_events[read_slot]:
                 self.cuda.stream_wait_event(
@@ -1477,6 +1485,10 @@ class CUDAIPCExtension:
                 # Note: float16 path will call stream_synchronize again below, but
                 # synchronizing an already-idle stream is a no-op in CUDA.
                 self.cuda.stream_synchronize(self._rx_stream)
+
+            if _diag:
+                _event_ms = (time.perf_counter() - _t_event) * 1000.0
+                _t_copy = time.perf_counter()
 
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._rx_dev_ptrs[read_slot].value
@@ -1531,6 +1543,15 @@ class CUDAIPCExtension:
                     self._rx_buffer_size,
                     self._rx_cached_shape,
                     stream=int(self._rx_stream.value),
+                )
+
+            if _diag:
+                _copy_ms = (time.perf_counter() - _t_copy) * 1000.0
+                self._log(
+                    f"[DIAG] import_frame #{self._diag_frames_since_reinit}: "
+                    f"slot={read_slot} write_idx={write_idx} addr=0x{address:x} "
+                    f"stream_wait={_event_ms:.2f}ms copyCUDAMemory={_copy_ms:.2f}ms",
+                    force=True,
                 )
 
             self.frame_count += 1
@@ -1590,6 +1611,7 @@ class CUDAIPCExtension:
         with contextlib.suppress(AttributeError):
             self.ownerComp.par.Numslots.enable = False
 
+        _t0 = time.perf_counter()
         try:
             self.cuda = get_cuda_runtime(device=self.device)
             self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
@@ -1908,9 +1930,12 @@ class CUDAIPCExtension:
             self._rx_cached_shape.dataType = np_dtype
 
             self._initialized = True
+            self._diag_frames_since_reinit = 0  # Reset so import_frame logs the next 5 calls
+            _init_ms = (time.perf_counter() - _t0) * 1000.0
             self._log(
                 f"Receiver initialized: {self._rx_num_slots} slots, "
-                f"{self._rx_width}x{self._rx_height}x{self._rx_num_comps}",
+                f"{self._rx_width}x{self._rx_height}x{self._rx_num_comps} "
+                f"(init took {_init_ms:.1f} ms)",
                 force=True,
             )
             return True
@@ -1956,18 +1981,7 @@ class CUDAIPCExtension:
         if not self._initialized and self.shm_handle is None:
             return
 
-        # Drain the receiver stream before closing IPC handles or destroying events/stream.
-        # On WDDM, the prior frame's copyCUDAMemory (CUDA→D3D11 cross-API mapping) is
-        # typically still WDDM-batched when Active=False fires. Tearing down with work
-        # in-flight leaves WDDM holding stale interop mappings keyed by the IPC device
-        # pointers; the next copyCUDAMemory against the same ImportBuffer TOP (same VA,
-        # same sender never restarted) hits the stale mapping → DXGI_ERROR_DEVICE_REMOVED
-        # → "An error occured trying to output to a Window" TDR on re-activation.
-        if hasattr(self, "_rx_stream") and self._rx_stream and self.cuda:
-            try:
-                self.cuda.stream_synchronize(self._rx_stream)
-            except (RuntimeError, OSError) as exc:
-                self._log(f"WARNING: stream_synchronize during cleanup failed: {exc}", force=True)
+        _cleanup_t0 = time.perf_counter()
 
         # Close all IPC memory handles
         if hasattr(self, "_rx_dev_ptrs") and self.cuda:
@@ -2024,7 +2038,8 @@ class CUDAIPCExtension:
         self._initialized = False
         self._rx_connect_attempts = 0
         self._rx_frames_since_last_retry = 0
-        self._log("Receiver cleanup complete", force=True)
+        _cleanup_ms = (time.perf_counter() - _cleanup_t0) * 1000.0
+        self._log(f"Receiver cleanup complete (total {_cleanup_ms:.1f} ms)", force=True)
 
     def is_ready(self) -> bool:
         """Check if extension is ready (mode-aware).
