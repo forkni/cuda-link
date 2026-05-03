@@ -19,9 +19,9 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           awk -v v="$tag" '
-            $0 ~ "^## \\["v"\\]" { flag=1; next }
-            flag && /^## \[/     { exit }
-            flag                 { print }
+            index($0, "## [" v "]") == 1 { flag=1; next }
+            flag && index($0, "## [") == 1 { exit }
+            flag { print }
           ' CHANGELOG.md > RELEASE_NOTES.md
           echo "Release notes: $(wc -l < RELEASE_NOTES.md) lines"
 
