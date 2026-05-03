@@ -36,6 +36,7 @@ except ImportError:
     pynvml = None  # type: ignore[assignment]
     NVML_AVAILABLE = False
 
+
 class _NvmlRefCounter:
     """Process-global ref-count for nvmlInit/nvmlShutdown.
 

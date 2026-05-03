@@ -264,10 +264,10 @@ def test_dtype_kind_bits_encoding() -> None:
     FORMAT_KIND_FLOAT = 2
 
     cases = [
-        ("float32", FORMAT_KIND_FLOAT,    32, 0),
-        ("float16", FORMAT_KIND_FLOAT,    16, 0),
-        ("uint8",   FORMAT_KIND_UNSIGNED,  8, 0),
-        ("uint16",  FORMAT_KIND_UNSIGNED, 16, 0),
+        ("float32", FORMAT_KIND_FLOAT, 32, 0),
+        ("float16", FORMAT_KIND_FLOAT, 16, 0),
+        ("uint8", FORMAT_KIND_UNSIGNED, 8, 0),
+        ("uint16", FORMAT_KIND_UNSIGNED, 16, 0),
     ]
     for dtype, exp_kind, exp_bits, exp_flags in cases:
         packed = _ST_BBH.pack(exp_kind, exp_bits, exp_flags)

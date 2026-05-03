@@ -138,9 +138,9 @@ TD_RAG/
 # Backup .toe files
 Backup/
 
-# Old .tox versions (keep only latest release)
-TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.9.0.tox
+# TOXES/ binary policy: only the LATEST CUDAIPCLink_vX.Y.Z.tox lives on main.
+# Older versions are removed via `git rm` at release time and preserved as
+# GitHub Release assets attached to their version tag (see release.yml).
 
 # AI assistant config (Gemini)
 GEMINI.md

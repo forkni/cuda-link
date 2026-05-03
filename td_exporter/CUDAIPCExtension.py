@@ -66,18 +66,18 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 
 # Dtype encoding: CUDA-aligned self-describing format stored at metadata+12 as <BBH (kind, bits, flags).
 # format_kind matches cudaChannelFormatKind (CUDA Runtime API):
-FORMAT_KIND_SIGNED = 0    # cudaChannelFormatKindSigned   — int8/int16/int32
+FORMAT_KIND_SIGNED = 0  # cudaChannelFormatKindSigned   — int8/int16/int32
 FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned — uint8/uint16/uint32
-FORMAT_KIND_FLOAT = 2     # cudaChannelFormatKindFloat    — float16/float32/float64
+FORMAT_KIND_FLOAT = 2  # cudaChannelFormatKindFloat    — float16/float32/float64
 # bits_per_component: 8, 16, 32, 64
 # flags (uint16, bit-field):
-FLAGS_BFLOAT16 = 0x0001   # kind=Float, bits=16 with bfloat16 encoding (vs standard float16)
+FLAGS_BFLOAT16 = 0x0001  # kind=Float, bits=16 with bfloat16 encoding (vs standard float16)
 
 # Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")   # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")   # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")   # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH") # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
+_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
 
 # Pixel format substrings that TD 2025 (CUDA 12.8) rejects in cudaMemory().
 # uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
@@ -589,10 +589,7 @@ class CUDAIPCExtension:
         # bits_per_component is authoritative (derived from data_size, which TD allocated).
         # format_kind is derived from shape.dataType hint for the ambiguous 16-bit case.
         pixel_count = self.width * self.height * self.channels if (self.width and self.height and self.channels) else 0
-        if pixel_count > 0 and self.data_size % pixel_count == 0:
-            bits = (self.data_size // pixel_count) * 8
-        else:
-            bits = 32  # Safe default; write_metadata_to_shm only called when data_size > 0
+        bits = self.data_size // pixel_count * 8 if pixel_count > 0 and self.data_size % pixel_count == 0 else 32
 
         flags = 0
         if bits == 8:
@@ -604,6 +601,7 @@ class CUDAIPCExtension:
             hint = self._detected_numpy_dtype
             try:
                 import numpy as _np
+
                 hint = _np.dtype(hint) if hint is not None else None
                 hint_is_float16 = hint is not None and hint == _np.dtype("float16")
             except Exception:  # noqa: BLE001
@@ -1317,8 +1315,11 @@ class CUDAIPCExtension:
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._rx_dev_ptrs[read_slot].value
 
-            if (self._rx_format_kind == FORMAT_KIND_FLOAT and self._rx_bits_per_comp == 16
-                    and not (self._rx_flags & FLAGS_BFLOAT16)):
+            if (
+                self._rx_format_kind == FORMAT_KIND_FLOAT
+                and self._rx_bits_per_comp == 16
+                and not (self._rx_flags & FLAGS_BFLOAT16)
+            ):
                 if CUPY_AVAILABLE and self._rx_cupy_f32_buf is not None:
                     # GPU-side float16→float32 conversion (Ch5: minimize PCIe traffic).
                     # stream_wait_event (enqueued above on _rx_stream) guarantees GPU data is ready.

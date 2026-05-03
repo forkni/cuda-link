@@ -59,10 +59,10 @@ def test_constructor_custom_params() -> None:
 def test_kind_bits_mapping() -> None:
     """dtype strings map to correct (format_kind, bits, flags) wire encoding."""
     from cuda_link.cuda_ipc_exporter import (
+        _DTYPE_TO_KIND_BITS,
         FLAGS_BFLOAT16,
         FORMAT_KIND_FLOAT,
         FORMAT_KIND_UNSIGNED,
-        _DTYPE_TO_KIND_BITS,
     )
 
     assert _DTYPE_TO_KIND_BITS["float32"] == (FORMAT_KIND_FLOAT, 32, 0)
