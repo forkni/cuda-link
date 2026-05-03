@@ -457,6 +457,15 @@ Produced by `benchmarks/compare_all.py` (300 frames @ 60fps, `spawn` multiproces
 
 > **Note**: `export_frame()` overhead in standalone Python processes (~117 µs) is higher than within TouchDesigner's CUDA context (~10-20 µs) due to WDDM kernel-mode transition cost per CUDA API call. The benchmark is useful for comparing methods relative to each other. The ~3-8µs figure in the overhead table above refers only to the IPC synchronization primitives (cudaEventRecord + write_idx update), not the full call.
 
+**CUDA Graphs effect on `export_frame()` submission overhead (async mode, 1080p f32):**
+
+| Mode | mean | p50 | p95 | p99 | WDDM submissions |
+|---|---|---|---|---|---|
+| Graphs off (`CUDALINK_USE_GRAPHS=0`) | 15.7 µs | 12.1 µs | 35.8 µs | 74.2 µs | 3 |
+| Graphs on (`CUDALINK_USE_GRAPHS=1`, default) | 4.7 µs | 3.8 µs | 8.2 µs | 14.3 µs | 2 |
+
+Measured with `bench_graphs.py` (no `CUDALINK_EXPORT_SYNC`). The wall-clock improvement reflects reduced WDDM kernel-mode transition cost: the `stream_wait_event + memcpy_async + record_event` triplet is collapsed into a single `cudaGraphLaunch` submission, eliminating one WDDM transition per frame. In sync mode (`CUDALINK_EXPORT_SYNC=1`) the numbers are identical because GPU copy time (~60–80 µs) dominates both paths.
+
 ### Measured Benchmarks (TouchDesigner → Python, Tier 2)
 
 Produced by `benchmarks/benchmark_comparison.py` (300 frames @ 60fps, live TD Sender → Python `CUDAIPCImporter`, RTX 4060 Laptop, Windows 11).

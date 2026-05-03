@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **CUDA Graphs for `export_frame()`** — `CUDAIPCExporter` now captures the
+  per-frame `memcpy_async` into a 1-node CUDA Graph on first use and replays it
+  via `cudaGraphLaunch` each frame. This cuts WDDM kernel-mode transitions from 3
+  to 2 per frame, reducing CPU submission overhead by ~70% at 1080p float32
+  (15.7 µs → 4.7 µs mean, measured async). Enabled by default; set
+  `CUDALINK_USE_GRAPHS=0` to revert to the legacy stream path. Falls back
+  automatically if graph capture or launch fails at runtime.
+  (`src/cuda_link/cuda_ipc_exporter.py`, `src/cuda_link/cuda_ipc_wrapper.py`)
+
+- **Multi-stream D2H for `get_frame_numpy()`** — opt-in via
+  `CUDALINK_D2H_STREAMS=N` (default `1`). Splits the D2H copy across N
+  independent non-blocking streams. No throughput gain on PCIe 4.0 (single
+  stream already saturates ~23–24 GB/s); may help on PCIe 3.0 or GPUs with dual
+  DMA engines. (`src/cuda_link/cuda_ipc_importer.py`)
+
+- **`cudaHostAllocPortable` for pinned D2H buffer** — the `get_frame_numpy()`
+  pinned host allocation now uses `cudaHostAlloc` with `cudaHostAllocPortable`
+  (flag `0x01`), making it accessible from any CUDA context in the process.
+  Relevant when PyTorch, CuPy, or other runtimes are loaded alongside
+  `cuda-link`. No throughput change; robustness improvement only.
+  (`src/cuda_link/cuda_ipc_importer.py:875`)
+
+### Internal
+
+- Test suite now resolves `cuda_link` from this repo's `src/` regardless of any
+  previously installed `cuda_link` editable package in site-packages (`pyproject.toml`
+  `pythonpath = ["src"]` + `tests/conftest.py` `sys.path.insert`).
+
+---
+
 ## [1.0.1] — 2026-05-03
 
 ### Added

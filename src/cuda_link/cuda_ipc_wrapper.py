@@ -22,23 +22,26 @@ _logger = logging.getLogger(__name__)
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
-CUDAEvent_t     = c_uint64  # cudaEvent_t opaque pointer
-CUDAStream_t    = c_uint64  # cudaStream_t opaque pointer
-CUDAGraph_t     = c_uint64  # cudaGraph_t opaque pointer (CUDA 10.0+)
+CUDAEvent_t = c_uint64  # cudaEvent_t opaque pointer
+CUDAStream_t = c_uint64  # cudaStream_t opaque pointer
+CUDAGraph_t = c_uint64  # cudaGraph_t opaque pointer (CUDA 10.0+)
 CUDAGraphExec_t = c_uint64  # cudaGraphExec_t opaque pointer (CUDA 10.0+)
 CUDAGraphNode_t = c_uint64  # cudaGraphNode_t opaque pointer (CUDA 10.0+)
 
 # --- CUDA Graph parameter structs ---
 
+
 class cudaPos(ctypes.Structure):
     """cudaPos: {x, y, z} offsets into an array or pitched memory."""
+
     _fields_ = [("x", c_size_t), ("y", c_size_t), ("z", c_size_t)]
 
 
 class cudaPitchedPtr(ctypes.Structure):
     """cudaPitchedPtr: pointer + pitch metadata for 2D/3D copies."""
+
     _fields_ = [
-        ("ptr",   c_void_p),
+        ("ptr", c_void_p),
         ("pitch", c_size_t),
         ("xsize", c_size_t),
         ("ysize", c_size_t),
@@ -47,20 +50,22 @@ class cudaPitchedPtr(ctypes.Structure):
 
 class cudaExtent(ctypes.Structure):
     """cudaExtent: width/height/depth dimensions in bytes for 3D copies."""
+
     _fields_ = [("width", c_size_t), ("height", c_size_t), ("depth", c_size_t)]
 
 
 class cudaMemcpy3DParms(ctypes.Structure):
     """cudaMemcpy3DParms: full parameter struct for cudaMemcpy3D and graph node updates."""
+
     _fields_ = [
-        ("srcArray", c_void_p),    # cudaArray_t — NULL for linear memory
-        ("srcPos",   cudaPos),
-        ("srcPtr",   cudaPitchedPtr),
-        ("dstArray", c_void_p),    # cudaArray_t — NULL for linear memory
-        ("dstPos",   cudaPos),
-        ("dstPtr",   cudaPitchedPtr),
-        ("extent",   cudaExtent),
-        ("kind",     c_int),       # cudaMemcpyKind
+        ("srcArray", c_void_p),  # cudaArray_t — NULL for linear memory
+        ("srcPos", cudaPos),
+        ("srcPtr", cudaPitchedPtr),
+        ("dstArray", c_void_p),  # cudaArray_t — NULL for linear memory
+        ("dstPos", cudaPos),
+        ("dstPtr", cudaPitchedPtr),
+        ("extent", cudaExtent),
+        ("kind", c_int),  # cudaMemcpyKind
     ]
 
 
@@ -422,9 +427,7 @@ class CUDARuntimeAPI:
 
         # cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
         #                      unsigned long long flags)   [CUDA 12.0 simplified form]
-        self.cudart.cudaGraphInstantiate.argtypes = [
-            POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64
-        ]
+        self.cudart.cudaGraphInstantiate.argtypes = [POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64]
         self.cudart.cudaGraphInstantiate.restype = c_int
 
         # cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
@@ -441,9 +444,7 @@ class CUDARuntimeAPI:
 
         # cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t* numNodes)
         # Pass nodes=NULL to query count; then call again with allocated array.
-        self.cudart.cudaGraphGetNodes.argtypes = [
-            CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)
-        ]
+        self.cudart.cudaGraphGetNodes.argtypes = [CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)]
         self.cudart.cudaGraphGetNodes.restype = c_int
 
         # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
@@ -451,7 +452,9 @@ class CUDARuntimeAPI:
         # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
         # (1D form) use cudaGraphExecMemcpyNodeSetParams1D instead.
         self.cudart.cudaGraphExecMemcpyNodeSetParams.argtypes = [
-            CUDAGraphExec_t, CUDAGraphNode_t, POINTER(cudaMemcpy3DParms)
+            CUDAGraphExec_t,
+            CUDAGraphNode_t,
+            POINTER(cudaMemcpy3DParms),
         ]
         self.cudart.cudaGraphExecMemcpyNodeSetParams.restype = c_int
 
@@ -460,24 +463,25 @@ class CUDARuntimeAPI:
         #                                    size_t count, cudaMemcpyKind kind)
         # Updates a 1D memcpy node (captured from cudaMemcpyAsync). CUDA 11.3+.
         self.cudart.cudaGraphExecMemcpyNodeSetParams1D.argtypes = [
-            CUDAGraphExec_t, CUDAGraphNode_t, c_void_p, c_void_p, c_size_t, c_int
+            CUDAGraphExec_t,
+            CUDAGraphNode_t,
+            c_void_p,
+            c_void_p,
+            c_size_t,
+            c_int,
         ]
         self.cudart.cudaGraphExecMemcpyNodeSetParams1D.restype = c_int
 
         # cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
         #                                      cudaEvent_t event)
         # Updates the event recorded by an event-record node. CUDA 11.4+.
-        self.cudart.cudaGraphExecEventRecordNodeSetEvent.argtypes = [
-            CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t
-        ]
+        self.cudart.cudaGraphExecEventRecordNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventRecordNodeSetEvent.restype = c_int
 
         # cudaGraphExecEventWaitNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
         #                                    cudaEvent_t event)
         # Updates the event waited on by an event-wait node. CUDA 11.4+.
-        self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [
-            CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t
-        ]
+        self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
 
     def check_error(self, result: int, operation: str) -> None:
@@ -1239,9 +1243,7 @@ class CUDARuntimeAPI:
         self.check_error(result, "cudaGraphExecDestroy")
 
     @staticmethod
-    def make_memcpy3d_params(
-        dst: c_void_p, src: c_void_p, count: int, kind: int
-    ) -> cudaMemcpy3DParms:
+    def make_memcpy3d_params(dst: c_void_p, src: c_void_p, count: int, kind: int) -> cudaMemcpy3DParms:
         """Build a cudaMemcpy3DParms struct for a flat 1D memory copy.
 
         Represents the copy as a single-row 2D memcpy (height=1, depth=1) so
@@ -1260,19 +1262,23 @@ class CUDARuntimeAPI:
         """
         params = cudaMemcpy3DParms()
         params.srcArray = None
-        params.srcPos   = cudaPos(0, 0, 0)
-        params.srcPtr   = cudaPitchedPtr(
+        params.srcPos = cudaPos(0, 0, 0)
+        params.srcPtr = cudaPitchedPtr(
             ptr=ctypes.cast(src, c_void_p),
-            pitch=count, xsize=count, ysize=1,
+            pitch=count,
+            xsize=count,
+            ysize=1,
         )
         params.dstArray = None
-        params.dstPos   = cudaPos(0, 0, 0)
-        params.dstPtr   = cudaPitchedPtr(
+        params.dstPos = cudaPos(0, 0, 0)
+        params.dstPtr = cudaPitchedPtr(
             ptr=ctypes.cast(dst, c_void_p),
-            pitch=count, xsize=count, ysize=1,
+            pitch=count,
+            xsize=count,
+            ysize=1,
         )
         params.extent = cudaExtent(width=count, height=1, depth=1)
-        params.kind   = kind
+        params.kind = kind
         return params
 
     def graph_exec_memcpy_node_set_params(
@@ -1324,9 +1330,12 @@ class CUDARuntimeAPI:
         dst_int = dst.value if isinstance(dst, c_void_p) else int(dst)
         src_int = src.value if isinstance(src, c_void_p) else int(src)
         result = self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
-            graph_exec, node,
-            c_void_p(dst_int), c_void_p(src_int),
-            c_size_t(count), c_int(kind),
+            graph_exec,
+            node,
+            c_void_p(dst_int),
+            c_void_p(src_int),
+            c_size_t(count),
+            c_int(kind),
         )
         self.check_error(result, "cudaGraphExecMemcpyNodeSetParams1D")
 

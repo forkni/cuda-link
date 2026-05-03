@@ -288,6 +288,14 @@ get_frame() call (us)      30       21       69       --       12       --
 - **FPS**: 60.0 sustained, 0 skipped frames
 - **Zero CPU blocking**: GPU synchronization via `cudaStreamWaitEvent` enqueue (~0.5-2µs) — does not wait for GPU
 
+### Performance Tuning (env vars)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export_frame()`. Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. Measured ~70% mean reduction in CPU submission overhead at 1080p (15.7 µs → 4.7 µs) with no change to GPU copy time. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
+| `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
+| `CUDALINK_EXPORT_SYNC` | `0` | Force a `cudaStreamSynchronize` after each `export_frame()`. Useful for wall-clock benchmarking of total GPU copy time; not recommended for production (adds 60–80 µs per frame at 1080p). |
+
 ### Tier 2: TD-Integrated Benchmarks (other methods)
 
 Run `python benchmarks/benchmark_td_metrics.py` with TouchDesigner active to measure Shared Mem Out TOP, Touch Out/In, and Spout cook times and E2E latency. TD-side logger scripts: `benchmarks/td_touchout_logger.py`, `benchmarks/td_spout_logger.py`.

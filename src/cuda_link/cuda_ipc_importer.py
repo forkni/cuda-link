@@ -249,8 +249,8 @@ class CUDAIPCImporter:
         # Set to 1 for single-stream behaviour (default, backward-compatible).
         # Recommended: 2 for single-DMA-engine GPUs; 4 for dual-DMA-engine (RTX 30/40).
         self._d2h_num_streams: int = max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1")))
-        self._d2h_streams: list = []   # extra streams for N>1; slot 0 reuses _numpy_stream
-        self._d2h_events: list = []    # one sync event per D2H stream (for join barrier)
+        self._d2h_streams: list = []  # extra streams for N>1; slot 0 reuses _numpy_stream
+        self._d2h_events: list = []  # one sync event per D2H stream (for join barrier)
 
         # Auto-initialize
         self._initialize()
@@ -355,7 +355,8 @@ class CUDAIPCImporter:
             if n_streams > 1:
                 logger.info(
                     "Multi-stream D2H enabled: %d streams (CUDALINK_D2H_STREAMS=%d)",
-                    n_streams, n_streams,
+                    n_streams,
+                    n_streams,
                 )
 
             # Open SharedMemory to read IPC handle
@@ -1179,18 +1180,18 @@ class CUDAIPCImporter:
             self._pinned_ptr = None
             self._numpy_buffer = None
 
-        if getattr(self, '_host_registered_arr', None) is not None and self.cuda is not None:
+        if getattr(self, "_host_registered_arr", None) is not None and self.cuda is not None:
             self._clear_host_registered()
             self._numpy_buffer = None
 
         # Destroy multi-stream D2H events and extra streams (slots 1..n_streams-1)
         if self.cuda is not None:
-            for evt in getattr(self, '_d2h_events', []):
+            for evt in getattr(self, "_d2h_events", []):
                 if evt is not None:
                     with contextlib.suppress(RuntimeError, OSError):
                         self.cuda.destroy_event(evt)
             self._d2h_events = []
-            for i, stream in enumerate(getattr(self, '_d2h_streams', [])):
+            for i, stream in enumerate(getattr(self, "_d2h_streams", [])):
                 if i == 0:
                     continue  # slot 0 is _numpy_stream, destroyed below
                 if stream is not None:

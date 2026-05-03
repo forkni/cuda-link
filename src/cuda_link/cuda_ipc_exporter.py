@@ -187,8 +187,9 @@ class CUDAIPCExporter:
         #   graph_launch (1 WDDM) + record_event (1 WDDM) = 2 submissions vs 3 legacy
         # When record_source_sync() has been called at least once, stream_wait_event is
         # issued before graph_launch (3 WDDM — same as legacy).
-        # Requires CUDA 12.x runtime (Python side). Disabled by default pending soak.
-        self._use_graphs: bool = os.getenv("CUDALINK_USE_GRAPHS", "0") == "1"
+        # Requires CUDA 12.x runtime (Python side). On by default; set CUDALINK_USE_GRAPHS=0
+        # to revert to the legacy 3-submission stream path.
+        self._use_graphs: bool = os.getenv("CUDALINK_USE_GRAPHS", "1") == "1"
         self._graphs_disabled: bool = False  # set True if build/launch fails at runtime
         self._source_sync_recorded: bool = False  # set True on first record_source_sync()
         # One CUDAGraphExec_t + template CUDAGraph_t per ring slot.
@@ -482,9 +483,7 @@ class CUDAIPCExporter:
                 nodes = self.cuda.graph_get_nodes(template_graph)
                 if len(nodes) != 1:
                     self.cuda.graph_destroy(template_graph)
-                    raise RuntimeError(
-                        f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode)."
-                    )
+                    raise RuntimeError(f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode).")
                 memcpy_node = nodes[0]
 
                 graph_exec = self.cuda.graph_instantiate(template_graph)
@@ -529,7 +528,7 @@ class CUDAIPCExporter:
                 except (RuntimeError, OSError) as e:
                     logger.error("Error destroying graph exec slot %d: %s", slot, e)
                 self._graph_execs[slot] = None
-        for slot, template in enumerate(getattr(self, '_graph_templates', [])):
+        for slot, template in enumerate(getattr(self, "_graph_templates", [])):
             if template is not None:
                 with contextlib.suppress(RuntimeError, OSError):
                     self.cuda.graph_destroy(template)
@@ -820,7 +819,7 @@ class CUDAIPCExporter:
                 logger.warning("Could not zero IPC handles: %s", e)
 
         # STEP 1c: Destroy CUDA Graph execs (before events/stream they reference)
-        if cuda_valid and getattr(self, '_use_graphs', False):
+        if cuda_valid and getattr(self, "_use_graphs", False):
             self._destroy_export_graphs()
 
         # STEP 2: Destroy IPC events + cross-stream sync event
