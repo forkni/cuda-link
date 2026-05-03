@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-05-03
+
+### Added
+
+- **NVML `driver_model` field** — `NVMLObserver.snapshot()` now reports the active
+  Windows driver model (`"WDDM"`, `"TCC"`, or `"MCDM"`) when running on Windows,
+  using `nvmlDeviceGetCurrentDriverModel`. The key is absent on Linux (call raises
+  `NVMLError_NotSupported` and is suppressed). Useful for diagnosing why a TCC-mode
+  GPU exhibits different latency characteristics than the typical WDDM consumer setup.
+
+### Internal / Docs
+
+- `docs/ARCHITECTURE.md` — new "Cross-Process Error Attribution" subsection under
+  Error Handling. Documents that `cudaPeekAtLastError`/`cudaGetLastError` only
+  inspect the calling process's CUDA context — a producer-side GPU fault surfaces
+  to the consumer as an IPC event timeout, not a CUDA error code. Debugging
+  guideline: when consumer reports a stall, check producer logs first.
+- `src/cuda_link/cuda_ipc_wrapper.py` — `malloc_host` docstring notes that
+  this project is single-GPU by construction (`get_cuda_runtime` rejects a second
+  device); multi-GPU usage would require `cudaHostAlloc` with `cudaHostAllocPortable`
+  for cross-device visibility (Handbook §5.1).
+- `.gitignore` — `scripts/git/`, `.githooks/`, `.gemini/` (deleted), and
+  `cgw.conf.example` are now local-only / untracked. Removes 43 files from the
+  index without touching working-tree state. Fresh clones no longer receive these
+  developer-tooling paths.
+
+[1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
+
 ## [1.0.0] — 2026-05-02
 
 ### BREAKING CHANGES
