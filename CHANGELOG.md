@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cgw.conf.example` are now local-only / untracked. Removes 43 files from the
   index without touching working-tree state. Fresh clones no longer receive these
   developer-tooling paths.
+- `build_wheel.cmd` — hardened Windows Python interpreter selection: prefers the
+  `py -3` launcher to bypass Microsoft Store stubs, rejects `WindowsApps`
+  reparse-point Python, and enforces `requires-python = ">=3.9"` from
+  `pyproject.toml` with a clear error instead of cryptic build failures
+  downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
 [1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
 
