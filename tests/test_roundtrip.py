@@ -121,7 +121,7 @@ def _worker_consumer_basic(
             rq.put(("ERROR", f"SharedMemory '{shm_name}' never appeared within 20s"))
             return
 
-        # Short extra delay so producer can write the CIPC magic and IPC handles
+        # Short extra delay so producer can write the CIPD magic and IPC handles
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)

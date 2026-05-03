@@ -53,7 +53,7 @@ The shared memory channel carries only control data (no pixel data):
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic number | 4 B | Protocol validation (`CIPC`) |
+| Magic number | 4 B | Protocol validation (`CIPD`) |
 | Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
 | Slot count | 4 B | Number of ring buffer slots |
 | Write index | 4 B | Current producer slot (atomic counter) |

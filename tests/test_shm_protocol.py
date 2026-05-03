@@ -9,7 +9,7 @@ import struct
 
 def test_header_layout_sizes() -> None:
     """Verify header is exactly 20 bytes (4B magic + 8B version + 4B num_slots + 4B write_idx)."""
-    PROTOCOL_MAGIC = 0x43495043  # "CIPC"
+    PROTOCOL_MAGIC = 0x43495044  # "CIPD"
     SHM_HEADER_SIZE = 20  # Updated from 16 to include 4-byte magic
 
     # Pack header values
@@ -215,72 +215,72 @@ def test_metadata_offset_calculation() -> None:
 
 
 def test_metadata_write_read_roundtrip() -> None:
-    """Verify metadata fields can be written and read back correctly."""
+    """Verify metadata fields round-trip with the new (kind, bits, flags) encoding."""
+    _ST_BBH = struct.Struct("<BBH")
     METADATA_OFFSET = 405  # For 3 slots: 20 header + 3*128 slots + 1 shutdown
 
     buffer = bytearray(425)  # 20 + 3*128 + 1 + 20 = 425
 
-    # Write metadata
-    width, height, num_comps, dtype_code, buf_size = 1920, 1080, 4, 0, 1920 * 1080 * 4 * 4
+    # Write metadata: 1920x1080 float32 RGBA
+    width, height, num_comps = 1920, 1080, 4
+    kind, bits, flags = 2, 32, 0  # FORMAT_KIND_FLOAT, 32-bit, no flags
+    buf_size = width * height * num_comps * (bits // 8)
 
     buffer[METADATA_OFFSET : METADATA_OFFSET + 4] = struct.pack("<I", width)
     buffer[METADATA_OFFSET + 4 : METADATA_OFFSET + 8] = struct.pack("<I", height)
     buffer[METADATA_OFFSET + 8 : METADATA_OFFSET + 12] = struct.pack("<I", num_comps)
-    buffer[METADATA_OFFSET + 12 : METADATA_OFFSET + 16] = struct.pack("<I", dtype_code)
+    buffer[METADATA_OFFSET + 12 : METADATA_OFFSET + 16] = _ST_BBH.pack(kind, bits, flags)
     buffer[METADATA_OFFSET + 16 : METADATA_OFFSET + 20] = struct.pack("<I", buf_size)
 
     # Read back
     assert struct.unpack("<I", buffer[METADATA_OFFSET : METADATA_OFFSET + 4])[0] == 1920
     assert struct.unpack("<I", buffer[METADATA_OFFSET + 4 : METADATA_OFFSET + 8])[0] == 1080
     assert struct.unpack("<I", buffer[METADATA_OFFSET + 8 : METADATA_OFFSET + 12])[0] == 4
-    assert struct.unpack("<I", buffer[METADATA_OFFSET + 12 : METADATA_OFFSET + 16])[0] == 0
+    r_kind, r_bits, r_flags = _ST_BBH.unpack(buffer[METADATA_OFFSET + 12 : METADATA_OFFSET + 16])
+    assert r_kind == kind
+    assert r_bits == bits
+    assert r_flags == flags
     assert struct.unpack("<I", buffer[METADATA_OFFSET + 16 : METADATA_OFFSET + 20])[0] == buf_size
 
-
-def test_backward_compatibility_old_reader() -> None:
-    """Verify new-format reader with magic can read extended buffer."""
-    PROTOCOL_MAGIC = 0x43495043  # "CIPC"
-    buffer = bytearray(425)  # 20 + 3*128 + 1 + 20
-
-    # Write header (new format with magic)
-    buffer[0:4] = struct.pack("<I", PROTOCOL_MAGIC)
-    buffer[4:12] = struct.pack("<Q", 1)
-    buffer[12:16] = struct.pack("<I", 3)
-    buffer[16:20] = struct.pack("<I", 42)
-
-    # New reader reads with magic validation
-    magic = struct.unpack("<I", bytes(buffer[0:4]))[0]
-    version = struct.unpack("<Q", bytes(buffer[4:12]))[0]
-    num_slots = struct.unpack("<I", bytes(buffer[12:16]))[0]
-    write_idx = struct.unpack("<I", bytes(buffer[16:20]))[0]
-    shutdown = buffer[404]  # 20 + 3*128 = 404
-
-    assert magic == PROTOCOL_MAGIC
-    assert version == 1
-    assert num_slots == 3
-    assert write_idx == 42
-    assert shutdown == 0
+    # Size invariant: W*H*C*(bits//8) == buf_size
+    assert width * height * num_comps * (r_bits // 8) == buf_size
 
 
-def test_dtype_code_mapping() -> None:
-    """Verify dtype code constants match protocol specification."""
-    DTYPE_FLOAT32 = 0
-    DTYPE_FLOAT16 = 1
-    DTYPE_UINT8 = 2
+def test_magic_mismatch_detection() -> None:
+    """Old-magic (CIPC) buffer must be distinguishable from new-magic (CIPD) buffer."""
+    OLD_MAGIC = 0x43495043  # "CIPC" — v0.9.x
+    NEW_MAGIC = 0x43495044  # "CIPD" — v1.0.0+
+    buffer = bytearray(20)
+    buffer[0:4] = struct.pack("<I", OLD_MAGIC)
+    read_magic = struct.unpack("<I", bytes(buffer[0:4]))[0]
+    assert read_magic != NEW_MAGIC, "Old-protocol buffer must fail the new magic check"
+    assert read_magic == OLD_MAGIC
 
-    # Test all valid dtype codes
-    valid_codes = [DTYPE_FLOAT32, DTYPE_FLOAT16, DTYPE_UINT8]
-    for code in valid_codes:
-        assert 0 <= code <= 2, f"Invalid dtype code: {code}"
+
+def test_dtype_kind_bits_encoding() -> None:
+    """Verify (format_kind, bits_per_comp, flags) encoding for all supported dtypes."""
+    _ST_BBH = struct.Struct("<BBH")
+    FORMAT_KIND_UNSIGNED = 1
+    FORMAT_KIND_FLOAT = 2
+
+    cases = [
+        ("float32", FORMAT_KIND_FLOAT, 32, 0),
+        ("float16", FORMAT_KIND_FLOAT, 16, 0),
+        ("uint8", FORMAT_KIND_UNSIGNED, 8, 0),
+        ("uint16", FORMAT_KIND_UNSIGNED, 16, 0),
+    ]
+    for dtype, exp_kind, exp_bits, exp_flags in cases:
+        packed = _ST_BBH.pack(exp_kind, exp_bits, exp_flags)
+        r_kind, r_bits, r_flags = _ST_BBH.unpack(packed)
+        assert r_kind == exp_kind, f"{dtype}: kind mismatch"
+        assert r_bits == exp_bits, f"{dtype}: bits mismatch"
+        assert r_flags == exp_flags, f"{dtype}: flags mismatch"
 
 
 def test_metadata_layout_fields() -> None:
-    """Verify metadata field layout and sizes."""
-    # Each field is 4 bytes (uint32)
-    FIELD_SIZE = 4
-    NUM_FIELDS = 5  # width, height, num_comps, dtype_code, buffer_size
-    METADATA_SIZE = FIELD_SIZE * NUM_FIELDS
-
+    """Verify metadata region is exactly 20 bytes with new field layout."""
+    # width(4) + height(4) + num_comps(4) + kind(1)+bits(1)+flags(2) + data_size(4) = 20
+    METADATA_SIZE = 4 + 4 + 4 + 4 + 4  # dtype field is still 4 bytes total (packed as BBH)
     assert METADATA_SIZE == 20, f"Metadata size: {METADATA_SIZE} != 20"
 
 

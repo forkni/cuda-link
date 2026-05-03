@@ -200,8 +200,8 @@ class CUDARuntimeAPI:
             # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
             ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
             _logger.debug("Loaded CUDA runtime: %s", buf.value)
-        except Exception:  # noqa: BLE001
-            pass
+        except (OSError, AttributeError) as e:
+            _logger.debug("Could not log DLL path: %s", e)
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
@@ -469,6 +469,10 @@ class CUDARuntimeAPI:
 
         Pinned memory enables direct DMA for D2H transfers, eliminating the
         CUDA driver's internal staging copy that pageable memory requires.
+
+        Note: this project is single-GPU by construction (get_cuda_runtime rejects
+        a second device). Multi-GPU would require cudaHostAlloc with
+        cudaHostAllocPortable for cross-device visibility (Handbook §5.1).
 
         Args:
             size: Number of bytes to allocate

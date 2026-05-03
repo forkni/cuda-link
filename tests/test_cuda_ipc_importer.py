@@ -134,8 +134,8 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header (magic="CIPC", version=1, num_slots=3, write_idx=0)
-        shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
+        # Write header (magic="CIPD", version=1, num_slots=3, write_idx=0)
+        shm.buf[0:4] = struct.pack("<I", 0x43495044)  # magic "CIPD"
         shm.buf[4:12] = struct.pack("<Q", 1)  # version
         shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
         shm.buf[16:20] = struct.pack("<I", 0)  # write_idx
@@ -177,8 +177,8 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header (magic="CIPC", version=1, num_slots=3, write_idx=1)
-        shm.buf[0:4] = struct.pack("<I", 0x43495043)  # magic "CIPC"
+        # Write header (magic="CIPD", version=1, num_slots=3, write_idx=1)
+        shm.buf[0:4] = struct.pack("<I", 0x43495044)  # magic "CIPD"
         shm.buf[4:12] = struct.pack("<Q", 1)  # version
         shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
         shm.buf[16:20] = struct.pack("<I", 1)  # write_idx=1
@@ -235,7 +235,7 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
     buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495043)  # magic "CIPC"
+    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
     struct.pack_into("<Q", buf, 4, 1)  # version=1
     struct.pack_into("<I", buf, 12, num_slots)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1

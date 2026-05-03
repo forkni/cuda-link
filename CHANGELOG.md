@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-05-03
+
+### Added
+
+- **NVML `driver_model` field** — `NVMLObserver.snapshot()` now reports the active
+  Windows driver model (`"WDDM"`, `"TCC"`, or `"MCDM"`) when running on Windows,
+  using `nvmlDeviceGetCurrentDriverModel`. The key is absent on Linux (call raises
+  `NVMLError_NotSupported` and is suppressed). Useful for diagnosing why a TCC-mode
+  GPU exhibits different latency characteristics than the typical WDDM consumer setup.
+
+### Internal / Docs
+
+- `docs/ARCHITECTURE.md` — new "Cross-Process Error Attribution" subsection under
+  Error Handling. Documents that `cudaPeekAtLastError`/`cudaGetLastError` only
+  inspect the calling process's CUDA context — a producer-side GPU fault surfaces
+  to the consumer as an IPC event timeout, not a CUDA error code. Debugging
+  guideline: when consumer reports a stall, check producer logs first.
+- `src/cuda_link/cuda_ipc_wrapper.py` — `malloc_host` docstring notes that
+  this project is single-GPU by construction (`get_cuda_runtime` rejects a second
+  device); multi-GPU usage would require `cudaHostAlloc` with `cudaHostAllocPortable`
+  for cross-device visibility (Handbook §5.1).
+- `.gitignore` — `scripts/git/`, `.githooks/`, `.gemini/` (deleted), and
+  `cgw.conf.example` are now local-only / untracked. Removes 43 files from the
+  index without touching working-tree state. Fresh clones no longer receive these
+  developer-tooling paths.
+
+[1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
+
+## [1.0.0] — 2026-05-02
+
+### BREAKING CHANGES
+
+- **Wire protocol incompatible with v0.9.x** — `PROTOCOL_MAGIC` bumped from `0x43495043`
+  ("CIPC") to `0x43495044` ("CIPD"). Old senders/receivers will fail-fast at the magic check
+  with "Protocol magic mismatch" and refuse to operate. Update both TD extension and Python
+  package together.
+
+### Changed
+
+- **dtype encoding redesigned** — the 4-byte `dtype_code` enum at metadata+12 is replaced
+  by a CUDA-aligned self-describing encoding: `format_kind` (uint8, `cudaChannelFormatKind`),
+  `bits_per_component` (uint8), `flags` (uint16, bit 0 = bfloat16). Sender derives
+  `bits_per_component` from `data_size / (W*H*C)` (authoritative — can no longer be silently
+  wrong). Receiver validates `W*H*C*(bits/8) == data_size` and refuses init on mismatch.
+  Fixes a bug where TD's `CUDAMemoryShape.dataType` could misreport the dtype (float32 for
+  a uint8 buffer), causing a 4× size mismatch and "Source memory size is not large enough"
+  errors at non-square resolutions like 576×1024 and 1550×288.
+
 ## [0.9.0] — 2026-04-23
 
 ### Added

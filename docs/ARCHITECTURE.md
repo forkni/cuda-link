@@ -104,7 +104,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 │ HEADER (20 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
 │ [0-3]     magic (uint32, little-endian)                     │
-│           Protocol validation: 0x43495043 ("CIPC")          │
+│           Protocol validation: 0x43495044 ("CIPD")          │
 │ [4-11]    version (uint64, little-endian)                   │
 │           Increments on producer re-initialization          │
 │ [12-15]   num_slots (uint32, little-endian)                 │
@@ -145,9 +145,13 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 │             [405-408]   width (uint32)                      │
 │             [409-412]   height (uint32)                     │
 │             [413-416]   num_comps (uint32)                  │
-│             [417-420]   dtype_code (uint32)                 │
-│                         0=float32, 1=float16, 2=uint8,      │
-│                         3=uint16                            │
+│             [417]       format_kind (uint8)                 │
+│                         cudaChannelFormatKind:              │
+│                         0=Signed, 1=Unsigned, 2=Float       │
+│             [418]       bits_per_comp (uint8) — 8/16/32/64  │
+│             [419-420]   flags (uint16 LE)                   │
+│                         bit 0: bfloat16 (kind=Float,bits=16)│
+│                         bits 1-15: reserved=0               │
 │             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
 │ [425-432]   timestamp (float64)                             │
@@ -405,6 +409,16 @@ return tensors[read_slot]                        ← Zero-copy, 0μs
 **Impact**: Undefined behavior, likely crashes.
 
 **Prevention**: Use dedicated `Ipcmemname` per exporter instance, avoid manual access.
+
+### Cross-Process Error Attribution
+
+**Important**: `cudaPeekAtLastError` / `cudaGetLastError` only inspect the CUDA context of the **calling process**. A GPU memory fault or async kernel error in the **producer** process will **not** propagate to the consumer process via the IPC event mechanism.
+
+**What the consumer observes**: a delayed or absent IPC event (timeout in `_wait_for_slot`), not a CUDA error code.
+
+**Where the error surfaces**: the producer's own per-frame sticky-error check (`check_sticky_error`, controlled by `CUDALINK_STICKY_ERROR_CHECK`, default ON) will catch the fault on the next producer frame and raise there.
+
+**Debugging guideline**: when the consumer reports a timeout or stall, check the **producer process logs first** — the root fault is almost always on the producer side.
 
 ---
 

@@ -2,7 +2,7 @@
 Multi-process integration tests for CUDA IPC.
 
 These tests verify the full producer-consumer pipeline.
-Protocol v0.5.0: 20-byte header (4B magic "CIPC" + 8B version + 4B num_slots + 4B write_idx).
+Protocol v1.0.0: 20-byte header (4B magic "CIPD" + 8B version + 4B num_slots + 4B write_idx).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from multiprocessing.shared_memory import SharedMemory
 import pytest
 
 # Protocol v0.5.0 constants
-_MAGIC = 0x43495043  # "CIPC"
+_MAGIC = 0x43495044  # "CIPD"
 _HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
 _SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 

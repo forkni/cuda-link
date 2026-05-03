@@ -138,17 +138,16 @@ TD_RAG/
 # Backup .toe files
 Backup/
 
-# Old .tox versions (keep only latest release)
-TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.9.0.tox
+# TOXES/ binary policy: only the LATEST CUDAIPCLink_vX.Y.Z.tox lives on main.
+# Older versions are removed via `git rm` at release time and preserved as
+# GitHub Release assets attached to their version tag (see release.yml).
 
 # AI assistant config (Gemini)
 GEMINI.md
 gemini-skills/
 
-# Gemini CLI runtime artifacts (telemetry, session logs)
-.gemini/telemetry.log
-.gemini/*.log
+# Gemini CLI data (removed locally; excluded from repo entirely)
+.gemini/
 
 # Claude auto-memory (session-specific)
 MEMORY.md
@@ -205,6 +204,7 @@ benchmarks/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
 
 # Local-only docs (style guides, workflow docs, debug protocol)
+docs/STYLE_AUDIT_REPORT.md
 docs/OPT_1_implementation_PLAN.md
 docs/AUTOMATED_GIT_WORKFLOW.md
 docs/BASH_STYLE_GUIDE.md
@@ -216,4 +216,8 @@ docs/PYTHON_STYLE_GUIDE_QUICK.md
 docs/PYTHON_STYLE_GUIDE.md
 docs/SHELL_STYLE_GUIDE.md
 logs/
-.cgw.conf
+
+# Git workflow scripts and hooks (local-only; .cgw.conf is tracked — not ignored)
+scripts/git/
+.githooks/
+cgw.conf.example

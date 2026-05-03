@@ -48,7 +48,7 @@ from CUDAIPCWrapper import (  # noqa: E402
 from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 
 # Protocol layout constants (named offsets, not hardcoded literals)
-PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
+PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
 MAGIC_OFFSET = 0
 MAGIC_SIZE = 4
 VERSION_OFFSET = 4
@@ -60,20 +60,24 @@ WRITE_IDX_SIZE = 4
 SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
 SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
+METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 # TIMESTAMP_OFFSET calculated at runtime: SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
-# Data type codes for extended protocol
-DTYPE_FLOAT32 = 0
-DTYPE_FLOAT16 = 1
-DTYPE_UINT8 = 2
-DTYPE_UINT16 = 3
+# Dtype encoding: CUDA-aligned self-describing format stored at metadata+12 as <BBH (kind, bits, flags).
+# format_kind matches cudaChannelFormatKind (CUDA Runtime API):
+FORMAT_KIND_SIGNED = 0  # cudaChannelFormatKindSigned   — int8/int16/int32
+FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned — uint8/uint16/uint32
+FORMAT_KIND_FLOAT = 2  # cudaChannelFormatKindFloat    — float16/float32/float64
+# bits_per_component: 8, 16, 32, 64
+# flags (uint16, bit-field):
+FLAGS_BFLOAT16 = 0x0001  # kind=Float, bits=16 with bfloat16 encoding (vs standard float16)
 
 # Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
 _ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
 _ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
 _ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
 
 # Pixel format substrings that TD 2025 (CUDA 12.8) rejects in cudaMemory().
 # uint8 / uint16 (fixed) and float32 are supported. float16 variants are not.
@@ -241,7 +245,9 @@ class CUDAIPCExtension:
         self._rx_width = 0
         self._rx_height = 0
         self._rx_num_comps = 0
-        self._rx_dtype_code = 0
+        self._rx_format_kind = FORMAT_KIND_FLOAT
+        self._rx_bits_per_comp = 32
+        self._rx_flags = 0
         self._rx_buffer_size = 0
         self._rx_last_write_idx = 0
 
@@ -499,7 +505,7 @@ class CUDAIPCExtension:
         """Write magic + version + num_slots + write_idx + all IPC handles to SharedMemory.
 
         Layout (20 + NUM_SLOTS*192 + 1 bytes):
-        [0-3]     magic (4B) - protocol validation "CIPC"
+        [0-3]     magic (4B) - protocol validation "CIPD"
         [4-11]    version (8B)
         [12-15]   num_slots (4B)
         [16-19]   write_idx (4B)
@@ -563,12 +569,14 @@ class CUDAIPCExtension:
     def _write_metadata_to_shm(self) -> None:
         """Write texture metadata to the extended protocol region after shutdown flag.
 
-        Extended protocol layout (appended after existing 593 bytes for 3 slots):
-        [shutdown_offset+1 : +4]  width (uint32 LE)
-        [shutdown_offset+5 : +4]  height (uint32 LE)
-        [shutdown_offset+9 : +4]  num_comps (uint32 LE)
-        [shutdown_offset+13 : +4] dtype_code (uint32 LE)  # 0=float32, 1=float16, 2=uint8
-        [shutdown_offset+17 : +4] buffer_size (uint32 LE)
+        Extended protocol layout (20 bytes):
+        [+0  : 4B]  width         (uint32 LE)
+        [+4  : 4B]  height        (uint32 LE)
+        [+8  : 4B]  num_comps     (uint32 LE)
+        [+12 : 1B]  format_kind   (uint8)  — cudaChannelFormatKind: 0=Signed,1=Unsigned,2=Float
+        [+13 : 1B]  bits_per_comp (uint8)  — 8/16/32/64
+        [+14 : 2B]  flags         (uint16 LE) — bit0=bfloat16; rest reserved=0
+        [+16 : 4B]  data_size     (uint32 LE) — actual bytes (before 2MiB alignment)
         """
         if self.shm_handle is None or self.data_size == 0:
             return
@@ -577,50 +585,44 @@ class CUDAIPCExtension:
         shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
         metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
 
-        # Determine dtype_code from CUDAMemoryShape.dataType (preferred) or byte-ratio (fallback)
-        detected_dtype = self._detected_numpy_dtype
-        if detected_dtype is not None:
+        # Encode format as CUDA-aligned (kind, bits, flags) — self-describing, no enum lookup.
+        # bits_per_component is authoritative (derived from data_size, which TD allocated).
+        # format_kind is derived from shape.dataType hint for the ambiguous 16-bit case.
+        pixel_count = self.width * self.height * self.channels if (self.width and self.height and self.channels) else 0
+        bits = self.data_size // pixel_count * 8 if pixel_count > 0 and self.data_size % pixel_count == 0 else 32
+
+        flags = 0
+        if bits == 8:
+            kind = FORMAT_KIND_UNSIGNED
+        elif bits == 16:
+            # Disambiguate float16 vs uint16 using shape.dataType hint (normalized to np.dtype).
+            # dtype_converter promotes float16→float32 upstream in normal TD pipelines,
+            # so 16-bit reaching here is typically uint16 fixed-point.
+            hint = self._detected_numpy_dtype
             try:
                 import numpy as _np
 
-                _dtype_to_code = {
-                    _np.dtype("float32"): DTYPE_FLOAT32,
-                    _np.dtype("float16"): DTYPE_FLOAT16,
-                    _np.dtype("uint8"): DTYPE_UINT8,
-                    _np.dtype("uint16"): DTYPE_UINT16,
-                }
-                dtype_code = _dtype_to_code.get(detected_dtype, DTYPE_FLOAT32)
+                hint = _np.dtype(hint) if hint is not None else None
+                hint_is_float16 = hint is not None and hint == _np.dtype("float16")
             except Exception:  # noqa: BLE001
-                detected_dtype = None  # Fall through to byte-ratio below
-
-        if detected_dtype is None:
-            # Fallback: byte-ratio inference (cannot distinguish float16 from uint16)
-            if self.width > 0 and self.height > 0 and self.channels > 0:
-                bytes_per_pixel = self.data_size / (self.width * self.height)
-                bytes_per_comp = bytes_per_pixel / self.channels
-            else:
-                bytes_per_comp = 4  # Default to float32
-            if bytes_per_comp <= 1:
-                dtype_code = DTYPE_UINT8
-            elif bytes_per_comp <= 2:
-                # dtype_converter promotes float16 → float32 upstream, so any
-                # remaining 2-byte format at this point is uint16 (fixed-point).
-                dtype_code = DTYPE_UINT16
-            else:
-                dtype_code = DTYPE_FLOAT32
+                hint_is_float16 = False
+            kind = FORMAT_KIND_FLOAT if hint_is_float16 else FORMAT_KIND_UNSIGNED
+        else:
+            kind = FORMAT_KIND_FLOAT  # float32 / float64
 
         # Write metadata fields
         self.shm_handle.buf[metadata_offset : metadata_offset + 4] = struct.pack("<I", self.width)
         self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8] = struct.pack("<I", self.height)
         self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12] = struct.pack("<I", self.channels)
-        self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16] = struct.pack("<I", dtype_code)
+        self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16] = _ST_BBH.pack(kind, bits, flags)
         self.shm_handle.buf[metadata_offset + 16 : metadata_offset + 20] = struct.pack("<I", self.data_size)
 
         # Track last written dtype for change detection
         self._last_numpy_dtype = self._detected_numpy_dtype
 
         self._log(
-            f"Wrote metadata: {self.width}x{self.height}x{self.channels}, dtype={dtype_code}, size={self.data_size}B"
+            f"Wrote metadata: {self.width}x{self.height}x{self.channels}, "
+            f"kind={kind} bits={bits} flags=0x{flags:04x}, size={self.data_size}B"
         )
 
     def _has_dtype_changed(self) -> bool:
@@ -1313,7 +1315,11 @@ class CUDAIPCExtension:
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._rx_dev_ptrs[read_slot].value
 
-            if self._rx_dtype_code == DTYPE_FLOAT16:
+            if (
+                self._rx_format_kind == FORMAT_KIND_FLOAT
+                and self._rx_bits_per_comp == 16
+                and not (self._rx_flags & FLAGS_BFLOAT16)
+            ):
                 if CUPY_AVAILABLE and self._rx_cupy_f32_buf is not None:
                     # GPU-side float16→float32 conversion (Ch5: minimize PCIe traffic).
                     # stream_wait_event (enqueued above on _rx_stream) guarantees GPU data is ready.
@@ -1499,19 +1505,31 @@ class CUDAIPCExtension:
                     "<I",
                     bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12]),
                 )[0]
-                self._rx_dtype_code = struct.unpack(
-                    "<I",
-                    bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16]),
-                )[0]
+                self._rx_format_kind, self._rx_bits_per_comp, self._rx_flags = _ST_BBH.unpack(
+                    bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16])
+                )
                 self._rx_buffer_size = struct.unpack(
                     "<I",
                     bytes(self.shm_handle.buf[metadata_offset + 16 : metadata_offset + 20]),
                 )[0]
                 self._log(
                     f"Read metadata: {self._rx_width}x{self._rx_height}x{self._rx_num_comps}, "
-                    f"dtype={self._rx_dtype_code}, buf_size={self._rx_buffer_size}",
+                    f"kind={self._rx_format_kind} bits={self._rx_bits_per_comp} flags=0x{self._rx_flags:04x}, "
+                    f"buf_size={self._rx_buffer_size}",
                     force=True,
                 )
+                # Strict size invariant: data_size must exactly equal W*H*C*(bits/8).
+                # Any mismatch means the sender's encoding is inconsistent — refuse to init.
+                expected_size = self._rx_width * self._rx_height * self._rx_num_comps * (self._rx_bits_per_comp // 8)
+                if self._rx_bits_per_comp == 0 or self._rx_buffer_size != expected_size:
+                    self._log(
+                        f"Metadata size invariant failed: W*H*C*(bits/8)={expected_size} "
+                        f"but buf_size={self._rx_buffer_size}. Sender/receiver protocol mismatch.",
+                        force=True,
+                    )
+                    self.shm_handle.close()
+                    self.shm_handle = None
+                    return False
             else:
                 self._log("No extended metadata in SharedMemory (legacy sender)", force=True)
                 self.shm_handle.close()
@@ -1636,17 +1654,25 @@ class CUDAIPCExtension:
             else:
                 np_module = numpy
 
-            dtype_map = {
-                DTYPE_FLOAT32: np_module.float32,
-                # float16 not supported by copyCUDAMemory — handled via D2H+copyNumpyArray path
-                DTYPE_FLOAT16: np_module.float32,  # shape dtype = float32 (unused for float16 path)
-                DTYPE_UINT8: np_module.uint8,
-                DTYPE_UINT16: np_module.uint16,
-            }
-            np_dtype = dtype_map.get(self._rx_dtype_code, np_module.float32)
+            # Decode numpy dtype directly from (format_kind, bits_per_comp, flags).
+            # float16 path uses float32 as the CUDAMemoryShape dtype because copyCUDAMemory
+            # doesn't accept float16 — the actual conversion happens via D2H + copyNumpyArray.
+            _is_float16 = (
+                self._rx_format_kind == FORMAT_KIND_FLOAT
+                and self._rx_bits_per_comp == 16
+                and not (self._rx_flags & FLAGS_BFLOAT16)
+            )
+            if self._rx_format_kind == FORMAT_KIND_UNSIGNED and self._rx_bits_per_comp == 8:
+                np_dtype = np_module.uint8
+            elif self._rx_format_kind == FORMAT_KIND_UNSIGNED and self._rx_bits_per_comp == 16:
+                np_dtype = np_module.uint16
+            elif _is_float16:
+                np_dtype = np_module.float32  # shape dtype for copyCUDAMemory; real f16 handled via D2H
+            else:
+                np_dtype = np_module.float32  # float32/float64 — TD's copyCUDAMemory expects float32 shape
 
             # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
-            if self._rx_dtype_code == DTYPE_FLOAT16:
+            if _is_float16:
                 n_elems = self._rx_width * self._rx_height * self._rx_num_comps
                 f16_bytes = n_elems * 2
                 # Use pinned (page-locked) memory for DMA-capable D2H transfer via cudaMemcpyAsync.

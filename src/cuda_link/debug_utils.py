@@ -22,7 +22,9 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-def benchmark_with_events(fn: Callable, *args: Any, warmup: int = 3, iterations: int = 10, **kwargs: Any) -> float:
+def benchmark_with_events(
+    fn: Callable[..., Any], *args: Any, warmup: int = 3, iterations: int = 10, **kwargs: Any
+) -> float:
     """
     GPU-accurate timing using CUDA events.
 
@@ -114,7 +116,7 @@ def create_snoop_config(
     out: str | None = None,
     *,
     enabled: bool = True,
-) -> object | None:
+) -> Any:
     """Create a snoop.Config with timestamp column output.
 
     Note: call-depth tracing is configured per-decorator via ``cfg.snoop(depth=N)``,
@@ -150,12 +152,12 @@ def create_snoop_config(
 
 
 def snoop_decorator(
-    fn: Callable | None = None,
+    fn: Callable[..., Any] | None = None,
     *,
     depth: int = 1,
     watch: tuple[str, ...] = (),
     enabled: bool = True,
-) -> Callable:
+) -> Callable[..., Any]:
     """Return a @snoop decorator, or a transparent no-op if snoop is unavailable.
 
     Designed so ``@snoop_decorator`` can be left on functions in development
@@ -180,13 +182,13 @@ def snoop_decorator(
             ...
     """
 
-    def _noop(f: Callable) -> Callable:
+    def _noop(f: Callable[..., Any]) -> Callable[..., Any]:
         return f
 
     try:
         import snoop as _snoop
     except ImportError:
-        decorator: Callable = _noop
+        decorator: Callable[..., Any] = _noop
     else:
         if not enabled:
             decorator = _noop

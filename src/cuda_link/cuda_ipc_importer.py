@@ -28,8 +28,12 @@ import sys
 import time
 import traceback
 from multiprocessing.shared_memory import SharedMemory
+from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .nvml_observer import NVMLObserver
 
 # Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
 # The winmm DLL handle is cached at module level so the load cost is paid once.
@@ -89,13 +93,13 @@ except ImportError:
     cp = None
     CUPY_AVAILABLE = False
 
-from .cuda_ipc_wrapper import cudaIpcEventHandle_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: E402
+from .cuda_ipc_wrapper import CUDARuntimeAPI, cudaIpcEventHandle_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: E402
 
 # Byte size per dtype — module-level constant avoids dict construction on every _dtype_itemsize() call
 _DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "uint8": 1, "uint16": 2}
 
 # Protocol layout constants (must match td_exporter/CUDAIPCExtension.py)
-PROTOCOL_MAGIC = 0x43495043  # "CIPC" - protocol validation magic number
+PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
 MAGIC_OFFSET = 0
 MAGIC_SIZE = 4
 VERSION_OFFSET = 4
@@ -107,7 +111,7 @@ WRITE_IDX_SIZE = 4
 SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
 SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
 SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 4B dtype_code + 4B buffer_size
+METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 # TIMESTAMP_OFFSET calculated at runtime: SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
@@ -115,6 +119,24 @@ TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
 _ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
 _ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
 _ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
+
+# CUDA-aligned dtype decoding constants (must match sender constants)
+_FORMAT_KIND_FLOAT = 2
+_FLAGS_BFLOAT16 = 0x0001
+
+
+def _decode_dtype_str(kind: int, bits: int, flags: int) -> str:
+    """Decode (format_kind, bits_per_comp, flags) → dtype string."""
+    if kind == _FORMAT_KIND_FLOAT and bits == 16 and not (flags & _FLAGS_BFLOAT16):
+        return "float16"
+    if kind == _FORMAT_KIND_FLOAT:
+        return "float32"
+    if bits == 8:
+        return "uint8"
+    if bits == 16:
+        return "uint16"
+    return "float32"  # safe fallback for future extensions
 
 
 class CUDAIPCImporter:
@@ -140,7 +162,7 @@ class CUDAIPCImporter:
         debug: bool = False,
         timeout_ms: float = 5000.0,
         device: int = 0,
-    ):
+    ) -> None:
         """Initialize CUDA IPC importer.
 
         Args:
@@ -167,7 +189,7 @@ class CUDAIPCImporter:
         self._spin_us: int = int(os.getenv("CUDALINK_WAIT_SPIN_US", "200"))
 
         # CUDA runtime API
-        self.cuda = None
+        self.cuda: CUDARuntimeAPI | None = None
         self._initialized = False
 
         # IPC state
@@ -215,6 +237,9 @@ class CUDAIPCImporter:
         # Cached dtype-derived values — avoids np.dtype() construction per frame
         self._cached_dtype_str: str = ""
         self._cached_numpy_dtype: object = None
+
+        # CUDA stream for async D2H copies (created in _initialize())
+        self._numpy_stream: object = None
 
         # Auto-initialize
         self._initialize()
@@ -324,7 +349,7 @@ class CUDAIPCImporter:
                 magic = struct.unpack("<I", bytes(self.shm_handle.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]))[0]
                 if magic != PROTOCOL_MAGIC:
                     logger.error("Protocol magic mismatch!")
-                    logger.error("  Expected: 0x%08X ('CIPC')", PROTOCOL_MAGIC)
+                    logger.error("  Expected: 0x%08X ('CIPD')", PROTOCOL_MAGIC)
                     logger.error("  Got:      0x%08X", magic)
                     logger.error(
                         "  Sender using incompatible protocol version. Please update both TD and Python sides."
@@ -386,17 +411,16 @@ class CUDAIPCImporter:
                     num_comps = struct.unpack(
                         "<I", bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12])
                     )[0]
-                    dtype_code = struct.unpack(
-                        "<I", bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16])
-                    )[0]
+                    kind, bits, flags = _ST_BBH.unpack(
+                        bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16])
+                    )
 
                     if width > 0 and height > 0 and num_comps > 0:
                         if self.shape is None:
                             self.shape = (height, width, num_comps)
                             logger.info("Auto-detected shape: %s", self.shape)
                         if self.dtype is None:
-                            dtype_map = {0: "float32", 1: "float16", 2: "uint8", 3: "uint16"}
-                            self.dtype = dtype_map.get(dtype_code, "float32")
+                            self.dtype = _decode_dtype_str(kind, bits, flags)
                             logger.info("Auto-detected dtype: %s", self.dtype)
                     else:
                         raise ValueError("Metadata contains zeros")
@@ -799,6 +823,8 @@ class CUDAIPCImporter:
         else:
             self.last_latency = 0.0
 
+        if self.shape is None:
+            raise RuntimeError("Importer not initialized: shape is None")
         height, width, channels = self.shape
         itemsize = self._dtype_itemsize()
         nbytes = height * width * channels * itemsize
@@ -1003,11 +1029,10 @@ class CUDAIPCImporter:
             width = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset : metadata_offset + 4]))[0]
             height = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
             num_comps = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            dtype_code = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16]))[0]
+            kind, bits, flags = _ST_BBH.unpack(bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16]))
             if width > 0 and height > 0 and num_comps > 0:
                 new_shape = (height, width, num_comps)
-                dtype_map = {0: "float32", 1: "float16", 2: "uint8", 3: "uint16"}
-                new_dtype = dtype_map.get(dtype_code, "float32")
+                new_dtype = _decode_dtype_str(kind, bits, flags)
                 if new_shape != self.shape or new_dtype != self.dtype:
                     logger.info(
                         "Metadata changed on reinit: %s %s -> %s %s",
@@ -1069,7 +1094,7 @@ class CUDAIPCImporter:
     def cleanup(self) -> None:
         """Cleanup CUDA IPC resources."""
         # Close all IPC handles
-        if hasattr(self, "dev_ptrs") and self.cuda:
+        if self.dev_ptrs and self.cuda is not None:
             for slot, dev_ptr in enumerate(self.dev_ptrs):
                 if dev_ptr is not None:
                     try:
@@ -1079,7 +1104,7 @@ class CUDAIPCImporter:
                         logger.error("Error closing IPC handle for slot %d: %s", slot, e)
 
         # Destroy all IPC events (fix per NVIDIA simpleIPC: even opened handles consume resources)
-        if hasattr(self, "ipc_events") and self.cuda is not None:
+        if self.ipc_events and self.cuda is not None:
             for slot, event in enumerate(self.ipc_events):
                 if event is not None:
                     try:
@@ -1097,14 +1122,12 @@ class CUDAIPCImporter:
             self._pinned_ptr = None
             self._numpy_buffer = None
 
-        # getattr fallback: cleanup() is called from __del__ on partially-initialized
-        # instances where __init__ raised before assigning this attribute.
-        if getattr(self, "_host_registered_arr", None) is not None and self.cuda:
+        if self._host_registered_arr is not None and self.cuda is not None:
             self._clear_host_registered()
             self._numpy_buffer = None
 
         # Destroy numpy stream
-        if hasattr(self, "_numpy_stream") and self.cuda:
+        if self._numpy_stream is not None and self.cuda is not None:
             try:
                 self.cuda.destroy_stream(self._numpy_stream)
                 logger.debug("Destroyed numpy stream")
@@ -1159,7 +1182,7 @@ class CUDAIPCImporter:
         """
         return self._initialized and len(self.dev_ptrs) > 0 and all(ptr is not None for ptr in self.dev_ptrs)
 
-    def attach_nvml_observer(self, observer: object) -> None:
+    def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats().
 
         Args:

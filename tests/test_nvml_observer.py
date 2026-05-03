@@ -261,7 +261,7 @@ def test_ref_count_multiple_observers() -> None:
         from cuda_link.nvml_observer import NVMLObserver
 
         # Reset global ref count
-        nvml_mod._nvml_ref_count = 0
+        nvml_mod._NVML_REFS._count = 0
 
         obs1 = NVMLObserver(device=0, enabled=True)
         obs2 = NVMLObserver(device=0, enabled=True)
