@@ -448,12 +448,21 @@ class CUDARuntimeAPI:
 
         # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
         #                                  const cudaMemcpy3DParms*)
-        # Updates the src/dst/size/kind of a memcpy node in an existing exec graph.
-        # Requires CUDA 10.0+; extent must match the original captured node.
+        # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
+        # (1D form) use cudaGraphExecMemcpyNodeSetParams1D instead.
         self.cudart.cudaGraphExecMemcpyNodeSetParams.argtypes = [
             CUDAGraphExec_t, CUDAGraphNode_t, POINTER(cudaMemcpy3DParms)
         ]
         self.cudart.cudaGraphExecMemcpyNodeSetParams.restype = c_int
+
+        # cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t, cudaGraphNode_t,
+        #                                    void* dst, const void* src,
+        #                                    size_t count, cudaMemcpyKind kind)
+        # Updates a 1D memcpy node (captured from cudaMemcpyAsync). CUDA 11.3+.
+        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.argtypes = [
+            CUDAGraphExec_t, CUDAGraphNode_t, c_void_p, c_void_p, c_size_t, c_int
+        ]
+        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.restype = c_int
 
         # cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
         #                                      cudaEvent_t event)
@@ -1296,6 +1305,30 @@ class CUDARuntimeAPI:
         params = self.make_memcpy3d_params(dst, src, count, kind)
         result = self.cudart.cudaGraphExecMemcpyNodeSetParams(graph_exec, node, byref(params))
         self.check_error(result, "cudaGraphExecMemcpyNodeSetParams")
+
+    def graph_exec_memcpy_node_set_params_1d(
+        self,
+        graph_exec: CUDAGraphExec_t,
+        node: CUDAGraphNode_t,
+        dst: c_void_p,
+        src: c_void_p,
+        count: int,
+        kind: int,
+    ) -> None:
+        """Update src/dst/count/kind of a 1D memcpy node in an executable graph.
+
+        Use this for nodes captured from cudaMemcpyAsync (1D form). The 3D variant
+        (graph_exec_memcpy_node_set_params) returns INVALID_VALUE on 1D nodes.
+        Requires CUDA 11.3+.
+        """
+        dst_int = dst.value if isinstance(dst, c_void_p) else int(dst)
+        src_int = src.value if isinstance(src, c_void_p) else int(src)
+        result = self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
+            graph_exec, node,
+            c_void_p(dst_int), c_void_p(src_int),
+            c_size_t(count), c_int(kind),
+        )
+        self.check_error(result, "cudaGraphExecMemcpyNodeSetParams1D")
 
     def graph_exec_event_record_node_set_event(
         self,

@@ -42,6 +42,7 @@ Compatibility:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import struct
@@ -53,6 +54,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 from .cuda_ipc_wrapper import (  # noqa: F401
+    CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
     CUDARuntimeAPI,
@@ -178,15 +180,21 @@ class CUDAIPCExporter:
         # redundant for consumers using the stream-ordered get_frame(stream=...) path.
         self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "0") == "1"
 
-        # CUDALINK_USE_GRAPHS=1: capture the per-frame hot path (stream_wait_event +
-        # memcpy_async + record_event) into CUDA Graphs and replay via graph_launch.
-        # This trades 3 WDDM kernel-mode submissions per frame for 1, reducing standalone
-        # Python export overhead by ~30-40% on Windows WDDM.
+        # CUDALINK_USE_GRAPHS=1: capture the memcpy_async into a 1-node CUDA Graph and
+        # replay via graph_launch.  IPC events (cudaEventInterprocess) and external
+        # stream_wait_event deps cannot be captured, so the graph contains only the D2D
+        # memcpy.  Per-frame cost when source_sync not used:
+        #   graph_launch (1 WDDM) + record_event (1 WDDM) = 2 submissions vs 3 legacy
+        # When record_source_sync() has been called at least once, stream_wait_event is
+        # issued before graph_launch (3 WDDM — same as legacy).
         # Requires CUDA 12.x runtime (Python side). Disabled by default pending soak.
         self._use_graphs: bool = os.getenv("CUDALINK_USE_GRAPHS", "0") == "1"
         self._graphs_disabled: bool = False  # set True if build/launch fails at runtime
-        # One CUDAGraphExec_t per ring slot; memcpy-node handle per slot for src updates
+        self._source_sync_recorded: bool = False  # set True on first record_source_sync()
+        # One CUDAGraphExec_t + template CUDAGraph_t per ring slot.
+        # Template is kept alive so node handles remain valid for SetParams calls.
         self._graph_execs: list[CUDAGraphExec_t | None] = [None] * num_slots
+        self._graph_templates: list[CUDAGraph_t | None] = [None] * num_slots
         self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * num_slots
 
         # Derived sizes
@@ -434,29 +442,33 @@ class CUDAIPCExporter:
     # ------------------------------------------------------------------
 
     def _build_export_graphs(self) -> None:
-        """Capture the per-frame hot path into one CUDA Graph exec per ring slot.
+        """Capture the D2D memcpy into a 1-node CUDA Graph exec per ring slot.
 
-        Graph topology per slot:
-            EventWaitNode(source_sync_event) → MemcpyNode(D2D) → EventRecordNode(ipc_events[slot])
+        Graph topology per slot (1 node):
+            MemcpyNode(D2D, ring_slot[slot] ← placeholder_src)
 
-        The EventWaitNode always uses source_sync_event.  If record_source_sync() is
-        never called, that event stays in its initial "complete" state and the node is
-        an immediate pass-through — no correctness impact.
+        stream_wait_event is NOT captured: external events (recorded outside this
+        capture) do not produce EventWait nodes in global-mode capture.
+        record_event on IPC events is NOT captured: cudaEventInterprocess events
+        raise cudaErrorStreamCaptureUnsupported (error 900) during capture.
 
-        On failure, sets self._graphs_disabled = True and falls back silently so that
-        CUDALINK_USE_GRAPHS=1 is safe to enable on any driver/GPU without crashing.
+        Per-frame cost:
+          - source_sync not used (common): graph_launch + record_event = 2 WDDM
+          - source_sync used: stream_wait_event + graph_launch + record_event = 3 WDDM
+
+        On failure the stream is restored to normal mode before returning so that
+        the legacy fallback path can use it without error.
         """
         assert self.cuda is not None
         assert self.ipc_stream is not None
-        assert self.source_sync_event is not None
 
-        placeholder_src = self.dev_ptrs[0]  # any valid device ptr; overwritten per frame
+        placeholder_src = self.dev_ptrs[0]
 
         for slot in range(self.num_slots):
+            capture_started = False
             try:
-                # Capture the three hot-path operations as a graph
-                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)  # global
-                self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)
+                capture_started = True
                 self.cuda.memcpy_async(
                     dst=self.dev_ptrs[slot],
                     src=placeholder_src,
@@ -464,27 +476,34 @@ class CUDAIPCExporter:
                     kind=3,  # D2D
                     stream=self.ipc_stream,
                 )
-                self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 template_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                capture_started = False
 
-                # Discover node handles before destroying the template.
-                # Capture order: EventWaitNode(0), MemcpyNode(1), EventRecordNode(2)
                 nodes = self.cuda.graph_get_nodes(template_graph)
-                if len(nodes) != 3:
+                if len(nodes) != 1:
+                    self.cuda.graph_destroy(template_graph)
                     raise RuntimeError(
-                        f"Unexpected graph node count {len(nodes)} (expected 3). "
-                        "Graph capture may include unexpected side-effects."
+                        f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode)."
                     )
-                memcpy_node = nodes[1]  # MemcpyNode
+                memcpy_node = nodes[0]
 
                 graph_exec = self.cuda.graph_instantiate(template_graph)
-                self.cuda.graph_destroy(template_graph)
+                # Keep template alive: node handles from the template must remain
+                # valid for cudaGraphExecMemcpyNodeSetParams1D per-frame updates.
+                # Template is destroyed in _destroy_export_graphs().
 
                 self._graph_execs[slot] = graph_exec
+                self._graph_templates[slot] = template_graph
                 self._graph_memcpy_nodes[slot] = memcpy_node
-                logger.debug("Built export graph for slot %d", slot)
+                logger.debug("Built export graph for slot %d (1-node: Memcpy)", slot)
 
             except (RuntimeError, OSError) as exc:
+                if capture_started:
+                    try:
+                        abandoned_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                        self.cuda.graph_destroy(abandoned_graph)
+                    except (RuntimeError, OSError):
+                        pass
                 logger.warning(
                     "CUDA Graph build failed for slot %d (%s) — "
                     "disabling graphs for this exporter instance and falling back to "
@@ -493,14 +512,13 @@ class CUDAIPCExporter:
                     exc,
                 )
                 self._graphs_disabled = True
-                # Destroy any already-built execs to avoid leaking resources
                 self._destroy_export_graphs()
                 return
 
         logger.info("CUDA export graphs built for %d slots (CUDALINK_USE_GRAPHS=1)", self.num_slots)
 
     def _destroy_export_graphs(self) -> None:
-        """Destroy all CUDA Graph exec objects (called from cleanup())."""
+        """Destroy all CUDA Graph exec objects and their templates (called from cleanup())."""
         if self.cuda is None:
             return
         for slot, graph_exec in enumerate(self._graph_execs):
@@ -511,6 +529,11 @@ class CUDAIPCExporter:
                 except (RuntimeError, OSError) as e:
                     logger.error("Error destroying graph exec slot %d: %s", slot, e)
                 self._graph_execs[slot] = None
+        for slot, template in enumerate(getattr(self, '_graph_templates', [])):
+            if template is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.graph_destroy(template)
+                self._graph_templates[slot] = None
         self._graph_memcpy_nodes = [None] * self.num_slots
 
     # ------------------------------------------------------------------
@@ -558,6 +581,7 @@ class CUDAIPCExporter:
                     logger.error(msg)
                     self._source_sync_device_warned = True
             self.cuda.record_event(self.source_sync_event, CUDAStream_t(producer_stream_handle))
+            self._source_sync_recorded = True
 
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
         """Export one frame from GPU memory via IPC ring buffer.
@@ -609,14 +633,18 @@ class CUDAIPCExporter:
 
             # --- GPU copy + sync: graph path or legacy path ---
             #
-            # Graph path (CUDALINK_USE_GRAPHS=1): replaces the 3 WDDM submissions below
-            # with a single cudaGraphLaunch, reducing kernel-mode transition overhead.
-            # Falls back to legacy path automatically if graph build/launch fails.
+            # Graph path (CUDALINK_USE_GRAPHS=1): replays a 1-node graph (MemcpyNode).
+            # stream_wait_event is issued before graph_launch only when record_source_sync()
+            # has been called (tracked by _source_sync_recorded); otherwise it is skipped
+            # (the event is in its initial "complete" state — no ordering needed).
+            # record_event is issued after graph_launch (IPC events not capturable).
+            #   - source_sync not used: graph_launch + record_event = 2 WDDM (vs 3 legacy)
+            #   - source_sync used:     stream_wait + graph_launch + record_event = 3 WDDM
             if self._use_graphs and not self._graphs_disabled:
                 if debug:
                     _t = time.perf_counter()
                 try:
-                    self.cuda.graph_exec_memcpy_node_set_params(
+                    self.cuda.graph_exec_memcpy_node_set_params_1d(
                         self._graph_execs[slot],
                         self._graph_memcpy_nodes[slot],
                         dst=self.dev_ptrs[slot],
@@ -624,14 +652,17 @@ class CUDAIPCExporter:
                         count=self.data_size,
                         kind=3,
                     )
+                    if self._source_sync_recorded and self.source_sync_event is not None:
+                        self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                     self.cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
+                    if self.ipc_events[slot]:
+                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 except (RuntimeError, OSError) as _graph_err:
                     logger.warning(
                         "Graph launch failed (%s) — disabling graphs, retrying via legacy path",
                         _graph_err,
                     )
                     self._graphs_disabled = True
-                    # Fall through to legacy path
                     goto_legacy = True
                 else:
                     goto_legacy = False
