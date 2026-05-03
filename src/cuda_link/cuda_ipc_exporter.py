@@ -53,9 +53,9 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 from .cuda_ipc_wrapper import (  # noqa: F401
-    CUDARuntimeAPI,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
+    CUDARuntimeAPI,
     CUDAStream_t,
     cudaIpcMemHandle_t,
     get_cuda_runtime,
