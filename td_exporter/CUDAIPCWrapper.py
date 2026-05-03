@@ -28,6 +28,11 @@ CUDAGraph_t = c_uint64  # cudaGraph_t opaque pointer (CUDA 10.0+)
 CUDAGraphExec_t = c_uint64  # cudaGraphExec_t opaque pointer (CUDA 10.0+)
 CUDAGraphNode_t = c_uint64  # cudaGraphNode_t opaque pointer (CUDA 10.0+)
 
+# Minimum cudart version required for all CUDA Graphs APIs used by this module.
+# cudaGraphInstantiateWithFlags, cudaGraphExecEventRecordNodeSetEvent, and
+# cudaGraphExecEventWaitNodeSetEvent are all CUDA 11.4+ (version integer 11040).
+CUDART_GRAPHS_MIN_VERSION = 11040
+
 # --- CUDA Graph parameter structs ---
 
 
@@ -204,7 +209,12 @@ class CUDARuntimeAPI:
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
+        # cudart64_12.dll is preferred: TD 2025+ ships it as the primary runtime
+        # (matching cublas64_12, npp*64_12 etc.); cudart64_110.dll is a legacy
+        # 11.0-ABI compat shim whose contents may be CUDA 11.x (not 12.x).
+        # PyTorch also links against cudart64_12.dll so preferring 12.x improves
+        # process-wide cudart sharing rather than fragmenting it.
+        dll_names = ["cudart64_12.dll", "cudart64_110.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
@@ -425,10 +435,15 @@ class CUDARuntimeAPI:
         self.cudart.cudaStreamEndCapture.argtypes = [CUDAStream_t, POINTER(CUDAGraph_t)]
         self.cudart.cudaStreamEndCapture.restype = c_int
 
-        # cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
-        #                      unsigned long long flags)   [CUDA 12.0 simplified form]
-        self.cudart.cudaGraphInstantiate.argtypes = [POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64]
-        self.cudart.cudaGraphInstantiate.restype = c_int
+        # cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
+        #                               unsigned long long flags)   [CUDA 11.4+ stable 3-arg form]
+        # Prefer this over cudaGraphInstantiate on any cudart 11.x: the latter changed
+        # from 5-arg (CUDA 10.0–11.8) to 3-arg (CUDA 12.0+) — calling the 12.0 3-arg
+        # binding against an 11.x DLL mismatches the ABI and crashes (WDDM access
+        # violation). cudaGraphInstantiateWithFlags has had a stable 3-arg signature
+        # since 11.4 and is available in all 12.x releases as well.
+        self.cudart.cudaGraphInstantiateWithFlags.argtypes = [POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64]
+        self.cudart.cudaGraphInstantiateWithFlags.restype = c_int
 
         # cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
         self.cudart.cudaGraphLaunch.argtypes = [CUDAGraphExec_t, CUDAStream_t]
@@ -1180,8 +1195,8 @@ class CUDARuntimeAPI:
             RuntimeError: If instantiation fails.
         """
         graph_exec = CUDAGraphExec_t()
-        result = self.cudart.cudaGraphInstantiate(byref(graph_exec), graph, c_uint64(flags))
-        self.check_error(result, "cudaGraphInstantiate")
+        result = self.cudart.cudaGraphInstantiateWithFlags(byref(graph_exec), graph, c_uint64(flags))
+        self.check_error(result, "cudaGraphInstantiateWithFlags")
         return graph_exec
 
     def graph_launch(self, graph_exec: CUDAGraphExec_t, stream: CUDAStream_t) -> None:

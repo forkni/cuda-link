@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cuda-link`. No throughput change; robustness improvement only.
   (`src/cuda_link/cuda_ipc_importer.py:875`)
 
+### Fixed
+
+- **CUDA Graphs build crash on cudart 11.0–11.8** — replaced `cudaGraphInstantiate`
+  (3-arg ABI stable only on CUDA 12.0+) with `cudaGraphInstantiateWithFlags` (stable
+  3-arg API since CUDA 11.4). The prior binding called the 12.0 3-arg form against
+  11.x DLLs that export the 5-arg form, producing an access violation
+  (`0xFFFFFFFFFFFFFFFF`) under TD's subprocess PATH. Gate raised from cudart `>= 11.3`
+  to `>= 11.4` to match the true floor of all graph APIs in use.
+  (`src/cuda_link/cuda_ipc_wrapper.py`, `src/cuda_link/cuda_ipc_exporter.py`,
+  `td_exporter/CUDAIPCExtension.py`)
+
+- **cudart DLL preference** — `cudart64_12.dll` is now preferred over `cudart64_110.dll`
+  in the by-name search list. TouchDesigner 2025+ ships both in `bin/`; `cudart64_12.dll`
+  is the primary CUDA 12.x runtime TD itself uses; `cudart64_110.dll` is a legacy 11.x
+  ABI compat shim. Preferring 12.x also improves process-wide cudart sharing with PyTorch.
+  (`src/cuda_link/cuda_ipc_wrapper.py`)
+
 ### Internal
 
 - Test suite now resolves `cuda_link` from this repo's `src/` regardless of any

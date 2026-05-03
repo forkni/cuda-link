@@ -41,6 +41,7 @@ except ImportError:
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
 
 from CUDAIPCWrapper import (  # noqa: E402, F401
+    CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
@@ -214,9 +215,9 @@ class CUDAIPCExtension:
         # CUDALINK_TD_USE_GRAPHS=1: capture export_frame's D2D memcpy_async into a 1-node
         # CUDA Graph and replay via graph_launch.  Same mechanism as the Python-side
         # CUDALINK_USE_GRAPHS, but gated independently because TD ships cudart64_110.dll
-        # and the per-frame *Params1D update API requires CUDA 11.3+.  Disabled by default
-        # pending TD-side soak; flip to "1" once validated on the user's TD runtime.
-        # Falls back automatically if capture/launch fails or runtime version is < 11030.
+        # and cudaGraphInstantiateWithFlags + EventRecordNodeSetEvent require CUDA 11.4+.
+        # Disabled by default pending TD-side soak; flip to "1" once validated.
+        # Falls back automatically if capture/launch fails or runtime version is < CUDART_GRAPHS_MIN_VERSION.
         self._use_graphs: bool = os.environ.get("CUDALINK_TD_USE_GRAPHS", "0") == "1"
         self._graphs_disabled: bool = False
         self._graph_execs: list = [None] * self.num_slots
@@ -511,21 +512,20 @@ class CUDAIPCExtension:
             self._log("Initialization complete - ready for zero-copy GPU transfer", force=True)
 
             # CUDA Graphs build (after IPC stream / events / ring buffer are ready).
-            # Gated on CUDALINK_TD_USE_GRAPHS=1 AND cudart >= 11.3 (the
-            # cudaGraphExecMemcpyNodeSetParams1D API).  TD ships cudart64_110.dll;
-            # older 11.0.x patch levels lack this API so we probe at runtime.
+            # Gated on CUDALINK_TD_USE_GRAPHS=1 AND cudart >= 11.4
+            # (cudaGraphInstantiateWithFlags + EventRecordNodeSetEvent require 11.4+).
             if self._use_graphs:
                 try:
                     rt_version = self.cuda.get_runtime_version()
                 except (RuntimeError, OSError) as exc:
                     rt_version = 0
                     self._log(f"cudaRuntimeGetVersion failed ({exc}) — disabling graphs", force=True)
-                if rt_version >= 11030:
+                if rt_version >= CUDART_GRAPHS_MIN_VERSION:
                     self._build_export_graphs()
                 else:
                     self._log(
-                        f"CUDALINK_TD_USE_GRAPHS=1 ignored: cudart {rt_version} < 11030 "
-                        "(cudaGraphExecMemcpyNodeSetParams1D requires 11.3+).",
+                        f"CUDALINK_TD_USE_GRAPHS=1 ignored: cudart {rt_version} < {CUDART_GRAPHS_MIN_VERSION} "
+                        "(cudaGraphInstantiateWithFlags requires 11.4+).",
                         force=True,
                     )
                     self._graphs_disabled = True
@@ -1117,9 +1117,7 @@ class CUDAIPCExtension:
                     f"GPU-Events[{self.num_slots}]" if all(self.ipc_events) else f"CPU-Sync(1/{self.sync_interval})"
                 )
 
-                graphs_label = (
-                    "ON" if self._use_graphs and not self._graphs_disabled else "OFF"
-                )
+                graphs_label = "ON" if self._use_graphs and not self._graphs_disabled else "OFF"
                 log_msg = (
                     f"Frame {self.frame_count}: slot {slot}, "
                     f"avg cudaMemory={avg_cuda_mem:.1f}us, "
