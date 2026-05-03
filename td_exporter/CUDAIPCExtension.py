@@ -1956,6 +1956,19 @@ class CUDAIPCExtension:
         if not self._initialized and self.shm_handle is None:
             return
 
+        # Drain the receiver stream before closing IPC handles or destroying events/stream.
+        # On WDDM, the prior frame's copyCUDAMemory (CUDA→D3D11 cross-API mapping) is
+        # typically still WDDM-batched when Active=False fires. Tearing down with work
+        # in-flight leaves WDDM holding stale interop mappings keyed by the IPC device
+        # pointers; the next copyCUDAMemory against the same ImportBuffer TOP (same VA,
+        # same sender never restarted) hits the stale mapping → DXGI_ERROR_DEVICE_REMOVED
+        # → "An error occured trying to output to a Window" TDR on re-activation.
+        if hasattr(self, "_rx_stream") and self._rx_stream and self.cuda:
+            try:
+                self.cuda.stream_synchronize(self._rx_stream)
+            except (RuntimeError, OSError) as exc:
+                self._log(f"WARNING: stream_synchronize during cleanup failed: {exc}", force=True)
+
         # Close all IPC memory handles
         if hasattr(self, "_rx_dev_ptrs") and self.cuda:
             for slot, dev_ptr in enumerate(self._rx_dev_ptrs):

@@ -56,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ABI compat shim. Preferring 12.x also improves process-wide cudart sharing with PyTorch.
   (`src/cuda_link/cuda_ipc_wrapper.py`)
 
+- **Receiver second-activation freeze on Windows WDDM** — `cleanup_receiver()` now calls
+  `cudaStreamSynchronize` on the receiver stream before closing IPC mem handles, destroying
+  events, and destroying the stream. Without this drain, the prior frame's
+  `import_buffer.copyCUDAMemory()` (CUDA→D3D11) could still be in the WDDM batch queue
+  at teardown, leaving stale interop mappings that caused `DXGI_ERROR_DEVICE_REMOVED`
+  ("An error occured trying to output to a Window") TDR on the second `Active=True` toggle.
+  (`td_exporter/CUDAIPCExtension.py`)
+
 ### Internal
 
 - Test suite now resolves `cuda_link` from this repo's `src/` regardless of any
