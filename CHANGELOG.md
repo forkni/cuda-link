@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automatically if graph capture or launch fails at runtime.
   (`src/cuda_link/cuda_ipc_exporter.py`, `src/cuda_link/cuda_ipc_wrapper.py`)
 
+- **CUDA Graphs for TouchDesigner Sender** — the TD-side `CUDAIPCExtension`
+  (Sender mode) gains the same graph capture path, gated by
+  `CUDALINK_TD_USE_GRAPHS` (default `0`, opt-in pending soak). Probes the
+  loaded cudart version via `cudaRuntimeGetVersion`; auto-disabled if the
+  runtime is older than 11.3 (the `cudaGraphExecMemcpyNodeSetParams1D` API).
+  (`td_exporter/CUDAIPCExtension.py`, `src/cuda_link/cuda_ipc_wrapper.py`
+  adds `cudaRuntimeGetVersion` binding + `get_runtime_version()` helper)
+
 - **Multi-stream D2H for `get_frame_numpy()`** — opt-in via
   `CUDALINK_D2H_STREAMS=N` (default `1`). Splits the D2H copy across N
   independent non-blocking streams. No throughput gain on PCIe 4.0 (single

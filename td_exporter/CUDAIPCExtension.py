@@ -40,7 +40,10 @@ except ImportError:
 
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
 
-from CUDAIPCWrapper import (  # noqa: E402
+from CUDAIPCWrapper import (  # noqa: E402, F401
+    CUDAGraph_t,
+    CUDAGraphExec_t,
+    CUDAGraphNode_t,
     cudaIpcEventHandle_t,
     cudaIpcMemHandle_t,
     get_cuda_runtime,
@@ -207,6 +210,19 @@ class CUDAIPCExtension:
         # _export_sync=False. Per CUDA Handbook p3/pg56, this forces WDDM-deferred commands
         # to submit without blocking — used to confirm the WDDM batching hypothesis.
         self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "0") == "1"
+
+        # CUDALINK_TD_USE_GRAPHS=1: capture export_frame's D2D memcpy_async into a 1-node
+        # CUDA Graph and replay via graph_launch.  Same mechanism as the Python-side
+        # CUDALINK_USE_GRAPHS, but gated independently because TD ships cudart64_110.dll
+        # and the per-frame *Params1D update API requires CUDA 11.3+.  Disabled by default
+        # pending TD-side soak; flip to "1" once validated on the user's TD runtime.
+        # Falls back automatically if capture/launch fails or runtime version is < 11030.
+        self._use_graphs: bool = os.environ.get("CUDALINK_TD_USE_GRAPHS", "0") == "1"
+        self._graphs_disabled: bool = False
+        self._graph_execs: list = [None] * self.num_slots
+        self._graph_templates: list = [None] * self.num_slots
+        self._graph_memcpy_nodes: list = [None] * self.num_slots
+
         self._nvml_observer: NVMLObserver | None = None
 
         # Performance metrics
@@ -355,6 +371,12 @@ class CUDAIPCExtension:
             self.ipc_handles = [None] * self.num_slots
             self.ipc_events = [None] * self.num_slots
             self.ipc_event_handles = [None] * self.num_slots
+            # Resize graph state to match new num_slots (cleanup() above already
+            # destroyed any previous graph execs/templates).
+            self._graph_execs = [None] * self.num_slots
+            self._graph_templates = [None] * self.num_slots
+            self._graph_memcpy_nodes = [None] * self.num_slots
+            self._graphs_disabled = False
 
         # Enable/disable Numslots based on new mode:
         # - Sender: editable (but only when not active — initialize() will disable it on activation)
@@ -488,6 +510,26 @@ class CUDAIPCExtension:
             self._initialized = True
             self._log("Initialization complete - ready for zero-copy GPU transfer", force=True)
 
+            # CUDA Graphs build (after IPC stream / events / ring buffer are ready).
+            # Gated on CUDALINK_TD_USE_GRAPHS=1 AND cudart >= 11.3 (the
+            # cudaGraphExecMemcpyNodeSetParams1D API).  TD ships cudart64_110.dll;
+            # older 11.0.x patch levels lack this API so we probe at runtime.
+            if self._use_graphs:
+                try:
+                    rt_version = self.cuda.get_runtime_version()
+                except (RuntimeError, OSError) as exc:
+                    rt_version = 0
+                    self._log(f"cudaRuntimeGetVersion failed ({exc}) — disabling graphs", force=True)
+                if rt_version >= 11030:
+                    self._build_export_graphs()
+                else:
+                    self._log(
+                        f"CUDALINK_TD_USE_GRAPHS=1 ignored: cudart {rt_version} < 11030 "
+                        "(cudaGraphExecMemcpyNodeSetParams1D requires 11.3+).",
+                        force=True,
+                    )
+                    self._graphs_disabled = True
+
             if NVML_AVAILABLE and os.environ.get("CUDALINK_NVML", "0") == "1":
                 obs = NVMLObserver(device=self.device, enabled=True)
                 if obs.start():
@@ -500,6 +542,93 @@ class CUDAIPCExtension:
             self._log(f"Initialization failed: {e}", force=True)
             traceback.print_exc()
             return False
+
+    # ------------------------------------------------------------------
+    # CUDA Graph helpers (Phase 5, CUDALINK_TD_USE_GRAPHS=1)
+    # ------------------------------------------------------------------
+
+    def _build_export_graphs(self) -> None:
+        """Capture the D2D memcpy into a 1-node CUDA Graph exec per ring slot.
+
+        Mirrors CUDAIPCExporter._build_export_graphs() on the Python side.
+        Captures only the memcpy_async (IPC events / external waits cannot be
+        captured in global mode).  On failure the stream is restored to normal
+        mode and self._graphs_disabled is set so the legacy stream path is used.
+        """
+        if self.cuda is None or self.ipc_stream is None:
+            return
+
+        placeholder_src = self.dev_ptrs[0]
+
+        for slot in range(self.num_slots):
+            capture_started = False
+            try:
+                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)
+                capture_started = True
+                self.cuda.memcpy_async(
+                    dst=self.dev_ptrs[slot],
+                    src=placeholder_src,
+                    count=self.data_size,
+                    kind=3,  # cudaMemcpyDeviceToDevice
+                    stream=self.ipc_stream,
+                )
+                template_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                capture_started = False
+
+                nodes = self.cuda.graph_get_nodes(template_graph)
+                if len(nodes) != 1:
+                    self.cuda.graph_destroy(template_graph)
+                    raise RuntimeError(f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode).")
+                memcpy_node = nodes[0]
+
+                graph_exec = self.cuda.graph_instantiate(template_graph)
+                # Keep template alive so the captured node handle stays valid for
+                # the per-frame cudaGraphExecMemcpyNodeSetParams1D updates.
+                self._graph_execs[slot] = graph_exec
+                self._graph_templates[slot] = template_graph
+                self._graph_memcpy_nodes[slot] = memcpy_node
+                self._log(f"Built export graph for slot {slot} (1-node: Memcpy)")
+
+            except (RuntimeError, OSError) as exc:
+                if capture_started:
+                    try:
+                        abandoned_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                        self.cuda.graph_destroy(abandoned_graph)
+                    except (RuntimeError, OSError):
+                        pass
+                self._log(
+                    f"CUDA Graph build failed for slot {slot} ({exc}) — disabling graphs "
+                    "for this session and falling back to legacy stream path. "
+                    "Set CUDALINK_TD_USE_GRAPHS=0 to suppress.",
+                    force=True,
+                )
+                self._graphs_disabled = True
+                self._destroy_export_graphs()
+                return
+
+        self._log(
+            f"CUDA export graphs built for {self.num_slots} slots (CUDALINK_TD_USE_GRAPHS=1)",
+            force=True,
+        )
+
+    def _destroy_export_graphs(self) -> None:
+        """Destroy all CUDA Graph exec objects and their templates."""
+        if self.cuda is None:
+            return
+        for slot, graph_exec in enumerate(getattr(self, "_graph_execs", [])):
+            if graph_exec is not None:
+                try:
+                    self.cuda.graph_exec_destroy(graph_exec)
+                except (RuntimeError, OSError) as e:
+                    self._log(f"Error destroying graph exec slot {slot}: {e}", force=True)
+                self._graph_execs[slot] = None
+        for slot, template in enumerate(getattr(self, "_graph_templates", [])):
+            if template is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.graph_destroy(template)
+                self._graph_templates[slot] = None
+        if hasattr(self, "_graph_memcpy_nodes"):
+            self._graph_memcpy_nodes = [None] * self.num_slots
 
     def _write_handle_to_shm(self) -> None:
         """Write magic + version + num_slots + write_idx + all IPC handles to SharedMemory.
@@ -838,14 +967,44 @@ class CUDAIPCExtension:
                 if self._timing_start:
                     self.cuda.record_event(self._timing_start, stream=self.ipc_stream)
 
-            # Copy TOP texture to this slot's persistent buffer (async on IPC stream)
-            self.cuda.memcpy_async(
-                dst=self.dev_ptrs[slot],
-                src=c_void_p(cuda_mem.ptr),
-                count=self.data_size,
-                kind=3,  # cudaMemcpyDeviceToDevice
-                stream=self.ipc_stream,
-            )
+            # Copy TOP texture to this slot's persistent buffer (async on IPC stream).
+            # When CUDALINK_TD_USE_GRAPHS=1 and the per-slot graph exec is built, replay
+            # a 1-node CUDA Graph (MemcpyNode) instead of the imperative memcpy_async —
+            # this collapses the kernel-mode submission into a single cudaGraphLaunch.
+            # Falls back automatically (and permanently for this instance) if launch fails.
+            if self._use_graphs and not self._graphs_disabled and self._graph_execs[slot] is not None:
+                try:
+                    self.cuda.graph_exec_memcpy_node_set_params_1d(
+                        self._graph_execs[slot],
+                        self._graph_memcpy_nodes[slot],
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(cuda_mem.ptr),
+                        count=self.data_size,
+                        kind=3,  # cudaMemcpyDeviceToDevice
+                    )
+                    self.cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
+                except (RuntimeError, OSError) as _graph_err:
+                    self._log(
+                        f"Graph launch failed ({_graph_err}) — disabling graphs, "
+                        "falling back to legacy memcpy_async this frame",
+                        force=True,
+                    )
+                    self._graphs_disabled = True
+                    self.cuda.memcpy_async(
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(cuda_mem.ptr),
+                        count=self.data_size,
+                        kind=3,
+                        stream=self.ipc_stream,
+                    )
+            else:
+                self.cuda.memcpy_async(
+                    dst=self.dev_ptrs[slot],
+                    src=c_void_p(cuda_mem.ptr),
+                    count=self.data_size,
+                    kind=3,  # cudaMemcpyDeviceToDevice
+                    stream=self.ipc_stream,
+                )
 
             if self.verbose_performance:
                 # Record GPU timing end event (actual GPU time measurement)
@@ -1129,6 +1288,12 @@ class CUDAIPCExtension:
                 self._log("Zeroed IPC handle bytes in SharedMemory", force=True)
             except (OSError, BufferError) as e:
                 self._log(f"Warning: Could not zero IPC handles: {e}", force=True)
+
+        # Destroy CUDA Graph execs first — they hold references into the IPC stream
+        # and (transitively) the ring-buffer pointers, so they must be torn down before
+        # the events/stream/buffers below.
+        if cuda_valid and getattr(self, "_use_graphs", False):
+            self._destroy_export_graphs()
 
         # Destroy IPC events (sender-side resources, safe to destroy)
         if cuda_valid and hasattr(self, "ipc_events") and self.cuda:

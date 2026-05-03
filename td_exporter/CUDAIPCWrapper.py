@@ -484,6 +484,13 @@ class CUDARuntimeAPI:
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
 
+        # cudaRuntimeGetVersion(int* runtimeVersion)
+        # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
+        # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
+        # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
+        self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
+        self.cudart.cudaRuntimeGetVersion.restype = c_int
+
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
 
@@ -1379,6 +1386,18 @@ class CUDARuntimeAPI:
         """
         result = self.cudart.cudaGraphExecEventWaitNodeSetEvent(graph_exec, node, event)
         self.check_error(result, "cudaGraphExecEventWaitNodeSetEvent")
+
+    def get_runtime_version(self) -> int:
+        """Return the CUDA runtime version as an int.
+
+        Examples: 11030 = CUDA 11.3, 11040 = CUDA 11.4, 12080 = CUDA 12.8.
+        Used to gate optional API calls when the loaded cudart DLL may be from
+        an older patch level (e.g., TouchDesigner ships ``cudart64_110.dll``).
+        """
+        version = c_int(0)
+        result = self.cudart.cudaRuntimeGetVersion(byref(version))
+        self.check_error(result, "cudaRuntimeGetVersion")
+        return int(version.value)
 
 
 # Global singleton instance (lazy initialization)
