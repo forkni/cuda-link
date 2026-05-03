@@ -216,11 +216,8 @@ docs/PYTHON_STYLE_GUIDE_QUICK.md
 docs/PYTHON_STYLE_GUIDE.md
 docs/SHELL_STYLE_GUIDE.md
 logs/
-.cgw.conf
 
-# Git workflow scripts and hooks (local-only)
+# Git workflow scripts and hooks (local-only; .cgw.conf is tracked — not ignored)
 scripts/git/
 .githooks/
-
-# CGW config example (local-only; .cgw.conf already ignored above)
 cgw.conf.example
