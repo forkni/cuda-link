@@ -277,6 +277,12 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     # memcpy_async receives a valid ctypes pointer
     imp._numpy_buffer = np.zeros(shape, dtype=np.dtype(dtype))
     imp._pinned_ptr = None
+    imp._host_registered_arr = None
+
+    # Phase 3 multi-stream D2H state (single stream in mock — matches N=1 default)
+    imp._d2h_num_streams = 1
+    imp._d2h_streams = [imp._numpy_stream]
+    imp._d2h_events = []
 
     return imp
 

@@ -411,6 +411,12 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp._source_sync_device_warned = False
     exp._ptr_device_cache = set()
 
+    # Phase 2 CUDA Graphs state (disabled in mock — no real CUDA context)
+    exp._use_graphs = False
+    exp._graphs_disabled = False
+    exp._graph_execs = [None] * num_slots
+    exp._graph_memcpy_nodes = [None] * num_slots
+
     # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
     mock_attrs = MagicMock()
     mock_attrs.type = 2  # cudaMemoryTypeDevice

@@ -54,6 +54,12 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     exp.ipc_events = [None] * num_slots
     exp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
 
+    # Phase 2 CUDA Graphs state (disabled in mock — no real CUDA context)
+    exp._use_graphs = False
+    exp._graphs_disabled = False
+    exp._graph_execs = [None] * num_slots
+    exp._graph_memcpy_nodes = [None] * num_slots
+
     mock_attrs = MagicMock()
     mock_attrs.type = 2  # cudaMemoryTypeDevice
     mock_attrs.device = device
