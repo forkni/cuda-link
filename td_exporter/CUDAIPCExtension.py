@@ -1983,31 +1983,62 @@ class CUDAIPCExtension:
 
         _cleanup_t0 = time.perf_counter()
 
+        # Toggle ImportBuffer Script TOP bypass to force TD to release its CUDA↔D3D11
+        # interop registration BEFORE we tear down the underlying CUDA resources.
+        # Without this, on WDDM the IPC device pointers remain bound to a stale interop
+        # mapping inside TD's Script TOP, and the driver-side cleanup of those pointers
+        # (cudaIpcCloseMemHandle / cudaStreamDestroy) blocks for several seconds while
+        # WDDM tries to drain pending work — exceeding the 2s TDR threshold.
+        _bypass_ms = 0.0
+        try:
+            import_buffer = self.ownerComp.op("ImportBuffer")
+            if import_buffer is not None and hasattr(import_buffer.par, "bypass"):
+                _bypass_t0 = time.perf_counter()
+                import_buffer.par.bypass = True
+                import_buffer.par.bypass = False
+                _bypass_ms = (time.perf_counter() - _bypass_t0) * 1000.0
+                self._log(f"Toggled ImportBuffer bypass ({_bypass_ms:.1f} ms)", force=True)
+        except (AttributeError, RuntimeError) as exc:
+            self._log(f"WARNING: ImportBuffer bypass toggle failed: {exc}", force=True)
+
         # Close all IPC memory handles
+        _close_ms = 0.0
         if hasattr(self, "_rx_dev_ptrs") and self.cuda:
+            _close_t0 = time.perf_counter()
             for slot, dev_ptr in enumerate(self._rx_dev_ptrs):
                 if dev_ptr:
+                    _slot_t0 = time.perf_counter()
                     try:
                         self.cuda.ipc_close_mem_handle(dev_ptr)
-                        self._log(f"Closed IPC handle for slot {slot}")
+                        _slot_ms = (time.perf_counter() - _slot_t0) * 1000.0
+                        self._log(f"Closed IPC handle for slot {slot} ({_slot_ms:.1f} ms)")
                     except (RuntimeError, OSError) as e:
                         self._log(f"Error closing IPC handle for slot {slot}: {e}", force=True)
+            _close_ms = (time.perf_counter() - _close_t0) * 1000.0
 
         # Destroy all IPC events (fix per NVIDIA simpleIPC: even opened handles consume resources)
+        _events_ms = 0.0
         if hasattr(self, "_rx_ipc_events") and self.cuda:
+            _events_t0 = time.perf_counter()
             for slot, event in enumerate(self._rx_ipc_events):
                 if event:
+                    _slot_t0 = time.perf_counter()
                     try:
                         self.cuda.destroy_event(event)
-                        self._log(f"Destroyed IPC event for slot {slot}")
+                        _slot_ms = (time.perf_counter() - _slot_t0) * 1000.0
+                        self._log(f"Destroyed IPC event for slot {slot} ({_slot_ms:.1f} ms)")
                     except (RuntimeError, OSError) as e:
                         self._log(f"Error destroying event for slot {slot}: {e}", force=True)
+            _events_ms = (time.perf_counter() - _events_t0) * 1000.0
 
         # Destroy receiver stream
+        _stream_ms = 0.0
         if hasattr(self, "_rx_stream") and self._rx_stream and self.cuda:
+            _stream_t0 = time.perf_counter()
             try:
                 self.cuda.destroy_stream(self._rx_stream)
-                self._log("Destroyed receiver stream", force=True)
+                _stream_ms = (time.perf_counter() - _stream_t0) * 1000.0
+                self._log(f"Destroyed receiver stream ({_stream_ms:.1f} ms)", force=True)
             except (RuntimeError, OSError) as e:
                 self._log(f"Error destroying receiver stream: {e}", force=True)
 
@@ -2039,7 +2070,12 @@ class CUDAIPCExtension:
         self._rx_connect_attempts = 0
         self._rx_frames_since_last_retry = 0
         _cleanup_ms = (time.perf_counter() - _cleanup_t0) * 1000.0
-        self._log(f"Receiver cleanup complete (total {_cleanup_ms:.1f} ms)", force=True)
+        self._log(
+            f"Receiver cleanup complete (total {_cleanup_ms:.1f} ms, "
+            f"bypass {_bypass_ms:.1f} ms, ipc_close {_close_ms:.1f} ms, "
+            f"events {_events_ms:.1f} ms, stream {_stream_ms:.1f} ms)",
+            force=True,
+        )
 
     def is_ready(self) -> bool:
         """Check if extension is ready (mode-aware).
