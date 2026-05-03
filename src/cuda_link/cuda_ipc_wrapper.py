@@ -200,8 +200,8 @@ class CUDARuntimeAPI:
             # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
             ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
             _logger.debug("Loaded CUDA runtime: %s", buf.value)
-        except Exception:  # noqa: BLE001
-            pass
+        except (OSError, AttributeError) as e:
+            _logger.debug("Could not log DLL path: %s", e)
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""

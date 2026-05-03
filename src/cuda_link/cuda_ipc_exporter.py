@@ -50,8 +50,12 @@ import time
 import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
+from typing import TYPE_CHECKING
 
-from .cuda_ipc_wrapper import CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
+from .cuda_ipc_wrapper import CUDARuntimeAPI, CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
+
+if TYPE_CHECKING:
+    from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
 
@@ -64,23 +68,23 @@ METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 
 TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
 
 # Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")   # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")   # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")   # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH") # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
+_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
+_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
+_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
 
 # CUDA-aligned dtype encoding (cudaChannelFormatKind values):
-FORMAT_KIND_SIGNED = 0    # cudaChannelFormatKindSigned
+FORMAT_KIND_SIGNED = 0  # cudaChannelFormatKindSigned
 FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned
-FORMAT_KIND_FLOAT = 2     # cudaChannelFormatKindFloat
-FLAGS_BFLOAT16 = 0x0001   # flag bit: bfloat16 (kind=Float, bits=16)
+FORMAT_KIND_FLOAT = 2  # cudaChannelFormatKindFloat
+FLAGS_BFLOAT16 = 0x0001  # flag bit: bfloat16 (kind=Float, bits=16)
 
 # Map dtype string → (format_kind, bits_per_component, flags)
 _DTYPE_TO_KIND_BITS: dict[str, tuple[int, int, int]] = {
-    "float32": (FORMAT_KIND_FLOAT,    32, 0),
-    "float16": (FORMAT_KIND_FLOAT,    16, 0),
-    "uint8":   (FORMAT_KIND_UNSIGNED,  8, 0),
-    "uint16":  (FORMAT_KIND_UNSIGNED, 16, 0),
+    "float32": (FORMAT_KIND_FLOAT, 32, 0),
+    "float16": (FORMAT_KIND_FLOAT, 16, 0),
+    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0),
+    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0),
 }
 
 _DTYPE_ITEMSIZE_MAP = {
@@ -172,7 +176,7 @@ class CUDAIPCExporter:
         self.data_size = height * width * channels * itemsize  # Actual data bytes
 
         # CUDA state
-        self.cuda = None
+        self.cuda: CUDARuntimeAPI | None = None
         self._initialized = False
         self.ipc_stream = None  # Dedicated non-blocking CUDA stream
         self.source_sync_event = None  # Cross-stream sync event (GPU-side, non-blocking CPU)
@@ -768,7 +772,7 @@ class CUDAIPCExporter:
         """
         return self._initialized and all(ptr is not None for ptr in self.dev_ptrs)
 
-    def attach_nvml_observer(self, observer: object) -> None:
+    def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats().
 
         Args:
