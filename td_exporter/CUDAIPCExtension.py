@@ -1117,11 +1117,14 @@ class CUDAIPCExtension:
                     f"GPU-Events[{self.num_slots}]" if all(self.ipc_events) else f"CPU-Sync(1/{self.sync_interval})"
                 )
 
+                graphs_label = (
+                    "ON" if self._use_graphs and not self._graphs_disabled else "OFF"
+                )
                 log_msg = (
                     f"Frame {self.frame_count}: slot {slot}, "
                     f"avg cudaMemory={avg_cuda_mem:.1f}us, "
                     f"avg memcpy={avg_memcpy:.1f}us, record={avg_record:.1f}us, "
-                    f"total={avg_total:.1f}us, mode={sync_mode}"
+                    f"total={avg_total:.1f}us, mode={sync_mode}, graphs={graphs_label}"
                 )
 
                 # Add GPU elapsed time if timing events available

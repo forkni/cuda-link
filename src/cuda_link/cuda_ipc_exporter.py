@@ -336,8 +336,28 @@ class CUDAIPCExporter:
 
             self._initialized = True
 
+            # CUDA Graphs build (after IPC stream / events / ring buffer are ready).
+            # Gated on cudart >= 11.3 (the cudaGraphExecMemcpyNodeSetParams1D API).
+            # When this Python sender is launched as a TD subprocess it inherits TD's
+            # PATH and may resolve cudart64_110.dll (CUDA 11.0), whose
+            # cudaGraphInstantiate has a 5-arg signature incompatible with the 3-arg
+            # binding used here. Probe the runtime version before attempting capture.
             if self._use_graphs:
-                self._build_export_graphs()
+                try:
+                    rt_version = self.cuda.get_runtime_version()
+                except (RuntimeError, OSError) as exc:
+                    rt_version = 0
+                    logger.warning("cudaRuntimeGetVersion failed (%s) — disabling graphs", exc)
+                if rt_version >= 11030:
+                    self._build_export_graphs()
+                else:
+                    logger.warning(
+                        "CUDALINK_USE_GRAPHS=1 ignored: cudart %d < 11030 "
+                        "(cudaGraphExecMemcpyNodeSetParams1D requires 11.3+). "
+                        "Falling back to legacy stream path.",
+                        rt_version,
+                    )
+                    self._graphs_disabled = True
 
             logger.info("Initialization complete — ready for zero-copy GPU transfer")
             return True

@@ -130,6 +130,22 @@ def main() -> None:
         print("[sender] ERROR: exporter.initialize() failed.")
         sys.exit(1)
 
+    graphs_active = bool(
+        getattr(exporter, "_use_graphs", False)
+        and not getattr(exporter, "_graphs_disabled", False)
+    )
+    graphs_label = "ON" if graphs_active else "OFF"
+    env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
+    try:
+        rt_version = cuda.get_runtime_version()
+        rt_label = f"{rt_version // 1000}.{(rt_version % 1000) // 10}"
+    except Exception:
+        rt_version = 0
+        rt_label = "unknown"
+    print(f"[sender] cudart runtime: {rt_label} ({rt_version})")
+    print(f"[sender] CUDA Graphs path: {graphs_label}  (CUDALINK_USE_GRAPHS={env_setting})")
+    if not graphs_active and env_setting in ("1", "(default=1)"):
+        print("[sender]   (graphs requested but disabled — see exporter logs for reason)")
     print("[sender] Initialized — waiting for TD receiver to connect ...\n")
 
     staging_ptr = cuda.malloc(exporter.data_size)
@@ -156,9 +172,15 @@ def main() -> None:
                 elapsed = now - start_time
                 fps = frame_count / elapsed if elapsed > 0 else 0.0
                 export_us = (now - t0) * 1e6
+                stats = exporter.get_stats()
+                avg_total = stats.get("avg_total_us", 0.0)
+                avg_memcpy = stats.get("avg_memcpy_us", 0.0)
                 print(
                     f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
-                    f"color={_COLOR_NAMES[color_idx]:<8s} | export={export_us:.0f} µs"
+                    f"color={_COLOR_NAMES[color_idx]:<8s} | "
+                    f"export={export_us:.0f} µs | "
+                    f"avg_total={avg_total:.1f} µs | avg_memcpy={avg_memcpy:.1f} µs | "
+                    f"graphs={graphs_label}"
                 )
                 last_report = now
 
@@ -170,11 +192,22 @@ def main() -> None:
         print(f"\n[sender] Stopped after {frame_count} frames.")
 
     finally:
+        try:
+            final_stats = exporter.get_stats()
+        except Exception:
+            final_stats = {}
         cuda.free(staging_ptr)
         exporter.cleanup()
         total = time.perf_counter() - start_time
         avg_fps = frame_count / total if total > 0 else 0.0
         print(f"[sender] Done — {frame_count} frames in {total:.1f}s  ({avg_fps:.1f} FPS avg)")
+        if final_stats:
+            print(
+                f"[sender] Final stats: graphs={graphs_label}  "
+                f"avg_total={final_stats.get('avg_total_us', 0.0):.1f} µs  "
+                f"avg_memcpy={final_stats.get('avg_memcpy_us', 0.0):.1f} µs  "
+                f"frames={final_stats.get('frame_count', 0)}"
+            )
         print("[sender] TD Receiver will detect shutdown on next cook.")
 
 
