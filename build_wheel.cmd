@@ -4,39 +4,71 @@ pushd "%~dp0" || exit /b 1
 
 REM build_wheel.cmd - Build cuda-link Python wheel for distribution
 REM
-REM Uses: python -m build --wheel  (PyPA PEP 517 standard, isolated build env)
-REM Output: dist\cuda_link-0.7.3-py3-none-any.whl
+REM Uses the resolved Python interpreter (preferring 'py -3' Windows launcher)
+REM with PyPA's PEP 517 isolated build env: <python> -m build --wheel
+REM Output: dist\cuda_link-<version>-py3-none-any.whl  (version from pyproject.toml)
 REM
 REM Usage:
 REM   Double-click or run from any terminal:
 REM     build_wheel.cmd
 REM
 REM   Then install into any Python environment:
-REM     pip install "dist\cuda_link-0.7.3-py3-none-any.whl"
-REM     pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"
-REM     pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"
+REM     pip install "dist\cuda_link-<version>-py3-none-any.whl"
+REM     pip install "dist\cuda_link-<version>-py3-none-any.whl[torch]"
+REM     pip install "dist\cuda_link-<version>-py3-none-any.whl[all]"
 
 echo ========================================
-echo  cuda-link Wheel Builder  v0.7.3
+echo  cuda-link Wheel Builder
 echo ========================================
 echo.
 
 REM ----------------------------------------
-REM [1/4] Validate Python
+REM [1/4] Resolve Python interpreter
 REM ----------------------------------------
-echo [1/4] Checking Python...
+echo [1/4] Resolving Python interpreter...
 
-python --version >nul 2>&1
-if errorlevel 1 (
+REM Prefer 'py -3' (Windows Python Launcher) -- bypasses Microsoft Store stub.
+REM Fall back to 'python' on PATH if launcher isn't installed.
+set "PY="
+py -3 --version >nul 2>&1 && set "PY=py -3"
+if not defined PY (
+    python --version >nul 2>&1 && set "PY=python"
+)
+
+if not defined PY (
     echo.
-    echo [ERROR] Python not found on PATH.
-    echo         Ensure Python 3.9+ is installed and added to PATH.
-    echo         Download from: https://www.python.org/downloads/
+    echo [ERROR] No Python interpreter found.
+    echo         Install Python 3.9 or newer from https://www.python.org/downloads/
+    echo         Make sure either 'py' or 'python' resolves on PATH.
     goto :error
 )
 
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do set "PYVER=%%v"
+REM Reject Microsoft Store stub (sys.executable resolves under WindowsApps)
+for /f "delims=" %%e in ('!PY! -c "import sys; print(sys.executable)" 2^>nul') do set "PY_EXE=%%e"
+echo !PY_EXE! | findstr /i "\\WindowsApps\\" >nul
+if not errorlevel 1 (
+    echo.
+    echo [ERROR] Detected Microsoft Store Python stub:
+    echo           !PY_EXE!
+    echo         This is a placeholder, not a usable Python install.
+    echo         Install Python from https://www.python.org/downloads/, then
+    echo         disable the App Execution Alias in Windows Settings:
+    echo           Settings -^> Apps -^> Advanced app settings -^> App execution aliases
+    goto :error
+)
+
+REM Enforce pyproject.toml's requires-python = ">=3.9"
+!PY! -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"
+if errorlevel 1 (
+    echo.
+    echo [ERROR] cuda-link requires Python 3.9 or newer. Detected:
+    !PY! --version
+    goto :error
+)
+
+for /f "tokens=*" %%v in ('!PY! --version 2^>^&1') do set "PYVER=%%v"
 echo   !PYVER!
+echo   !PY_EXE!
 echo.
 
 REM ----------------------------------------
@@ -44,7 +76,7 @@ REM [1.5/4] Sync td_exporter/CUDAIPCWrapper.py from canonical source
 REM ----------------------------------------
 echo [1.5/4] Syncing CUDAIPCWrapper.py...
 
-python scripts\sync_td_wrapper.py
+!PY! scripts\sync_td_wrapper.py
 if errorlevel 1 (
     echo.
     echo [ERROR] Failed to sync td_exporter/CUDAIPCWrapper.py from src/cuda_link/cuda_ipc_wrapper.py.
@@ -57,11 +89,11 @@ REM [2/4] Ensure PyPA build frontend
 REM ----------------------------------------
 echo [2/4] Ensuring build tools...
 
-python -m pip install --upgrade build --quiet
+!PY! -m pip install --upgrade build --quiet
 if errorlevel 1 (
     echo.
     echo [ERROR] Failed to install/upgrade the 'build' package.
-    echo         Try manually: python -m pip install --upgrade build
+    echo         Try manually: !PY! -m pip install --upgrade build
     goto :error
 )
 
@@ -116,14 +148,14 @@ REM ----------------------------------------
 echo [4/4] Building wheel...
 echo.
 
-python -m build --wheel
+!PY! -m build --wheel
 if errorlevel 1 (
     echo.
     echo [ERROR] Wheel build failed.
     echo         Check the output above for details.
     echo         Common fixes:
     echo           - Ensure pyproject.toml is valid
-    echo           - Run: python -m pip install --upgrade setuptools build
+    echo           - Run: !PY! -m pip install --upgrade setuptools build
     goto :error
 )
 
@@ -139,12 +171,7 @@ if not defined WHEEL_FILE (
     goto :error
 )
 
-REM Get wheel file size (in KB)
-set "WHEEL_SIZE=unknown"
-for /f "tokens=3" %%s in ('dir "dist\!WHEEL_FILE!" 2^>nul ^| findstr /r "[0-9]"') do (
-    set "RAW_SIZE=%%s"
-)
-REM Convert bytes to KB via PowerShell for clean output
+REM Get wheel file size in KB via PowerShell
 for /f %%k in ('powershell -Command "[math]::Ceiling((Get-Item 'dist\!WHEEL_FILE!').Length / 1KB)"') do set "WHEEL_KB=%%k"
 
 echo.
