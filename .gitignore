@@ -146,9 +146,8 @@ TOXES/CUDAIPCLink_v*.tox
 GEMINI.md
 gemini-skills/
 
-# Gemini CLI runtime artifacts (telemetry, session logs)
-.gemini/telemetry.log
-.gemini/*.log
+# Gemini CLI data (removed locally; excluded from repo entirely)
+.gemini/
 
 # Claude auto-memory (session-specific)
 MEMORY.md
@@ -217,3 +216,10 @@ docs/PYTHON_STYLE_GUIDE.md
 docs/SHELL_STYLE_GUIDE.md
 logs/
 .cgw.conf
+
+# Git workflow scripts and hooks (local-only)
+scripts/git/
+.githooks/
+
+# CGW config example (local-only; .cgw.conf already ignored above)
+cgw.conf.example
