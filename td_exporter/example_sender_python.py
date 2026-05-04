@@ -19,6 +19,7 @@ TD Setup (handled by example_sender_launcher.py Execute DAT):
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import struct
@@ -300,10 +301,8 @@ def main() -> None:
         # but ONLY for user-initiated shutdowns. CTRL_BREAK_EVENT is also how the
         # launcher signals graceful .toe-close, so we skip the pause in that case.
         if _shutdown_via != "ctrl_break":
-            try:
+            with contextlib.suppress(EOFError, KeyboardInterrupt):
                 input("\n[sender] Press Enter to close this window ...")
-            except (EOFError, KeyboardInterrupt):
-                pass
 
 
 if __name__ == "__main__":
