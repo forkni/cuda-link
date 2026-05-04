@@ -25,6 +25,7 @@ TD Setup:
 """
 
 import os
+import signal
 import subprocess
 
 _process = None  # Sender subprocess handle
@@ -43,7 +44,10 @@ def onStart() -> None:
 
     _process = subprocess.Popen(
         ["python", script],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,  # Windows: opens a visible console
+        # CREATE_NEW_CONSOLE: opens a visible console window for the sender.
+        # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on shutdown
+        # (CTRL_C_EVENT is blocked for new process groups on Windows).
+        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     print(f"[CUDA-Link Launcher] Sender subprocess started  (PID {_process.pid})")
     print(f"  Script: {script}")
@@ -61,13 +65,25 @@ def onExit() -> None:
         return
 
     if _process.poll() is None:
-        _process.terminate()
+        pid = _process.pid
         try:
+            # CTRL_BREAK_EVENT gives the Python sender a chance to run its IPC cleanup
+            # (7-step GPU teardown). CTRL_C_EVENT cannot cross CREATE_NEW_PROCESS_GROUP
+            # boundaries on Windows; CTRL_BREAK_EVENT can.
+            _process.send_signal(signal.CTRL_BREAK_EVENT)
             _process.wait(timeout=3)
-            print(f"[CUDA-Link Launcher] Sender subprocess terminated (PID {_process.pid}).")
+            print(f"[CUDA-Link Launcher] Sender subprocess exited gracefully (PID {pid}).")
         except subprocess.TimeoutExpired:
+            _process.terminate()
+            try:
+                _process.wait(timeout=2)
+                print(f"[CUDA-Link Launcher] Sender subprocess terminated (PID {pid}).")
+            except subprocess.TimeoutExpired:
+                _process.kill()
+                print(f"[CUDA-Link Launcher] Sender subprocess force-killed (PID {pid}).")
+        except OSError:
             _process.kill()
-            print(f"[CUDA-Link Launcher] Sender subprocess force-killed (PID {_process.pid}).")
+            print(f"[CUDA-Link Launcher] Sender subprocess force-killed (PID {pid}).")
 
     _process = None
 

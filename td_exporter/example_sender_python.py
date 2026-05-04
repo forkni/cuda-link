@@ -26,6 +26,88 @@ import sys
 import time
 
 # ---------------------------------------------------------------------------
+# Windows console control handler — ensures GPU IPC cleanup runs even when
+# the user closes the console window via the X button (CTRL_CLOSE_EVENT),
+# which does NOT raise KeyboardInterrupt in Python by default.
+# ---------------------------------------------------------------------------
+
+if sys.platform == "win32":
+    from ctypes import wintypes as _wintypes
+
+    CTRL_C_EVENT = 0
+    CTRL_BREAK_EVENT = 1
+    CTRL_CLOSE_EVENT = 2
+    CTRL_LOGOFF_EVENT = 5
+    CTRL_SHUTDOWN_EVENT = 6
+
+    _HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
+
+# Module-level refs so the handler thread can access them regardless of stack.
+_cuda_ref = None
+_exporter_ref = None
+_staging_ptr_ref = None
+_cleaned_up = False
+# Track which event triggered shutdown — controls end-of-main "Press Enter" pause:
+#   "ctrl_c" → user pressed Ctrl+C in console → pause (let user read messages).
+#   "ctrl_break" → launcher sent CTRL_BREAK_EVENT (graceful .toe close) → no pause.
+#   None → main loop exited some other way → pause as a safety net.
+_shutdown_via: str | None = None
+
+
+def _do_cleanup() -> None:
+    """Idempotent GPU IPC cleanup — safe to call from handler thread and from finally:."""
+    global _cleaned_up
+    if _cleaned_up:
+        return
+    _cleaned_up = True
+    try:
+        if _staging_ptr_ref is not None and _cuda_ref is not None:
+            _cuda_ref.free(_staging_ptr_ref)
+    except Exception as exc:
+        print(f"[sender] cleanup: cuda.free error: {exc}")
+    try:
+        if _exporter_ref is not None:
+            _exporter_ref.cleanup()
+    except Exception as exc:
+        print(f"[sender] cleanup: exporter.cleanup error: {exc}")
+
+
+if sys.platform == "win32":
+
+    def _ctrl_handler(ctrl_type: int) -> bool:
+        global _shutdown_via
+        if ctrl_type == CTRL_C_EVENT:
+            _shutdown_via = "ctrl_c"
+            print("\n[sender] Ctrl+C — stopping ...", flush=True)
+            return False  # Chain to Python's default → raises KeyboardInterrupt in main.
+        if ctrl_type == CTRL_BREAK_EVENT:
+            _shutdown_via = "ctrl_break"
+            print("\n[sender] Ctrl+Break / launcher shutdown — stopping ...", flush=True)
+            return False  # Chain to Python's default → raises KeyboardInterrupt in main.
+        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+            # Console X-button, user logoff, or system shutdown.
+            # OS allows ~5 s (CLOSE) or ~20 s (LOGOFF/SHUTDOWN) before forced termination.
+            # The main loop's finally: won't run for these — we MUST clean up here.
+            print(
+                f"\n[sender] Console control event {ctrl_type} (close/logoff/shutdown) — running cleanup ...",
+                flush=True,
+            )
+            _do_cleanup()
+            print("[sender] Cleanup complete.", flush=True)
+            return True  # Handled — OS still terminates after return.
+        return False
+
+    # The launcher uses CREATE_NEW_PROCESS_GROUP, which DISABLES Ctrl+C delivery to the
+    # child process by default. SetConsoleCtrlHandler(NULL, FALSE) re-enables it before
+    # we install our own handler.
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+
+    # MUST be module-level; a local variable would be GC'd and Windows would call freed memory.
+    _ctrl_handler_ref = _HandlerRoutine(_ctrl_handler)
+    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler_ref, True):
+        print("[sender] WARNING: SetConsoleCtrlHandler failed — console-close cleanup unavailable")
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -87,6 +169,7 @@ def _fill_ctypes(cuda: object, ptr: object, data_size: int, color: tuple) -> Non
 
 
 def main() -> None:
+    global _cuda_ref, _exporter_ref, _staging_ptr_ref
     # Ensure cuda_link is importable — try src/ relative to this script
     try:
         from cuda_link import CUDAIPCExporter
@@ -105,6 +188,7 @@ def main() -> None:
             sys.exit(1)
 
     cuda = get_cuda_runtime()
+    _cuda_ref = cuda
 
     print("=" * 58)
     print("  CUDA-Link Example  —  Python → TouchDesigner Sender")
@@ -125,6 +209,7 @@ def main() -> None:
         num_slots=NUM_SLOTS,
         debug=False,
     )
+    _exporter_ref = exporter
 
     if not exporter.initialize():
         print("[sender] ERROR: exporter.initialize() failed.")
@@ -149,6 +234,7 @@ def main() -> None:
     print("[sender] Initialized — waiting for TD receiver to connect ...\n")
 
     staging_ptr = cuda.malloc(exporter.data_size)
+    _staging_ptr_ref = staging_ptr
     frame_interval = 1.0 / TARGET_FPS
     frame_count = 0
     start_time = time.perf_counter()
@@ -196,19 +282,28 @@ def main() -> None:
             final_stats = exporter.get_stats()
         except Exception:
             final_stats = {}
-        cuda.free(staging_ptr)
-        exporter.cleanup()
+        _do_cleanup()
         total = time.perf_counter() - start_time
         avg_fps = frame_count / total if total > 0 else 0.0
-        print(f"[sender] Done — {frame_count} frames in {total:.1f}s  ({avg_fps:.1f} FPS avg)")
+        print(f"[sender] Done — {frame_count} frames in {total:.1f}s  ({avg_fps:.1f} FPS avg)", flush=True)
         if final_stats:
             print(
                 f"[sender] Final stats: graphs={graphs_label}  "
                 f"avg_total={final_stats.get('avg_total_us', 0.0):.1f} µs  "
                 f"avg_memcpy={final_stats.get('avg_memcpy_us', 0.0):.1f} µs  "
-                f"frames={final_stats.get('frame_count', 0)}"
+                f"frames={final_stats.get('frame_count', 0)}",
+                flush=True,
             )
-        print("[sender] TD Receiver will detect shutdown on next cook.")
+        print("[sender] TD Receiver will detect shutdown on next cook.", flush=True)
+
+        # Hold the console window open so the user can read the cleanup output —
+        # but ONLY for user-initiated shutdowns. CTRL_BREAK_EVENT is also how the
+        # launcher signals graceful .toe-close, so we skip the pause in that case.
+        if _shutdown_via != "ctrl_break":
+            try:
+                input("\n[sender] Press Enter to close this window ...")
+            except (EOFError, KeyboardInterrupt):
+                pass
 
 
 if __name__ == "__main__":
