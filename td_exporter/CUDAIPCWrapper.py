@@ -209,12 +209,10 @@ class CUDARuntimeAPI:
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        # cudart64_12.dll is preferred: TD 2025+ ships it as the primary runtime
-        # (matching cublas64_12, npp*64_12 etc.); cudart64_110.dll is a legacy
-        # 11.0-ABI compat shim whose contents may be CUDA 11.x (not 12.x).
-        # PyTorch also links against cudart64_12.dll so preferring 12.x improves
-        # process-wide cudart sharing rather than fragmenting it.
-        dll_names = ["cudart64_12.dll", "cudart64_110.dll", "cudart64_11.dll"]
+        # cudart64_110.dll is preferred for bisect testing (W1): reverts the 12.x
+        # preference introduced in 4695d8f to test whether cudart64_12 ABI is the
+        # driver-error amplifier on WDDM.
+        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
@@ -411,6 +409,7 @@ class CUDARuntimeAPI:
         self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
         self.cudart.cudaPointerGetAttributes.restype = c_int
 
+        # === G1: non-graph helpers (re-enabled Phase 1.1) ===
         # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
         # Replaces cudaMallocHost with explicit flag control.
         # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
@@ -424,7 +423,8 @@ class CUDARuntimeAPI:
         self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceGetAttribute.restype = c_int
 
-        # --- CUDA Graph API (CUDA 10.0+, full set needed for CUDALINK_USE_GRAPHS) ---
+        # === G2: graph lifecycle (re-enabled Phase 1.2) ===
+        # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
 
         # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
         # mode: 0=global, 1=thread_local, 2=relaxed
@@ -462,6 +462,17 @@ class CUDARuntimeAPI:
         self.cudart.cudaGraphGetNodes.argtypes = [CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)]
         self.cudart.cudaGraphGetNodes.restype = c_int
 
+        # cudaRuntimeGetVersion(int* runtimeVersion)
+        # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
+        # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
+        # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
+        self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
+        self.cudart.cudaRuntimeGetVersion.restype = c_int
+
+        # === G3: graph node setters (re-enabled Phase 1.3) ===
+        # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
+        # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
+
         # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
         #                                  const cudaMemcpy3DParms*)
         # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
@@ -498,13 +509,6 @@ class CUDARuntimeAPI:
         # Updates the event waited on by an event-wait node. CUDA 11.4+.
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
-
-        # cudaRuntimeGetVersion(int* runtimeVersion)
-        # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
-        # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
-        # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
-        self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
-        self.cudart.cudaRuntimeGetVersion.restype = c_int
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.

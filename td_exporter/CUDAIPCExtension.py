@@ -1990,16 +1990,9 @@ class CUDAIPCExtension:
         # (cudaIpcCloseMemHandle / cudaStreamDestroy) blocks for several seconds while
         # WDDM tries to drain pending work — exceeding the 2s TDR threshold.
         _bypass_ms = 0.0
-        try:
-            import_buffer = self.ownerComp.op("ImportBuffer")
-            if import_buffer is not None and hasattr(import_buffer.par, "bypass"):
-                _bypass_t0 = time.perf_counter()
-                import_buffer.par.bypass = True
-                import_buffer.par.bypass = False
-                _bypass_ms = (time.perf_counter() - _bypass_t0) * 1000.0
-                self._log(f"Toggled ImportBuffer bypass ({_bypass_ms:.1f} ms)", force=True)
-        except (AttributeError, RuntimeError) as exc:
-            self._log(f"WARNING: ImportBuffer bypass toggle failed: {exc}", force=True)
+        # ImportBuffer bypass toggle disabled for bisect testing (TR1).
+        # Was toggling bypass=True/False on the Script TOP before tearing down CUDA
+        # resources; suspected to cause re-activation instability on WDDM.
 
         # Close all IPC memory handles
         _close_ms = 0.0
