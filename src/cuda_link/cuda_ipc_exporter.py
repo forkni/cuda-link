@@ -282,13 +282,21 @@ class CUDAIPCExporter:
                 )
             logger.info("Loaded CUDA runtime on device %d", actual_device)
 
-            # Create or reuse dedicated high-priority non-blocking IPC stream.
+            # Create or reuse dedicated non-blocking IPC stream.
             # cudaStreamNonBlocking (0x01) prevents the default stream from
-            # implicitly synchronising with this stream. Highest priority ensures
-            # the D2D memcpy preempts lower-priority compute work in the TD context.
+            # implicitly synchronising with this stream. Default is high-priority
+            # so the D2D memcpy preempts lower-priority compute work in the TD context.
+            # F7 — CUDALINK_LIB_STREAM_PRIO=normal: drop to default-priority stream.
+            # Use when a TD-side Sender-B coexists with this Python producer in the
+            # same machine and the high-priority stream contends with TD init.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
-                logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
+                lib_stream_high_prio = os.environ.get("CUDALINK_LIB_STREAM_PRIO", "high") != "normal"
+                if lib_stream_high_prio:
+                    self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
+                    logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
+                else:
+                    self.ipc_stream = self.cuda.create_stream(flags=0x01)
+                    logger.info("Created IPC stream (normal-priority): 0x%016x", int(self.ipc_stream.value))
             else:
                 logger.debug("Reusing IPC stream: 0x%016x", int(self.ipc_stream.value))
 
@@ -813,8 +821,7 @@ class CUDAIPCExporter:
                         avg_shm = self.total_shm_write_us / n
                         avg_total = self.total_export_us / n
                         avg_unacc = avg_total - (
-                            avg_wait + avg_memcpy + avg_record + avg_sync
-                            + avg_sticky + avg_fp + avg_shm
+                            avg_wait + avg_memcpy + avg_record + avg_sync + avg_sticky + avg_fp + avg_shm
                         )
                         logger.debug(
                             "Frame %d [PROFILE] pre=0.0us interop=0.0us post=0.0us"
