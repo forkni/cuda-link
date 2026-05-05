@@ -227,6 +227,25 @@ class CUDAIPCExtension:
         self._graph_templates: list = [None] * self.num_slots
         self._graph_memcpy_nodes: list = [None] * self.num_slots
 
+        # Phase 3.5 diagnostic knobs — all opt-in, all env-gated, default-off.
+        # CUDALINK_TD_STREAM_PRIO=normal: use default-priority stream instead of high-priority.
+        # Probe P5 — tests whether priority contention with Receiver-A causes TDR.
+        self._stream_high_prio: bool = os.environ.get("CUDALINK_TD_STREAM_PRIO", "high") != "normal"
+        # CUDALINK_TD_INIT_PACE=1: sync+sleep at 3 checkpoints inside initialize() to spread
+        # the WDDM submission burst over ~60 ms. Probe P7 — tests WDDM queue depth hypothesis.
+        self._init_pace: bool = os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1"
+        # CUDALINK_TD_INIT_CLEAR_STICKY=1: peek+consume any sticky CUDA error at the start of
+        # initialize() before heavy allocations. Escalation probe F4.
+        self._init_clear_sticky: bool = os.environ.get("CUDALINK_TD_INIT_CLEAR_STICKY", "0") == "1"
+        # CUDALINK_TD_GRAPHS_DEFERRED=1: defer _build_export_graphs() from initialize() to
+        # the first export_frame() call after frame_count >= 30 (probe P1 / fix F3).
+        self._graphs_pending: bool = False
+        self._graphs_deferred: bool = os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1"
+        # CUDALINK_TD_PERSIST_STREAM=1: skip stream_destroy in cleanup() so the IPC stream
+        # survives deactivate/reactivate cycles (fix F8). initialize() already has the
+        # `if self.ipc_stream is None` guard, so no further change is needed there.
+        self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "0") == "1"
+
         self._nvml_observer: NVMLObserver | None = None
 
         # Performance metrics
@@ -417,14 +436,33 @@ class CUDAIPCExtension:
             self.cuda = get_cuda_runtime(device=self.device)
             self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
 
-            # Create high-priority dedicated non-blocking stream for IPC operations.
+            # F4 — CUDALINK_TD_INIT_CLEAR_STICKY=1: consume any latched error from a concurrent
+            # stream (e.g. Receiver-A hot path) before Sender-B's cudaMalloc / IpcGet calls.
+            if self._init_clear_sticky:
+                sticky = self.cuda.peek_at_last_error()
+                if sticky != 0:
+                    self.cuda.cudart.cudaGetLastError()  # consume without raising
+                    self._log(f"[INIT_CLEAR_STICKY] consumed sticky error 0x{sticky:08x}", force=True)
+                else:
+                    self._log("[INIT_CLEAR_STICKY] no sticky error at init entry", force=True)
+
+            # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
-                self._log(
-                    f"Created IPC stream (high-priority): 0x{int(self.ipc_stream.value):016x}",
-                    force=True,
-                )
+                # F2 — CUDALINK_TD_STREAM_PRIO=normal: default-priority stream instead of
+                # high-priority. Probe P5: tests priority contention with Receiver-A.
+                if self._stream_high_prio:
+                    self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
+                    self._log(
+                        f"Created IPC stream (high-priority): 0x{int(self.ipc_stream.value):016x}",
+                        force=True,
+                    )
+                else:
+                    self.ipc_stream = self.cuda.create_stream(flags=0x01)
+                    self._log(
+                        f"Created IPC stream (normal-priority): 0x{int(self.ipc_stream.value):016x}",
+                        force=True,
+                    )
             else:
                 self._log(
                     f"Reusing IPC stream: 0x{int(self.ipc_stream.value):016x}",
@@ -471,6 +509,13 @@ class CUDAIPCExtension:
 
             self._log(f"Created {self.num_slots} IPC buffer slots with events", force=True)
 
+            # F1 checkpoint 1/3 — CUDALINK_TD_INIT_PACE=1: flush WDDM queue after per-slot
+            # alloc burst (cudaMalloc + IpcGetMemHandle + EventCreate + IpcGetEventHandle × N).
+            if self._init_pace:
+                self.cuda.stream_synchronize(self.ipc_stream)
+                time.sleep(0.02)
+                self._log("[INIT_PACE] checkpoint 1/3 (post-slot-alloc)", force=True)
+
             # Create SharedMemory for IPC handle transfer
             # Size: header + slots + shutdown flag + metadata + timestamp (for extended protocol)
             shm_size = (
@@ -494,6 +539,12 @@ class CUDAIPCExtension:
 
             # Write texture metadata to extended protocol region
             self._write_metadata_to_shm()
+
+            # F1 checkpoint 2/3 — after SHM segment creation + handle/metadata writes.
+            if self._init_pace:
+                self.cuda.stream_synchronize(self.ipc_stream)
+                time.sleep(0.02)
+                self._log("[INIT_PACE] checkpoint 2/3 (post-SHM-write)", force=True)
 
             # Cache SHM offsets: avoid recomputing these on every export_frame() call
             self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
@@ -526,7 +577,22 @@ class CUDAIPCExtension:
                     rt_version = 0
                     self._log(f"cudaRuntimeGetVersion failed ({exc}) — disabling graphs", force=True)
                 if rt_version >= CUDART_GRAPHS_MIN_VERSION:
-                    self._build_export_graphs()
+                    if self._graphs_deferred:
+                        # F3 — CUDALINK_TD_GRAPHS_DEFERRED=1: defer graph capture to first
+                        # warm frame (frame_count >= 30) so the init burst doesn't overlap
+                        # with Receiver-A's 60 Hz stream. First 30 frames use legacy memcpy_async.
+                        self._graphs_pending = True
+                        self._log(
+                            "CUDA export graph build deferred to first warm frame (CUDALINK_TD_GRAPHS_DEFERRED=1)",
+                            force=True,
+                        )
+                    else:
+                        self._build_export_graphs()
+                        # F1 checkpoint 3/3 — after graph capture + instantiation.
+                        if self._init_pace:
+                            self.cuda.stream_synchronize(self.ipc_stream)
+                            time.sleep(0.02)
+                            self._log("[INIT_PACE] checkpoint 3/3 (post-graph-build)", force=True)
                 else:
                     self._log(
                         f"CUDALINK_TD_USE_GRAPHS=1 ignored: cudart {rt_version} < {CUDART_GRAPHS_MIN_VERSION} "
@@ -826,11 +892,19 @@ class CUDAIPCExtension:
             if self.cuda is None:
                 self.cuda = get_cuda_runtime(device=self.device)
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
-                self._log(
-                    f"Created IPC stream (pre-init): 0x{int(self.ipc_stream.value):016x}",
-                    force=True,
-                )
+                # F2 mirror — honour CUDALINK_TD_STREAM_PRIO in the pre-init lazy path too.
+                if self._stream_high_prio:
+                    self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
+                    self._log(
+                        f"Created IPC stream (pre-init, high-priority): 0x{int(self.ipc_stream.value):016x}",
+                        force=True,
+                    )
+                else:
+                    self.ipc_stream = self.cuda.create_stream(flags=0x01)
+                    self._log(
+                        f"Created IPC stream (pre-init, normal-priority): 0x{int(self.ipc_stream.value):016x}",
+                        force=True,
+                    )
 
             # TD 2025 rejects float16 pixel formats from cudaMemory().
             # dtype_converter Transform TOP sits before ExportBuffer — toggle its format param.
@@ -971,6 +1045,12 @@ class CUDAIPCExtension:
                 # Record GPU timing start event (actual GPU time measurement)
                 if self._timing_start:
                     self.cuda.record_event(self._timing_start, stream=self.ipc_stream)
+
+            # F3 deferred graph build — CUDALINK_TD_GRAPHS_DEFERRED=1: fires once after 30
+            # steady-state frames so the capture burst doesn't overlap Sender-B's cold activation.
+            if self._graphs_pending and self.frame_count >= 30:
+                self._build_export_graphs()
+                self._graphs_pending = False
 
             # Copy TOP texture to this slot's persistent buffer (async on IPC stream).
             # When CUDALINK_TD_USE_GRAPHS=1 and the per-slot graph exec is built, replay
@@ -1330,14 +1410,23 @@ class CUDAIPCExtension:
                 finally:
                     self._timing_end = None
 
-        # Destroy dedicated IPC stream (set to None to prevent double-free)
+        # Destroy dedicated IPC stream (set to None to prevent double-free).
+        # F8 — CUDALINK_TD_PERSIST_STREAM=1: skip destroy so the stream survives
+        # deactivate/reactivate cycles; initialize() reuses it via the existing
+        # `if self.ipc_stream is None` guard.
         if cuda_valid and hasattr(self, "ipc_stream") and self.ipc_stream and self.cuda:
-            try:
-                self.cuda.destroy_stream(self.ipc_stream)
-                self._log("Destroyed IPC stream", force=True)
-                self.ipc_stream = None
-            except (RuntimeError, OSError) as e:
-                self._log(f"Error destroying IPC stream: {e}", force=True)
+            if self._persist_stream:
+                self._log(
+                    f"[PERSIST_STREAM] keeping ipc_stream=0x{int(self.ipc_stream.value):016x} across cleanup",
+                    force=True,
+                )
+            else:
+                try:
+                    self.cuda.destroy_stream(self.ipc_stream)
+                    self._log("Destroyed IPC stream", force=True)
+                    self.ipc_stream = None
+                except (RuntimeError, OSError) as e:
+                    self._log(f"Error destroying IPC stream: {e}", force=True)
 
         # Close SharedMemory (but don't unlink yet)
         if self.shm_handle:
@@ -1390,7 +1479,8 @@ class CUDAIPCExtension:
         self.ipc_events = []
         self.ipc_handles = []
         self.ipc_event_handles = []
-        self.ipc_stream = None
+        if not self._persist_stream:
+            self.ipc_stream = None
         self.shm_handle = None
         self._fmt_conv_active = False
         self._export_buffer = None
