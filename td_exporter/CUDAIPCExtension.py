@@ -40,6 +40,11 @@ except ImportError:
 
     CUDAMemoryShape = None  # Will be accessed as global in TD runtime
 
+from ActivationBarrier import (  # noqa: E402, I001
+    decrement as _ab_decrement,
+    increment as _ab_increment,
+    open_or_create as _ab_open_or_create,
+)
 from CUDAIPCWrapper import (  # noqa: E402, F401
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
@@ -245,6 +250,15 @@ class CUDAIPCExtension:
         # survives deactivate/reactivate cycles (fix F8). initialize() already has the
         # `if self.ipc_stream is None` guard, so no further change is needed there.
         self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "0") == "1"
+        # F9 — CUDALINK_TD_ACTIVATION_BARRIER=1: increment cross-process activation counter
+        # in cudalink_activation_barrier SHM around Sender init so the Python producer skips
+        # pushes during the WDDM-saturating init burst. Decrement happens in export_frame()
+        # after _barrier_settle_frames warm frames have elapsed (default 30).
+        self._activation_barrier: bool = os.environ.get("CUDALINK_TD_ACTIVATION_BARRIER", "0") == "1"
+        self._barrier_settle_frames: int = int(os.environ.get("CUDALINK_TD_BARRIER_SETTLE_FRAMES", "30"))
+        self._barrier_settle_remaining: int = 0
+        self._barrier_held: bool = False
+        self._barrier_shm: object = None  # SharedMemory handle, opened in initialize()
 
         self._nvml_observer: NVMLObserver | None = None
 
@@ -432,6 +446,18 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
+            # F9 — CUDALINK_TD_ACTIVATION_BARRIER=1: signal Python producer to pause pushes
+            # during this Sender's WDDM-saturating init burst.
+            if self._activation_barrier and self._mode == "Sender":
+                try:
+                    if self._barrier_shm is None:
+                        self._barrier_shm = _ab_open_or_create(create=True)
+                    count = _ab_increment(self._barrier_shm, os.getpid())
+                    self._barrier_held = True
+                    self._log(f"[ACTIVATION_BARRIER] held +1 (count={count}) for Sender init", force=True)
+                except (OSError, RuntimeError, struct.error) as _exc:
+                    self._log(f"[ACTIVATION_BARRIER] init increment failed (ignored): {_exc}", force=True)
+
             # Load CUDA runtime bound to the configured device
             self.cuda = get_cuda_runtime(device=self.device)
             self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
@@ -565,6 +591,8 @@ class CUDAIPCExtension:
                 self._timing_end = None
 
             self._initialized = True
+            if self._barrier_held:
+                self._barrier_settle_remaining = self._barrier_settle_frames
             self._log("Initialization complete - ready for zero-copy GPU transfer", force=True)
 
             # CUDA Graphs build (after IPC stream / events / ring buffer are ready).
@@ -1165,6 +1193,23 @@ class CUDAIPCExtension:
             # Frame tracking
             self.frame_count += 1
 
+            # F9 — barrier settle countdown: release the cross-process activation barrier
+            # after _barrier_settle_frames successful exports have elapsed post-init.
+            if self._barrier_settle_remaining > 0:
+                self._barrier_settle_remaining -= 1
+                if self._barrier_settle_remaining == 0 and self._barrier_held and self._barrier_shm is not None:
+                    try:
+                        count = _ab_decrement(self._barrier_shm, os.getpid())
+                        self._log(
+                            f"[ACTIVATION_BARRIER] released after {self._barrier_settle_frames}-frame settle"
+                            f" (count now {count})",
+                            force=True,
+                        )
+                    except (OSError, RuntimeError, struct.error) as _exc:
+                        self._log(f"[ACTIVATION_BARRIER] settle decrement failed (ignored): {_exc}", force=True)
+                    finally:
+                        self._barrier_held = False
+
             # Calculate total frame time (only if verbose)
             if self.verbose_performance:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
@@ -1340,6 +1385,20 @@ class CUDAIPCExtension:
         CRITICAL ORDER: Signal shutdown FIRST, then free GPU resources.
         cudaFree() blocks until all processes close IPC handles.
         """
+        # F9 — release activation barrier if still held (mid-settle cleanup path).
+        if self._barrier_held and self._barrier_shm is not None:
+            try:
+                count = _ab_decrement(self._barrier_shm, os.getpid())
+                self._log(
+                    f"[ACTIVATION_BARRIER] released on cleanup (mid-settle, count now {count})",
+                    force=True,
+                )
+            except (OSError, RuntimeError, struct.error) as _exc:
+                self._log(f"[ACTIVATION_BARRIER] cleanup decrement failed (ignored): {_exc}", force=True)
+            finally:
+                self._barrier_held = False
+                self._barrier_shm = None
+
         # Skip if already cleaned up (prevents double-cleanup from Active toggle + __delTD__)
         if not self._initialized and self.shm_handle is None:
             return

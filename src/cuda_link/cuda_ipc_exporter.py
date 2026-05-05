@@ -53,6 +53,9 @@ from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
+from .activation_barrier import bump_skip as _ab_bump
+from .activation_barrier import open_or_create as _ab_open
+from .activation_barrier import read_state as _ab_read
 from .cuda_ipc_wrapper import (  # noqa: F401
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
@@ -207,6 +210,14 @@ class CUDAIPCExporter:
         # Windows Task Manager 3D-engine reading from ~65% to ~7% on rigs where WDDM
         # defers submissions. NVML true compute load is unchanged. Set to "0" to disable.
         self._export_flush_probe: bool = os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
+        # F9 — CUDALINK_ACTIVATION_BARRIER=1: read cudalink_activation_barrier SHM on each
+        # export_frame and skip publishing while a TD-side Sender is in its activation window.
+        # Cross-process backpressure mechanism — no CUDA stream coupling.
+        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "0") == "1"
+        self._barrier_stale_ns: int = int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000)))
+        self._barrier_shm: SharedMemory | None = None
+        self._barrier_skip_log_last_ns: int = 0
+        self._barrier_stale_log_last_ns: int = 0
         if self._export_profile:
             self.debug = True  # profile mode requires timing path (mirrors TD L248-249)
 
@@ -641,6 +652,9 @@ class CUDAIPCExporter:
         if size != self.data_size:
             logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
             return False
+        # F9 — skip publish if a TD-side Sender is in its activation window.
+        if self._barrier_enabled and self._check_activation_barrier():
+            return False
         debug = self.debug
         if debug:
             frame_start = time.perf_counter()
@@ -863,6 +877,41 @@ class CUDAIPCExporter:
         except (OSError, RuntimeError):
             return False
 
+    def _check_activation_barrier(self) -> bool:
+        """Return True if the activation barrier is held and this frame should be skipped.
+
+        Lazily opens the segment on first call. Applies a stale-timeout so a Sender
+        that crashes mid-init cannot block the producer indefinitely.
+        """
+        if self._barrier_shm is None:
+            try:
+                self._barrier_shm = _ab_open(create=False)
+            except FileNotFoundError:
+                return False  # no Sender has ever activated — fast path
+        try:
+            active_count, last_change_ns, _ = _ab_read(self._barrier_shm)
+        except (OSError, RuntimeError, struct.error):
+            return False
+        if active_count <= 0:
+            return False
+        now_ns = time.monotonic_ns()
+        if now_ns - last_change_ns > self._barrier_stale_ns:
+            # Sender crashed mid-init and never decremented — stale, ignore.
+            if now_ns - self._barrier_stale_log_last_ns > 1_000_000_000:
+                logger.warning(
+                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
+                    active_count,
+                    (now_ns - last_change_ns) / 1e9,
+                )
+                self._barrier_stale_log_last_ns = now_ns
+            return False
+        with contextlib.suppress(OSError, RuntimeError, struct.error):
+            _ab_bump(self._barrier_shm)
+        if now_ns - self._barrier_skip_log_last_ns > 1_000_000_000:
+            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
+            self._barrier_skip_log_last_ns = now_ns
+        return True
+
     def cleanup(self) -> None:
         """Cleanup all CUDA IPC resources.
 
@@ -987,6 +1036,13 @@ class CUDAIPCExporter:
             pass  # Already unlinked
         except (OSError, RuntimeError) as e:
             logger.warning("Could not unlink SharedMemory: %s", e)
+
+        # F9 — close activation barrier SHM handle (producer never decrements, just closes).
+        _bshm = getattr(self, "_barrier_shm", None)
+        if _bshm is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                _bshm.close()
+            self._barrier_shm = None
 
         # Reset all state to prevent double-free on re-entry
         self.dev_ptrs = [None] * self.num_slots

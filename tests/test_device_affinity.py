@@ -67,6 +67,13 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     exp.total_sticky_check_us = 0.0
     exp.total_flush_probe_us = 0.0
 
+    # F9 activation barrier (disabled in mock)
+    exp._barrier_enabled = False
+    exp._barrier_stale_ns = 5_000_000_000
+    exp._barrier_shm = None
+    exp._barrier_skip_log_last_ns = 0
+    exp._barrier_stale_log_last_ns = 0
+
     mock_attrs = MagicMock()
     mock_attrs.type = 2  # cudaMemoryTypeDevice
     mock_attrs.device = device
