@@ -198,6 +198,17 @@ class CUDAIPCExporter:
         self._graph_execs: list[CUDAGraphExec_t | None] = [None] * num_slots
         self._graph_templates: list[CUDAGraph_t | None] = [None] * num_slots
         self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * num_slots
+        # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
+        # Mirrors td_exporter/CUDAIPCExtension.py's same knob. Forces debug=True.
+        self._export_profile: bool = os.getenv("CUDALINK_EXPORT_PROFILE", "0") == "1"
+        # CUDALINK_EXPORT_FLUSH_PROBE: calls cudaStreamQuery after check_sticky_error when
+        # _export_sync=False. Forces WDDM-deferred commands to submit without CPU blocking.
+        # Default ON per Phase 3 decision (2026-05-04): ~12 µs/frame cost, collapses
+        # Windows Task Manager 3D-engine reading from ~65% to ~7% on rigs where WDDM
+        # defers submissions. NVML true compute load is unchanged. Set to "0" to disable.
+        self._export_flush_probe: bool = os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
+        if self._export_profile:
+            self.debug = True  # profile mode requires timing path (mirrors TD L248-249)
 
         # Derived sizes
         itemsize = _DTYPE_ITEMSIZE_MAP[dtype]
@@ -227,6 +238,9 @@ class CUDAIPCExporter:
         self.total_stream_wait_us: float = 0.0
         self.total_record_event_us: float = 0.0
         self.total_shm_write_us: float = 0.0
+        self.total_sync_us: float = 0.0
+        self.total_sticky_check_us: float = 0.0
+        self.total_flush_probe_us: float = 0.0
 
         # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
         self._ts_offset: int = 0
@@ -733,9 +747,28 @@ class CUDAIPCExporter:
             # regardless of whether the CPU has synced. The _wait_for_slot() timeout
             # guards the polling path. Skipping this sync saves ~13-100µs/frame.
             if self._export_sync:
+                if debug and self._export_profile:
+                    _t_sync = time.perf_counter()
                 self.cuda.stream_synchronize(self.ipc_stream)
+                if debug and self._export_profile:
+                    self.total_sync_us += (time.perf_counter() - _t_sync) * 1_000_000
 
+            if debug and self._export_profile:
+                _t_sticky = time.perf_counter()
             self.cuda.check_sticky_error("export_frame")
+            if debug and self._export_profile:
+                self.total_sticky_check_us += (time.perf_counter() - _t_sticky) * 1_000_000
+
+            # WDDM deferred-submission probe: forces pending GPU work to submit without
+            # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
+            # cudaStreamQuery triggers that flush. Only active when EXPORT_FLUSH_PROBE=1
+            # and EXPORT_SYNC=0 (if sync is on, the stream is already flushed above).
+            if self._export_flush_probe and not self._export_sync:
+                if debug and self._export_profile:
+                    _t_fp = time.perf_counter()
+                self.cuda.stream_query(self.ipc_stream)
+                if debug and self._export_profile:
+                    self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
 
             # Write timestamp, clear shutdown_flag, then publish write_idx LAST.
             # Ordering matters: the consumer reads shutdown_flag BEFORE write_idx, so
@@ -770,6 +803,32 @@ class CUDAIPCExporter:
                         self.total_shm_write_us / n,
                         self.total_export_us / n,
                     )
+                    if self._export_profile:
+                        avg_wait = self.total_stream_wait_us / n
+                        avg_memcpy = self.total_memcpy_us / n
+                        avg_record = self.total_record_event_us / n
+                        avg_sync = self.total_sync_us / n
+                        avg_sticky = self.total_sticky_check_us / n
+                        avg_fp = self.total_flush_probe_us / n
+                        avg_shm = self.total_shm_write_us / n
+                        avg_total = self.total_export_us / n
+                        avg_unacc = avg_total - (
+                            avg_wait + avg_memcpy + avg_record + avg_sync
+                            + avg_sticky + avg_fp + avg_shm
+                        )
+                        logger.debug(
+                            "Frame %d [PROFILE] pre=0.0us interop=0.0us post=0.0us"
+                            " memcpy=%.1fus record=%.1fus sync=%.1fus"
+                            " sticky=%.1fus flush_probe=%.1fus shm=%.1fus unacc=%.1fus",
+                            n,
+                            avg_memcpy,
+                            avg_record,
+                            avg_sync,
+                            avg_sticky,
+                            avg_fp,
+                            avg_shm,
+                            avg_unacc,
+                        )
 
             return True
 

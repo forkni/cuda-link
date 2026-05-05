@@ -207,10 +207,13 @@ class CUDAIPCExtension:
         # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
         # Zero overhead when unset (single predicted-false branch per region).
         self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
-        # CUDALINK_EXPORT_FLUSH_PROBE=1: calls cudaStreamQuery after record_event when
+        # CUDALINK_EXPORT_FLUSH_PROBE: calls cudaStreamQuery after check_sticky_error when
         # _export_sync=False. Per CUDA Handbook p3/pg56, this forces WDDM-deferred commands
-        # to submit without blocking — used to confirm the WDDM batching hypothesis.
-        self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "0") == "1"
+        # to submit without CPU blocking. Default ON per Phase 3 decision (2026-05-04):
+        # measured ~12 µs/frame cost on RTX 30/40, collapses Windows Task Manager's
+        # 3D-engine reading from ~65% to ~7% on rigs where WDDM defers submissions.
+        # NVML true compute load is unchanged. Set to "0" to disable.
+        self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
 
         # CUDALINK_TD_USE_GRAPHS=1: capture export_frame's D2D memcpy_async into a 1-node
         # CUDA Graph and replay via graph_launch.  Same mechanism as the Python-side

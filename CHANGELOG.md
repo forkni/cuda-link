@@ -39,6 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cuda-link`. No throughput change; robustness improvement only.
   (`src/cuda_link/cuda_ipc_importer.py:875`)
 
+- **Python lib gains `CUDALINK_EXPORT_PROFILE` + `CUDALINK_EXPORT_FLUSH_PROBE`** —
+  the Python-side `CUDAIPCExporter.export_frame()` now reads the same two diagnostic
+  env vars as the TD extension. `CUDALINK_EXPORT_PROFILE=1` enables fine-grained
+  per-region sub-timers (`sync`, `sticky`, `flush_probe`) and emits a `[PROFILE]` line
+  every 97 frames; force-enables `debug=True`. `CUDALINK_EXPORT_FLUSH_PROBE`
+  inserts a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error`
+  when `EXPORT_SYNC=0`. Closes a long-standing instrumentation asymmetry between
+  the TD extension and the Python lib. (`src/cuda_link/cuda_ipc_exporter.py`)
+
+### Changed
+
+- **`CUDALINK_EXPORT_FLUSH_PROBE` default flipped `"0"` → `"1"`** (both TD extension
+  and Python lib). Phase 3 measurement (2026-05-04, RTX 30/40, 1080p RGBA8): the
+  ~12 µs/frame `cudaStreamQuery` collapses Windows Task Manager's 3D-engine reading
+  from ~65 % to ~7 % on rigs where WDDM defers GPU command submission, *without*
+  the ~130 µs/frame cost of a full `cudaStreamSynchronize` (which `EXPORT_SYNC=1`
+  pays). NVML true compute load is unchanged across all three settings — confirms
+  the high Task Manager reading was a queue-depth artefact, not real load. The
+  earlier v0.9.0 changelog entry calling this knob "diagnostic-only — hypothesis
+  refuted" reflected an earlier rig where the artefact did not reproduce; the
+  WDDM behaviour is rig- and driver-dependent. Set `CUDALINK_EXPORT_FLUSH_PROBE=0`
+  to restore the prior default. (`td_exporter/CUDAIPCExtension.py`,
+  `src/cuda_link/cuda_ipc_exporter.py`)
+
 ### Fixed
 
 - **CUDA Graphs build crash on cudart 11.0–11.8** — replaced `cudaGraphInstantiate`

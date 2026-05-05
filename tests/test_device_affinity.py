@@ -60,6 +60,13 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     exp._graph_execs = [None] * num_slots
     exp._graph_memcpy_nodes = [None] * num_slots
 
+    # Phase 3 diagnostic knobs (off in mock — no instrumentation desired)
+    exp._export_profile = False
+    exp._export_flush_probe = False
+    exp.total_sync_us = 0.0
+    exp.total_sticky_check_us = 0.0
+    exp.total_flush_probe_us = 0.0
+
     mock_attrs = MagicMock()
     mock_attrs.type = 2  # cudaMemoryTypeDevice
     mock_attrs.device = device

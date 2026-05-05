@@ -21,10 +21,18 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import logging
 import os
 import struct
 import sys
 import time
+
+# When CUDALINK_EXPORT_PROFILE=1 the lib promotes self.debug=True and emits
+# [PROFILE] lines via logger.debug(). Configure the root logger so those
+# messages reach stdout (standard Python logging convention requires the host
+# application to set up handlers; the lib itself cannot do it).
+if os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1":
+    logging.basicConfig(level=logging.DEBUG, format="[lib] %(message)s", stream=sys.stdout)
 
 # ---------------------------------------------------------------------------
 # Windows console control handler — ensures GPU IPC cleanup runs even when

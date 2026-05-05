@@ -19,8 +19,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_defaults() -> None:
-    """Default parameters produce expected attribute values."""
+def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default parameters produce expected attribute values (clean env)."""
+    for var in ("CUDALINK_EXPORT_SYNC", "CUDALINK_EXPORT_PROFILE", "CUDALINK_EXPORT_FLUSH_PROBE",
+                "CUDALINK_USE_GRAPHS", "CUDALINK_STICKY_ERROR_CHECK"):
+        monkeypatch.delenv(var, raising=False)
+
     from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
 
     exp = CUDAIPCExporter(shm_name="test_ipc", height=512, width=512)
@@ -416,6 +420,13 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp._graphs_disabled = False
     exp._graph_execs = [None] * num_slots
     exp._graph_memcpy_nodes = [None] * num_slots
+
+    # Phase 3 diagnostic knobs (off in mock)
+    exp._export_profile = False
+    exp._export_flush_probe = False
+    exp.total_sync_us = 0.0
+    exp.total_sticky_check_us = 0.0
+    exp.total_flush_probe_us = 0.0
 
     # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
     mock_attrs = MagicMock()
