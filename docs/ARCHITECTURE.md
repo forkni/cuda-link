@@ -501,22 +501,44 @@ This latency is **imperceptible** for real-time applications.
 
 ## Comparison: CUDA IPC vs CPU SharedMemory
 
-CUDA IPC zero-copies GPU memory across processes with no CPU transit. Architectural differences vs CPU SharedMemory:
+CUDA IPC zero-copies GPU memory across processes; CPU SharedMemory adds two memcpys (GPU->CPU on the producer, CPU->GPU on the consumer). Numerical impact at typical resolutions:
 
-| Property | CUDA IPC | CPU SharedMemory |
-|--------|----------|------------------|
+**1920x1080 float32 RGBA (31.6 MB/frame):**
+
+| Metric | CPU SharedMemory | CUDA-Link | Speed-up |
+|--------|------------------|-----------|----------|
+| Producer write | 2.60 ms | 138 us (bench_graphs) / 585 us (bench_sweep) | 4.4x – 18.8x |
+| Consumer read (D2H) | 2.48 ms | 1.35 ms (bench_d2h_streams) / ~2.0 ms (bench_sweep) | 1.2x – 1.8x |
+| End-to-end | 5.37 ms | ~1.6 ms (IPC notify 240 us + D2H 1.35 ms) | ~3.4x |
+
+**512x512 float32 RGBA (4 MB/frame):**
+
+| Metric | CPU SharedMemory | CUDA-Link | Speed-up |
+|--------|------------------|-----------|----------|
+| Producer write | 361 us | 42 us (bench_graphs) | 8.6x |
+| Consumer read (D2H) | 350 us | 0.23 ms (bench_d2h_streams) | 1.5x |
+| End-to-end | 1.02 ms | ~0.49 ms (IPC notify 259 us + D2H 0.23 ms) | ~2.1x |
+
+**Methodology notes:**
+
+- CPU SharedMemory numbers are from prior measurements on an unspecified earlier RTX-class system, PCIe 4.0. CUDA-Link numbers are from RTX 4090 / driver 596.36 / PCIe 4.0 x16. PCIe generation matches; D2H bandwidth comparison is meaningful. Producer-side write is GPU-independent (CPU->SHM is CPU-bound).
+- `bench_graphs` measures pure isolated `export_frame()` (single producer, no consumer). `bench_sweep` measures `export_frame()` under concurrent consumer load — cross-process WDDM contention inflates the wall-clock sample. Use the bench_graphs figure for "what does CUDA-Link cost in the integrated path"; use the bench_sweep figure for "what does the spawn-process Python-only roundtrip look like."
+- For zero-copy GPU consumers (`get_frame()` -> torch tensor, `get_frame_cupy()`), the read column collapses to <5 us and the gap widens further. The D2H comparison only applies when the consumer needs CPU data.
+
+**Architectural differences:**
+
+| Property | CUDA-Link | CPU SharedMemory |
+|---|---|---|
 | Memory copies | 0 (GPU D2D only) | 2 (GPU->CPU, CPU->GPU) |
-| export_frame() p50 (1080p f32) | 138 us (bench_graphs) | n/a |
-| get_frame_numpy() p50 (1080p f32) | ~2.0 ms D2H (bench_sweep) | n/a |
-| D2H throughput (1080p f32, bench_d2h_streams) | 1.35 ms at 23.7 GB/s | memcpy limited |
-| IPC sync primitives only | 3-8 us | N/A |
+| Sync primitive cost | 3-8 us | N/A |
 | Platform support | Windows only | Cross-platform |
+| Zero-copy read mode | `get_frame()` / `get_frame_cupy()` | not available |
 
-**Read overhead note**: `get_frame_numpy()` performs a GPU-to-CPU copy. The zero-copy GPU modes (`get_frame()` -> torch tensor, `get_frame_cupy()`) have negligible read overhead and are the recommended path for AI pipelines.
+**TouchOUT / Spout**: not measured. The original project README referenced TD-side loggers for these baselines but no scripts were ever committed. A comparison would require building those loggers from scratch against a live TD instance.
 
 **TD->Python note**: When a live TouchDesigner sender is the producer, `cudaIpcOpenMemHandle` requires TD's CUDA runtime instance. Loading a second CUDA runtime (e.g. `cudart64_12.dll`) in TD's process causes error 400 — see `td_exporter/CUDAIPCWrapper.py` `_load_cuda_runtime()` for details.
 
-**Conclusion**: CUDA IPC eliminates CPU-side data movement entirely. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
+**Conclusion**: CUDA-Link is 2x – 3.4x faster end-to-end than CPU SharedMemory at typical resolutions and 4x – 19x faster on the producer side. Use CPU SharedMemory for cross-platform or non-CUDA workflows.
 
 ---
 

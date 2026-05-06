@@ -295,6 +295,21 @@ python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
 python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
 ```
 
+### vs CPU SharedMemory
+
+End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU SharedMemory baseline (PCIe 4.0):
+
+```
+Resolution    Method              Producer write   Consumer read   E2E
+----------    ----------------    --------------   -------------   ---------
+1920x1080     CPU SharedMemory          2.60 ms         2.48 ms     5.37 ms
+1920x1080     CUDA-Link                  138 µs         1.35 ms     ~1.6 ms      (~3.4x faster E2E)
+512x512       CPU SharedMemory           361 µs          350 µs     1.02 ms
+512x512       CUDA-Link                   42 µs         0.23 ms    ~0.49 ms      (~2.1x faster E2E)
+```
+
+Producer write is 4–19x faster (no CPU transit). With zero-copy GPU consumers (`get_frame()` / `get_frame_cupy()`), the read path collapses to <5 µs and the end-to-end gap widens further. **TouchOUT and Spout** baselines were never measured — see methodology notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#comparison-cuda-ipc-vs-cpu-sharedmemory) for the full hardware caveats and source data.
+
 ### Performance Tuning (env vars)
 
 | Variable | Default | Effect |
