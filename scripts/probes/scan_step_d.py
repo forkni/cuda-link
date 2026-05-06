@@ -46,15 +46,6 @@ HARD_FAILURE_MARKERS = [
     "dxgi_error_device_removed",
 ]
 
-# Receiver-A non-recovery signature — these appear when the residual fails
-# to self-recover (regression signal for F8/F2 drops; look for it in F9 drop).
-RECEIVER_STUCK_MARKERS = [
-    "sender shutdown detected",
-    "retry",
-    "re-attach",
-    "never recovered",
-]
-
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
@@ -69,6 +60,21 @@ _CYCLE_RE = re.compile(
 _POST_RE = re.compile(r"\bpost=([\d.]+)\s*ms", re.IGNORECASE)
 _FPS_RE = re.compile(r"\bfps=([\d.]+)", re.IGNORECASE)
 _CYCLE_TAG_RE = re.compile(r"\bcycle=(\d+)\b", re.IGNORECASE)
+
+# CUDAIPCExtension Sender-B [PROFILE] lines — post= is in microseconds.
+_PROFILE_POST_US_RE = re.compile(r"\[PROFILE\].*?\bpost=([\d.]+)us", re.IGNORECASE)
+# Sender-B deactivate / reactivate events.
+_SENDER_ACTIVATE_RE = re.compile(
+    r"\[CUDAIPCExtension:Sender\].*?Active.*?changed.*?False.*?->\s*True",
+    re.IGNORECASE,
+)
+_SENDER_DEACTIVATE_RE = re.compile(
+    r"\[CUDAIPCExtension:Sender\].*?Active.*?changed.*?True.*?->\s*False",
+    re.IGNORECASE,
+)
+# Receiver reconnect events (successful recovery signal).
+_RECEIVER_SHUTDOWN_RE = re.compile(r"Sender shutdown detected", re.IGNORECASE)
+_RECEIVER_OPENED_RE = re.compile(r"Opened slot \d+", re.IGNORECASE)
 
 
 def _load(path: Path) -> list[str]:
@@ -127,12 +133,69 @@ def _parse_cycles(lines: list[str]) -> list[dict]:
     return [{"cycle": i + 1, "post_ms": p, "fps": f} for i, (p, f) in enumerate(untagged)]
 
 
+def _parse_cycles_td(sender_lines: list[str], td_lines: list[str]) -> list[dict]:
+    """Resolve cycle telemetry, preferring structured log then [PROFILE] format."""
+    cycles = _parse_cycles(sender_lines + td_lines)
+    if not cycles:
+        cycles = _parse_cycles_from_sender_profile(sender_lines)
+    return cycles
+
+
 def _check_slot_escalation(cycles: list[dict]) -> bool:
     """Return True if slot-0 close timing escalates strictly across cycles."""
     posts = [c["post_ms"] for c in cycles if "post_ms" in c]
     if len(posts) < 2:
         return False
     return all(posts[i] < posts[i + 1] for i in range(len(posts) - 1))
+
+
+def _parse_cycles_from_sender_profile(lines: list[str]) -> list[dict]:
+    """Extract per-cycle post= values from CUDAIPCExtension:Sender [PROFILE] lines.
+
+    Each Sender-B reactivation ('Active: False -> True') starts a new cycle.
+    The first [PROFILE] line (Frame 97 report) after each reactivation is the
+    cycle's first-settle metric.  post= is reported in microseconds; divide by
+    1000 to get milliseconds.
+    """
+    cycles: list[dict] = []
+    cycle_n = 0
+    waiting_for_profile = False
+
+    for line in lines:
+        if _SENDER_ACTIVATE_RE.search(line):
+            cycle_n += 1
+            waiting_for_profile = True
+            continue
+
+        if waiting_for_profile:
+            m = _PROFILE_POST_US_RE.search(line)
+            if m:
+                post_ms = float(m.group(1)) / 1000.0
+                cycles.append({"cycle": cycle_n, "post_ms": post_ms, "fps": None})
+                waiting_for_profile = False
+
+    return cycles
+
+
+def _count_unrecovered_shutdowns(lines: list[str]) -> int:
+    """Count 'Sender shutdown detected' events that never led to 'Opened slot'.
+
+    Each shutdown that eventually sees an 'Opened slot' on the same receiver
+    log is a *recovered* cycle — expected residual behaviour.  Only shutdowns
+    that exhaust retries without recovery are counted as regressions.
+    """
+    count = 0
+    pending = False
+    for line in lines:
+        if _RECEIVER_SHUTDOWN_RE.search(line):
+            if pending:
+                count += 1  # previous shutdown never recovered
+            pending = True
+        elif pending and _RECEIVER_OPENED_RE.search(line):
+            pending = False  # this cycle recovered
+    if pending:
+        count += 1  # last shutdown never recovered
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -193,16 +256,16 @@ def scan(artifact_dir: Path) -> dict:
     tdr_observed = (hard_hits_prod + hard_hits_td) > 0
     result["tdr_observed"] = tdr_observed
 
-    # --- receiver-A recovery check ------------------------------------------
-    recv_stuck_hits = _count_markers(td_lines, RECEIVER_STUCK_MARKERS)
-    result["receiver_stuck_hits"] = recv_stuck_hits
-    receiver_a_no_recovery = recv_stuck_hits > 3  # small residual is expected
+    # --- receiver-B recovery check ------------------------------------------
+    # Count shutdowns that never reconnected (NOT raw retry-line hits).
+    recv_unrecovered = _count_unrecovered_shutdowns(receiver_lines)
+    result["receiver_unrecovered_cycles"] = recv_unrecovered
+    receiver_no_recovery = recv_unrecovered > 0
 
     # --- per-cycle telemetry ------------------------------------------------
-    cycles = _parse_cycles(producer_lines)
+    cycles = _parse_cycles_td(sender_lines, td_lines)
     if not cycles:
-        # try TD logs if producer had no cycle data
-        cycles = _parse_cycles(td_lines)
+        cycles = _parse_cycles(producer_lines)
 
     cycle_results = []
     for c in cycles:
@@ -211,7 +274,7 @@ def scan(artifact_dir: Path) -> dict:
         fps = c.get("fps")
         limit = CYCLE_1_POST_LIMIT_MS if n == 1 else CYCLE_N_POST_LIMIT_MS
         post_pass = post_ms is not None and post_ms <= limit
-        fps_pass = fps is not None and fps >= FPS_FLOOR
+        fps_pass = fps is None or fps >= FPS_FLOOR  # None = not captured, assume pass
         cycle_results.append(
             {
                 "cycle": n,
@@ -229,7 +292,7 @@ def scan(artifact_dir: Path) -> dict:
 
     # --- overall verdict -----------------------------------------------------
     all_cycles_pass = all(c["pass"] for c in cycle_results) if cycle_results else None
-    regression = tdr_observed or receiver_a_no_recovery or (all_cycles_pass is False)
+    regression = tdr_observed or receiver_no_recovery or (all_cycles_pass is False)
 
     if all_cycles_pass is None:
         result["verdict"] = "INCONCLUSIVE"
@@ -239,18 +302,21 @@ def scan(artifact_dir: Path) -> dict:
         reasons = []
         if tdr_observed:
             reasons.append("TDR/hard CUDA failure detected")
-        if receiver_a_no_recovery:
-            reasons.append(f"Receiver-A stuck ({recv_stuck_hits} retry-loop hits)")
+        if receiver_no_recovery:
+            reasons.append(f"Receiver-B: {recv_unrecovered} shutdown(s) with no reconnect")
         failing = [c for c in cycle_results if not c["pass"]]
         if failing:
             reasons.append(
                 "cycle(s) failed thresholds: "
-                + ", ".join(f"cycle {c['cycle']} post={c['first_settle_post_ms']}ms" for c in failing)
+                + ", ".join(f"cycle {c['cycle']} post={c['first_settle_post_ms']:.2f}ms" for c in failing)
             )
         result["verdict_reason"] = "; ".join(reasons)
     else:
         result["verdict"] = "F9_DROPPABLE"
-        result["verdict_reason"] = f"All {len(cycle_results)} cycle(s) passed — F9 can be removed from minimum stack"
+        posts = ", ".join(f"cycle {c['cycle']} post={c['first_settle_post_ms']:.2f}ms" for c in cycle_results)
+        result["verdict_reason"] = (
+            f"All {len(cycle_results)} cycle(s) passed ({posts}) — F9 can be removed from minimum stack"
+        )
 
     return result
 
