@@ -142,7 +142,9 @@ def _check_slot_escalation(cycles: list[dict]) -> bool:
 
 def scan(artifact_dir: Path) -> dict:
     producer_lines = _load(artifact_dir / "producer.log")
-    td_lines = _load(artifact_dir / "td_sender.txt")
+    sender_lines = _load(artifact_dir / "td_sender.txt")
+    receiver_lines = _load(artifact_dir / "td_receiver.txt")
+    td_lines = sender_lines + receiver_lines  # combined TD-side view
     env_lines = _load(artifact_dir / "env.txt")
 
     result: dict = {
@@ -150,6 +152,7 @@ def scan(artifact_dir: Path) -> dict:
         "files_found": {
             "producer.log": (artifact_dir / "producer.log").exists(),
             "td_sender.txt": (artifact_dir / "td_sender.txt").exists(),
+            "td_receiver.txt": (artifact_dir / "td_receiver.txt").exists(),
             "env.txt": (artifact_dir / "env.txt").exists(),
         },
     }
@@ -164,21 +167,25 @@ def scan(artifact_dir: Path) -> dict:
 
     # --- validity gate -------------------------------------------------------
     f9_hits_producer = _count_markers(producer_lines, F9_ACTIVE_MARKERS)
-    f9_hits_td = _count_markers(td_lines, F9_ACTIVE_MARKERS)
-    total_f9_hits = f9_hits_producer + f9_hits_td
+    f9_hits_sender = _count_markers(sender_lines, F9_ACTIVE_MARKERS)
+    f9_hits_receiver = _count_markers(receiver_lines, F9_ACTIVE_MARKERS)
+    total_f9_hits = f9_hits_producer + f9_hits_sender + f9_hits_receiver
 
     if total_f9_hits > 0:
         result["valid"] = False
         result["validity_reason"] = (
             f"F9 active during run: {f9_hits_producer} hit(s) in producer.log, "
-            f"{f9_hits_td} hit(s) in td_sender.txt. "
-            "Env was not clean — retry in a fresh cmd.exe window."
+            f"{f9_hits_sender} hit(s) in td_sender.txt, "
+            f"{f9_hits_receiver} hit(s) in td_receiver.txt. "
+            "Env was not clean -- retry in a fresh cmd.exe window."
         )
         result["verdict"] = "INVALID"
         return result
 
     result["valid"] = True
-    result["validity_reason"] = "0 [ACTIVATION_BARRIER] hits in producer.log + td_sender.txt — F9 was off"
+    result["validity_reason"] = (
+        "0 [ACTIVATION_BARRIER] hits in producer.log + td_sender.txt + td_receiver.txt -- F9 was off"
+    )
 
     # --- hard failure check --------------------------------------------------
     hard_hits_prod = _count_markers(producer_lines, HARD_FAILURE_MARKERS)
@@ -194,7 +201,7 @@ def scan(artifact_dir: Path) -> dict:
     # --- per-cycle telemetry ------------------------------------------------
     cycles = _parse_cycles(producer_lines)
     if not cycles:
-        # try TD log if producer had no cycle data
+        # try TD logs if producer had no cycle data
         cycles = _parse_cycles(td_lines)
 
     cycle_results = []
