@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-06
+
 ### Added
+
+- **`benchmarks/bench_sweep.py`** — full IPC roundtrip sweep (16 cells: 4 resolutions
+  × 2 dtypes × graphs on/off). Two spawn-process workers (producer + consumer)
+  exercise the IPC path end-to-end at 60 FPS, capture per-cell `export_us`,
+  `get_numpy_us`, `e2e_us` (IPC notify), and `throughput_gbs` percentiles, and
+  write `benchmarks/results/sweep_{timestamp}.{csv,json}` plus
+  `sweep_latest.{csv,json}` for doc-update reproducibility. Validated on
+  RTX 4090 / driver 596.36 / PCIe 4.0 x16 (2026-05-06).
+- **CPU SharedMemory comparison block** in `README.md` and detailed comparison
+  tables in `docs/ARCHITECTURE.md` — concrete speed-ups vs the original
+  UT_SharedMem-class baseline at 1080p (~3.4× E2E) and 512×512 (~2.1× E2E),
+  with 4–19× advantage on producer write. TouchOUT/Spout baselines are
+  explicitly flagged as never measured.
 
 - **CUDA Graphs for `export_frame()`** — `CUDAIPCExporter` now captures the
   per-frame `memcpy_async` into a 1-node CUDA Graph on first use and replays it
@@ -49,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the TD extension and the Python lib. (`src/cuda_link/cuda_ipc_exporter.py`)
 
 ### Changed
+
+- **Concurrent-topology load-bearing flags now default-on (Phase 4 / 4.1)** —
+  `CUDALINK_EXPORT_SYNC`, `CUDALINK_ACTIVATION_BARRIER`,
+  `CUDALINK_TD_ACTIVATION_BARRIER`, and `CUDALINK_TD_PERSIST_STREAM` flip from
+  opt-in to default-on; `CUDALINK_TD_STREAM_PRIO` default flips `"high"` →
+  `"normal"`; the experimental `CUDALINK_TD_INIT_CLEAR_STICKY` (F4) is removed
+  entirely (never observed firing in 3.6 subtractive probe). Net effect: the
+  validated Python-producer + TD-Sender concurrent topology now requires **zero
+  env vars** to run safely. Each flag's load-bearing role was confirmed via
+  Phase 3.6 step-by-step subtractive probes (2026-05-06, branch
+  `feat/cuda-graphs-d2h-streams`). Set any flag to `0` to opt out.
 
 - **`CUDALINK_EXPORT_FLUSH_PROBE` default flipped `"0"` → `"1"`** (both TD extension
   and Python lib). Phase 3 measurement (2026-05-04, RTX 30/40, 1080p RGBA8): the
@@ -128,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
 
 ## [1.0.0] — 2026-05-02
