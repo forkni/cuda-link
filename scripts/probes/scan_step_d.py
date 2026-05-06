@@ -183,18 +183,23 @@ def _count_unrecovered_shutdowns(lines: list[str]) -> int:
     Each shutdown that eventually sees an 'Opened slot' on the same receiver
     log is a *recovered* cycle — expected residual behaviour.  Only shutdowns
     that exhaust retries without recovery are counted as regressions.
+
+    The final shutdown is intentionally excluded: the probe protocol ends with
+    a Sender-B deactivation (needed to save the textport), which leaves the
+    last receiver shutdown unrecovered by design.  Counting it would produce a
+    false-positive in every clean run.  Only a shutdown that is followed by
+    *another* shutdown without an intervening recovery indicates a stuck loop.
     """
     count = 0
     pending = False
     for line in lines:
         if _RECEIVER_SHUTDOWN_RE.search(line):
             if pending:
-                count += 1  # previous shutdown never recovered
+                count += 1  # previous shutdown never recovered before this one
             pending = True
         elif pending and _RECEIVER_OPENED_RE.search(line):
             pending = False  # this cycle recovered
-    if pending:
-        count += 1  # last shutdown never recovered
+    # Final pending shutdown is excluded — it is the protocol-end deactivation.
     return count
 
 
