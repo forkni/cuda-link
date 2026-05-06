@@ -232,10 +232,13 @@ class CUDAIPCExtension:
         self._graph_templates: list = [None] * self.num_slots
         self._graph_memcpy_nodes: list = [None] * self.num_slots
 
-        # Phase 3.5 diagnostic knobs — all opt-in, all env-gated, default-off.
-        # CUDALINK_TD_STREAM_PRIO=normal: use default-priority stream instead of high-priority.
-        # Set when running concurrent topologies (Sender-B alongside Receiver-A) — equal priorities avoid WDDM contention accumulation across reactivation cycles.
-        self._stream_high_prio: bool = os.environ.get("CUDALINK_TD_STREAM_PRIO", "high") != "normal"
+        # Phase 3.5 diagnostic knobs — env-gated.
+        # CUDALINK_TD_STREAM_PRIO: CUDA stream priority for the IPC stream.
+        # Default normal (Phase 4.1 — in single-pair only one stream exists per process so
+        # priority is moot; in concurrent, high/high contention accumulates across reactivation
+        # cycles and produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed).
+        # Set to "high" for explicit single-pair lowest-latency (measured difference is small).
+        self._stream_high_prio: bool = os.environ.get("CUDALINK_TD_STREAM_PRIO", "normal") == "high"
         # CUDALINK_TD_INIT_PACE=1: sync+sleep at 3 checkpoints inside initialize() to spread
         # the WDDM submission burst over ~60 ms. (Opt-in; not part of the validated default stack.)
         self._init_pace: bool = os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1"
@@ -466,8 +469,8 @@ class CUDAIPCExtension:
             # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.
             if self.ipc_stream is None:
-                # CUDALINK_TD_STREAM_PRIO=normal: default-priority stream instead of
-                # high-priority — required when sharing a process with Receiver-A to avoid WDDM contention.
+                # Default normal-priority (Phase 4.1). Set CUDALINK_TD_STREAM_PRIO=high
+                # for explicit single-pair lowest-latency.
                 if self._stream_high_prio:
                     self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                     self._log(
