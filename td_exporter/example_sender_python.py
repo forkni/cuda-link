@@ -34,6 +34,16 @@ import time
 if os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1":
     logging.basicConfig(level=logging.DEBUG, format="[lib] %(message)s", stream=sys.stdout)
 
+_probe_log_file = os.environ.get("CUDALINK_PROBE_LOG_FILE", "")
+if _probe_log_file:
+    _root_logger = logging.getLogger()
+    if not any(isinstance(h, logging.FileHandler) for h in _root_logger.handlers):
+        _fh = logging.FileHandler(_probe_log_file, mode="w", encoding="utf-8")
+        _fh.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s"))
+        _root_logger.addHandler(_fh)
+        if _root_logger.level == logging.NOTSET:
+            _root_logger.setLevel(logging.INFO)
+
 # ---------------------------------------------------------------------------
 # Windows console control handler — ensures GPU IPC cleanup runs even when
 # the user closes the console window via the X button (CTRL_CLOSE_EVENT),
@@ -224,10 +234,7 @@ def main() -> None:
         print("[sender] ERROR: exporter.initialize() failed.")
         sys.exit(1)
 
-    graphs_active = bool(
-        getattr(exporter, "_use_graphs", False)
-        and not getattr(exporter, "_graphs_disabled", False)
-    )
+    graphs_active = bool(getattr(exporter, "_use_graphs", False) and not getattr(exporter, "_graphs_disabled", False))
     graphs_label = "ON" if graphs_active else "OFF"
     env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
     try:
