@@ -42,6 +42,7 @@ Compatibility:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import struct
@@ -52,7 +53,19 @@ from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
-from .cuda_ipc_wrapper import CUDARuntimeAPI, CUDAStream_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: F401
+from .activation_barrier import bump_skip as _ab_bump
+from .activation_barrier import open_or_create as _ab_open
+from .activation_barrier import read_state as _ab_read
+from .cuda_ipc_wrapper import (  # noqa: F401
+    CUDART_GRAPHS_MIN_VERSION,
+    CUDAGraph_t,
+    CUDAGraphExec_t,
+    CUDAGraphNode_t,
+    CUDARuntimeAPI,
+    CUDAStream_t,
+    cudaIpcMemHandle_t,
+    get_cuda_runtime,
+)
 
 if TYPE_CHECKING:
     from .nvml_observer import NVMLObserver
@@ -166,10 +179,50 @@ class CUDAIPCExporter:
         self.debug = debug
         self.device = device
 
-        # CUDALINK_EXPORT_SYNC=1 restores the old behaviour of blocking the CPU on
-        # ipc_stream after each record_event(). Default off: the ~13-100µs sync is
-        # redundant for consumers using the stream-ordered get_frame(stream=...) path.
-        self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "0") == "1"
+        # CUDALINK_EXPORT_SYNC: block CPU on ipc_stream after each record_event().
+        # Default on (Phase 3.6 — load-bearing for concurrent topologies; prevents
+        # cycle-2 TDR cascade when a TD Sender shares the process with a TD Receiver).
+        # Set to "0" to opt out for low-latency single-producer scenarios (~100-300µs/frame saved).
+        self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "1") != "0"
+
+        # CUDALINK_USE_GRAPHS=1: capture the memcpy_async into a 1-node CUDA Graph and
+        # replay via graph_launch.  IPC events (cudaEventInterprocess) and external
+        # stream_wait_event deps cannot be captured, so the graph contains only the D2D
+        # memcpy.  Per-frame cost when source_sync not used:
+        #   graph_launch (1 WDDM) + record_event (1 WDDM) = 2 submissions vs 3 legacy
+        # When record_source_sync() has been called at least once, stream_wait_event is
+        # issued before graph_launch (3 WDDM — same as legacy).
+        # Requires CUDA 12.x runtime (Python side). On by default; set CUDALINK_USE_GRAPHS=0
+        # to revert to the legacy 3-submission stream path.
+        self._use_graphs: bool = os.getenv("CUDALINK_USE_GRAPHS", "1") == "1"
+        self._graphs_disabled: bool = False  # set True if build/launch fails at runtime
+        self._source_sync_recorded: bool = False  # set True on first record_source_sync()
+        # One CUDAGraphExec_t + template CUDAGraph_t per ring slot.
+        # Template is kept alive so node handles remain valid for SetParams calls.
+        self._graph_execs: list[CUDAGraphExec_t | None] = [None] * num_slots
+        self._graph_templates: list[CUDAGraph_t | None] = [None] * num_slots
+        self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * num_slots
+        # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
+        # Mirrors td_exporter/CUDAIPCExtension.py's same knob. Forces debug=True.
+        self._export_profile: bool = os.getenv("CUDALINK_EXPORT_PROFILE", "0") == "1"
+        # CUDALINK_EXPORT_FLUSH_PROBE: calls cudaStreamQuery after check_sticky_error when
+        # _export_sync=False. Forces WDDM-deferred commands to submit without CPU blocking.
+        # Default ON per Phase 3 decision (2026-05-04): ~12 µs/frame cost, collapses
+        # Windows Task Manager 3D-engine reading from ~65% to ~7% on rigs where WDDM
+        # defers submissions. NVML true compute load is unchanged. Set to "0" to disable.
+        self._export_flush_probe: bool = os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
+        # CUDALINK_ACTIVATION_BARRIER: read cudalink_activation_barrier SHM on each
+        # export_frame and skip publishing while a TD-side Sender is in its activation window.
+        # Cross-process backpressure mechanism — no CUDA stream coupling.
+        # Default on (Phase 3.6 — no-op when no TD-side Sender exists since the SHM
+        # counter stays at 0; gracefully skipped if SHM is missing). Set to "0" to opt out.
+        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0"
+        self._barrier_stale_ns: int = int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000)))
+        self._barrier_shm: SharedMemory | None = None
+        self._barrier_skip_log_last_ns: int = 0
+        self._barrier_stale_log_last_ns: int = 0
+        if self._export_profile:
+            self.debug = True  # profile mode requires timing path (mirrors TD L248-249)
 
         # Derived sizes
         itemsize = _DTYPE_ITEMSIZE_MAP[dtype]
@@ -199,6 +252,9 @@ class CUDAIPCExporter:
         self.total_stream_wait_us: float = 0.0
         self.total_record_event_us: float = 0.0
         self.total_shm_write_us: float = 0.0
+        self.total_sync_us: float = 0.0
+        self.total_sticky_check_us: float = 0.0
+        self.total_flush_probe_us: float = 0.0
 
         # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
         self._ts_offset: int = 0
@@ -240,13 +296,21 @@ class CUDAIPCExporter:
                 )
             logger.info("Loaded CUDA runtime on device %d", actual_device)
 
-            # Create or reuse dedicated high-priority non-blocking IPC stream.
+            # Create or reuse dedicated non-blocking IPC stream.
             # cudaStreamNonBlocking (0x01) prevents the default stream from
-            # implicitly synchronising with this stream. Highest priority ensures
-            # the D2D memcpy preempts lower-priority compute work in the TD context.
+            # implicitly synchronising with this stream. Default is high-priority
+            # so the D2D memcpy preempts lower-priority compute work in the TD context.
+            # CUDALINK_LIB_STREAM_PRIO=normal: drop to default-priority stream.
+            # Use when a TD-side Sender-B coexists with this Python producer in the
+            # same machine and the high-priority stream contends with TD init.
             if self.ipc_stream is None:
-                self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
-                logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
+                lib_stream_high_prio = os.environ.get("CUDALINK_LIB_STREAM_PRIO", "high") != "normal"
+                if lib_stream_high_prio:
+                    self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
+                    logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
+                else:
+                    self.ipc_stream = self.cuda.create_stream(flags=0x01)
+                    logger.info("Created IPC stream (normal-priority): 0x%016x", int(self.ipc_stream.value))
             else:
                 logger.debug("Reusing IPC stream: 0x%016x", int(self.ipc_stream.value))
 
@@ -308,6 +372,30 @@ class CUDAIPCExporter:
             self._ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
             self._initialized = True
+
+            # CUDA Graphs build (after IPC stream / events / ring buffer are ready).
+            # Gated on cudart >= 11.4 (cudaGraphInstantiateWithFlags + the
+            # EventRecordNodeSetEvent / EventWaitNodeSetEvent APIs all require 11.4+).
+            # cudaGraphInstantiateWithFlags was introduced specifically to avoid the
+            # 5-arg (10.0-11.8) vs 3-arg (12.0+) ABI split in cudaGraphInstantiate.
+            if self._use_graphs:
+                try:
+                    rt_version = self.cuda.get_runtime_version()
+                except (RuntimeError, OSError) as exc:
+                    rt_version = 0
+                    logger.warning("cudaRuntimeGetVersion failed (%s) — disabling graphs", exc)
+                if rt_version >= CUDART_GRAPHS_MIN_VERSION:
+                    self._build_export_graphs()
+                else:
+                    logger.warning(
+                        "CUDALINK_USE_GRAPHS=1 ignored: cudart %d < %d "
+                        "(cudaGraphInstantiateWithFlags requires 11.4+). "
+                        "Falling back to legacy stream path.",
+                        rt_version,
+                        CUDART_GRAPHS_MIN_VERSION,
+                    )
+                    self._graphs_disabled = True
+
             logger.info("Initialization complete — ready for zero-copy GPU transfer")
             return True
 
@@ -408,6 +496,103 @@ class CUDAIPCExporter:
         )
 
     # ------------------------------------------------------------------
+    # CUDA Graph helpers (Phase 2, CUDALINK_USE_GRAPHS=1)
+    # ------------------------------------------------------------------
+
+    def _build_export_graphs(self) -> None:
+        """Capture the D2D memcpy into a 1-node CUDA Graph exec per ring slot.
+
+        Graph topology per slot (1 node):
+            MemcpyNode(D2D, ring_slot[slot] ← placeholder_src)
+
+        stream_wait_event is NOT captured: external events (recorded outside this
+        capture) do not produce EventWait nodes in global-mode capture.
+        record_event on IPC events is NOT captured: cudaEventInterprocess events
+        raise cudaErrorStreamCaptureUnsupported (error 900) during capture.
+
+        Per-frame cost:
+          - source_sync not used (common): graph_launch + record_event = 2 WDDM
+          - source_sync used: stream_wait_event + graph_launch + record_event = 3 WDDM
+
+        On failure the stream is restored to normal mode before returning so that
+        the legacy fallback path can use it without error.
+        """
+        assert self.cuda is not None
+        assert self.ipc_stream is not None
+
+        placeholder_src = self.dev_ptrs[0]
+
+        for slot in range(self.num_slots):
+            capture_started = False
+            try:
+                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)
+                capture_started = True
+                self.cuda.memcpy_async(
+                    dst=self.dev_ptrs[slot],
+                    src=placeholder_src,
+                    count=self.data_size,
+                    kind=3,  # D2D
+                    stream=self.ipc_stream,
+                )
+                template_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                capture_started = False
+
+                nodes = self.cuda.graph_get_nodes(template_graph)
+                if len(nodes) != 1:
+                    self.cuda.graph_destroy(template_graph)
+                    raise RuntimeError(f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode).")
+                memcpy_node = nodes[0]
+
+                graph_exec = self.cuda.graph_instantiate(template_graph)
+                # Keep template alive: node handles from the template must remain
+                # valid for cudaGraphExecMemcpyNodeSetParams1D per-frame updates.
+                # Template is destroyed in _destroy_export_graphs().
+
+                self._graph_execs[slot] = graph_exec
+                self._graph_templates[slot] = template_graph
+                self._graph_memcpy_nodes[slot] = memcpy_node
+                logger.debug("Built export graph for slot %d (1-node: Memcpy)", slot)
+
+            except (RuntimeError, OSError) as exc:
+                if capture_started:
+                    try:
+                        abandoned_graph = self.cuda.stream_end_capture(self.ipc_stream)
+                        self.cuda.graph_destroy(abandoned_graph)
+                    except (RuntimeError, OSError):
+                        pass
+                logger.warning(
+                    "CUDA Graph build failed for slot %d (%s) — "
+                    "disabling graphs for this exporter instance and falling back to "
+                    "legacy stream path. Set CUDALINK_USE_GRAPHS=0 to suppress.",
+                    slot,
+                    exc,
+                )
+                self._graphs_disabled = True
+                self._destroy_export_graphs()
+                return
+
+        logger.info("CUDA export graphs built for %d slots (CUDALINK_USE_GRAPHS=1)", self.num_slots)
+
+    def _destroy_export_graphs(self) -> None:
+        """Destroy all CUDA Graph exec objects and their templates (called from cleanup())."""
+        if self.cuda is None:
+            return
+        for slot, graph_exec in enumerate(self._graph_execs):
+            if graph_exec is not None:
+                try:
+                    self.cuda.graph_exec_destroy(graph_exec)
+                    logger.debug("Destroyed export graph exec slot %d", slot)
+                except (RuntimeError, OSError) as e:
+                    logger.error("Error destroying graph exec slot %d: %s", slot, e)
+                self._graph_execs[slot] = None
+        for slot, template in enumerate(getattr(self, "_graph_templates", [])):
+            if template is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.graph_destroy(template)
+                self._graph_templates[slot] = None
+        self._graph_memcpy_nodes = [None] * self.num_slots
+
+    # ------------------------------------------------------------------
     # Hot path
     # ------------------------------------------------------------------
 
@@ -452,6 +637,7 @@ class CUDAIPCExporter:
                     logger.error(msg)
                     self._source_sync_device_warned = True
             self.cuda.record_event(self.source_sync_event, CUDAStream_t(producer_stream_handle))
+            self._source_sync_recorded = True
 
     def export_frame(self, gpu_ptr: int, size: int) -> bool:
         """Export one frame from GPU memory via IPC ring buffer.
@@ -468,6 +654,16 @@ class CUDAIPCExporter:
             return False
         if size != self.data_size:
             logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
+            return False
+        # Activation-barrier check: skip publish if a TD-side Sender is in its activation window.
+        if self._barrier_enabled and self._check_activation_barrier():
+            # Reassert the per-frame heartbeat even on the skip path.
+            # The consumer reads shutdown_flag == 1 as "producer gone"; bypassing the
+            # success-path heartbeat write on skip frames would leave any stale 1-byte
+            # uncleared and trip a false "Sender shutdown detected" on the TD receiver.
+            if self.shm_handle is not None and self._shutdown_offset:
+                with contextlib.suppress(OSError, BufferError):
+                    self.shm_handle.buf[self._shutdown_offset] = 0
             return False
         debug = self.debug
         if debug:
@@ -501,35 +697,75 @@ class CUDAIPCExporter:
                 if len(self._ptr_device_cache) < 8:
                     self._ptr_device_cache.add(gpu_ptr_int)
 
-            # GPU-side wait: ipc_stream waits for source data to be ready (non-blocking CPU).
-            # Only active if record_source_sync() was called; otherwise this is a no-op.
-            if debug:
-                _t = time.perf_counter()
-            if self.source_sync_event is not None:
-                self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
-            if debug:
-                self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
+            # --- GPU copy + sync: graph path or legacy path ---
+            #
+            # Graph path (CUDALINK_USE_GRAPHS=1): replays a 1-node graph (MemcpyNode).
+            # stream_wait_event is issued before graph_launch only when record_source_sync()
+            # has been called (tracked by _source_sync_recorded); otherwise it is skipped
+            # (the event is in its initial "complete" state — no ordering needed).
+            # record_event is issued after graph_launch (IPC events not capturable).
+            #   - source_sync not used: graph_launch + record_event = 2 WDDM (vs 3 legacy)
+            #   - source_sync used:     stream_wait + graph_launch + record_event = 3 WDDM
+            if self._use_graphs and not self._graphs_disabled:
+                if debug:
+                    _t = time.perf_counter()
+                try:
+                    self.cuda.graph_exec_memcpy_node_set_params_1d(
+                        self._graph_execs[slot],
+                        self._graph_memcpy_nodes[slot],
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(gpu_ptr),
+                        count=self.data_size,
+                        kind=3,
+                    )
+                    if self._source_sync_recorded and self.source_sync_event is not None:
+                        self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                    self.cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
+                    if self.ipc_events[slot]:
+                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                except (RuntimeError, OSError) as _graph_err:
+                    logger.warning(
+                        "Graph launch failed (%s) — disabling graphs, retrying via legacy path",
+                        _graph_err,
+                    )
+                    self._graphs_disabled = True
+                    goto_legacy = True
+                else:
+                    goto_legacy = False
+                if debug:
+                    self.total_memcpy_us += (time.perf_counter() - _t) * 1_000_000
+            else:
+                goto_legacy = True
 
-            # Async D2D copy to this slot's persistent IPC buffer
-            if debug:
-                memcpy_start = time.perf_counter()
-            self.cuda.memcpy_async(
-                dst=self.dev_ptrs[slot],
-                src=c_void_p(gpu_ptr),
-                count=self.data_size,
-                kind=3,  # cudaMemcpyDeviceToDevice
-                stream=self.ipc_stream,
-            )
-            if debug:
-                self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
+            if goto_legacy:
+                # Legacy path: 3 separate WDDM submissions per frame.
+                # GPU-side wait on source_sync_event is a no-op if record_source_sync()
+                # was never called (event stays in its initial "complete" state).
+                if debug:
+                    _t = time.perf_counter()
+                if self.source_sync_event is not None:
+                    self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                if debug:
+                    self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
 
-            # Record IPC event (stream-ordered, signals consumer that data is ready)
-            if debug:
-                _t = time.perf_counter()
-            if self.ipc_events[slot]:
-                self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
-            if debug:
-                self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
+                if debug:
+                    memcpy_start = time.perf_counter()
+                self.cuda.memcpy_async(
+                    dst=self.dev_ptrs[slot],
+                    src=c_void_p(gpu_ptr),
+                    count=self.data_size,
+                    kind=3,  # cudaMemcpyDeviceToDevice
+                    stream=self.ipc_stream,
+                )
+                if debug:
+                    self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
+
+                if debug:
+                    _t = time.perf_counter()
+                if self.ipc_events[slot]:
+                    self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                if debug:
+                    self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
             # Optional CPU-blocking sync after record_event. Disabled by default.
             #
@@ -543,9 +779,28 @@ class CUDAIPCExporter:
             # regardless of whether the CPU has synced. The _wait_for_slot() timeout
             # guards the polling path. Skipping this sync saves ~13-100µs/frame.
             if self._export_sync:
+                if debug and self._export_profile:
+                    _t_sync = time.perf_counter()
                 self.cuda.stream_synchronize(self.ipc_stream)
+                if debug and self._export_profile:
+                    self.total_sync_us += (time.perf_counter() - _t_sync) * 1_000_000
 
+            if debug and self._export_profile:
+                _t_sticky = time.perf_counter()
             self.cuda.check_sticky_error("export_frame")
+            if debug and self._export_profile:
+                self.total_sticky_check_us += (time.perf_counter() - _t_sticky) * 1_000_000
+
+            # WDDM deferred-submission probe: forces pending GPU work to submit without
+            # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
+            # cudaStreamQuery triggers that flush. Only active when EXPORT_FLUSH_PROBE=1
+            # and EXPORT_SYNC=0 (if sync is on, the stream is already flushed above).
+            if self._export_flush_probe and not self._export_sync:
+                if debug and self._export_profile:
+                    _t_fp = time.perf_counter()
+                self.cuda.stream_query(self.ipc_stream)
+                if debug and self._export_profile:
+                    self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
 
             # Write timestamp, clear shutdown_flag, then publish write_idx LAST.
             # Ordering matters: the consumer reads shutdown_flag BEFORE write_idx, so
@@ -580,6 +835,31 @@ class CUDAIPCExporter:
                         self.total_shm_write_us / n,
                         self.total_export_us / n,
                     )
+                    if self._export_profile:
+                        avg_wait = self.total_stream_wait_us / n
+                        avg_memcpy = self.total_memcpy_us / n
+                        avg_record = self.total_record_event_us / n
+                        avg_sync = self.total_sync_us / n
+                        avg_sticky = self.total_sticky_check_us / n
+                        avg_fp = self.total_flush_probe_us / n
+                        avg_shm = self.total_shm_write_us / n
+                        avg_total = self.total_export_us / n
+                        avg_unacc = avg_total - (
+                            avg_wait + avg_memcpy + avg_record + avg_sync + avg_sticky + avg_fp + avg_shm
+                        )
+                        logger.debug(
+                            "Frame %d [PROFILE] pre=0.0us interop=0.0us post=0.0us"
+                            " memcpy=%.1fus record=%.1fus sync=%.1fus"
+                            " sticky=%.1fus flush_probe=%.1fus shm=%.1fus unacc=%.1fus",
+                            n,
+                            avg_memcpy,
+                            avg_record,
+                            avg_sync,
+                            avg_sticky,
+                            avg_fp,
+                            avg_shm,
+                            avg_unacc,
+                        )
 
             return True
 
@@ -606,6 +886,41 @@ class CUDAIPCExporter:
             return True
         except (OSError, RuntimeError):
             return False
+
+    def _check_activation_barrier(self) -> bool:
+        """Return True if the activation barrier is held and this frame should be skipped.
+
+        Lazily opens the segment on first call. Applies a stale-timeout so a Sender
+        that crashes mid-init cannot block the producer indefinitely.
+        """
+        if self._barrier_shm is None:
+            try:
+                self._barrier_shm = _ab_open(create=False)
+            except FileNotFoundError:
+                return False  # no Sender has ever activated — fast path
+        try:
+            active_count, last_change_ns, _ = _ab_read(self._barrier_shm)
+        except (OSError, RuntimeError, struct.error):
+            return False
+        if active_count <= 0:
+            return False
+        now_ns = time.monotonic_ns()
+        if now_ns - last_change_ns > self._barrier_stale_ns:
+            # Sender crashed mid-init and never decremented — stale, ignore.
+            if now_ns - self._barrier_stale_log_last_ns > 1_000_000_000:
+                logger.warning(
+                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
+                    active_count,
+                    (now_ns - last_change_ns) / 1e9,
+                )
+                self._barrier_stale_log_last_ns = now_ns
+            return False
+        with contextlib.suppress(OSError, RuntimeError, struct.error):
+            _ab_bump(self._barrier_shm)
+        if now_ns - self._barrier_skip_log_last_ns > 1_000_000_000:
+            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
+            self._barrier_skip_log_last_ns = now_ns
+        return True
 
     def cleanup(self) -> None:
         """Cleanup all CUDA IPC resources.
@@ -648,6 +963,10 @@ class CUDAIPCExporter:
                 logger.debug("Zeroed IPC handle bytes in SharedMemory")
             except (OSError, BufferError) as e:
                 logger.warning("Could not zero IPC handles: %s", e)
+
+        # STEP 1c: Destroy CUDA Graph execs (before events/stream they reference)
+        if cuda_valid and getattr(self, "_use_graphs", False):
+            self._destroy_export_graphs()
 
         # STEP 2: Destroy IPC events + cross-stream sync event
         if cuda_valid and self.cuda and self.ipc_events:
@@ -727,6 +1046,13 @@ class CUDAIPCExporter:
             pass  # Already unlinked
         except (OSError, RuntimeError) as e:
             logger.warning("Could not unlink SharedMemory: %s", e)
+
+        # Close activation-barrier SHM handle (producer never decrements, just closes).
+        _bshm = getattr(self, "_barrier_shm", None)
+        if _bshm is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                _bshm.close()
+            self._barrier_shm = None
 
         # Reset all state to prevent double-free on re-entry
         self.dev_ptrs = [None] * self.num_slots

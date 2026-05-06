@@ -5,6 +5,124 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.1.0] — 2026-05-06
+
+### Added
+
+- **`benchmarks/bench_sweep.py`** — full IPC roundtrip sweep (16 cells: 4 resolutions
+  × 2 dtypes × graphs on/off). Two spawn-process workers (producer + consumer)
+  exercise the IPC path end-to-end at 60 FPS, capture per-cell `export_us`,
+  `get_numpy_us`, `e2e_us` (IPC notify), and `throughput_gbs` percentiles, and
+  write `benchmarks/results/sweep_{timestamp}.{csv,json}` plus
+  `sweep_latest.{csv,json}` for doc-update reproducibility. Validated on
+  RTX 4090 / driver 596.36 / PCIe 4.0 x16 (2026-05-06).
+- **CPU SharedMemory comparison block** in `README.md` and detailed comparison
+  tables in `docs/ARCHITECTURE.md` — concrete speed-ups vs the original
+  UT_SharedMem-class baseline at 1080p (~3.4× E2E) and 512×512 (~2.1× E2E),
+  with 4–19× advantage on producer write. TouchOUT/Spout baselines are
+  explicitly flagged as never measured.
+
+- **CUDA Graphs for `export_frame()`** — `CUDAIPCExporter` now captures the
+  per-frame `memcpy_async` into a 1-node CUDA Graph on first use and replays it
+  via `cudaGraphLaunch` each frame. This cuts WDDM kernel-mode transitions from 3
+  to 2 per frame, reducing CPU submission overhead by ~70% at 1080p float32
+  (15.7 µs → 4.7 µs mean, measured async). Enabled by default; set
+  `CUDALINK_USE_GRAPHS=0` to revert to the legacy stream path. Falls back
+  automatically if graph capture or launch fails at runtime.
+  (`src/cuda_link/cuda_ipc_exporter.py`, `src/cuda_link/cuda_ipc_wrapper.py`)
+
+- **CUDA Graphs for TouchDesigner Sender** — the TD-side `CUDAIPCExtension`
+  (Sender mode) gains the same graph capture path, gated by
+  `CUDALINK_TD_USE_GRAPHS` (default `0`, opt-in pending soak). Probes the
+  loaded cudart version via `cudaRuntimeGetVersion`; auto-disabled if the
+  runtime is older than 11.3 (the `cudaGraphExecMemcpyNodeSetParams1D` API).
+  (`td_exporter/CUDAIPCExtension.py`, `src/cuda_link/cuda_ipc_wrapper.py`
+  adds `cudaRuntimeGetVersion` binding + `get_runtime_version()` helper)
+
+- **Multi-stream D2H for `get_frame_numpy()`** — opt-in via
+  `CUDALINK_D2H_STREAMS=N` (default `1`). Splits the D2H copy across N
+  independent non-blocking streams. No throughput gain on PCIe 4.0 (single
+  stream already saturates ~23–24 GB/s); may help on PCIe 3.0 or GPUs with dual
+  DMA engines. (`src/cuda_link/cuda_ipc_importer.py`)
+
+- **`cudaHostAllocPortable` for pinned D2H buffer** — the `get_frame_numpy()`
+  pinned host allocation now uses `cudaHostAlloc` with `cudaHostAllocPortable`
+  (flag `0x01`), making it accessible from any CUDA context in the process.
+  Relevant when PyTorch, CuPy, or other runtimes are loaded alongside
+  `cuda-link`. No throughput change; robustness improvement only.
+  (`src/cuda_link/cuda_ipc_importer.py:875`)
+
+- **Python lib gains `CUDALINK_EXPORT_PROFILE` + `CUDALINK_EXPORT_FLUSH_PROBE`** —
+  the Python-side `CUDAIPCExporter.export_frame()` now reads the same two diagnostic
+  env vars as the TD extension. `CUDALINK_EXPORT_PROFILE=1` enables fine-grained
+  per-region sub-timers (`sync`, `sticky`, `flush_probe`) and emits a `[PROFILE]` line
+  every 97 frames; force-enables `debug=True`. `CUDALINK_EXPORT_FLUSH_PROBE`
+  inserts a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error`
+  when `EXPORT_SYNC=0`. Closes a long-standing instrumentation asymmetry between
+  the TD extension and the Python lib. (`src/cuda_link/cuda_ipc_exporter.py`)
+
+### Changed
+
+- **Concurrent-topology load-bearing flags now default-on (Phase 4 / 4.1)** —
+  `CUDALINK_EXPORT_SYNC`, `CUDALINK_ACTIVATION_BARRIER`,
+  `CUDALINK_TD_ACTIVATION_BARRIER`, and `CUDALINK_TD_PERSIST_STREAM` flip from
+  opt-in to default-on; `CUDALINK_TD_STREAM_PRIO` default flips `"high"` →
+  `"normal"`; the experimental `CUDALINK_TD_INIT_CLEAR_STICKY` (F4) is removed
+  entirely (never observed firing in 3.6 subtractive probe). Net effect: the
+  validated Python-producer + TD-Sender concurrent topology now requires **zero
+  env vars** to run safely. Each flag's load-bearing role was confirmed via
+  Phase 3.6 step-by-step subtractive probes (2026-05-06, branch
+  `feat/cuda-graphs-d2h-streams`). Set any flag to `0` to opt out.
+
+- **`CUDALINK_EXPORT_FLUSH_PROBE` default flipped `"0"` → `"1"`** (both TD extension
+  and Python lib). Phase 3 measurement (2026-05-04, RTX 30/40, 1080p RGBA8): the
+  ~12 µs/frame `cudaStreamQuery` collapses Windows Task Manager's 3D-engine reading
+  from ~65 % to ~7 % on rigs where WDDM defers GPU command submission, *without*
+  the ~130 µs/frame cost of a full `cudaStreamSynchronize` (which `EXPORT_SYNC=1`
+  pays). NVML true compute load is unchanged across all three settings — confirms
+  the high Task Manager reading was a queue-depth artefact, not real load. The
+  earlier v0.9.0 changelog entry calling this knob "diagnostic-only — hypothesis
+  refuted" reflected an earlier rig where the artefact did not reproduce; the
+  WDDM behaviour is rig- and driver-dependent. Set `CUDALINK_EXPORT_FLUSH_PROBE=0`
+  to restore the prior default. (`td_exporter/CUDAIPCExtension.py`,
+  `src/cuda_link/cuda_ipc_exporter.py`)
+
+### Fixed
+
+- **CUDA Graphs build crash on cudart 11.0–11.8** — replaced `cudaGraphInstantiate`
+  (3-arg ABI stable only on CUDA 12.0+) with `cudaGraphInstantiateWithFlags` (stable
+  3-arg API since CUDA 11.4). The prior binding called the 12.0 3-arg form against
+  11.x DLLs that export the 5-arg form, producing an access violation
+  (`0xFFFFFFFFFFFFFFFF`) under TD's subprocess PATH. Gate raised from cudart `>= 11.3`
+  to `>= 11.4` to match the true floor of all graph APIs in use.
+  (`src/cuda_link/cuda_ipc_wrapper.py`, `src/cuda_link/cuda_ipc_exporter.py`,
+  `td_exporter/CUDAIPCExtension.py`)
+
+- **cudart DLL preference** — `cudart64_12.dll` is now preferred over `cudart64_110.dll`
+  in the by-name search list. TouchDesigner 2025+ ships both in `bin/`; `cudart64_12.dll`
+  is the primary CUDA 12.x runtime TD itself uses; `cudart64_110.dll` is a legacy 11.x
+  ABI compat shim. Preferring 12.x also improves process-wide cudart sharing with PyTorch.
+  (`src/cuda_link/cuda_ipc_wrapper.py`)
+
+- **Receiver second-activation freeze on Windows WDDM** — `cleanup_receiver()` no longer
+  calls `cudaStreamSynchronize` before teardown. The synchronize was itself the cause of
+  a 5+ second hang during cleanup (measured: 5406.9 ms), exceeding the Windows WDDM TDR
+  threshold and triggering the NVIDIA driver reset popup ("An error occured trying to
+  output to a Window") on the next `Active=True` toggle. `cudaStreamDestroy` releases the
+  stream asynchronously once in-flight work completes and does not block the calling
+  thread, so it cannot trigger TDR.
+  (`td_exporter/CUDAIPCExtension.py`)
+
+### Internal
+
+- Test suite now resolves `cuda_link` from this repo's `src/` regardless of any
+  previously installed `cuda_link` editable package in site-packages (`pyproject.toml`
+  `pythonpath = ["src"]` + `tests/conftest.py` `sys.path.insert`).
+
+---
+
 ## [1.0.1] — 2026-05-03
 
 ### Added
@@ -36,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
 
 ## [1.0.0] — 2026-05-02

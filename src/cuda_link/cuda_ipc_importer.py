@@ -20,6 +20,7 @@ Architecture:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import os
@@ -241,6 +242,16 @@ class CUDAIPCImporter:
         # CUDA stream for async D2H copies (created in _initialize())
         self._numpy_stream: object = None
 
+        # Multi-stream D2H (Phase 3, CUDALINK_D2H_STREAMS > 1):
+        # Split the D2H copy into N concurrent streams to better saturate PCIe bandwidth.
+        # Each chunk is copied on an independent non-blocking stream; all are joined via
+        # per-stream wait_event() calls before returning to the caller.
+        # Set to 1 for single-stream behaviour (default, backward-compatible).
+        # Recommended: 2 for single-DMA-engine GPUs; 4 for dual-DMA-engine (RTX 30/40).
+        self._d2h_num_streams: int = max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1")))
+        self._d2h_streams: list = []  # extra streams for N>1; slot 0 reuses _numpy_stream
+        self._d2h_events: list = []  # one sync event per D2H stream (for join barrier)
+
         # Auto-initialize
         self._initialize()
 
@@ -332,6 +343,21 @@ class CUDAIPCImporter:
             # Create internal stream for numpy async D2H operations
             self._numpy_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
             logger.debug("Created numpy stream: 0x%016x", int(self._numpy_stream.value))
+
+            # Multi-stream D2H: allocate n_streams-1 additional streams + n_streams events.
+            # Stream slot 0 reuses _numpy_stream; slots 1..n_streams-1 are new streams.
+            # Each stream gets a sync event for the join barrier.
+            n_streams = self._d2h_num_streams
+            self._d2h_streams = [self._numpy_stream] + [
+                self.cuda.create_stream(flags=0x01) for _ in range(n_streams - 1)
+            ]
+            self._d2h_events = [self.cuda.create_sync_event() for _ in range(n_streams)]
+            if n_streams > 1:
+                logger.info(
+                    "Multi-stream D2H enabled: %d streams (CUDALINK_D2H_STREAMS=%d)",
+                    n_streams,
+                    n_streams,
+                )
 
             # Open SharedMemory to read IPC handle
             try:
@@ -845,11 +871,13 @@ class CUDAIPCImporter:
             self._clear_host_registered()
 
             try:
-                self._pinned_ptr = self.cuda.malloc_host(nbytes)
+                # cudaHostAllocPortable (0x01) makes the allocation accessible from any
+                # CUDA context in the process — needed when PyTorch and CuPy coexist.
+                self._pinned_ptr = self.cuda.malloc_host_alloc(nbytes, flags=0x01)
                 buf = (ctypes.c_ubyte * nbytes).from_address(self._pinned_ptr.value)
                 self._numpy_buffer = np.frombuffer(buf, dtype=self._numpy_dtype()).reshape(self.shape)
                 self.pinned_memory_available = True
-                logger.debug("Allocated pinned numpy buffer: %s, %s", self.shape, self.dtype)
+                logger.debug("Allocated portable pinned numpy buffer: %s, %s", self.shape, self.dtype)
             except (RuntimeError, OSError) as e:
                 logger.warning(
                     "cudaMallocHost failed for %d bytes (%.1f MB) — trying cudaHostRegister: %s",
@@ -890,17 +918,47 @@ class CUDAIPCImporter:
         if debug:
             self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
 
-        # Async D2H copy on dedicated stream + synchronize (CPU-blocking until copy completes)
+        # Async D2H copy: multi-stream or single-stream depending on CUDALINK_D2H_STREAMS.
+        #
+        # Multi-stream (N>1): splits the buffer into N equal chunks issued on N independent
+        # non-blocking streams, then joins via per-stream event waits.  This better saturates
+        # PCIe bandwidth by keeping the DMA engine pipeline fuller.
+        # Single-stream (N=1): original behaviour — one cudaMemcpyAsync + stream_synchronize.
         if debug:
             _d2h_t = time.perf_counter()
-        self.cuda.memcpy_async(
-            dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
-            src=self.dev_ptrs[read_slot],
-            count=nbytes,
-            kind=2,  # cudaMemcpyDeviceToHost
-            stream=self._numpy_stream,
-        )
-        self.cuda.stream_synchronize(self._numpy_stream)
+        n_streams = self._d2h_num_streams
+        if n_streams <= 1:
+            self.cuda.memcpy_async(
+                dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
+                src=self.dev_ptrs[read_slot],
+                count=nbytes,
+                kind=2,  # cudaMemcpyDeviceToHost
+                stream=self._numpy_stream,
+            )
+            self.cuda.stream_synchronize(self._numpy_stream)
+        else:
+            # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
+            chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
+            dst_base = self._numpy_buffer.ctypes.data
+            src_base = self.dev_ptrs[read_slot].value
+            issued = 0
+            for i in range(n_streams):
+                offset = i * chunk
+                size = min(chunk, nbytes - offset)
+                if size <= 0:
+                    break
+                self.cuda.memcpy_async(
+                    dst=ctypes.c_void_p(dst_base + offset),
+                    src=ctypes.c_void_p(src_base + offset),
+                    count=size,
+                    kind=2,
+                    stream=self._d2h_streams[i],
+                )
+                self.cuda.record_event(self._d2h_events[i], stream=self._d2h_streams[i])
+                issued = i + 1
+            # Join: wait on each issued stream's event (CPU-blocking per event)
+            for i in range(issued):
+                self.cuda.wait_event(self._d2h_events[i])
         self.cuda.check_sticky_error("get_frame_numpy")
         if debug:
             d2h_time = (time.perf_counter() - _d2h_t) * 1_000_000
@@ -1122,9 +1180,24 @@ class CUDAIPCImporter:
             self._pinned_ptr = None
             self._numpy_buffer = None
 
-        if self._host_registered_arr is not None and self.cuda is not None:
+        if getattr(self, "_host_registered_arr", None) is not None and self.cuda is not None:
             self._clear_host_registered()
             self._numpy_buffer = None
+
+        # Destroy multi-stream D2H events and extra streams (slots 1..n_streams-1)
+        if self.cuda is not None:
+            for evt in getattr(self, "_d2h_events", []):
+                if evt is not None:
+                    with contextlib.suppress(RuntimeError, OSError):
+                        self.cuda.destroy_event(evt)
+            self._d2h_events = []
+            for i, stream in enumerate(getattr(self, "_d2h_streams", [])):
+                if i == 0:
+                    continue  # slot 0 is _numpy_stream, destroyed below
+                if stream is not None:
+                    with contextlib.suppress(RuntimeError, OSError):
+                        self.cuda.destroy_stream(stream)
+            self._d2h_streams = []
 
         # Destroy numpy stream
         if self._numpy_stream is not None and self.cuda is not None:

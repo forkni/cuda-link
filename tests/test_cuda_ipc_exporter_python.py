@@ -19,8 +19,18 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_defaults() -> None:
-    """Default parameters produce expected attribute values."""
+def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default parameters produce expected attribute values (clean env)."""
+    for var in (
+        "CUDALINK_EXPORT_SYNC",
+        "CUDALINK_EXPORT_PROFILE",
+        "CUDALINK_EXPORT_FLUSH_PROBE",
+        "CUDALINK_USE_GRAPHS",
+        "CUDALINK_STICKY_ERROR_CHECK",
+        "CUDALINK_ACTIVATION_BARRIER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
 
     exp = CUDAIPCExporter(shm_name="test_ipc", height=512, width=512)
@@ -33,6 +43,8 @@ def test_constructor_defaults() -> None:
     assert exp.num_slots == 2
     assert exp.debug is False
     assert not exp.is_ready()
+    assert exp._export_sync is True  # Phase 4: default flipped to ON
+    assert exp._barrier_enabled is True  # Phase 4: default flipped to ON
 
 
 def test_constructor_custom_params() -> None:
@@ -410,6 +422,26 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp._strict_device = False
     exp._source_sync_device_warned = False
     exp._ptr_device_cache = set()
+
+    # Phase 2 CUDA Graphs state (disabled in mock — no real CUDA context)
+    exp._use_graphs = False
+    exp._graphs_disabled = False
+    exp._graph_execs = [None] * num_slots
+    exp._graph_memcpy_nodes = [None] * num_slots
+
+    # Phase 3 diagnostic knobs (off in mock)
+    exp._export_profile = False
+    exp._export_flush_probe = False
+    exp.total_sync_us = 0.0
+    exp.total_sticky_check_us = 0.0
+    exp.total_flush_probe_us = 0.0
+
+    # F9 activation barrier (disabled in mock)
+    exp._barrier_enabled = False
+    exp._barrier_stale_ns = 5_000_000_000
+    exp._barrier_shm = None
+    exp._barrier_skip_log_last_ns = 0
+    exp._barrier_stale_log_last_ns = 0
 
     # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
     mock_attrs = MagicMock()

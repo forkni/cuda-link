@@ -4,13 +4,13 @@ Zero-copy GPU texture transfer between TouchDesigner and Python processes using 
 
 ## Overview
 
-This component enables **zero-copy GPU texture sharing** between TouchDesigner and Python processes using CUDA Inter-Process Communication (IPC). It eliminates CPU memory copies, achieving low-microsecond IPC overhead (~3-8µs CPU-side) for real-time AI pipelines, video processing, and other GPU-accelerated workflows.
+This component enables **zero-copy GPU texture sharing** between TouchDesigner and Python processes using CUDA Inter-Process Communication (IPC). It eliminates CPU memory copies for real-time AI pipelines, video processing, and other GPU-accelerated workflows.
 
 ### Key Features
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - ~3-8μs CPU-side for IPC sync primitives; ~177-219μs for `export_frame()` in Python (WDDM, 60 FPS, includes producer-side `stream_synchronize`); ~10-20μs within TouchDesigner's CUDA context; TD→Python e2e: avg 0.57ms at 512x512 (measured, 60 FPS); vs ~2.6ms for CPU SharedMemory at 1080p (see [Benchmarks](#benchmarks))
+- **Low-overhead IPC** - `export_frame()` 42–400 µs p50 (512×512 → 4K float32, EXPORT_SYNC=1); `get_frame_numpy()` D2H 0.2–5.5 ms p50 (PCIe 4.0 ~23 GB/s); IPC notification ~250 µs cross-process (see [Benchmarks](#benchmarks))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -18,20 +18,19 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 ### Performance
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| IPC sync primitives | ~3-8μs | cudaEventRecord + write_idx on producer; query_event (1 poll, pre-signaled) on consumer |
-| export_frame() in TouchDesigner | ~10-20μs | Within TD's CUDA context at 512x512 |
-| export_frame() Python process | ~177-219μs | Standalone Python, WDDM; includes producer-side stream_synchronize (~177µs 512x512, ~219µs 1080p @ 60 FPS) |
-| get_frame() TD→Python (consumer) | avg 30µs, p95 69µs | 512x512 float32, cudaStreamWaitEvent + tensor view (measured, 60 FPS) |
-| E2E latency TD→Python | avg 0.57ms, p95 1.06ms | 512x512 float32, producer write → consumer read (measured, 300 frames @ 60 FPS) |
-| D2H copy (720p uint8) | ~300-500μs | numpy output mode, PCIe bandwidth dependent |
-| D2H copy (1080p uint8) | ~1-2ms | numpy output mode, PCIe bandwidth dependent |
-| D2H copy (1080p float32) | ~1.5-4ms | numpy output mode, ~31.6 MB; ~1.5ms PCIe 4.0 (measured), ~4ms PCIe 3.0 |
-| Initialization | ~50-100μs | One-time IPC handle opening |
-| Theoretical max FPS | 10,000+ | Limited by GPU pipeline depth, not IPC overhead |
+Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-side. Scripts in `benchmarks/`.
 
-**Baseline comparison** (measured, 1080p float32 @ 60 FPS): CPU SharedMemory write averages ~2.6ms per frame. CUDA IPC `export_frame()` averages ~219µs — **~12x faster write**, **~5.9x lower E2E latency** (0.91ms vs 5.37ms). `get_frame_numpy()` read averages ~1.5ms vs ~2.5ms for CPU SharedMemory. See [Benchmarks](#benchmarks) for full comparison table.
+| Operation | p50 | Notes |
+|-----------|-----|-------|
+| `export_frame()` — 512×512 RGBA float32 | 42 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
+| `export_frame()` — 1080p RGBA float32 | 138 µs | Standalone, EXPORT_SYNC=1 |
+| `export_frame()` — 4K RGBA float32 | 400 µs | Standalone, EXPORT_SYNC=1 |
+| `get_frame_numpy()` D2H — 512×512 float32 | 0.23 ms | Standalone, ~18 GB/s |
+| `get_frame_numpy()` D2H — 1080p float32 | 1.35 ms | Standalone, ~24 GB/s PCIe 4.0 |
+| `get_frame_numpy()` D2H — 4K float32 | 5.5 ms | Standalone, ~23 GB/s PCIe 4.0 |
+| `get_frame()` / `get_frame_cupy()` GPU | <5 µs | Zero-copy tensor/array view, no D2H |
+| IPC notification latency | ~250–300 µs | Producer publish → consumer detect (cross-process) |
+| Initialization | ~50–100 µs | One-time IPC handle opening |
 
 ## Requirements
 
@@ -232,65 +231,100 @@ pytest tests/ -v -m "not slow"
 
 ## Benchmarks
 
-The `benchmarks/` directory contains a reproducible benchmark suite comparing CUDA IPC against CPU SharedMemory and NumPy array transfer without TouchDesigner.
+All results on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. RGBA (4-channel) frames.
 
-### Tier 1: Pure Python (no TD required)
+### export_frame() — CUDA Graphs A/B (`bench_graphs.py`)
+
+Single-process, EXPORT_SYNC=1 (CPU waits for GPU D2D completion), 2000 frames:
+
+```
+Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
+----------    -------------------   ------------------
+512x512                      41.7                 45.3
+1280x720                     59.0                 59.6
+1920x1080                   138.3                133.3
+3840x2160                   400.2                404.0
+```
+
+With EXPORT_SYNC=1 the GPU D2D copy dominates; CUDA Graphs saves WDDM submission transitions but the net wall-clock difference is small (<5%). The Graphs path stays on by default for consistency with async workflows.
 
 ```bash
-# Default: 512x512, 300 frames @ 60fps
-python benchmarks/compare_all.py
-
-# Specific resolution
-python benchmarks/compare_all.py --resolution 1080p --frames 500
-
-# Sweep all standard resolutions (512x512, 720p, 1080p, 4K)
-python benchmarks/compare_all.py --sweep
-
-# Save raw comparison data as JSON
-python benchmarks/compare_all.py --resolution 1080p --save-json
+python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
 ```
 
-### Results — Tier 1: Pure Python (no TD, 1080p float32 RGBA, RTX GPU, Windows 11, 300 frames @ 60fps)
+### get_frame_numpy() D2H — stream count (`bench_d2h_streams.py`)
+
+Standalone D2H copy, no IPC overhead, 2000 frames:
 
 ```
-Method               Write avg    Read avg     E2E Latency    Notes
--------------------  -----------  -----------  -------------  ----------------
-CUDA IPC             219µs        1.46ms       0.91ms         GPU zero-copy (PCIe 4.0)
-CPU SharedMem (Py)   2.60ms       2.48ms       5.37ms         CPU memcpy
-NumPy Transfer (Py)  2.48ms       2.58ms       5.35ms         numpy+SHM
+Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
+----------    -----------------   ------------------   -------------
+512x512                    0.23                 0.22            17.7
+1280x720                   0.62                 0.62            22.6
+1920x1080                  1.35                 1.35            23.7
+3840x2160                  5.54                 5.55            23.1
 ```
 
-**Write column**: CUDA IPC `export_frame()` includes a producer-side `stream_synchronize` that guarantees the IPC event is pre-signaled before `write_idx` is published, eliminating consumer polling delays. This adds ~D2D GPU time per frame compared to async-only enqueue.
-
-**Read column**: CUDA IPC `get_frame_numpy()` incurs a D2H copy (~1.5ms for 31.6 MB float32 on PCIe 4.0; ~4ms on PCIe 3.0). Consumer-side event check returns immediately (1 poll, pre-signaled). Zero-copy GPU modes (`get_frame()`, `get_frame_cupy()`) have negligible read overhead.
-
-Run individual benchmarks for per-frame CSV and full percentile stats:
+PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_STREAMS=1` (default) is optimal for this platform.
 
 ```bash
-python benchmarks/benchmark_roundtrip.py --resolution 1080p --frames 500 --csv results.csv
-python benchmarks/benchmark_cpu_sharedmem.py --resolution 1080p --frames 500
-python benchmarks/benchmark_numpy_transfer.py --resolution 1080p --frames 500 --with-copy
+python benchmarks/bench_d2h_streams.py --frames 2000 --streams 1 2 --sizes 512 1280 1920 3840
 ```
 
-### Results — Tier 2: TD Sender → Python Receiver (512x512 float32 RGBA, RTX 4060 Laptop, Windows 11, 300 frames @ 60fps)
+### Full IPC roundtrip sweep (`bench_sweep.py`)
 
-Measured with `benchmark_comparison.py` against a live TouchDesigner sender:
+Two separate Python processes (producer + consumer), 500 warmup + 2000 measurement frames at 60 FPS. `export p50` and `get_numpy p50` are inflated vs standalone because both processes share PCIe bandwidth concurrently. `IPC notify p50` measures producer-publish → consumer-detects-write_idx (signaling latency, resolution-independent).
 
 ```
-Metric                    avg      p50      p95      p99      min      max
------------------------  -------  -------  -------  -------  -------  -------
-E2E latency (ms)          0.57     0.58     1.06     1.20     0.019    1.422
-get_frame() call (us)      30       21       69       --       12       --
+Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC notify p50 (µs)
+----------    -------   ------   ---------------   ------------------   -------------------
+512x512       float32   off               1316                 1.44                     259
+512x512       float32   on                1076                 1.45                     257
+512x512       uint8     off                970                 0.45                     255
+1280x720      float32   off               1743                 4.60                     297
+1920x1080     float32   off                585                 2.00                     240
+1920x1080     uint8     off               1234                 2.65                     265
+3840x2160     float32   off                566                 5.85                     300
+3840x2160     uint8     off                566                 2.59                     227
 ```
 
-- **E2E latency**: time from TD producer writing the frame (producer timestamp) to Python consumer returning it
-- **get_frame()**: consumer-side only — `cudaStreamWaitEvent` enqueue + tensor view return; excludes periodic handle-reopen events (~13 out of 300 frames reopen a handle at ~500µs each, excluded from avg above)
-- **FPS**: 60.0 sustained, 0 skipped frames
-- **Zero CPU blocking**: GPU synchronization via `cudaStreamWaitEvent` enqueue (~0.5-2µs) — does not wait for GPU
+Full results (all 16 cells, CSV + JSON): `benchmarks/results/sweep_latest.csv` / `sweep_latest.json`.
 
-### Tier 2: TD-Integrated Benchmarks (other methods)
+```bash
+python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
+python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
+```
 
-Run `python benchmarks/benchmark_td_metrics.py` with TouchDesigner active to measure Shared Mem Out TOP, Touch Out/In, and Spout cook times and E2E latency. TD-side logger scripts: `benchmarks/td_touchout_logger.py`, `benchmarks/td_spout_logger.py`.
+### vs CPU SharedMemory
+
+End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU SharedMemory baseline (PCIe 4.0):
+
+```
+Resolution    Method              Producer write   Consumer read   E2E
+----------    ----------------    --------------   -------------   ---------
+1920x1080     CPU SharedMemory          2.60 ms         2.48 ms     5.37 ms
+1920x1080     CUDA-Link                  138 µs         1.35 ms     ~1.6 ms      (~3.4x faster E2E)
+512x512       CPU SharedMemory           361 µs          350 µs     1.02 ms
+512x512       CUDA-Link                   42 µs         0.23 ms    ~0.49 ms      (~2.1x faster E2E)
+```
+
+Producer write is 4–19x faster (no CPU transit). With zero-copy GPU consumers (`get_frame()` / `get_frame_cupy()`), the read path collapses to <5 µs and the end-to-end gap widens further. **TouchOUT and Spout** baselines were never measured — see methodology notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#comparison-cuda-ipc-vs-cpu-sharedmemory) for the full hardware caveats and source data.
+
+### Performance Tuning (env vars)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export_frame()` (Python-side `CUDAIPCExporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. With EXPORT_SYNC=1 (default) the GPU D2D copy dominates wall-clock time and the net savings are small (<5% at 1080p on PCIe 4.0); see `bench_graphs.py` for measured A/B. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
+| `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender. Same mechanism as `CUDALINK_USE_GRAPHS`, gated independently because TD ships `cudart64_110.dll` and the per-frame `cudaGraphExecMemcpyNodeSetParams1D` API requires CUDA 11.3+. Auto-disabled on older runtimes (probed via `cudaRuntimeGetVersion` at `initialize()`). Off by default pending TD-side soak; flip to `1` to enable. |
+| `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
+| `CUDALINK_EXPORT_SYNC` | `1` | Block CPU on the IPC stream after each `export_frame()`. Default on — load-bearing for concurrent topologies (prevents cycle-2 first-settle TDR cascade when a TD Sender shares a process with a TD Receiver, Phase 3.6 confirmed). Cost equals GPU D2D copy time: ~42 µs (512×512) → ~400 µs (4K) float32 RGBA on PCIe 4.0 (see `bench_graphs.py`). Set to `0` to opt out for low-latency single-producer async scenarios. |
+| `CUDALINK_ACTIVATION_BARRIER` | `1` | Python-lib side of the cross-process activation barrier (F9). Reads a tiny SHM counter each `export_frame()` and skips publishing while a TD Sender is in its WDDM-saturating init window. No-op in single-pair topologies (counter stays at 0); gracefully skipped if the SHM segment is absent. Set to `0` to opt out. |
+| `CUDALINK_TD_ACTIVATION_BARRIER` | `1` | TD-side counterpart of `CUDALINK_ACTIVATION_BARRIER` — increments the same SHM counter around Sender `initialize()` so the Python producer backs off. Same no-op / graceful-absence behaviour. Set to `0` to opt out. |
+| `CUDALINK_TD_PERSIST_STREAM` | `1` | Skip `stream_destroy` in TD Sender `cleanup()` so the IPC CUDA stream survives `deactivate`→`reactivate` cycles (F8). Free in single-pair (no deactivation ever happens); load-bearing in concurrent — without it, stream recreate on each reactivation collides with in-flight Receiver work, doubling first-settle `post=` latency (Phase 3.6 confirmed). Set to `0` to opt out. |
+| `CUDALINK_TD_STREAM_PRIO` | `normal` | CUDA stream priority for the TD Sender's IPC stream. Default `normal` is safe for both single-pair and concurrent topologies — in single-pair only one stream exists per process so priority is moot; in concurrent, equal priorities prevent WDDM contention accumulation across reactivation cycles (high/high contention produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed). Set to `high` only for explicit single-pair lowest-latency optimisation. |
+| `CUDALINK_EXPORT_FLUSH_PROBE` | `1` | Insert a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when `EXPORT_SYNC=0`. Forces WDDM-deferred CUDA submissions to drain each frame, preventing Windows Task Manager's 3D-engine counter from inflating when true compute load (per NVML) is low. NVML readings are unchanged — purely cosmetic/observability. Set to `0` to disable. |
+| `CUDALINK_EXPORT_PROFILE` | `0` | Enable fine-grained per-region sub-timers in `export_frame()` and emit a `[PROFILE] pre=…us interop=…us post=…us memcpy=…us record=…us sync=…us sticky=…us flush_probe=…us shm=…us unacc=…us` line every 97 frames. Force-enables `verbose_performance` (TD) / `debug` (lib). Diagnostic-only; negligible overhead when on, zero when unset. |
+
 
 ## Troubleshooting
 
@@ -304,11 +338,11 @@ Run `python benchmarks/benchmark_td_metrics.py` with TouchDesigner active to mea
 importer = CUDAIPCImporter(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
 ```
 
-### "CUDA IPC overhead > 500μs"
+### "CUDA IPC overhead unexpectedly high"
 
-**Cause**: In standalone Python processes (WDDM), `export_frame()` typically measures ~177-219μs (async D2D enqueue + producer-side `stream_synchronize` + WDDM kernel transitions, at 60 FPS). Within TouchDesigner's CUDA context it is ~10-20μs. Values above 500μs may indicate GPU driver overhead or context contention.
+**Cause**: In standalone Python processes (WDDM), `export_frame()` with EXPORT_SYNC=1 typically measures 42–400 µs p50 (512×512 → 4K float32 RGBA, RTX 4090 / PCIe 4.0). Values 2–5× higher than these baselines may indicate GPU driver overhead, context contention, or PCIe bandwidth sharing with other D2H workloads.
 
-**Solution**: Run `python benchmarks/compare_all.py --resolution 1080p --frames 200` to measure actual overhead and compare against CPU SharedMemory on your hardware.
+**Solution**: Run `python benchmarks/bench_graphs.py` for standalone export latency and `python benchmarks/bench_sweep.py --quick` for a multiprocess IPC roundtrip baseline on your hardware.
 
 ### "Version mismatch" or stale frames
 
