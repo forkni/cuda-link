@@ -211,7 +211,7 @@ class CUDAIPCExporter:
         # Windows Task Manager 3D-engine reading from ~65% to ~7% on rigs where WDDM
         # defers submissions. NVML true compute load is unchanged. Set to "0" to disable.
         self._export_flush_probe: bool = os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
-        # F9 — CUDALINK_ACTIVATION_BARRIER: read cudalink_activation_barrier SHM on each
+        # CUDALINK_ACTIVATION_BARRIER: read cudalink_activation_barrier SHM on each
         # export_frame and skip publishing while a TD-side Sender is in its activation window.
         # Cross-process backpressure mechanism — no CUDA stream coupling.
         # Default on (Phase 3.6 — no-op when no TD-side Sender exists since the SHM
@@ -300,7 +300,7 @@ class CUDAIPCExporter:
             # cudaStreamNonBlocking (0x01) prevents the default stream from
             # implicitly synchronising with this stream. Default is high-priority
             # so the D2D memcpy preempts lower-priority compute work in the TD context.
-            # F7 — CUDALINK_LIB_STREAM_PRIO=normal: drop to default-priority stream.
+            # CUDALINK_LIB_STREAM_PRIO=normal: drop to default-priority stream.
             # Use when a TD-side Sender-B coexists with this Python producer in the
             # same machine and the high-priority stream contends with TD init.
             if self.ipc_stream is None:
@@ -655,9 +655,9 @@ class CUDAIPCExporter:
         if size != self.data_size:
             logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
             return False
-        # F9 — skip publish if a TD-side Sender is in its activation window.
+        # Activation-barrier check: skip publish if a TD-side Sender is in its activation window.
         if self._barrier_enabled and self._check_activation_barrier():
-            # F10 — reassert the per-frame heartbeat even on the skip path.
+            # Reassert the per-frame heartbeat even on the skip path.
             # The consumer reads shutdown_flag == 1 as "producer gone"; bypassing the
             # success-path heartbeat write on skip frames would leave any stale 1-byte
             # uncleared and trip a false "Sender shutdown detected" on the TD receiver.
@@ -1047,7 +1047,7 @@ class CUDAIPCExporter:
         except (OSError, RuntimeError) as e:
             logger.warning("Could not unlink SharedMemory: %s", e)
 
-        # F9 — close activation barrier SHM handle (producer never decrements, just closes).
+        # Close activation-barrier SHM handle (producer never decrements, just closes).
         _bshm = getattr(self, "_barrier_shm", None)
         if _bshm is not None:
             with contextlib.suppress(OSError, RuntimeError):

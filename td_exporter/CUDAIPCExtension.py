@@ -234,22 +234,22 @@ class CUDAIPCExtension:
 
         # Phase 3.5 diagnostic knobs — all opt-in, all env-gated, default-off.
         # CUDALINK_TD_STREAM_PRIO=normal: use default-priority stream instead of high-priority.
-        # Probe P5 — tests whether priority contention with Receiver-A causes TDR.
+        # Set when running concurrent topologies (Sender-B alongside Receiver-A) — equal priorities avoid WDDM contention accumulation across reactivation cycles.
         self._stream_high_prio: bool = os.environ.get("CUDALINK_TD_STREAM_PRIO", "high") != "normal"
         # CUDALINK_TD_INIT_PACE=1: sync+sleep at 3 checkpoints inside initialize() to spread
-        # the WDDM submission burst over ~60 ms. Probe P7 — tests WDDM queue depth hypothesis.
+        # the WDDM submission burst over ~60 ms. (Opt-in; not part of the validated default stack.)
         self._init_pace: bool = os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1"
         # CUDALINK_TD_GRAPHS_DEFERRED=1: defer _build_export_graphs() from initialize() to
-        # the first export_frame() call after frame_count >= 30 (probe P1 / fix F3).
+        # the first export_frame() call after frame_count >= 30, so graph capture doesn't overlap Sender-B's cold-start init burst.
         self._graphs_pending: bool = False
         self._graphs_deferred: bool = os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1"
         # CUDALINK_TD_PERSIST_STREAM: skip stream_destroy in cleanup() so the IPC stream
-        # survives deactivate/reactivate cycles (fix F8). initialize() already has the
+        # survives deactivate/reactivate cycles. initialize() already has the
         # `if self.ipc_stream is None` guard, so no further change is needed there.
         # Default on (Phase 3.6 — load-bearing for concurrent; free in single-pair since
         # no deactivate→reactivate cycle ever destroys the stream). Set to "0" to opt out.
         self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "1") != "0"
-        # F9 — CUDALINK_TD_ACTIVATION_BARRIER: increment cross-process activation counter
+        # CUDALINK_TD_ACTIVATION_BARRIER: increment cross-process activation counter
         # in cudalink_activation_barrier SHM around Sender init so the Python producer skips
         # pushes during the WDDM-saturating init burst. Decrement happens in export_frame()
         # after _barrier_settle_frames warm frames have elapsed (default 30).
@@ -447,7 +447,7 @@ class CUDAIPCExtension:
             self.ownerComp.par.Numslots.enable = False
 
         try:
-            # F9 — CUDALINK_TD_ACTIVATION_BARRIER=1: signal Python producer to pause pushes
+            # Activation-barrier hold: signal the Python producer to pause pushes
             # during this Sender's WDDM-saturating init burst.
             if self._activation_barrier and self._mode == "Sender":
                 try:
@@ -466,8 +466,8 @@ class CUDAIPCExtension:
             # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.
             if self.ipc_stream is None:
-                # F2 — CUDALINK_TD_STREAM_PRIO=normal: default-priority stream instead of
-                # high-priority. Probe P5: tests priority contention with Receiver-A.
+                # CUDALINK_TD_STREAM_PRIO=normal: default-priority stream instead of
+                # high-priority — required when sharing a process with Receiver-A to avoid WDDM contention.
                 if self._stream_high_prio:
                     self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                     self._log(
@@ -526,7 +526,7 @@ class CUDAIPCExtension:
 
             self._log(f"Created {self.num_slots} IPC buffer slots with events", force=True)
 
-            # F1 checkpoint 1/3 — CUDALINK_TD_INIT_PACE=1: flush WDDM queue after per-slot
+            # INIT_PACE checkpoint 1/3 — CUDALINK_TD_INIT_PACE=1: flush WDDM queue after per-slot
             # alloc burst (cudaMalloc + IpcGetMemHandle + EventCreate + IpcGetEventHandle × N).
             if self._init_pace:
                 self.cuda.stream_synchronize(self.ipc_stream)
@@ -557,7 +557,7 @@ class CUDAIPCExtension:
             # Write texture metadata to extended protocol region
             self._write_metadata_to_shm()
 
-            # F1 checkpoint 2/3 — after SHM segment creation + handle/metadata writes.
+            # INIT_PACE checkpoint 2/3 — after SHM segment creation + handle/metadata writes.
             if self._init_pace:
                 self.cuda.stream_synchronize(self.ipc_stream)
                 time.sleep(0.02)
@@ -597,7 +597,7 @@ class CUDAIPCExtension:
                     self._log(f"cudaRuntimeGetVersion failed ({exc}) — disabling graphs", force=True)
                 if rt_version >= CUDART_GRAPHS_MIN_VERSION:
                     if self._graphs_deferred:
-                        # F3 — CUDALINK_TD_GRAPHS_DEFERRED=1: defer graph capture to first
+                        # CUDALINK_TD_GRAPHS_DEFERRED=1: defer graph capture to first
                         # warm frame (frame_count >= 30) so the init burst doesn't overlap
                         # with Receiver-A's 60 Hz stream. First 30 frames use legacy memcpy_async.
                         self._graphs_pending = True
@@ -607,7 +607,7 @@ class CUDAIPCExtension:
                         )
                     else:
                         self._build_export_graphs()
-                        # F1 checkpoint 3/3 — after graph capture + instantiation.
+                        # INIT_PACE checkpoint 3/3 — after graph capture + instantiation.
                         if self._init_pace:
                             self.cuda.stream_synchronize(self.ipc_stream)
                             time.sleep(0.02)
@@ -911,7 +911,7 @@ class CUDAIPCExtension:
             if self.cuda is None:
                 self.cuda = get_cuda_runtime(device=self.device)
             if self.ipc_stream is None:
-                # F2 mirror — honour CUDALINK_TD_STREAM_PRIO in the pre-init lazy path too.
+                # Honour CUDALINK_TD_STREAM_PRIO in the pre-init lazy path too (mirror of init).
                 if self._stream_high_prio:
                     self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
                     self._log(
@@ -1065,7 +1065,7 @@ class CUDAIPCExtension:
                 if self._timing_start:
                     self.cuda.record_event(self._timing_start, stream=self.ipc_stream)
 
-            # F3 deferred graph build — CUDALINK_TD_GRAPHS_DEFERRED=1: fires once after 30
+            # Deferred graph build (CUDALINK_TD_GRAPHS_DEFERRED=1): fires once after 30
             # steady-state frames so the capture burst doesn't overlap Sender-B's cold activation.
             if self._graphs_pending and self.frame_count >= 30:
                 self._build_export_graphs()
@@ -1184,7 +1184,7 @@ class CUDAIPCExtension:
             # Frame tracking
             self.frame_count += 1
 
-            # F9 — barrier settle countdown: release the cross-process activation barrier
+            # Barrier settle countdown: release the cross-process activation barrier
             # after _barrier_settle_frames successful exports have elapsed post-init.
             if self._barrier_settle_remaining > 0:
                 self._barrier_settle_remaining -= 1
@@ -1376,7 +1376,7 @@ class CUDAIPCExtension:
         CRITICAL ORDER: Signal shutdown FIRST, then free GPU resources.
         cudaFree() blocks until all processes close IPC handles.
         """
-        # F9 — release activation barrier if still held (mid-settle cleanup path).
+        # Release activation barrier if still held (mid-settle cleanup path).
         if self._barrier_held and self._barrier_shm is not None:
             try:
                 count = _ab_decrement(self._barrier_shm, os.getpid())
@@ -1461,7 +1461,7 @@ class CUDAIPCExtension:
                     self._timing_end = None
 
         # Destroy dedicated IPC stream (set to None to prevent double-free).
-        # F8 — CUDALINK_TD_PERSIST_STREAM=1: skip destroy so the stream survives
+        # CUDALINK_TD_PERSIST_STREAM=1: skip destroy so the stream survives
         # deactivate/reactivate cycles; initialize() reuses it via the existing
         # `if self.ipc_stream is None` guard.
         if cuda_valid and hasattr(self, "ipc_stream") and self.ipc_stream and self.cuda:
