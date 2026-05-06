@@ -50,7 +50,7 @@ while True:
     if not importer.is_ready():
         break
 
-    # Get frame (zero-copy, < 5μs)
+    # Get frame (zero-copy GPU tensor)
     input_tensor = importer.get_frame()  # Shape: (512, 512, 4)
 
     # Preprocess (convert RGBA → RGB, normalize)
@@ -75,7 +75,7 @@ while True:
 importer.cleanup()
 ```
 
-**Performance**: ~60 FPS at 512x512, ~25 FPS at 1080p (model-dependent).
+**Performance**: 60 FPS achievable at 512x512; throughput is limited by model inference, not IPC overhead. See `benchmarks/results/sweep_latest.csv` for IPC timings.
 
 ---
 
@@ -130,7 +130,7 @@ cv2.destroyAllWindows()
 importer.cleanup()
 ```
 
-**Performance**: ~60 FPS at 720p (OpenCV Canny is fast).
+**Performance**: 60 FPS achievable at 720p; IPC is not the bottleneck. See `benchmarks/results/sweep_latest.csv` for IPC timings.
 
 ---
 
@@ -312,12 +312,12 @@ print("Clean shutdown complete")
 ### Use Case
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For cross-method comparison with statistical rigor (avg, p50, p95, p99, CSV export), use the automated benchmark suite:
+> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99, CSV + JSON export), use:
 > ```bash
-> python benchmarks/compare_all.py --resolution 1080p --frames 500
-> python benchmarks/compare_all.py --sweep   # all standard resolutions
+> python benchmarks/bench_sweep.py          # full 4x2x2 sweep (~70 min)
+> python benchmarks/bench_sweep.py --quick  # smoke test (1 cell, ~5 min)
 > ```
-> See [README Benchmarks section](../README.md#benchmarks) for results and Tier 2 TD-integrated benchmarks.
+> See [README Benchmarks section](../README.md#benchmarks) and `benchmarks/results/sweep_latest.csv` for results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a live TD sender.
 
@@ -357,23 +357,13 @@ print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} μs")
 importer.cleanup()
 ```
 
-**Expected output** (PyTorch zero-copy mode, TD sender, 1080p):
-```
-IPC get_frame() overhead:
-  Mean:   3.5 μs
-  Median: 2.8 μs
-  P95:    6.0 μs
-  P99:    9.0 μs
-```
+**Expected output** (PyTorch zero-copy mode, `get_frame()`, 1080p):
+
+The call returns a pre-mapped GPU tensor; overhead is the ring-buffer poll and `cudaStreamWaitEvent` enqueue. Reference timings at `benchmarks/results/sweep_latest.csv` (IPC notify p50 ~240 us at 1080p f32, bench_sweep).
 
 **Expected output** (numpy D2H copy mode, `get_frame_numpy()`, 1080p float32):
-```
-IPC get_frame_numpy() overhead:
-  Mean:   4150 μs
-  Median: 4100 μs
-  P95:    4600 μs
-  P99:    5200 μs
-```
+
+Dominated by GPU-to-CPU D2H transfer. Reference: bench_sweep get_numpy p50 ~2000 us at 1080p f32 (spawn-process context); bench_d2h_streams p50 ~1350 us isolated. Full results at `benchmarks/results/sweep_latest.csv`.
 
 ---
 
@@ -411,7 +401,7 @@ while running:
     with torch.no_grad():
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
-    # Export to TD: ~10-20μs overhead at 512x512 (async D2D memcpy + event record)
+    # Export to TD (see benchmarks/results/sweep_latest.csv for timing)
     exporter.export_frame(
         gpu_ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
@@ -454,15 +444,16 @@ Script TOP (receives AI frames via IPC)
 
 | Metric | Value |
 |--------|-------|
-| Python export overhead | ~10-20μs per frame (512x512) |
-| TD import overhead | <5μs per frame |
-| Total IPC overhead | ~15-25μs per frame (512x512) |
-| Maximum theoretical FPS | ~10,000 (IPC-limited) |
+| export_frame() p50, 512x512 f32 (bench_graphs isolated) | 42 us |
+| export_frame() p50, 1080p f32 (bench_graphs isolated) | 138 us |
+| Max theoretical FPS (1080p, bench_graphs) | ~7,200 FPS |
 | Practical FPS | Limited by AI model inference |
+
+Full IPC roundtrip timings (with concurrent consumer): `benchmarks/results/sweep_latest.csv`.
 
 **Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
 - AI inference: ~32ms/frame (31 FPS)
-- IPC export: ~20μs per frame (0.06% overhead)
+- IPC export overhead: small fraction of inference time
 - TD display: 60 FPS locked (reads latest available frame)
 
 ---

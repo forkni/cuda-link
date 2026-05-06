@@ -54,6 +54,26 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     exp.ipc_events = [None] * num_slots
     exp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
 
+    # Phase 2 CUDA Graphs state (disabled in mock — no real CUDA context)
+    exp._use_graphs = False
+    exp._graphs_disabled = False
+    exp._graph_execs = [None] * num_slots
+    exp._graph_memcpy_nodes = [None] * num_slots
+
+    # Phase 3 diagnostic knobs (off in mock — no instrumentation desired)
+    exp._export_profile = False
+    exp._export_flush_probe = False
+    exp.total_sync_us = 0.0
+    exp.total_sticky_check_us = 0.0
+    exp.total_flush_probe_us = 0.0
+
+    # F9 activation barrier (disabled in mock)
+    exp._barrier_enabled = False
+    exp._barrier_stale_ns = 5_000_000_000
+    exp._barrier_shm = None
+    exp._barrier_skip_log_last_ns = 0
+    exp._barrier_stale_log_last_ns = 0
+
     mock_attrs = MagicMock()
     mock_attrs.type = 2  # cudaMemoryTypeDevice
     mock_attrs.device = device
@@ -238,3 +258,38 @@ def test_export_frame_env_gate_strict_device_default(monkeypatch: pytest.MonkeyP
 
     exp = CUDAIPCExporter(shm_name="test", height=8, width=8)
     assert exp._strict_device is False
+
+
+# ---------------------------------------------------------------------------
+# F10: heartbeat-preserving F9 early-return
+# ---------------------------------------------------------------------------
+
+
+def test_f10_f9_skip_clears_shutdown_flag() -> None:
+    """F9 skip path must zero shutdown_flag even when bypassing L803 heartbeat.
+
+    Regression test for the false 'Sender shutdown detected' caused by F9's
+    early-return bypassing the per-frame shutdown_flag=0 reassertion.
+    """
+    exp = _make_exporter(device=0)
+    exp._barrier_enabled = True
+    # Simulate a stale shutdown_flag=1 (e.g. from a prior producer cleanup).
+    exp.shm_handle.buf[exp._shutdown_offset] = 1
+
+    with patch.object(exp, "_check_activation_barrier", return_value=True):
+        result = exp.export_frame(gpu_ptr=0xDEAD0000, size=exp.data_size)
+
+    assert result is False  # F9 skipped publish
+    assert exp.shm_handle.buf[exp._shutdown_offset] == 0  # F10 cleared the stale byte
+
+
+def test_f10_f9_skip_does_not_advance_write_idx() -> None:
+    """F9 skip must not increment write_idx (no phantom frame published)."""
+    exp = _make_exporter(device=0)
+    exp._barrier_enabled = True
+    initial_write_idx = exp.write_idx
+
+    with patch.object(exp, "_check_activation_barrier", return_value=True):
+        exp.export_frame(gpu_ptr=0xDEAD0000, size=exp.data_size)
+
+    assert exp.write_idx == initial_write_idx

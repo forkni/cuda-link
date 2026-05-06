@@ -424,6 +424,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
 
     ext._rx_frames_since_last_retry = 0
     ext._rx_connect_attempts = 0
+    ext._diag_frames_since_reinit = 999  # > 5 → suppress DIAG branch (init seeds 0; reset at CUDAIPCExtension.py:1933)
 
     return ext
 

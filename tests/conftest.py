@@ -15,9 +15,11 @@ import pytest
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
-# Add project root and td_exporter to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+# Prepend this repo's src/ ahead of any installed cuda_link package.
+_REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def pytest_configure(config: pytest.Config) -> None:
