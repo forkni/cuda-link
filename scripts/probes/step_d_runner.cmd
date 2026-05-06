@@ -86,9 +86,9 @@ ECHO  Step D  --  F9-drop probe runner  (TD->TD pipeline)
 ECHO  Artifact: %ARTIFACT_DIR%
 ECHO ============================================================
 
-:: --- hard-clear F9 vars ------------------------------------------------------
-SET CUDALINK_TD_ACTIVATION_BARRIER=
-SET CUDALINK_ACTIVATION_BARRIER=
+:: --- force F9 vars to 0 (defaults are now ON post-Phase 4; explicit =0 disables) ---
+SET CUDALINK_TD_ACTIVATION_BARRIER=0
+SET CUDALINK_ACTIVATION_BARRIER=0
 
 :: --- set the kept stack ------------------------------------------------------
 SET CUDALINK_TD_STREAM_PRIO=normal
@@ -100,20 +100,20 @@ SET CUDALINK_LIB_STREAM_PRIO=high
 SET "CUDALINK_PROBE_LOG_FILE=%ARTIFACT_DIR%\producer.log"
 
 :: --- pre-flight assertions --------------------------------------------------
-IF DEFINED CUDALINK_TD_ACTIVATION_BARRIER (
-    ECHO [FAIL] CUDALINK_TD_ACTIVATION_BARRIER still defined after explicit clear.
+IF NOT "%CUDALINK_TD_ACTIVATION_BARRIER%"=="0" (
+    ECHO [FAIL] CUDALINK_TD_ACTIVATION_BARRIER is not "0" — F9 not disabled for probe.
     EXIT /B 2
 )
-IF DEFINED CUDALINK_ACTIVATION_BARRIER (
-    ECHO [FAIL] CUDALINK_ACTIVATION_BARRIER still defined after explicit clear.
+IF NOT "%CUDALINK_ACTIVATION_BARRIER%"=="0" (
+    ECHO [FAIL] CUDALINK_ACTIVATION_BARRIER is not "0" — F9 not disabled for probe.
     EXIT /B 2
 )
 
 :: --- env snapshot -----------------------------------------------------------
 SET > "%ARTIFACT_DIR%\env.txt"
 ECHO [OK] Env snapshot: %ARTIFACT_DIR%\env.txt
-ECHO      F9 vars (should be absent):
-FINDSTR /I "CUDALINK_TD_ACTIVATION_BARRIER CUDALINK_ACTIVATION_BARRIER" "%ARTIFACT_DIR%\env.txt" || ECHO      (none found -- correct)
+ECHO      F9 vars (should be =0 to override default-on):
+FINDSTR /I "CUDALINK_TD_ACTIVATION_BARRIER CUDALINK_ACTIVATION_BARRIER" "%ARTIFACT_DIR%\env.txt"
 ECHO.
 
 :: --- launch both TD instances -----------------------------------------------

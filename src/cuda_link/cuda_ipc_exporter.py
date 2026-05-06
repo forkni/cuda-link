@@ -179,10 +179,11 @@ class CUDAIPCExporter:
         self.debug = debug
         self.device = device
 
-        # CUDALINK_EXPORT_SYNC=1 restores the old behaviour of blocking the CPU on
-        # ipc_stream after each record_event(). Default off: the ~13-100µs sync is
-        # redundant for consumers using the stream-ordered get_frame(stream=...) path.
-        self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "0") == "1"
+        # CUDALINK_EXPORT_SYNC: block CPU on ipc_stream after each record_event().
+        # Default on (Phase 3.6 — load-bearing for concurrent topologies; prevents
+        # cycle-2 TDR cascade when a TD Sender shares the process with a TD Receiver).
+        # Set to "0" to opt out for low-latency single-producer scenarios (~100-300µs/frame saved).
+        self._export_sync: bool = os.getenv("CUDALINK_EXPORT_SYNC", "1") != "0"
 
         # CUDALINK_USE_GRAPHS=1: capture the memcpy_async into a 1-node CUDA Graph and
         # replay via graph_launch.  IPC events (cudaEventInterprocess) and external
@@ -210,10 +211,12 @@ class CUDAIPCExporter:
         # Windows Task Manager 3D-engine reading from ~65% to ~7% on rigs where WDDM
         # defers submissions. NVML true compute load is unchanged. Set to "0" to disable.
         self._export_flush_probe: bool = os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
-        # F9 — CUDALINK_ACTIVATION_BARRIER=1: read cudalink_activation_barrier SHM on each
+        # F9 — CUDALINK_ACTIVATION_BARRIER: read cudalink_activation_barrier SHM on each
         # export_frame and skip publishing while a TD-side Sender is in its activation window.
         # Cross-process backpressure mechanism — no CUDA stream coupling.
-        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "0") == "1"
+        # Default on (Phase 3.6 — no-op when no TD-side Sender exists since the SHM
+        # counter stays at 0; gracefully skipped if SHM is missing). Set to "0" to opt out.
+        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0"
         self._barrier_stale_ns: int = int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000)))
         self._barrier_shm: SharedMemory | None = None
         self._barrier_skip_log_last_ns: int = 0

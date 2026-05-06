@@ -27,6 +27,7 @@ def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "CUDALINK_EXPORT_FLUSH_PROBE",
         "CUDALINK_USE_GRAPHS",
         "CUDALINK_STICKY_ERROR_CHECK",
+        "CUDALINK_ACTIVATION_BARRIER",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -42,6 +43,8 @@ def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exp.num_slots == 2
     assert exp.debug is False
     assert not exp.is_ready()
+    assert exp._export_sync is True  # Phase 4: default flipped to ON
+    assert exp._barrier_enabled is True  # Phase 4: default flipped to ON
 
 
 def test_constructor_custom_params() -> None:

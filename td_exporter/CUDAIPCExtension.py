@@ -203,12 +203,12 @@ class CUDAIPCExtension:
         # Conditional synchronization (CPU fallback)
         self.sync_interval = 10  # Sync every N frames (reduces GPU sync overhead)
 
-        # CUDALINK_EXPORT_SYNC=0 (default): correctness is guaranteed by the receiver's
-        # cudaStreamWaitEvent(ipc_events[slot]) — no CPU block needed. Set to "1" to restore
-        # the pre-2026-04-23 blocking sync. Measured cost of "1": ~295 µs/frame dead CPU wait
-        # (A/B/C diagnostic, SESSION_LOG 2026-04-23; Handbook p3/pg56 confirmed the stream is
-        # idle at frame-end). Mirrors Python lib default "0".
-        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "0") == "1"
+        # CUDALINK_EXPORT_SYNC: block CPU on ipc_stream after each export_frame().
+        # Default on (Phase 3.6 — load-bearing for concurrent topologies; prevents
+        # cycle-2 TDR cascade). Measured cost when on: ~295 µs/frame dead CPU wait
+        # (A/B/C diagnostic, SESSION_LOG 2026-04-23; Handbook p3/pg56). Set to "0" to
+        # opt out for low-latency single-producer scenarios. Mirrors Python lib default "1".
+        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") != "0"
         # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
         # Zero overhead when unset (single predicted-false branch per region).
         self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
@@ -239,22 +239,23 @@ class CUDAIPCExtension:
         # CUDALINK_TD_INIT_PACE=1: sync+sleep at 3 checkpoints inside initialize() to spread
         # the WDDM submission burst over ~60 ms. Probe P7 — tests WDDM queue depth hypothesis.
         self._init_pace: bool = os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1"
-        # CUDALINK_TD_INIT_CLEAR_STICKY=1: peek+consume any sticky CUDA error at the start of
-        # initialize() before heavy allocations. Escalation probe F4.
-        self._init_clear_sticky: bool = os.environ.get("CUDALINK_TD_INIT_CLEAR_STICKY", "0") == "1"
         # CUDALINK_TD_GRAPHS_DEFERRED=1: defer _build_export_graphs() from initialize() to
         # the first export_frame() call after frame_count >= 30 (probe P1 / fix F3).
         self._graphs_pending: bool = False
         self._graphs_deferred: bool = os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1"
-        # CUDALINK_TD_PERSIST_STREAM=1: skip stream_destroy in cleanup() so the IPC stream
+        # CUDALINK_TD_PERSIST_STREAM: skip stream_destroy in cleanup() so the IPC stream
         # survives deactivate/reactivate cycles (fix F8). initialize() already has the
         # `if self.ipc_stream is None` guard, so no further change is needed there.
-        self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "0") == "1"
-        # F9 — CUDALINK_TD_ACTIVATION_BARRIER=1: increment cross-process activation counter
+        # Default on (Phase 3.6 — load-bearing for concurrent; free in single-pair since
+        # no deactivate→reactivate cycle ever destroys the stream). Set to "0" to opt out.
+        self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "1") != "0"
+        # F9 — CUDALINK_TD_ACTIVATION_BARRIER: increment cross-process activation counter
         # in cudalink_activation_barrier SHM around Sender init so the Python producer skips
         # pushes during the WDDM-saturating init burst. Decrement happens in export_frame()
         # after _barrier_settle_frames warm frames have elapsed (default 30).
-        self._activation_barrier: bool = os.environ.get("CUDALINK_TD_ACTIVATION_BARRIER", "0") == "1"
+        # Default on (Phase 3.6 — no-op when SHM counter stays at 0 in single-pair;
+        # gracefully skipped if SHM is missing). Set to "0" to opt out.
+        self._activation_barrier: bool = os.environ.get("CUDALINK_TD_ACTIVATION_BARRIER", "1") != "0"
         self._barrier_settle_frames: int = int(os.environ.get("CUDALINK_TD_BARRIER_SETTLE_FRAMES", "30"))
         self._barrier_settle_remaining: int = 0
         self._barrier_held: bool = False
@@ -461,16 +462,6 @@ class CUDAIPCExtension:
             # Load CUDA runtime bound to the configured device
             self.cuda = get_cuda_runtime(device=self.device)
             self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
-
-            # F4 — CUDALINK_TD_INIT_CLEAR_STICKY=1: consume any latched error from a concurrent
-            # stream (e.g. Receiver-A hot path) before Sender-B's cudaMalloc / IpcGet calls.
-            if self._init_clear_sticky:
-                sticky = self.cuda.peek_at_last_error()
-                if sticky != 0:
-                    self.cuda.cudart.cudaGetLastError()  # consume without raising
-                    self._log(f"[INIT_CLEAR_STICKY] consumed sticky error 0x{sticky:08x}", force=True)
-                else:
-                    self._log("[INIT_CLEAR_STICKY] no sticky error at init entry", force=True)
 
             # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.
