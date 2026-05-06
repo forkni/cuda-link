@@ -654,6 +654,18 @@ class CUDAIPCExporter:
             return False
         # F9 — skip publish if a TD-side Sender is in its activation window.
         if self._barrier_enabled and self._check_activation_barrier():
+            # F10 — reassert the per-frame heartbeat even on the skip path.
+            # The consumer reads shutdown_flag == 1 as "producer gone"; bypassing L803
+            # on skip frames would leave any stale 1-byte uncleared and trip a false
+            # "Sender shutdown detected" on the TD receiver side.
+            if self.shm_handle is not None and self._shutdown_offset:
+                try:
+                    _flag_obs = int(self.shm_handle.buf[self._shutdown_offset])
+                    if _flag_obs != 0:
+                        logger.info("[ACTIVATION_BARRIER] skip — shutdown_flag observed=%d (F10-D)", _flag_obs)
+                    self.shm_handle.buf[self._shutdown_offset] = 0
+                except (OSError, BufferError):
+                    pass
             return False
         debug = self.debug
         if debug:
