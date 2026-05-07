@@ -469,6 +469,44 @@ def test_receiver_import_frame_lazy_retry_without_shm() -> None:
     assert result is False, "import_frame() must return False when uninitialized and SHM absent"
 
 
+def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
+    """import_frame() must call cleanup() when the SHM shutdown byte is set.
+
+    Drives the shutdown-detection branch (TDReceiver:191-194). Pre-fix this path
+    called self.cleanup_receiver() which no longer exists on TDReceiverEngine after
+    the engine-split refactor, producing an AttributeError every time the sender
+    disconnected or restarted.
+    """
+    from multiprocessing import shared_memory
+
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm_xyz", Numslots=3, Active=True, Debug=False)
+    ext = CUDAIPCExtension(owner)
+    engine = ext._engine
+
+    shm = shared_memory.SharedMemory(name="test_rx_shutdown_regression_xyz", create=True, size=1024)
+    try:
+        engine.shm_handle = shm
+        engine._rx_shutdown_offset = 100
+        engine._rx_ipc_version = 1
+        engine._rx_dev_ptrs = []
+        engine._rx_ipc_events = []
+        engine._rx_num_slots = 0
+        engine._rx_stream = None
+        engine.cuda = None
+        engine._initialized = True
+
+        shm.buf[100] = 1  # mark shutdown byte
+
+        result = engine.import_frame(None)  # type: ignore[arg-type]
+        assert result is False
+        assert engine._initialized is False, "cleanup() must reset _initialized"
+    finally:
+        shm.close()
+        shm.unlink()
+
+
 # ---------------------------------------------------------------------------
 # Public API shape — no CUDA required
 # ---------------------------------------------------------------------------

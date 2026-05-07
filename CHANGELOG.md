@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delegations so `callbacks_template.py` / `script_top_callbacks.py` continue to work
   without modification after the engine split. (`td_exporter/CUDAIPCExtension.py`)
 
+- **`TDReceiver.import_frame()` reconnect crash** — two internal calls to the removed
+  `self.cleanup_receiver()` (left over from the engine-split refactor) now correctly
+  call `self.cleanup()`. Without this, the receiver crashed with `AttributeError:
+  'TDReceiverEngine' object has no attribute 'cleanup_receiver'` the moment the sender
+  shut down or restarted mid-session. (`td_exporter/TDReceiver.py`)
+
 ## [1.1.0] — 2026-05-06
 
 ### Added

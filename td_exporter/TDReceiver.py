@@ -190,7 +190,7 @@ class TDReceiverEngine:
             # Check for shutdown signal
             if self.shm_handle.buf[self._rx_shutdown_offset] == 1:
                 self._log("Sender shutdown detected. Cleaning up.", force=True)
-                self.cleanup_receiver()
+                self.cleanup()
                 return False
 
             # Check for version change (sender re-initialized)
@@ -200,7 +200,7 @@ class TDReceiverEngine:
                     f"Sender re-initialized (v{self._rx_ipc_version} -> v{current_version}). Reconnecting...",
                     force=True,
                 )
-                self.cleanup_receiver()
+                self.cleanup()
                 return False  # Will reinitialize on next frame
 
             # Read write_idx and calculate read slot
