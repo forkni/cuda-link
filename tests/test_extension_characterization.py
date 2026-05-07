@@ -541,12 +541,12 @@ def test_is_ready_false_before_init() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Facade mode-gating — regression tests for bug #1 / #2 / #3
+# Facade mode-gating — wrong-mode calls must be safe no-ops
 # ---------------------------------------------------------------------------
 
 
 def test_check_deferred_cleanup_no_attr_error_in_sender_mode() -> None:
-    """_check_deferred_cleanup() must not raise AttributeError when in Sender mode (bug #1)."""
+    """_check_deferred_cleanup() must not raise AttributeError when in Sender mode."""
     from CUDAIPCExtension import CUDAIPCExtension
 
     owner = _make_sender_comp("dummy_shm", num_slots=3)
@@ -556,7 +556,7 @@ def test_check_deferred_cleanup_no_attr_error_in_sender_mode() -> None:
 
 
 def test_import_frame_returns_false_in_sender_mode() -> None:
-    """import_frame() in Sender mode must return False, not crash (bug #2)."""
+    """import_frame() in Sender mode must return False, not crash."""
     from unittest.mock import MagicMock
 
     from CUDAIPCExtension import CUDAIPCExtension
@@ -569,7 +569,7 @@ def test_import_frame_returns_false_in_sender_mode() -> None:
 
 
 def test_update_receiver_resolution_no_attr_error_in_receiver_mode() -> None:
-    """update_receiver_resolution() must not raise AttributeError when in Receiver mode (bug #3)."""
+    """update_receiver_resolution() must not raise AttributeError when in Receiver mode."""
     from unittest.mock import MagicMock
 
     from CUDAIPCExtension import CUDAIPCExtension
