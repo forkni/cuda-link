@@ -45,6 +45,7 @@ from ActivationBarrier import (  # noqa: E402, I001
     increment as _ab_increment,
     open_or_create as _ab_open_or_create,
 )
+from TDHost import RealTDHost, RealTOPHandle, TDHost  # noqa: E402
 from CUDAIPCWrapper import (  # noqa: E402, F401
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
@@ -127,35 +128,38 @@ class CUDAIPCExtension:
     - Zero CPU memory copies (GPU-direct)
     """
 
-    def __init__(self, ownerComp: COMP) -> None:
+    def __init__(self, ownerComp: COMP, host: TDHost | None = None) -> None:
         """Initialize CUDA IPC extension (Sender or Receiver mode).
 
         Args:
             ownerComp: The component that owns this extension
+            host: Optional TDHost adapter (constructed from ownerComp if None).
+                  Pass a FakeTDHost in tests to avoid touching the TD runtime.
         """
         self.ownerComp = ownerComp
+        self._host: TDHost = host if host is not None else RealTDHost(ownerComp)
 
         # Determine mode from parameter
-        try:
-            self._mode = str(ownerComp.par.Mode.eval())  # 'Sender' or 'Receiver'
-        except AttributeError:
-            self._mode = "Sender"  # Default to sender for backward compat
+        _mode_val = self._host.param_value("Mode")
+        self._mode = str(_mode_val) if _mode_val is not None else "Sender"
 
         # CUDA runtime API
         self.cuda = None
         self._initialized = False
 
         # Ring buffer configuration - read from parameter or default to 3
+        _slots_val = self._host.param_value("Numslots")
         try:
-            self.num_slots = int(ownerComp.par.Numslots.eval())
-        except (AttributeError, ValueError):
+            self.num_slots = int(_slots_val) if _slots_val is not None else 3
+        except (ValueError, TypeError):
             self.num_slots = 3
 
         # CUDA device index - read from parameter or default to 0.
         # IPC handles are device-scoped; sender and receiver must use the same device.
+        _dev_val = self._host.param_value("Cudadevice")
         try:
-            self.device = int(ownerComp.par.Cudadevice.eval())
-        except (AttributeError, ValueError):
+            self.device = int(_dev_val) if _dev_val is not None else 0
+        except (ValueError, TypeError):
             self.device = 0
 
         # GPU buffer state (arrays for ring buffer)
@@ -184,11 +188,8 @@ class CUDAIPCExtension:
         # SharedMemory for IPC handle transfer
         self.shm_handle = None
         # Read SharedMemory name from dedicated parameter or use fallback
-        try:
-            self.shm_name = ownerComp.par.Ipcmemname.eval()
-        except AttributeError:
-            # Fallback to default name if parameter doesn't exist
-            self.shm_name = "cudalink_output_ipc"
+        _shm_name_val = self._host.param_value("Ipcmemname")
+        self.shm_name = str(_shm_name_val) if _shm_name_val is not None else "cudalink_output_ipc"
 
         # Cached SHM byte offsets — computed once in initialize() to avoid per-frame arithmetic
         self._shutdown_offset = 0  # SHM_HEADER_SIZE + num_slots * SLOT_SIZE
@@ -281,16 +282,15 @@ class CUDAIPCExtension:
         self.total_unaccounted_us: float = 0.0  # frame_time − Σ all sub-timers
 
         # Verbosity control - read from local Debug parameter
-        try:
-            self.verbose_performance = bool(ownerComp.par.Debug.eval())
-        except AttributeError:
-            self.verbose_performance = False
+        _debug_val = self._host.param_value("Debug")
+        self.verbose_performance = bool(_debug_val) if _debug_val is not None else False
         if self._export_profile:
             self.verbose_performance = True  # profile mode requires verbose timing path
 
         # Apply showCustomOnly from Hidebuiltin parameter on load
-        with contextlib.suppress(AttributeError):
-            self.ownerComp.showCustomOnly = bool(ownerComp.par.Hidebuiltin.eval())
+        _hide_val = self._host.param_value("Hidebuiltin")
+        if _hide_val is not None:
+            self._host.show_custom_only(bool(_hide_val))
 
         # Receiver-specific state (only used when mode='Receiver')
         self._rx_dev_ptrs = [None] * self.num_slots  # Opened IPC mem pointers
@@ -341,18 +341,13 @@ class CUDAIPCExtension:
         self._detected_numpy_dtype: object = None  # Set each frame from cuda_mem.shape.dataType
         self._last_numpy_dtype: object = None  # Set in _write_metadata_to_shm()
 
-        # Cached parameter reference — eliminates 3-deep ownerComp.par.Active chain per frame
-        try:
-            self._active_par = ownerComp.par.Active
-        except AttributeError:
-            self._active_par = None  # Component has no Active parameter
+        # Active state is checked via self._host.is_active() — caching is inside RealTDHost.
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
         # Disable Numslots in Receiver mode — sender controls slot count via SharedMemory
         if self._mode == "Receiver":
-            with contextlib.suppress(AttributeError):
-                self.ownerComp.par.Numslots.enable = False
+            self._host.set_param_enabled("Numslots", False)
 
     @property
     def mode(self) -> str:
@@ -370,13 +365,17 @@ class CUDAIPCExtension:
         if force or self.verbose_performance:
             print(f"{prefix} {msg}")
 
-    def _needs_format_conversion(self, top_op: TOP) -> bool:
+    def _needs_format_conversion(self, top_op: object) -> bool:
         """Return True if the TOP's pixel format is unsupported by cudaMemory() in TD 2025.
 
         TD 2025 (CUDA 12.8) rejects float16 formats from cudaMemory().
         uint8, uint16 (fixed), and float32 are supported.
+        top_op may be a RealTOPHandle, FakeTOPHandle, or raw TD TOP (backward compat).
         """
-        pixel_fmt = str(getattr(top_op, "pixelFormat", ""))
+        if hasattr(top_op, "pixel_format"):
+            pixel_fmt = str(top_op.pixel_format)
+        else:
+            pixel_fmt = str(getattr(top_op, "pixelFormat", ""))
         if pixel_fmt == self._last_pixel_fmt:
             return self._last_fmt_needs_conv
         self._last_pixel_fmt = pixel_fmt
@@ -408,8 +407,10 @@ class CUDAIPCExtension:
         # them to [], so initialize() would resize anyway, but doing it here ensures
         # export_frame()'s is_ready() check sees the correct array size immediately.
         if new_mode == "Sender":
-            with contextlib.suppress(AttributeError, ValueError):
-                self.num_slots = int(self.ownerComp.par.Numslots.eval())
+            _ns = self._host.param_value("Numslots")
+            if _ns is not None:
+                with contextlib.suppress(ValueError, TypeError):
+                    self.num_slots = int(_ns)
             self.dev_ptrs = [None] * self.num_slots
             self.ipc_handles = [None] * self.num_slots
             self.ipc_events = [None] * self.num_slots
@@ -424,8 +425,7 @@ class CUDAIPCExtension:
         # Enable/disable Numslots based on new mode:
         # - Sender: editable (but only when not active — initialize() will disable it on activation)
         # - Receiver: always disabled (sender controls slot count via SharedMemory)
-        with contextlib.suppress(AttributeError):
-            self.ownerComp.par.Numslots.enable = new_mode == "Sender"
+        self._host.set_param_enabled("Numslots", new_mode == "Sender")
 
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
 
@@ -446,8 +446,7 @@ class CUDAIPCExtension:
             return True
 
         # Lock Numslots while active — changing slot count at runtime causes array size mismatch
-        with contextlib.suppress(AttributeError):
-            self.ownerComp.par.Numslots.enable = False
+        self._host.set_param_enabled("Numslots", False)
 
         try:
             # Activation-barrier hold: signal the Python producer to pause pushes
@@ -570,10 +569,9 @@ class CUDAIPCExtension:
             self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
             self._ts_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 
-            # Cache dtype_converter TOP reference — eliminates per-frame ownerComp.op() lookup
-            self._fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
-            # Cache ExportBuffer TOP reference — eliminates per-frame ownerComp.op() lookup (same pattern)
-            self._export_buffer = self.ownerComp.op(_EXPORT_BUFFER_NAME)
+            # Cache dtype_converter and ExportBuffer as TOPHandle — eliminates per-frame lookups
+            self._fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
+            self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
             # Create GPU timing events (only when Debug is ON for benchmarking)
             if self.verbose_performance:
@@ -885,17 +883,17 @@ class CUDAIPCExtension:
             True if export successful, False otherwise
         """
         top_op = self._export_buffer
-        if top_op is None or not getattr(top_op, "valid", True):
+        if top_op is None or not top_op.is_valid():
             self._export_buffer = None  # invalidate stale cache
             # Lazy lookup: op may have been added after initialize() (e.g. dynamic network edits)
-            top_op = self.ownerComp.op(_EXPORT_BUFFER_NAME)
+            top_op = self._host.find_top(_EXPORT_BUFFER_NAME)
             if top_op is None:
                 self._log(f"'{_EXPORT_BUFFER_NAME}' not found in component", force=True)
                 return False
             self._export_buffer = top_op  # cache for subsequent frames
 
-        # Check if Active parameter is enabled (use cached par ref to avoid 3-deep chain per frame)
-        if self._active_par is not None and not bool(self._active_par.eval()):
+        # Check if Active parameter is enabled (hot path via TDHost.is_active())
+        if not self._host.is_active():
             return False
 
         # Start frame timer (only if verbose)
@@ -933,31 +931,36 @@ class CUDAIPCExtension:
             # Check source TOP (upstream of converter), not ExportBuffer (downstream).
             # Use cached reference (set in initialize()) to avoid per-frame ownerComp.op() lookup.
             fmt_transform = self._fmt_transform
-            if fmt_transform is not None and not getattr(fmt_transform, "valid", True):
+            if fmt_transform is not None and not fmt_transform.is_valid():
                 self._fmt_transform = None
                 fmt_transform = None
             if fmt_transform is None:
                 # Lazy lookup: initialize() may not have run yet (pre-init export_frame() path).
                 # Without this, float16 sources are permanently stuck — cudaMemory() fails before
                 # auto-init at line 719 is reached. Same pattern as _export_buffer lazy fallback.
-                fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+                fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
                 if fmt_transform is not None:
                     self._fmt_transform = fmt_transform
             if fmt_transform is not None:
                 source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
                 if self._needs_format_conversion(source_top):
                     if not self._fmt_conv_active:
-                        fmt_transform.par.format = "rgba32float"
+                        fmt_transform.set_format("rgba32float")
                         self._fmt_conv_active = True
+                        src_fmt = (
+                            source_top.pixel_format
+                            if hasattr(source_top, "pixel_format")
+                            else getattr(source_top, "pixelFormat", "?")
+                        )
                         self._log(
-                            f"Pixel format '{getattr(source_top, 'pixelFormat', '?')}' unsupported "
+                            f"Pixel format '{src_fmt}' unsupported "
                             f"by cudaMemory() — dtype_converter set to rgba32float, skipping frame",
                             force=True,
                         )
                         return False  # dtype_converter cooks next frame
                 else:
                     if self._fmt_conv_active:
-                        fmt_transform.par.format = "useinput"
+                        fmt_transform.set_format("useinput")
                         self._fmt_conv_active = False
                         self._log(
                             "Source format CUDA-compatible — dtype_converter set to useinput",
@@ -974,11 +977,13 @@ class CUDAIPCExtension:
 
             # Get TOP's CUDA memory — always pass a valid stream (never None)
             try:
-                cuda_mem = top_op.cudaMemory(
-                    stream=int(self.ipc_stream.value),
-                )
+                cuda_mem = top_op.cuda_memory(stream=int(self.ipc_stream.value))
             except Exception as cuda_err:
-                pixel_fmt = getattr(top_op, "pixelFormat", "unknown")
+                pixel_fmt = (
+                    top_op.pixel_format
+                    if hasattr(top_op, "pixel_format")
+                    else getattr(top_op, "pixelFormat", "unknown")
+                )
                 err_msg = f"cudaMemory() failed (pixelFormat={pixel_fmt}): {cuda_err}"
                 if err_msg != self._last_cuda_mem_err:
                     self._log(err_msg, force=True)
@@ -1003,17 +1008,12 @@ class CUDAIPCExtension:
             # CRITICAL: Keep reference to prevent garbage collection
             self.cuda_mem_ref = cuda_mem
 
-            # Get dimensions from cuda_mem.shape (cache reference to avoid repeated lookups)
-            shape = cuda_mem.shape
-            actual_width = shape.width
-            actual_height = shape.height
-            actual_channels = shape.numComps
+            # CUDAMemoryRef fields are plain Python ints — direct access, no shape indirection
+            actual_width = cuda_mem.width
+            actual_height = cuda_mem.height
+            actual_channels = cuda_mem.channels
             actual_size = cuda_mem.size
-            # CUDAMemoryShape.dataType returns numpy.dtype — more reliable than byte-ratio inference
-            try:
-                self._detected_numpy_dtype = shape.dataType
-            except AttributeError:
-                self._detected_numpy_dtype = None
+            self._detected_numpy_dtype = cuda_mem.data_type  # numpy.dtype or None
 
             # Check if we need to (re)initialize
             if not self._initialized or actual_size != self.data_size:
@@ -1350,8 +1350,7 @@ class CUDAIPCExtension:
         if self._mode == "Sender":
             self._cleanup_sender()
             # Re-enable Numslots when sender deactivates (allow editing again)
-            with contextlib.suppress(AttributeError):
-                self.ownerComp.par.Numslots.enable = True
+            self._host.set_param_enabled("Numslots", True)
         else:
             self.cleanup_receiver()
 
@@ -1508,9 +1507,9 @@ class CUDAIPCExtension:
             self._deferred_free()
 
         # Reset dtype_converter Transform TOP to pass-through on cleanup
-        fmt_transform = self.ownerComp.op(_FMT_TRANSFORM_NAME)
+        fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
         if fmt_transform is not None:
-            fmt_transform.par.format = "useinput"
+            fmt_transform.set_format("useinput")
         self._fmt_conv_active = False
 
         # Unlink SharedMemory (sender is owner and should clean up)
@@ -1564,8 +1563,8 @@ class CUDAIPCExtension:
         Returns:
             True if import successful, False otherwise.
         """
-        # Check Active parameter (use cached par ref to avoid 3-deep chain per frame)
-        if self._active_par is not None and not bool(self._active_par.eval()):
+        # Check Active parameter (hot path via TDHost.is_active())
+        if not self._host.is_active():
             return False
 
         # Lazy initialization with exponential backoff retry logic
@@ -1588,6 +1587,9 @@ class CUDAIPCExtension:
                 elif self._rx_connect_attempts == self._rx_max_connect_attempts + 1:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
+
+        # Wrap import_buffer for TOPHandle-style access (Phase 3 will pass handle directly)
+        _ib = RealTOPHandle(import_buffer) if import_buffer is not None else None
 
         try:
             # Check for shutdown signal
@@ -1660,7 +1662,7 @@ class CUDAIPCExtension:
                     with cp.cuda.ExternalStream(rx_stream_int):
                         cp.copyto(self._rx_cupy_f32_buf, cupy_f16, casting="same_kind")
 
-                    import_buffer.copyCUDAMemory(
+                    _ib.copy_cuda_memory(
                         self._rx_cupy_f32_buf.data.ptr,
                         f32_size,
                         self._rx_cached_shape,  # dataType=float32 set during initialize_receiver()
@@ -1682,9 +1684,9 @@ class CUDAIPCExtension:
                         self._rx_f16_cpu_buf.reshape(self._rx_height, self._rx_width, self._rx_num_comps),
                         casting="same_kind",
                     )
-                    import_buffer.copyNumpyArray(self._rx_f32_cpu_buf)
+                    _ib.copy_numpy_array(self._rx_f32_cpu_buf)
             else:
-                import_buffer.copyCUDAMemory(
+                _ib.copy_cuda_memory(
                     address,
                     self._rx_buffer_size,
                     self._rx_cached_shape,
@@ -1731,9 +1733,7 @@ class CUDAIPCExtension:
             return False
 
         try:
-            import_buffer.par.outputresolution = 9  # Custom Resolution
-            import_buffer.par.resolutionw = self._rx_width
-            import_buffer.par.resolutionh = self._rx_height
+            RealTOPHandle(import_buffer).set_resolution(self._rx_width, self._rx_height)
             self._rx_needs_resolution_update = False
             self._log(
                 f"Set ImportBuffer resolution to {self._rx_width}x{self._rx_height} (from Execute DAT)",
@@ -1754,8 +1754,7 @@ class CUDAIPCExtension:
             return True
 
         # Numslots is always disabled in Receiver mode (sender controls slot count)
-        with contextlib.suppress(AttributeError):
-            self.ownerComp.par.Numslots.enable = False
+        self._host.set_param_enabled("Numslots", False)
 
         _t0 = time.perf_counter()
         try:
@@ -1815,8 +1814,7 @@ class CUDAIPCExtension:
             # Sync UI parameter to show sender's slot count (informational only).
             # Do NOT set self.num_slots — that's the sender-specific working value.
             # Receiver always uses self._rx_num_slots for its own arrays.
-            with contextlib.suppress(AttributeError):
-                self.ownerComp.par.Numslots = self._rx_num_slots
+            self._host.set_param_value("Numslots", self._rx_num_slots)
 
             # Cache receiver shutdown offset once — avoids per-frame arithmetic in import_frame()
             self._rx_shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
