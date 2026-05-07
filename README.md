@@ -158,20 +158,23 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 ```
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
-CUDAIPCExtension (Sender)          CUDAIPCImporter
-  │ export_frame(top_op)             │ get_frame() / get_frame_numpy()
-  │ cudaMemcpy D2D → ring buffer    │ Waits on IPC event
-  └─→ SharedMemory ←─────────────────┘
+CUDAIPCExtension facade
+  └── TDSenderEngine               CUDAIPCImporter
+        │ export_frame(top_op)       │ get_frame() / get_frame_numpy()
+        │ cudaMemcpy D2D → ring buf  │ Waits on IPC event
+        └─→ SharedMemory ←───────────┘
 
 Direction B: Python (Producer) → TD (Consumer)
 ───────────────────────────────────────────────
-CUDAIPCExporter                    CUDAIPCExtension (Receiver)
-  │ export_frame(gpu_ptr, size)     │ import_frame(script_top)
-  │ cudaMemcpy D2D → ring buffer    │ copyCUDAMemory()
-  └─→ SharedMemory ←─────────────────┘
+CUDAIPCExporter                    CUDAIPCExtension facade
+  │ export_frame(gpu_ptr, size)      └── TDReceiverEngine
+  │ cudaMemcpy D2D → ring buf             │ import_frame(script_top)
+  └─→ SharedMemory ←──────────────────────┘ copyCUDAMemory()
 
 Both directions share the same v0.5.0 binary protocol.
 ```
+
+The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
 
 ### Ring Buffer (3 Slots)
 

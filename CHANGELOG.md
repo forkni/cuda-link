@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **TD extension refactored into facade + engine split** (`CUDAIPCExtension.py` → ~300 LOC facade;
+  new `TDSender.py` / `TDReceiver.py` engine classes). `TDSenderEngine` owns all Sender-mode GPU
+  resources; `TDReceiverEngine` owns all Receiver-mode resources. Mode switches tear down the old
+  engine and construct a fresh one — zero cross-mode state leak. Public API (`export_frame`,
+  `import_frame`, `switch_mode`, etc.) is unchanged; existing `.tox` callback templates work
+  without modification.
+- **`TDHost` adapter seam** (`TDHost.py`) isolates all `ownerComp.par.*`, `op(...)`,
+  `top.cudaMemory()`, and `copyCUDAMemory()` calls from engine logic. Tests inject `FakeTDHost`
+  / `FakeTOPHandle` — no TD runtime required.
+- **`TDSenderConfig` frozen dataclass** (`TDConfig.py`) centralises all 11 `CUDALINK_*`
+  environment-variable reads. Constructed once at extension init; engines read only
+  `self._config.<field>`.
+- **`docs/TOX_BUILD_GUIDE.md`** updated: Component Structure diagram now shows all eight Text DATs
+  (`CUDAIPCWrapper`, `ActivationBarrier`, `NVMLObserver`, `TDHost`, `TDConfig`, `TDSender`,
+  `TDReceiver`, `CUDAIPCExporter`); Step 3 expanded with per-DAT assembly instructions.
+- **`docs/ARCHITECTURE.md`** and **`README.md`** Architecture section updated to document the
+  facade-with-delegation layout and TDHost seam.
+- **`CONTEXT.md`** created at repo root with canonical vocabulary for the new architecture.
+
 ## [1.1.0] — 2026-05-06
 
 ### Added

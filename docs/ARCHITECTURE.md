@@ -95,6 +95,27 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 ---
 
+## TD-Side Extension Architecture
+
+The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
+
+```
+CUDAIPCExtension  (~300 LOC facade)
+├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
+├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
+└── _engine: TDSenderEngine | TDReceiverEngine
+      ├── TDSenderEngine (~1300 LOC)   ← owns GPU alloc, IPC export, SHM write, CUDA graphs
+      └── TDReceiverEngine (~800 LOC) ← owns SHM attach, IPC open, copyCUDAMemory calls
+```
+
+**Mode switching** tears down the current engine and constructs a fresh one — guaranteeing zero cross-mode state leak. The old engine's `cleanup()` is called first, which frees all CUDA resources before the new engine is constructed.
+
+**TDHost seam**: all `ownerComp.par.*`, `ownerComp.op("ExportBuffer")`, `top.cudaMemory()`, and `scriptTOP.copyCUDAMemory()` calls go through `TDHost`/`TOPHandle` protocols. Tests inject `FakeTDHost`/`FakeTOPHandle` — no TD runtime required.
+
+**textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCExporter` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
+
+---
+
 ## SharedMemory Protocol
 
 ### Binary Layout (433 bytes for 3 slots)
