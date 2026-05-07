@@ -1,0 +1,244 @@
+# Profiling Guide
+
+Operational guide for the `compute-sanitizer → nsys → ncu` workflow in cuda-link.
+
+---
+
+## 0. Tool Selection
+
+| Tool | Purpose | When to use |
+|---|---|---|
+| `compute-sanitizer` | Correctness gate: memory errors, race conditions, synchronization | Always first — before any perf work |
+| `nsys` | System timeline: which streams collide and when, cross-process boundary | After correctness is confirmed |
+| `ncu` | Kernel deep dive: Speed-of-Light, memory bandwidth, warp stalls | After `nsys` narrows to specific kernels |
+
+cuda-link's multi-stream topology (Sender `ipc_stream`, Receiver `_rx_stream`, Importer
+`_numpy_stream`, optional `_d2h_streams[1..n-1]`, cudart graph stream) means timeline-level
+visibility is required to diagnose interaction between streams. CPU-side `CUDALINK_EXPORT_PROFILE`
+timers capture aggregate latency but cannot show GPU-side serialisation. nsys shows both.
+
+---
+
+## 1. Setup
+
+### Install the `nvtx` package
+
+```bash
+pip install nvtx
+```
+
+Without this package the `CUDALINK_NVTX` env var is a no-op (the shim degrades silently).
+
+### Nsight tool locations on Windows
+
+Default after CUDA 12 install:
+
+```
+C:/Program Files/NVIDIA Corporation/Nsight Systems <version>/target-windows-x64/nsys.exe
+C:/Program Files/NVIDIA Corporation/Nsight Compute <version>/ncu.exe
+```
+
+Ensure both are on `PATH` before running the scripts:
+
+```powershell
+# In PowerShell
+$env:PATH += ";C:/Program Files/NVIDIA Corporation/Nsight Systems 2024.6.1/target-windows-x64"
+$env:PATH += ";C:/Program Files/NVIDIA Corporation/Nsight Compute 2024.3.2"
+```
+
+### Clock control on WDDM
+
+WDDM (Windows Display Driver Model) does **not** support `nvidia-smi -pm 1` persistent mode.
+All runner scripts use `--clock-control base` instead, which tells ncu to use the boost clock
+without locking it. Results are comparable across runs on the same machine but may vary more
+than on bare-metal Linux. Do not attempt `nvidia-smi -ac` on WDDM — it has no effect and
+masks the issue.
+
+---
+
+## 2. Workflow
+
+### Step 1 — Correctness gate
+
+```powershell
+./scripts/profiling/run_compute_sanitizer.ps1
+# expect: exit 0, no memcheck violations
+# output: benchmarks/results/sanitizer/_latest/memcheck.log
+```
+
+Fix any violations before proceeding. CUDA IPC uses cross-process device pointers; a single
+out-of-bounds write can corrupt another process's GPU allocation without triggering a page fault.
+
+### Step 2 — System timeline
+
+```powershell
+$env:CUDALINK_NVTX = "1"
+$env:CUDALINK_NVTX_VERBOSE = "1"
+./scripts/profiling/run_nsys.ps1
+# output: benchmarks/results/nsys/_latest/run.nsys-rep
+#         benchmarks/results/nsys/_latest/analyze.txt (anti-pattern report)
+```
+
+Open the report:
+
+```powershell
+nsys-ui benchmarks/results/nsys/_latest/run.nsys-rep
+```
+
+**What to look for:**
+- NVTX ranges aligned with CUDA kernel activity on the correct stream
+- No unexpected serialisation between `ipc_stream` and `_rx_stream` in the steady state
+- `cudalink.sender.export_frame.*` and `cudalink.receiver.import_frame.*` do not overlap when
+  `CUDALINK_TD_STREAM_PRIO=normal` and `CUDALINK_TD_PERSIST_STREAM=1` (see §4 below)
+
+### Step 3 — Kernel deep dive
+
+```powershell
+./scripts/profiling/run_ncu.ps1          # Sender export path
+./scripts/profiling/run_ncu_receiver.ps1 # Receiver import path
+# output: benchmarks/results/ncu/_latest/sender.ncu-rep
+#         benchmarks/results/ncu/_latest/receiver.ncu-rep
+```
+
+Open in the Nsight Compute GUI:
+
+```powershell
+ncu-ui benchmarks/results/ncu/_latest/sender.ncu-rep
+```
+
+Check the **Speed-of-Light** roofline: the IPC D2D `memcpy_async` should be memory-bandwidth
+bound (~90%+ of HBM/GDDR bandwidth on typical payloads). If SOL is unexpectedly low, check
+for coalescing issues in **Memory Workload Analysis → Sectors/Request**.
+
+---
+
+## 3. NVTX Annotation Taxonomy
+
+All ranges are emitted at the **Python process** level (shim: `src/cuda_link/_nvtx.py`) and
+at the **TouchDesigner COMP** level (shim: `td_exporter/NVTXShim.py`). Both shims read
+`CUDALINK_NVTX` and `CUDALINK_NVTX_VERBOSE` once at import; zero overhead when unset.
+
+| Phase | Top-level range | Sub-ranges (verbose only) | Color |
+|---|---|---|---|
+| TD Sender export | `cudalink.sender.export_frame.slot<N>` | `cudalink.sender.memcpy`, `cudalink.sender.record_event` | green |
+| Python Exporter | `cudalink.exporter.slot<N>` | `cudalink.exporter.memcpy`, `cudalink.exporter.record_event`, `cudalink.exporter.flush_probe`, `cudalink.exporter.shm_write` | green |
+| TD Receiver import | `cudalink.receiver.import_frame.slot<N>` | `cudalink.receiver.event_wait` | blue |
+| Python Importer GPU | `cudalink.importer.get_frame.slot<N>` | `cudalink.importer.event_wait` | purple |
+| Python Importer numpy | `cudalink.importer.get_frame_numpy.slot<N>` | `cudalink.importer.event_wait`, `cudalink.importer.d2h_copy` | orange |
+
+**Slot identity, not frame number** — slot count is bounded (1–3), frame count is unbounded.
+This keeps the `nsys stats` symbol table compact and timeline labels readable.
+
+**Sub-ranges** appear only when `CUDALINK_NVTX_VERBOSE=1`. They nest inside the top-level range
+for the same phase and are safe to enable in profiling sessions but add Python overhead per
+context manager; disable for production.
+
+### Cross-process timeline
+
+`bench_sweep.py` spawns producer and consumer as separate processes. nsys produces one
+`.nsys-rep` per process (they share wall-clock). In nsys-ui tile the two reports to align
+their timelines:
+
+```
+File → Open → run.nsys-rep        (producer/TD process)
+File → Open in Same Window → run_1.nsys-rep  (consumer process)
+```
+
+The four NVTX phases (sender, exporter, receiver, importer) should interleave on alternating
+stream lanes, not stack vertically (which would indicate stream priority contention).
+
+---
+
+## 4. Multi-Stream Topology and Load-Bearing Flags
+
+Two env flags are required for stable concurrent topology. They were discovered by subtractive
+probing (see `SESSION_LOG.md` Phase 3.6 for the full timeline).
+
+### Correct topology (flags set)
+
+```
+SET CUDALINK_TD_STREAM_PRIO=normal
+SET CUDALINK_TD_PERSIST_STREAM=1
+```
+
+On the nsys timeline, the Sender export stream (`ipc_stream`) and Receiver import stream
+(`_rx_stream`) run concurrently on separate GPU SM lanes. `cudalink.sender.export_frame.*`
+and `cudalink.receiver.import_frame.*` NVTX ranges run in parallel without head-of-line
+blocking. Post-settle latency stabilises within 3 frames.
+
+### Regression signature (flags wrong)
+
+```
+SET CUDALINK_TD_STREAM_PRIO=high
+SET CUDALINK_TD_PERSIST_STREAM=0
+```
+
+On the nsys timeline you will see:
+
+1. `ipc_stream` and `_rx_stream` CUDA kernels stacking vertically (single SM lane, serialised)
+   — symptom of high-priority contention accumulation across WDDM scheduling epochs.
+2. A multi-second gap after Receiver reactivation before `cudalink.receiver.import_frame.*`
+   resumes — symptom of cold submission queue stalls from `PERSIST_STREAM=0` (stream
+   destroyed/recreated on each deactivate/activate cycle while Sender is in flight).
+3. CPU-side `CUDALINK_EXPORT_PROFILE` shows `post=` latency growing monotonically across
+   reactivation cycles (non-recovering). This is the same pattern as the Phase 3.6
+   Step-C cycle-3 shutdown.
+
+This deliberate regression is useful for validating that the NVTX instrumentation can see
+the failure mode that motivated this work.
+
+---
+
+## 5. WDDM-Specific Caveats
+
+### TDR risk during ncu sessions
+
+Nsight Compute replays kernels multiple times for counter collection. On WDDM, long replay
+sessions can starve the display driver and trigger a TDR (Timeout Detection and Recovery)
+reset. Mitigations already baked into the runner scripts:
+
+- `--launch-count 5` — bounds the number of kernels replayed per invocation
+- `--launch-skip 5` — skips warmup kernels
+- `--replay-mode kernel` — **required**: replays one kernel at a time rather than re-executing
+  the full CUDA Graph (range/application replay would re-launch the graph and corrupt IPC state
+  across the producer/consumer boundary)
+
+If ncu still TDRs, reduce `--launch-count` to 2 or 3 in the script.
+
+### `cudart64_12.dll` preference
+
+cuda-link auto-detects the CUDA runtime DLL. Never hard-code a DLL path or force a version via
+`PATH` reordering — this broke compatibility with CUDA 11.x in a prior incident. Trust the
+detection logic in `CUDAIPCWrapper.py`.
+
+### CUPTI single-subscriber rule
+
+CUPTI (the profiling API used by both nsys and ncu) allows only **one subscriber per process**.
+If a downstream consumer script imports `torch.profiler` and leaves it active, running nsys or
+ncu against that process will produce incomplete traces or CUPTI errors. Stop `torch.profiler`
+before attaching Nsight tools. This applies even though cuda-link itself does not use PyTorch —
+the constraint is per-process, not per-library.
+
+---
+
+## 6. `CUDALINK_EXPORT_PROFILE` ↔ NVTX: What Each Measures
+
+Both instruments coexist. They are complementary, not duplicates.
+
+| Dimension | `CUDALINK_EXPORT_PROFILE` (CPU timers) | NVTX (GPU timeline) |
+|---|---|---|
+| **Enable** | `SET CUDALINK_EXPORT_PROFILE=1` | `SET CUDALINK_NVTX=1` |
+| **What it measures** | CPU-side elapsed time per `export_frame()` sub-operation (enqueue cost only — async ops record enqueue latency, not GPU execution time) | GPU kernel launch and completion on the nsys/ncu timeline (actual GPU work duration) |
+| **Granularity** | Rolling average logged every 97 frames to Python logger | Per-call range visible in nsys-ui |
+| **Cross-process** | Per-process only | Both processes visible in tiled nsys-ui |
+| **When to trust** | `memcpy=`, `record=`, `shm=` for diagnosing CPU scheduling jitter and SHM write latency | GPU-side for diagnosing stream contention, PCIe saturation, kernel occupancy |
+
+**Key bridging rule**: if `EXPORT_PROFILE` shows `memcpy=40µs` but the nsys GPU timeline shows
+the D2D copy taking 200µs, the gap is CPU-GPU enqueue latency (WDDM batch submission delay).
+This is normal on WDDM. The nsys timeline is ground truth for actual GPU execution time.
+
+If `EXPORT_PROFILE` shows `flush_probe=` growing across frames, it means `cudaStreamQuery`
+is blocking on an unsubmitted WDDM batch — the deferred-submission accumulation that F8
+(`PERSIST_STREAM=1`) was designed to prevent during reactivation. Correlate with the nsys
+timeline: if the Sender stream shows no GPU activity during that window, the batch was buffered
+by WDDM and `flush_probe` is flushing it.

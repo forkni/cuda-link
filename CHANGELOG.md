@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- NVTX annotations on Sender/Receiver/Exporter/Importer phase boundaries
+  (env-gated via `CUDALINK_NVTX=1` / `CUDALINK_NVTX_VERBOSE=1`; zero cost when off).
+- `scripts/profiling/` — runner scripts for compute-sanitizer, nsys, and ncu
+  (Windows `.ps1` + POSIX `.sh` parity).
+- `docs/PROFILING.md` — operational guide for Nsight workflow,
+  WDDM caveats, and `EXPORT_PROFILE` ↔ NVTX bridging.
+
 ## [1.2.0] — 2026-05-07
 
 ### Changed
