@@ -162,10 +162,22 @@ class CUDAIPCExtension:
         return self._engine.initialize(width, height, channels, buffer_size)
 
     def export_frame(self, top_op: TOP | None = None) -> bool:
+        if self._mode != "Sender":
+            return False
         return self._engine.export_frame(top_op)
 
     def import_frame(self, import_buffer: TOP) -> bool:
+        if self._mode != "Receiver":
+            return False
         return self._engine.import_frame(import_buffer)
+
+    def _check_deferred_cleanup(self) -> None:
+        if self._mode == "Sender":
+            self._engine._check_deferred_cleanup()
+
+    def update_receiver_resolution(self, import_buffer: TOP) -> None:
+        if self._mode == "Receiver":
+            self._engine.update_receiver_resolution(import_buffer)
 
     def initialize_receiver(self) -> bool:
         """Delegate to receiver engine's initialize_receiver() (backward compat)."""

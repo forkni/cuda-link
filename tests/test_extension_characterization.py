@@ -538,3 +538,54 @@ def test_is_ready_false_before_init() -> None:
         owner = _COMP(Mode=mode, Ipcmemname="x", Numslots=3, Active=True)
         ext = CUDAIPCExtension(owner)
         assert not ext.is_ready(), f"is_ready() should be False before init in {mode} mode"
+
+
+# ---------------------------------------------------------------------------
+# Facade mode-gating — regression tests for bug #1 / #2 / #3
+# ---------------------------------------------------------------------------
+
+
+def test_check_deferred_cleanup_no_attr_error_in_sender_mode() -> None:
+    """_check_deferred_cleanup() must not raise AttributeError when in Sender mode (bug #1)."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    owner = _make_sender_comp("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(owner)
+    assert ext.mode == "Sender"
+    ext._check_deferred_cleanup()  # must not raise
+
+
+def test_import_frame_returns_false_in_sender_mode() -> None:
+    """import_frame() in Sender mode must return False, not crash (bug #2)."""
+    from unittest.mock import MagicMock
+
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    owner = _make_sender_comp("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(owner)
+    assert ext.mode == "Sender"
+    result = ext.import_frame(MagicMock())
+    assert result is False
+
+
+def test_update_receiver_resolution_no_attr_error_in_receiver_mode() -> None:
+    """update_receiver_resolution() must not raise AttributeError when in Receiver mode (bug #3)."""
+    from unittest.mock import MagicMock
+
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm", Numslots=3, Active=True)
+    ext = CUDAIPCExtension(owner)
+    assert ext.mode == "Receiver"
+    ext.update_receiver_resolution(MagicMock())  # must not raise
+
+
+def test_export_frame_returns_false_in_receiver_mode() -> None:
+    """export_frame() in Receiver mode must return False, not crash."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm", Numslots=3, Active=True)
+    ext = CUDAIPCExtension(owner)
+    assert ext.mode == "Receiver"
+    result = ext.export_frame()
+    assert result is False
