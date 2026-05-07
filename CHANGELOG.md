@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-07
+
 ### Changed
 
 - **TD extension refactored into facade + engine split** (`CUDAIPCExtension.py` → ~300 LOC facade;
@@ -27,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`docs/ARCHITECTURE.md`** and **`README.md`** Architecture section updated to document the
   facade-with-delegation layout and TDHost seam.
 - **`CONTEXT.md`** created at repo root with canonical vocabulary for the new architecture.
+
+### Fixed
+
+- **Facade mode-gating** — `CUDAIPCExtension.import_frame()` / `export_frame()` now
+  return `False` when called in the wrong mode instead of dispatching to an engine that
+  lacks the method. Added `_check_deferred_cleanup()` and `update_receiver_resolution()`
+  delegations so `callbacks_template.py` / `script_top_callbacks.py` continue to work
+  without modification after the engine split. (`td_exporter/CUDAIPCExtension.py`)
 
 ## [1.1.0] — 2026-05-06
 
