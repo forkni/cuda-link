@@ -46,6 +46,7 @@ from ActivationBarrier import (  # noqa: E402, I001
     open_or_create as _ab_open_or_create,
 )
 from TDHost import RealTDHost, RealTOPHandle, TDHost  # noqa: E402
+from TDConfig import TDSenderConfig  # noqa: E402
 from CUDAIPCWrapper import (  # noqa: E402, F401
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
@@ -128,16 +129,24 @@ class CUDAIPCExtension:
     - Zero CPU memory copies (GPU-direct)
     """
 
-    def __init__(self, ownerComp: COMP, host: TDHost | None = None) -> None:
+    def __init__(
+        self,
+        ownerComp: COMP,
+        host: TDHost | None = None,
+        config: TDSenderConfig | None = None,
+    ) -> None:
         """Initialize CUDA IPC extension (Sender or Receiver mode).
 
         Args:
             ownerComp: The component that owns this extension
             host: Optional TDHost adapter (constructed from ownerComp if None).
                   Pass a FakeTDHost in tests to avoid touching the TD runtime.
+            config: Optional frozen sender config (built from env if None).
+                    Pass a TDSenderConfig(...) in tests to pin specific toggles.
         """
         self.ownerComp = ownerComp
         self._host: TDHost = host if host is not None else RealTDHost(ownerComp)
+        self._config: TDSenderConfig = config if config is not None else TDSenderConfig.from_env()
 
         # Determine mode from parameter
         _mode_val = self._host.param_value("Mode")
@@ -204,63 +213,23 @@ class CUDAIPCExtension:
         # Conditional synchronization (CPU fallback)
         self.sync_interval = 10  # Sync every N frames (reduces GPU sync overhead)
 
-        # CUDALINK_EXPORT_SYNC: block CPU on ipc_stream after each export_frame().
-        # Default on (Phase 3.6 — load-bearing for concurrent topologies; prevents
-        # cycle-2 TDR cascade). Measured cost when on: ~295 µs/frame dead CPU wait
-        # (A/B/C diagnostic, SESSION_LOG 2026-04-23; Handbook p3/pg56). Set to "0" to
-        # opt out for low-latency single-producer scenarios. Mirrors Python lib default "1".
-        self._export_sync: bool = os.environ.get("CUDALINK_EXPORT_SYNC", "1") != "0"
-        # CUDALINK_EXPORT_PROFILE=1: enables fine-grained per-region sub-timers in export_frame.
-        # Zero overhead when unset (single predicted-false branch per region).
-        self._export_profile: bool = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
-        # CUDALINK_EXPORT_FLUSH_PROBE: calls cudaStreamQuery after check_sticky_error when
-        # _export_sync=False. Per CUDA Handbook p3/pg56, this forces WDDM-deferred commands
-        # to submit without CPU blocking. Default ON per Phase 3 decision (2026-05-04):
-        # measured ~12 µs/frame cost on RTX 30/40, collapses Windows Task Manager's
-        # 3D-engine reading from ~65% to ~7% on rigs where WDDM defers submissions.
-        # NVML true compute load is unchanged. Set to "0" to disable.
-        self._export_flush_probe: bool = os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1"
-
-        # CUDALINK_TD_USE_GRAPHS=1: capture export_frame's D2D memcpy_async into a 1-node
-        # CUDA Graph and replay via graph_launch.  Same mechanism as the Python-side
-        # CUDALINK_USE_GRAPHS, but gated independently because TD ships cudart64_110.dll
-        # and cudaGraphInstantiateWithFlags + EventRecordNodeSetEvent require CUDA 11.4+.
-        # Disabled by default pending TD-side soak; flip to "1" once validated.
-        # Falls back automatically if capture/launch fails or runtime version is < CUDART_GRAPHS_MIN_VERSION.
-        self._use_graphs: bool = os.environ.get("CUDALINK_TD_USE_GRAPHS", "0") == "1"
+        # All boolean/int toggles are now read from self._config (TDSenderConfig).
+        # See TDConfig.py for env var names, defaults, and interaction-matrix notes.
+        self._export_sync: bool = self._config.export_sync
+        self._export_profile: bool = self._config.export_profile
+        self._export_flush_probe: bool = self._config.export_flush_probe
+        self._use_graphs: bool = self._config.use_graphs
         self._graphs_disabled: bool = False
         self._graph_execs: list = [None] * self.num_slots
         self._graph_templates: list = [None] * self.num_slots
         self._graph_memcpy_nodes: list = [None] * self.num_slots
-
-        # Phase 3.5 diagnostic knobs — env-gated.
-        # CUDALINK_TD_STREAM_PRIO: CUDA stream priority for the IPC stream.
-        # Default normal (Phase 4.1 — in single-pair only one stream exists per process so
-        # priority is moot; in concurrent, high/high contention accumulates across reactivation
-        # cycles and produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed).
-        # Set to "high" for explicit single-pair lowest-latency (measured difference is small).
-        self._stream_high_prio: bool = os.environ.get("CUDALINK_TD_STREAM_PRIO", "normal") == "high"
-        # CUDALINK_TD_INIT_PACE=1: sync+sleep at 3 checkpoints inside initialize() to spread
-        # the WDDM submission burst over ~60 ms. (Opt-in; not part of the validated default stack.)
-        self._init_pace: bool = os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1"
-        # CUDALINK_TD_GRAPHS_DEFERRED=1: defer _build_export_graphs() from initialize() to
-        # the first export_frame() call after frame_count >= 30, so graph capture doesn't overlap Sender-B's cold-start init burst.
+        self._stream_high_prio: bool = self._config.stream_high_prio
+        self._init_pace: bool = self._config.init_pace
         self._graphs_pending: bool = False
-        self._graphs_deferred: bool = os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1"
-        # CUDALINK_TD_PERSIST_STREAM: skip stream_destroy in cleanup() so the IPC stream
-        # survives deactivate/reactivate cycles. initialize() already has the
-        # `if self.ipc_stream is None` guard, so no further change is needed there.
-        # Default on (Phase 3.6 — load-bearing for concurrent; free in single-pair since
-        # no deactivate→reactivate cycle ever destroys the stream). Set to "0" to opt out.
-        self._persist_stream: bool = os.environ.get("CUDALINK_TD_PERSIST_STREAM", "1") != "0"
-        # CUDALINK_TD_ACTIVATION_BARRIER: increment cross-process activation counter
-        # in cudalink_activation_barrier SHM around Sender init so the Python producer skips
-        # pushes during the WDDM-saturating init burst. Decrement happens in export_frame()
-        # after _barrier_settle_frames warm frames have elapsed (default 30).
-        # Default on (Phase 3.6 — no-op when SHM counter stays at 0 in single-pair;
-        # gracefully skipped if SHM is missing). Set to "0" to opt out.
-        self._activation_barrier: bool = os.environ.get("CUDALINK_TD_ACTIVATION_BARRIER", "1") != "0"
-        self._barrier_settle_frames: int = int(os.environ.get("CUDALINK_TD_BARRIER_SETTLE_FRAMES", "30"))
+        self._graphs_deferred: bool = self._config.graphs_deferred
+        self._persist_stream: bool = self._config.persist_stream
+        self._activation_barrier: bool = self._config.activation_barrier
+        self._barrier_settle_frames: int = self._config.barrier_settle_frames
         self._barrier_settle_remaining: int = 0
         self._barrier_held: bool = False
         self._barrier_shm: object = None  # SharedMemory handle, opened in initialize()
@@ -621,7 +590,7 @@ class CUDAIPCExtension:
                     )
                     self._graphs_disabled = True
 
-            if NVML_AVAILABLE and os.environ.get("CUDALINK_NVML", "0") == "1":
+            if NVML_AVAILABLE and self._config.nvml:
                 obs = NVMLObserver(device=self.device, enabled=True)
                 if obs.start():
                     self._nvml_observer = obs
