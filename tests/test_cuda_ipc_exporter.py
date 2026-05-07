@@ -349,18 +349,19 @@ def test_log_helper() -> None:
 
 
 def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
-    """Build a CUDAIPCExtension (Receiver) with manually-injected float16 state.
+    """Build a TDReceiverEngine with manually-injected float16 state.
 
     Bypasses real CUDA/CuPy initialization to test routing logic only.
+    Returns a TDReceiverEngine directly (no facade needed for unit tests).
     """
     import struct
     from unittest.mock import MagicMock, patch
 
     import numpy as np
+    from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE
 
-    # Patch Mode parameter before construction so __init__ thinks it's Receiver
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", use_cupy):
-        from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExtension
+    with patch("TDReceiver.CUPY_AVAILABLE", use_cupy):
+        from TDReceiver import TDReceiverEngine
 
     HEIGHT, WIDTH, COMPS = 4, 4, 4
     NUM_SLOTS = 2
@@ -374,60 +375,65 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     struct.pack_into("<I", buf, 12, NUM_SLOTS)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1
 
-    ext = object.__new__(CUDAIPCExtension)
-    ext.ownerComp = MagicMock()
-    # _host replaces _active_par (Phase 1 TDHost refactor)
-    ext._host = MagicMock()
-    ext._host.is_active.return_value = True
-    ext.verbose_performance = False
-    ext._initialized = True
-    ext._mode = "Receiver"
-    ext.frame_count = 0
-    ext._rx_last_write_idx = 0
-    ext._rx_ipc_version = 1
-    ext._rx_num_slots = NUM_SLOTS
-    ext._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
-    ext._rx_width = WIDTH
-    ext._rx_height = HEIGHT
-    ext._rx_num_comps = COMPS
-    ext._rx_format_kind = FORMAT_KIND_FLOAT
-    ext._rx_bits_per_comp = 16
-    ext._rx_flags = 0
-    ext._rx_buffer_size = F16_SIZE
-    ext._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
-    ext._rx_dev_ptrs[0].value = 0xDEAD0000  # fake GPU ptr for slot 0
-    ext._rx_ipc_events = [MagicMock(), MagicMock()]
-    ext._rx_stream = MagicMock()
-    ext._rx_stream.value = 0x1234
+    fake_host = MagicMock()
+    fake_host.is_active.return_value = True
+    from TDConfig import TDSenderConfig
 
-    # CPU fallback buffers (always allocated even in CuPy path — used as fallback)
-    ext._rx_f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
-    ext._rx_f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-    ext._rx_f16_pinned_ptr = None
+    engine = TDReceiverEngine(
+        host=fake_host,
+        config=TDSenderConfig(),
+        cuda=MagicMock(),
+        log_fn=lambda msg, force=False: None,
+        num_slots=NUM_SLOTS,
+        device=0,
+        shm_name="test_shm",
+        verbose=False,
+    )
 
-    # CUDAMemoryShape mock (shape for copyCUDAMemory)
+    # Inject state directly (bypasses real CUDA)
+    engine._initialized = True
+    engine.frame_count = 0
+    engine._rx_last_write_idx = 0
+    engine._rx_ipc_version = 1
+    engine._rx_num_slots = NUM_SLOTS
+    engine._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
+    engine._rx_width = WIDTH
+    engine._rx_height = HEIGHT
+    engine._rx_num_comps = COMPS
+    engine._rx_format_kind = FORMAT_KIND_FLOAT
+    engine._rx_bits_per_comp = 16
+    engine._rx_flags = 0
+    engine._rx_buffer_size = F16_SIZE
+    engine._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
+    engine._rx_dev_ptrs[0].value = 0xDEAD0000
+    engine._rx_ipc_events = [MagicMock(), MagicMock()]
+    engine._rx_stream = MagicMock()
+    engine._rx_stream.value = 0x1234
+
+    engine._rx_f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
+    engine._rx_f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+    engine._rx_f16_pinned_ptr = None
+
     mock_shape = MagicMock()
-    ext._rx_cached_shape = mock_shape
+    engine._rx_cached_shape = mock_shape
 
-    ext.cuda = MagicMock()
-    ext.shm_handle = MagicMock()
-    ext.shm_handle.buf = buf
+    engine.shm_handle = MagicMock()
+    engine.shm_handle.buf = buf
 
-    # CuPy GPU buffer (only if CuPy path is being tested)
     from unittest.mock import MagicMock as _MagicMock
 
     if use_cupy:
-        ext._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-        ext._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
+        engine._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+        engine._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
     else:
-        ext._rx_cupy_f32_buf = None
-        ext._rx_cupy_f16_views = []
+        engine._rx_cupy_f32_buf = None
+        engine._rx_cupy_f16_views = []
 
-    ext._rx_frames_since_last_retry = 0
-    ext._rx_connect_attempts = 0
-    ext._diag_frames_since_reinit = 999  # > 5 → suppress DIAG branch (init seeds 0; reset at CUDAIPCExtension.py:1933)
+    engine._rx_frames_since_last_retry = 0
+    engine._rx_connect_attempts = 0
+    engine._diag_frames_since_reinit = 999
 
-    return ext
+    return engine
 
 
 def test_float16_receiver_uses_cpu_fallback_when_cupy_unavailable() -> None:
@@ -438,7 +444,7 @@ def test_float16_receiver_uses_cpu_fallback_when_cupy_unavailable() -> None:
 
     import_buffer = MagicMock()
 
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", False):
+    with patch("TDReceiver.CUPY_AVAILABLE", False):
         result = ext.import_frame(import_buffer)
 
     assert result is True
@@ -467,7 +473,7 @@ def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
     ext._rx_cupy_f32_buf = MagicMock()
     ext._rx_cupy_f32_buf.data.ptr = 0xF3200000
 
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", True), patch("CUDAIPCExtension.cp", mock_cp):
+    with patch("TDReceiver.CUPY_AVAILABLE", True), patch("TDReceiver.cp", mock_cp):
         result = ext.import_frame(import_buffer)
 
     assert result is True

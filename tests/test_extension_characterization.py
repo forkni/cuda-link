@@ -371,8 +371,11 @@ def test_switch_mode_sender_to_receiver_no_shm_leak(
     assert not ext._initialized, "_initialized must be False after mode switch"
     assert ext.shm_handle is None, "shm_handle must be None after mode switch"
     assert ext.dev_ptrs == [], "dev_ptrs must be empty after Sender cleanup"
-    # _graph_execs: no graphs were built (USE_GRAPHS=0 default), so all entries are None
-    assert all(g is None for g in ext._graph_execs), "no dangling graph execs after mode switch"
+    # After mode switch the old sender engine is discarded; engine is now TDReceiverEngine
+    from TDReceiver import TDReceiverEngine
+
+    assert isinstance(ext._engine, TDReceiverEngine), "engine must be receiver after mode switch"
+    assert not hasattr(ext._engine, "_graph_execs"), "no dangling graph execs on receiver engine"
 
 
 def test_switch_mode_receiver_to_sender_resets_rx_state() -> None:
@@ -391,20 +394,23 @@ def test_switch_mode_receiver_to_sender_resets_rx_state() -> None:
 
     assert ext.mode == "Receiver"
 
-    # Manually poke some receiver state to verify it is erased
-    ext._rx_dev_ptrs = ["fake_ptr"] * 3
-    ext._rx_width = 1920
-    ext._rx_height = 1080
+    # Poke state directly on the engine (facade properties are read-only for rx state)
+    ext._engine._rx_width = 1920
+    ext._engine._rx_height = 1080
 
     ext.switch_mode("Sender")
 
     assert ext.mode == "Sender"
+    # After engine replacement receiver state is gone (new sender engine has no _rx_* attrs)
+    assert ext._rx_width == 0, "_rx_width must reset after switch to Sender"
+    assert ext._rx_height == 0, "_rx_height must reset after switch to Sender"
     # Sender arrays sized to num_slots
+    from TDSender import TDSenderEngine
+
+    assert isinstance(ext._engine, TDSenderEngine), "engine must be sender after mode switch"
     assert len(ext.dev_ptrs) == 3
     assert all(p is None for p in ext.dev_ptrs)
     assert len(ext.ipc_handles) == 3
-    assert len(ext.ipc_events) == 3
-    assert len(ext._graph_execs) == 3
 
 
 def test_switch_mode_noop_same_mode() -> None:
