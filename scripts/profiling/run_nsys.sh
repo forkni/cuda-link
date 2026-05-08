@@ -18,7 +18,7 @@ export CUDALINK_NVTX_VERBOSE=1
 echo "==> nsys profile → $out/run.nsys-rep"
 
 nsys profile \
-    --trace=cuda,nvtx,osrt \
+    --trace=cuda,nvtx \
     --output "$out/run" \
     python benchmarks/bench_sweep.py --quick
 

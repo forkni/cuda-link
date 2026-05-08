@@ -20,7 +20,10 @@ $env:CUDALINK_NVTX = "1"
 $env:CUDALINK_NVTX_VERBOSE = "1"
 
 nsys profile `
-    --trace=cuda,nvtx,osrt `
+    --trace=cuda,nvtx,wddm `
+    --wddm-memory-trace=false `
+    --wddm-additional-events=true `
+    --wddm-backtraces=true `
     --output "$out/run" `
     python benchmarks/bench_sweep.py --quick
 
