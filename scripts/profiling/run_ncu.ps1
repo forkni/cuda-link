@@ -33,6 +33,8 @@ Write-Host "==> ncu (sender path) → $out/sender.ncu-rep  [$sectionFlag $sectio
 ncu `
     $sectionFlag $sectionVal `
     --clock-control base `
+    --cache-control all `
+    --import-source yes `
     --launch-skip 5 --launch-count 5 `
     --replay-mode kernel `
     --target-processes all `

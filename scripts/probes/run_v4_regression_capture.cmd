@@ -175,6 +175,13 @@ IF %ERRORLEVEL% NEQ 0 (
     EXIT /B %ERRORLEVEL%
 )
 
+:: --- export nsys stats CSVs (mirrors v2/v3 directory layout) -------------------
+ECHO.
+ECHO [INFO] Exporting nsys stats CSVs...
+SET "STAT_REPORTS=nvtx_sum,cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_size_sum,cuda_gpu_mem_time_sum,wddm_queue_sum"
+nsys stats --format csv --report %STAT_REPORTS% --output "%PROD_OUT%\producer" "%PROD_OUT%\producer.nsys-rep"
+nsys stats --format csv --report %STAT_REPORTS% --output "%CONS_OUT%\td_consumer" "%CONS_OUT%\td_consumer.nsys-rep"
+
 ECHO.
 ECHO ============================================================
 ECHO  Analysis complete.
