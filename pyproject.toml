@@ -43,6 +43,7 @@ dev = [
     "mypy",
     "snoop>=0.4",
     "py-heat>=0.0.6",
+    "nvtx>=0.2",
 ]
 
 [project.urls]
