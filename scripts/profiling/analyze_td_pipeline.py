@@ -328,6 +328,37 @@ def compute_bw_gbps(total_bytes: int, total_ns: int) -> float:
 
 
 def main() -> None:
+    import argparse as _ap
+
+    global PROD_DB, CONS_DB, E2E_CSV, FINDINGS_MD
+    _p = _ap.ArgumentParser(description="Cross-process TD pipeline nsys analysis.")
+    _p.add_argument(
+        "--prod-db",
+        metavar="PATH",
+        default=str(PROD_DB),
+        help="Producer nsys SQLite (default: td_pipeline_v3_producer/producer.sqlite)",
+    )
+    _p.add_argument(
+        "--cons-db",
+        metavar="PATH",
+        default=str(CONS_DB),
+        help="Consumer nsys SQLite (default: td_pipeline_v3_consumer/td_consumer.sqlite)",
+    )
+    _p.add_argument(
+        "--e2e-csv", metavar="PATH", default=str(E2E_CSV), help="Output E2E CSV (default: td_pipeline_e2e.csv)"
+    )
+    _p.add_argument(
+        "--findings-md",
+        metavar="PATH",
+        default=str(FINDINGS_MD),
+        help="Output findings Markdown (default: td_pipeline_findings.md)",
+    )
+    _args = _p.parse_args()
+    PROD_DB = Path(_args.prod_db)
+    CONS_DB = Path(_args.cons_db)
+    E2E_CSV = Path(_args.e2e_csv)
+    FINDINGS_MD = Path(_args.findings_md)
+
     print("Loading producer NVTX slot events ...")
     prod_slots = load_nvtx_slots(PROD_DB)
     print(f"  {len(prod_slots)} slot events found")

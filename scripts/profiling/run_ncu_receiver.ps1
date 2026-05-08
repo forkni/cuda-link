@@ -1,6 +1,15 @@
 #!/usr/bin/env pwsh
 # ncu kernel profiling — Receiver import path (SpeedOfLight + MemoryWorkloadAnalysis).
 # Variant of run_ncu.ps1 filtered to the receiver NVTX phase instead of the sender.
+#
+# Optional parameters:
+#   -Set <name>   Replace default --section with --set <name> (e.g. "full" for all counters).
+#                 Use with caution: --set full greatly increases replay time and TDR risk.
+#                 If TDRs occur, reduce --launch-count to 2 or 3.
+
+param(
+    [string]$Set = ""
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -11,10 +20,13 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $env:CUDALINK_NVTX = "1"
 
-Write-Host "==> ncu (receiver path) → $out/receiver.ncu-rep"
+$sectionFlag = if ($Set) { "--set" }     else { "--section" }
+$sectionVal  = if ($Set) { $Set }        else { "SpeedOfLight,MemoryWorkloadAnalysis" }
+
+Write-Host "==> ncu (receiver path) → $out/receiver.ncu-rep  [$sectionFlag $sectionVal]"
 
 ncu `
-    --section SpeedOfLight,MemoryWorkloadAnalysis `
+    $sectionFlag $sectionVal `
     --clock-control base `
     --launch-skip 5 --launch-count 5 `
     --replay-mode kernel `
