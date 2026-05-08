@@ -31,6 +31,8 @@ import traceback
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
+from . import _nvtx
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -758,19 +760,22 @@ class CUDAIPCImporter:
         if debug:
             wait_start = time.perf_counter()
 
-        if stream is not None:
-            # Stream-ordered wait (non-blocking to CPU)
-            cuda_stream = self._resolve_stream(stream)
-            if self.ipc_events[read_slot]:
-                self.cuda.stream_wait_event(cuda_stream, self.ipc_events[read_slot], 0)
-            # Note: No fallback sync needed - downstream GPU work will naturally wait on stream
-        else:
-            # Backward-compatible blocking wait
-            try:
-                self._wait_for_slot(read_slot)
-            except TimeoutError:
-                logger.error("Producer timeout — returning None")
-                return None
+        _nvtx.push_range(f"cudalink.importer.get_frame.slot{read_slot}", "purple")
+        with _nvtx.verbose_range("cudalink.importer.event_wait", "purple"):
+            if stream is not None:
+                # Stream-ordered wait (non-blocking to CPU)
+                cuda_stream = self._resolve_stream(stream)
+                if self.ipc_events[read_slot]:
+                    self.cuda.stream_wait_event(cuda_stream, self.ipc_events[read_slot], 0)
+                # Note: No fallback sync needed - downstream GPU work will naturally wait on stream
+            else:
+                # Backward-compatible blocking wait
+                try:
+                    self._wait_for_slot(read_slot)
+                except TimeoutError:
+                    logger.error("Producer timeout — returning None")
+                    _nvtx.pop_range()
+                    return None
 
         if debug:
             self.total_wait_event_time += (time.perf_counter() - wait_start) * 1_000_000
@@ -801,6 +806,7 @@ class CUDAIPCImporter:
                 )
 
         # Return tensor for this slot (zero-copy, no allocation)
+        _nvtx.pop_range()
         return self.tensors[read_slot]
 
     def get_frame_numpy(self) -> np.ndarray | None:
@@ -908,13 +914,16 @@ class CUDAIPCImporter:
         # the IPC event BEFORE publishing write_idx (improvement #2), so the event is always
         # pre-signaled when the consumer reads write_idx — query_event returns True on the
         # first call with no polling delay.
+        _nvtx.push_range(f"cudalink.importer.get_frame_numpy.slot{read_slot}", "orange")
         if debug:
             _wait_t = time.perf_counter()
-        try:
-            self._wait_for_slot(read_slot)
-        except TimeoutError:
-            logger.error("Producer timeout — returning None")
-            return None
+        with _nvtx.verbose_range("cudalink.importer.event_wait", "orange"):
+            try:
+                self._wait_for_slot(read_slot)
+            except TimeoutError:
+                logger.error("Producer timeout — returning None")
+                _nvtx.pop_range()
+                return None
         if debug:
             self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
 
@@ -926,39 +935,40 @@ class CUDAIPCImporter:
         # Single-stream (N=1): original behaviour — one cudaMemcpyAsync + stream_synchronize.
         if debug:
             _d2h_t = time.perf_counter()
-        n_streams = self._d2h_num_streams
-        if n_streams <= 1:
-            self.cuda.memcpy_async(
-                dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
-                src=self.dev_ptrs[read_slot],
-                count=nbytes,
-                kind=2,  # cudaMemcpyDeviceToHost
-                stream=self._numpy_stream,
-            )
-            self.cuda.stream_synchronize(self._numpy_stream)
-        else:
-            # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
-            chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
-            dst_base = self._numpy_buffer.ctypes.data
-            src_base = self.dev_ptrs[read_slot].value
-            issued = 0
-            for i in range(n_streams):
-                offset = i * chunk
-                size = min(chunk, nbytes - offset)
-                if size <= 0:
-                    break
+        with _nvtx.verbose_range("cudalink.importer.d2h_copy", "orange"):
+            n_streams = self._d2h_num_streams
+            if n_streams <= 1:
                 self.cuda.memcpy_async(
-                    dst=ctypes.c_void_p(dst_base + offset),
-                    src=ctypes.c_void_p(src_base + offset),
-                    count=size,
-                    kind=2,
-                    stream=self._d2h_streams[i],
+                    dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
+                    src=self.dev_ptrs[read_slot],
+                    count=nbytes,
+                    kind=2,  # cudaMemcpyDeviceToHost
+                    stream=self._numpy_stream,
                 )
-                self.cuda.record_event(self._d2h_events[i], stream=self._d2h_streams[i])
-                issued = i + 1
-            # Join: wait on each issued stream's event (CPU-blocking per event)
-            for i in range(issued):
-                self.cuda.wait_event(self._d2h_events[i])
+                self.cuda.stream_synchronize(self._numpy_stream)
+            else:
+                # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
+                chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
+                dst_base = self._numpy_buffer.ctypes.data
+                src_base = self.dev_ptrs[read_slot].value
+                issued = 0
+                for i in range(n_streams):
+                    offset = i * chunk
+                    size = min(chunk, nbytes - offset)
+                    if size <= 0:
+                        break
+                    self.cuda.memcpy_async(
+                        dst=ctypes.c_void_p(dst_base + offset),
+                        src=ctypes.c_void_p(src_base + offset),
+                        count=size,
+                        kind=2,
+                        stream=self._d2h_streams[i],
+                    )
+                    self.cuda.record_event(self._d2h_events[i], stream=self._d2h_streams[i])
+                    issued = i + 1
+                # Join: wait on each issued stream's event (CPU-blocking per event)
+                for i in range(issued):
+                    self.cuda.wait_event(self._d2h_events[i])
         self.cuda.check_sticky_error("get_frame_numpy")
         if debug:
             d2h_time = (time.perf_counter() - _d2h_t) * 1_000_000
@@ -983,6 +993,7 @@ class CUDAIPCImporter:
                 )
 
         # Return pre-allocated buffer (NOTE: caller must not hold reference across frames)
+        _nvtx.pop_range()
         return self._numpy_buffer
 
     def get_frame_cupy(self, stream: object | None = None) -> cp.ndarray | None:

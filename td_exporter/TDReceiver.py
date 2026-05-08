@@ -27,6 +27,9 @@ from CUDAIPCWrapper import (  # noqa: E402
     cudaIpcMemHandle_t,
     get_cuda_runtime,
 )
+from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
+from NVTXShim import push_range as _nvtx_push
+from NVTXShim import verbose_range as _nvtx_verbose
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import RealTOPHandle, TDHost  # noqa: E402
 
@@ -186,6 +189,9 @@ class TDReceiverEngine:
         # Wrap import_buffer for TOPHandle-style access (Phase 3 will pass handle directly)
         _ib = RealTOPHandle(import_buffer) if import_buffer is not None else None
 
+        _nvtx_push(
+            f"cudalink.receiver.import_frame.slot{(self._rx_last_write_idx) % max(self._rx_num_slots, 1)}", "blue"
+        )
         try:
             # Check for shutdown signal
             if self.shm_handle.buf[self._rx_shutdown_offset] == 1:
@@ -217,17 +223,18 @@ class TDReceiverEngine:
                 _t_event = time.perf_counter()
 
             # Wait on IPC event for this slot (stream-ordered, non-blocking to CPU)
-            if self._rx_ipc_events[read_slot]:
-                self.cuda.stream_wait_event(
-                    self._rx_stream,
-                    self._rx_ipc_events[read_slot],
-                    0,
-                )
-            else:
-                # Fallback when no IPC event: drain the stream now.
-                # Note: float16 path will call stream_synchronize again below, but
-                # synchronizing an already-idle stream is a no-op in CUDA.
-                self.cuda.stream_synchronize(self._rx_stream)
+            with _nvtx_verbose("cudalink.receiver.event_wait", "blue"):
+                if self._rx_ipc_events[read_slot]:
+                    self.cuda.stream_wait_event(
+                        self._rx_stream,
+                        self._rx_ipc_events[read_slot],
+                        0,
+                    )
+                else:
+                    # Fallback when no IPC event: drain the stream now.
+                    # Note: float16 path will call stream_synchronize again below, but
+                    # synchronizing an already-idle stream is a no-op in CUDA.
+                    self.cuda.stream_synchronize(self._rx_stream)
 
             if _diag:
                 _event_ms = (time.perf_counter() - _t_event) * 1000.0
@@ -311,6 +318,8 @@ class TDReceiverEngine:
 
             traceback.print_exc()
             return False
+        finally:
+            _nvtx_pop()
 
     def update_receiver_resolution(self, import_buffer: TOP) -> bool:
         """Update ImportBuffer resolution from outside the cook cycle.

@@ -33,6 +33,9 @@ from CUDAIPCWrapper import (  # noqa: E402
     get_cuda_runtime,
 )
 from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
+from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
+from NVTXShim import push_range as _nvtx_push
+from NVTXShim import verbose_range as _nvtx_verbose
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
@@ -683,6 +686,7 @@ class TDSenderEngine:
                 # record_event_time is only set in the ipc_events path; init here for the fallback
                 record_event_time = 0.0
 
+        _nvtx_push(f"cudalink.sender.export_frame.slot{self.write_idx % self.num_slots}", "green")
         try:
             # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
             # Always use a non-blocking stream (never None/default stream) for TD 2025 compat.
@@ -882,13 +886,14 @@ class TDSenderEngine:
                         stream=self.ipc_stream,
                     )
             else:
-                self.cuda.memcpy_async(
-                    dst=self.dev_ptrs[slot],
-                    src=c_void_p(cuda_mem.ptr),
-                    count=self.data_size,
-                    kind=3,  # cudaMemcpyDeviceToDevice
-                    stream=self.ipc_stream,
-                )
+                with _nvtx_verbose("cudalink.sender.memcpy", "green"):
+                    self.cuda.memcpy_async(
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(cuda_mem.ptr),
+                        count=self.data_size,
+                        kind=3,  # cudaMemcpyDeviceToDevice
+                        stream=self.ipc_stream,
+                    )
 
             if self.verbose_performance:
                 # Record GPU timing end event (actual GPU time measurement)
@@ -905,7 +910,8 @@ class TDSenderEngine:
                     record_start = time.perf_counter()
 
                 # Record event for this slot after async memcpy (stream-ordered)
-                self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                with _nvtx_verbose("cudalink.sender.record_event", "green"):
+                    self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
 
                 if self.verbose_performance:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
@@ -1083,6 +1089,8 @@ class TDSenderEngine:
 
             traceback.print_exc()
             return False
+        finally:
+            _nvtx_pop()
 
     def _check_deferred_cleanup(self) -> None:
         """Execute deferred GPU cleanup if scheduled and enough frames have passed.
