@@ -32,7 +32,7 @@ SET "CONS_OUT=%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_v4_consumer"
 IF NOT EXIST "%PROD_OUT%\producer.nsys-rep" (
     ECHO.
     ECHO [WARN] %PROD_OUT%\producer.nsys-rep not found.
-    ECHO        Was the V4-Producer window closed cleanly (Ctrl+C)?
+    ECHO        Was the V4-Producer window closed cleanly with Ctrl+C?
     EXIT /B 1
 )
 IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
@@ -43,12 +43,21 @@ IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
 )
 
 :: --- export SQLite (nsys 2026+ syntax) ----------------------------------------
+:: Skip if SQLite already exists -- nsys export exits 1 on existing files (no skip behaviour).
 ECHO.
-ECHO [INFO] Exporting SQLite (producer)...
-nsys export --type sqlite --output "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
+IF EXIST "%PROD_OUT%\producer.sqlite" (
+    ECHO [INFO] SQLite already exists for producer, skipping export.
+) ELSE (
+    ECHO [INFO] Exporting SQLite (producer^)...
+    nsys export --type sqlite --output "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
+)
 
-ECHO [INFO] Exporting SQLite (consumer)...
-nsys export --type sqlite --output "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
+IF EXIST "%CONS_OUT%\td_consumer.sqlite" (
+    ECHO [INFO] SQLite already exists for consumer, skipping export.
+) ELSE (
+    ECHO [INFO] Exporting SQLite (consumer^)...
+    nsys export --type sqlite --output "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
+)
 
 :: --- verify SQLite files exist ------------------------------------------------
 IF NOT EXIST "%PROD_OUT%\producer.sqlite" (

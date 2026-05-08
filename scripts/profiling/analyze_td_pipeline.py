@@ -268,21 +268,29 @@ def pair_events_by_slot(
     cons_slots: list[tuple[int, int, int]],
     overlap_start: int,
     overlap_end: int,
+    *,
+    clock_offset_reliable: bool = True,
 ) -> list[dict]:
     """Exact slot-index matching: for each consumer slot<N> event, find the nearest
     prior producer slot<N> event with the same index. Requires consumer NVTX.
+
+    When clock_offset_reliable=False the time-overlap gate and gap check are skipped
+    because the clock offset between the two sessions exceeds the capture window.
+    Slot-ID matching remains correct; handoff/e2e columns are omitted from the result
+    as they would be polluted by the offset. import_frame_us is consumer-internal and
+    always reliable regardless of the clock alignment.
     """
     from collections import defaultdict
 
-    # Group producer slots by index, skip warmup
+    # Group producer slots by index, skip warmup; skip overlap gate if clock unreliable
     prod_by_slot: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for i, (slot, s, e) in enumerate(prod_slots):
-        if i >= WARMUP_FRAMES and overlap_start <= s <= overlap_end:
+        if i >= WARMUP_FRAMES and (not clock_offset_reliable or overlap_start <= s <= overlap_end):
             prod_by_slot[slot].append((s, e))
 
     pairs = []
     for slot, cons_s, cons_e in cons_slots:
-        if not (overlap_start <= cons_s <= overlap_end):
+        if clock_offset_reliable and not (overlap_start <= cons_s <= overlap_end):
             continue
         candidates = prod_by_slot.get(slot, [])
         # Find nearest prior producer slot end
@@ -291,20 +299,20 @@ def pair_events_by_slot(
             continue
         prod_s, prod_e = max(prior, key=lambda x: x[1])
         gap_ns = cons_s - prod_e
-        if gap_ns > MAX_PAIR_GAP_NS:
+        if clock_offset_reliable and gap_ns > MAX_PAIR_GAP_NS:
             continue
-        pairs.append(
-            {
-                "slot": slot,
-                "prod_start_ns": prod_s,
-                "prod_end_ns": prod_e,
-                "cons_slot_start_ns": cons_s,
-                "cons_slot_end_ns": cons_e,
-                "handoff_latency_us": gap_ns / 1000.0,
-                "e2e_latency_us": (cons_s - prod_s) / 1000.0,
-                "import_frame_us": (cons_e - cons_s) / 1000.0,
-            }
-        )
+        pair: dict = {
+            "slot": slot,
+            "prod_start_ns": prod_s,
+            "prod_end_ns": prod_e,
+            "cons_slot_start_ns": cons_s,
+            "cons_slot_end_ns": cons_e,
+            "import_frame_us": (cons_e - cons_s) / 1000.0,
+        }
+        if clock_offset_reliable:
+            pair["handoff_latency_us"] = gap_ns / 1000.0
+            pair["e2e_latency_us"] = (cons_s - prod_s) / 1000.0
+        pairs.append(pair)
     pairs.sort(key=lambda p: p["prod_start_ns"])
     return pairs
 
@@ -411,10 +419,48 @@ def main() -> None:
     cons_nvtx_slots_adj = [(sl, s - clock_offset, e - clock_offset) for sl, s, e in cons_nvtx_slots]
     cons_nvtx_waits_adj = [(s - clock_offset, e - clock_offset) for s, e in cons_nvtx_waits]
 
+    # Determine whether the clock alignment is reliable (offset must fit within the capture window).
+    # When the two nsys sessions started more than a full capture-window apart, the adjusted
+    # consumer timestamps won't overlap the producer's, making handoff/e2e latencies meaningless.
+    _prod_dur_ns = prod_slots[-1][2] - prod_slots[0][1] if len(prod_slots) > 1 else 0
+    _cons_dur_ns = (
+        cons_nvtx_slots_adj[-1][2] - cons_nvtx_slots_adj[0][1]
+        if len(cons_nvtx_slots_adj) > 1
+        else (cons_waits[-1][1] - cons_waits[0][0] if len(cons_waits) > 1 else 0)
+    )
+    clock_offset_reliable = abs(clock_offset) <= max(_prod_dur_ns, _cons_dur_ns)
+    if not clock_offset_reliable:
+        print(
+            f"  WARNING: clock offset ({abs(clock_offset) / 1e9:.1f}s) exceeds capture window"
+            f" ({max(_prod_dur_ns, _cons_dur_ns) / 1e9:.1f}s); "
+            "handoff/e2e latencies will be omitted -- import_frame_us is still valid."
+        )
+
     print("\nPairing producer slots with consumer events ...")
     if cons_nvtx_slots_adj:
-        pairs = pair_events_by_slot(prod_slots, cons_nvtx_slots_adj, overlap_start, overlap_end)
-        print(f"  {len(pairs)} slot-matched pairs (exact slot index, warmup skipped)")
+        if clock_offset_reliable:
+            pairs = pair_events_by_slot(
+                prod_slots, cons_nvtx_slots_adj, overlap_start, overlap_end, clock_offset_reliable=True
+            )
+            print(f"  {len(pairs)} slot-matched pairs (exact slot index, warmup skipped)")
+        else:
+            # Clock offset exceeds capture window — adjusted consumer timestamps are meaningless
+            # for producer cross-reference. Emit consumer import_frame records directly so the
+            # CSV is populated with trustworthy import_frame_us data.
+            pairs = [
+                {
+                    "slot": slot,
+                    "cons_slot_start_ns": cons_s,
+                    "cons_slot_end_ns": cons_e,
+                    "import_frame_us": (cons_e - cons_s) / 1000.0,
+                }
+                for i, (slot, cons_s, cons_e) in enumerate(cons_nvtx_slots)
+                if i >= WARMUP_FRAMES
+            ]
+            pairs.sort(key=lambda p: p["cons_slot_start_ns"])
+            print(
+                f"  {len(pairs)} consumer-only records (clock unreliable, import_frame_us only -- no producer cross-ref)"
+            )
     else:
         pairs = pair_events(prod_slots, cons_waits, overlap_start, overlap_end)
         print(f"  {len(pairs)} matched pairs (nearest-prior, warmup skipped, gap < {MAX_PAIR_GAP_NS / 1e6:.0f} ms)")
@@ -431,8 +477,8 @@ def main() -> None:
     cons_d2a_bytes = sum(b for _, _, b in cons_memcpy)
     cons_d2a_ns = sum(e - s for s, e, _ in cons_memcpy)
 
-    handoff_us = [p["handoff_latency_us"] for p in pairs]
-    e2e_us = [p["e2e_latency_us"] for p in pairs]
+    handoff_us = [p["handoff_latency_us"] for p in pairs if "handoff_latency_us" in p]
+    e2e_us = [p["e2e_latency_us"] for p in pairs if "e2e_latency_us" in p]
     event_wait_us_nvtx = [(e - s) / 1000.0 for s, e in cons_nvtx_waits_adj[WARMUP_FRAMES:]]
     event_wait_us_api = [p["event_wait_us"] for p in pairs if "event_wait_us" in p]
     event_wait_us = event_wait_us_nvtx if event_wait_us_nvtx else event_wait_us_api
@@ -508,6 +554,7 @@ def main() -> None:
         cons_slot_dur=cons_slot_dur,
         has_consumer_nvtx=bool(cons_nvtx_slots_adj),
         prod_subrange=prod_subrange,
+        clock_offset_reliable=clock_offset_reliable,
     )
     print(f"\nWrote findings -> {FINDINGS_MD}")
 
@@ -540,6 +587,7 @@ def _write_findings(
     cons_slot_dur=None,
     has_consumer_nvtx=False,
     prod_subrange=None,
+    clock_offset_reliable: bool = True,
 ) -> None:
     if cons_slot_dur is None:
         cons_slot_dur = []
@@ -595,6 +643,39 @@ def _write_findings(
     _glaunch_med = _fmt(prod_subrange.get("glaunch_med"))
     _shm_avg = _fmt(prod_subrange.get("shm_avg"))
     _shm_med = _fmt(prod_subrange.get("shm_med"))
+    # E2E section varies based on whether the clock alignment is reliable
+    if clock_offset_reliable:
+        _e2e_table_rows = (
+            f"| Handoff latency (slot_end -> consumer wait_start)"
+            f" | {format(median(handoff), '.0f') if handoff else 'n/a'} µs"
+            f" | {_pval(handoff, 99, '.0f')} µs"
+            f" | {format(max(handoff), '.0f') if handoff else 'n/a'} µs |\n"
+            f"| Full E2E (slot_start -> consumer wait_start)"
+            f" | {format(median(e2e), '.0f') if e2e else 'n/a'} µs"
+            f" | {_pval(e2e, 99, '.0f')} µs"
+            f" | {format(max(e2e), '.0f') if e2e else 'n/a'} µs |"
+        )
+        _e2e_note = (
+            f"Note: pairing method = nearest prior producer slot completion before each consumer IPC wait.\n"
+            f"At {cons_fps:.0f} FPS consumer / {prod_fps:.0f} FPS producer, the consumer always reads a slot that is\n"
+            f"{ratio_str}-3 frames behind the producer's current write head -- expected."
+        )
+    else:
+        _e2e_table_rows = (
+            f"| import_frame duration (consumer-internal, trustworthy)"
+            f" | {format(median(cons_slot_dur), '.0f') if cons_slot_dur else 'n/a'} µs"
+            f" | {_pval(cons_slot_dur, 99, '.0f')} µs"
+            f" | {format(max(cons_slot_dur), '.0f') if cons_slot_dur else 'n/a'} µs |\n"
+            "⚠ Handoff and E2E latencies omitted: clock offset exceeds capture window.\n"
+            "  import_frame_us in the CSV is reliable (consumer-internal).\n"
+            "  handoff_latency_us and e2e_latency_us are not present in this run's CSV."
+        )
+        _e2e_note = (
+            "Note: slot-ID matching used without time-window gating (non-overlapping nsys sessions).\n"
+            "For clock-faithful cross-process latency, ensure both nsys sessions start within\n"
+            "the same rolling window (gap < capture duration) on the next live capture."
+        )
+
     _near_sync = prod_fps > 0 and cons_fps > 0 and cons_fps / prod_fps > 0.8
     _handoff_med = f"{median(handoff):.0f}" if handoff else "n/a"
     obs4 = (
@@ -644,16 +725,13 @@ def _write_findings(
 - **Frame drop rate**: ~{frame_drop_pct}% -- by design (TD reads latest-written slot each cook)
 - **NVTX**: {nvtx_status}
 
-## Cross-Process E2E Latency ({len(pairs)} matched pairs)
+## Cross-Process E2E Latency ({len(pairs)} slot-matched pairs)
 
 | Metric | p50 | p99 | max |
 |---|---|---|---|
-| Handoff latency (slot_end -> consumer wait_start) | {format(median(handoff), ".0f") if handoff else "n/a"} µs | {_pval(handoff, 99, ".0f")} µs | {format(max(handoff), ".0f") if handoff else "n/a"} µs |
-| Full E2E (slot_start -> consumer wait_start) | {format(median(e2e), ".0f") if e2e else "n/a"} µs | {_pval(e2e, 99, ".0f")} µs | {format(max(e2e), ".0f") if e2e else "n/a"} µs |
+{_e2e_table_rows}
 
-Note: pairing method = nearest prior producer slot completion before each consumer IPC wait.
-At {cons_fps:.0f} FPS consumer / {prod_fps:.0f} FPS producer, the consumer always reads a slot that is
-{ratio_str}-3 frames behind the producer's current write head -- expected.
+{_e2e_note}
 
 ## Key Observations
 
