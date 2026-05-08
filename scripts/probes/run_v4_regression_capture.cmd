@@ -99,12 +99,12 @@ ECHO    SET CUDALINK_TD_STREAM_PRIO=normal
 ECHO    SET CUDALINK_EXPORT_SYNC=1
 ECHO    SET CUDALINK_NVTX=1
 ECHO    SET CUDALINK_NVTX_VERBOSE=1
-ECHO    nsys profile --force-overwrite=true ^
-ECHO      --trace=cuda,nvtx,wddm ^
-ECHO      --wddm-memory-trace=false ^
-ECHO      --wddm-additional-events=true ^
-ECHO      --wddm-backtraces=true ^
-ECHO      --output "%PROD_OUT%\producer" ^
+ECHO    nsys profile --force-overwrite=true ^^
+ECHO      --trace=cuda,nvtx,wddm ^^
+ECHO      --wddm-memory-trace=false ^^
+ECHO      --wddm-additional-events=true ^^
+ECHO      --wddm-backtraces=true ^^
+ECHO      --output "%PROD_OUT%\producer" ^^
 ECHO      python "%DEFAULT_SENDER%"
 ECHO.
 ECHO ---- TERMINAL 2 (TouchDesigner consumer) -------------------
@@ -115,12 +115,12 @@ ECHO    SET CUDALINK_TD_STREAM_PRIO=normal
 ECHO    SET CUDALINK_EXPORT_SYNC=1
 ECHO    SET CUDALINK_NVTX=1
 ECHO    SET CUDALINK_NVTX_VERBOSE=1
-ECHO    nsys profile --force-overwrite=true ^
-ECHO      --trace=cuda,nvtx,wddm ^
-ECHO      --wddm-memory-trace=false ^
-ECHO      --wddm-additional-events=true ^
-ECHO      --wddm-backtraces=true ^
-ECHO      --output "%CONS_OUT%\td_consumer" ^
+ECHO    nsys profile --force-overwrite=true ^^
+ECHO      --trace=cuda,nvtx,wddm ^^
+ECHO      --wddm-memory-trace=false ^^
+ECHO      --wddm-additional-events=true ^^
+ECHO      --wddm-backtraces=true ^^
+ECHO      --output "%CONS_OUT%\td_consumer" ^^
 ECHO      "%TD_EXE%" "%TOE%"
 ECHO.
 ECHO ---- CAPTURE DURATION --------------------------------------
