@@ -583,7 +583,7 @@ def _write_findings(
         else "**No consumer NVTX** -- nvtx package is not installed in TouchDesigner's bundled Python\n"
         "   runtime. The cudalink.receiver.* ranges are instrumented but silently no-op. To surface\n"
         "   them in a future capture, install nvtx into TD's Python:\n"
-        r"     C:\Program Files\Derivative\TouchDesigner.2025.32460\bin\python.exe -m pip install nvtx"
+        r"     C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\python.exe -m pip install nvtx"
     )
 
     def _fmt(v):

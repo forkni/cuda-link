@@ -1,7 +1,11 @@
 @ECHO OFF
 :: run_v4_regression_capture.cmd -- Phase 3.7 regression baseline
 ::
-:: Two-terminal nsys capture of the TD pipeline with CUDALINK_TD_PERSIST_STREAM=0.
+:: Coordinator for the two-terminal nsys capture of the TD pipeline with
+:: CUDALINK_TD_PERSIST_STREAM=0.  Launches the producer and consumer helpers
+:: (v4_capture_consumer.cmd, v4_capture_producer.cmd) in their own cmd windows,
+:: then waits for you to run the protocol and press a key before running analysis.
+::
 :: Purpose: confirm that dropping F8 serialises ipc_stream and _rx_stream onto a
 :: single WDDM Render queue lane (expected stream-stack visible in nsys-ui timeline).
 ::
@@ -24,7 +28,7 @@
 ::
 :: Defaults:
 ::   toe    = <repo_root>\CUDA_Link_Example.toe
-::   td_exe = C:\Program Files\Derivative\TouchDesigner.2025.32460\bin\TouchDesigner.exe
+::   td_exe = C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe
 
 SETLOCAL ENABLEDELAYEDEXPANSION
 
@@ -33,10 +37,9 @@ PUSHD "%~dp0..\.."
 SET "REPO_ROOT=%CD%"
 POPD
 
-:: --- defaults -----------------------------------------------------------------
+:: --- defaults (for env.txt traceability only -- helpers use their own defaults)
 SET "DEFAULT_TOE=%REPO_ROOT%\CUDA_Link_Example.toe"
-SET "DEFAULT_TD=C:\Program Files\Derivative\TouchDesigner.2025.32460\bin\TouchDesigner.exe"
-SET "DEFAULT_SENDER=%REPO_ROOT%\td_exporter\example_sender_python.py"
+SET "DEFAULT_TD=C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe"
 
 IF NOT "%~1"=="" (SET "TOE=%~1")     ELSE (SET "TOE=%DEFAULT_TOE%")
 IF NOT "%~2"=="" (SET "TD_EXE=%~2")  ELSE (SET "TD_EXE=%DEFAULT_TD%")
@@ -59,16 +62,8 @@ IF NOT EXIST "%TD_EXE%" (
     ECHO [FAIL] TouchDesigner.exe not found: %TD_EXE%
     EXIT /B 2
 )
-IF NOT EXIST "%DEFAULT_SENDER%" (
-    ECHO [FAIL] example_sender_python.py not found: %DEFAULT_SENDER%
-    EXIT /B 2
-)
 
-:: --- regression env -----------------------------------------------------------
-:: F8 dropped (PERSIST_STREAM=0) to expose stream destroy/recreate on each TD cook.
-:: F2 kept because it is load-bearing (Phase 3.6 Step C confirmed).
-:: EXPORT_SYNC kept because it is required.
-
+:: --- regression env (for env.txt snapshot) ------------------------------------
 SET CUDALINK_TD_PERSIST_STREAM=0
 SET CUDALINK_TD_STREAM_PRIO=normal
 SET CUDALINK_EXPORT_SYNC=1
@@ -89,75 +84,67 @@ ECHO  Output dirs:
 ECHO    Producer : %PROD_OUT%
 ECHO    Consumer : %CONS_OUT%
 ECHO.
-ECHO  This is a TWO-TERMINAL capture.  Follow the steps below:
-ECHO.
-ECHO ---- TERMINAL 1 (Python producer) --------------------------
-ECHO  Open a NEW cmd.exe window in the repo root and run:
-ECHO.
-ECHO    SET CUDALINK_TD_PERSIST_STREAM=0
-ECHO    SET CUDALINK_TD_STREAM_PRIO=normal
-ECHO    SET CUDALINK_EXPORT_SYNC=1
-ECHO    SET CUDALINK_NVTX=1
-ECHO    SET CUDALINK_NVTX_VERBOSE=1
-ECHO    nsys profile --force-overwrite=true ^^
-ECHO      --trace=cuda,nvtx,wddm ^^
-ECHO      --wddm-memory-trace=false ^^
-ECHO      --wddm-additional-events=true ^^
-ECHO      --wddm-backtraces=true ^^
-ECHO      --output "%PROD_OUT%\producer" ^^
-ECHO      python "%DEFAULT_SENDER%"
-ECHO.
-ECHO ---- TERMINAL 2 (TouchDesigner consumer) -------------------
-ECHO  Open ANOTHER new cmd.exe window in the repo root and run:
-ECHO.
-ECHO    SET CUDALINK_TD_PERSIST_STREAM=0
-ECHO    SET CUDALINK_TD_STREAM_PRIO=normal
-ECHO    SET CUDALINK_EXPORT_SYNC=1
-ECHO    SET CUDALINK_NVTX=1
-ECHO    SET CUDALINK_NVTX_VERBOSE=1
-ECHO    nsys profile --force-overwrite=true ^^
-ECHO      --trace=cuda,nvtx,wddm ^^
-ECHO      --wddm-memory-trace=false ^^
-ECHO      --wddm-additional-events=true ^^
-ECHO      --wddm-backtraces=true ^^
-ECHO      --output "%CONS_OUT%\td_consumer" ^^
-ECHO      "%TD_EXE%" "%TOE%"
-ECHO.
-ECHO ---- CAPTURE DURATION --------------------------------------
-ECHO  Capture both for ~60 seconds of steady-state streaming.
-ECHO  Start Terminal 2 (TD) a few seconds BEFORE Terminal 1 so
-ECHO  the clock overlap window is maximised.
-ECHO.
-ECHO  Stop by closing the Python sender (Ctrl+C or Enter) --
-ECHO  nsys will finalise the .nsys-rep on process exit.
-ECHO  Stop TD only after the producer has exited.
-ECHO.
-ECHO ---- AFTER CAPTURE -----------------------------------------
-ECHO  Export SQLite from each .nsys-rep (nsys stats requires it):
-ECHO.
-ECHO    nsys export --sqlite "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
-ECHO    nsys export --sqlite "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
-ECHO.
-ECHO ============================================================
+
+:: --- launch consumer (TD) first, then producer after a 5-second stagger -------
+ECHO [INFO] Launching consumer (TouchDesigner) in its own window...
+START "V4-Consumer (nsys)" cmd /k "%REPO_ROOT%\scripts\probes\v4_capture_consumer.cmd" "%TOE%" "%TD_EXE%"
+
+TIMEOUT /T 5 /NOBREAK >NUL
+
+ECHO [INFO] Launching producer (Python sender) in its own window...
+START "V4-Producer (nsys)" cmd /k "%REPO_ROOT%\scripts\probes\v4_capture_producer.cmd"
 
 ECHO.
-ECHO Press any key in THIS window once both captures are complete
-ECHO and both SQLite exports have been created.
+ECHO ============================================================
+ECHO  Capture protocol (3 reactivation cycles)
+ECHO ============================================================
+ECHO.
+ECHO  1. Wait until CUDA_Link_Example.toe shows Receiver-A streaming at 60 fps.
+ECHO  2. In TD: toggle Receiver-A Active  OFF -> wait ~30 s -> ON   (cycle 1)
+ECHO  3. Repeat OFF/ON for cycles 2 and 3.
+ECHO  4. Stop the producer: press Ctrl+C in the V4-Producer window.
+ECHO     nsys finalises producer.nsys-rep on exit.
+ECHO  5. Close TouchDesigner.
+ECHO     nsys finalises td_consumer.nsys-rep on exit.
+ECHO.
+ECHO  Then press any key HERE to export SQLite and run analysis.
+ECHO ============================================================
+ECHO.
 PAUSE
+
+:: --- verify SQLite source files exist -----------------------------------------
+IF NOT EXIST "%PROD_OUT%\producer.nsys-rep" (
+    ECHO.
+    ECHO [WARN] %PROD_OUT%\producer.nsys-rep not found.
+    ECHO        Was the V4-Producer window closed cleanly (Ctrl+C)?
+    EXIT /B 1
+)
+IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
+    ECHO.
+    ECHO [WARN] %CONS_OUT%\td_consumer.nsys-rep not found.
+    ECHO        Was the TouchDesigner window closed after the producer stopped?
+    EXIT /B 1
+)
+
+:: --- export SQLite ------------------------------------------------------------
+ECHO.
+ECHO [INFO] Exporting SQLite (producer)...
+nsys export --sqlite "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
+
+ECHO [INFO] Exporting SQLite (consumer)...
+nsys export --sqlite "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
 
 :: --- verify SQLite files exist ------------------------------------------------
 IF NOT EXIST "%PROD_OUT%\producer.sqlite" (
     ECHO.
-    ECHO [WARN] %PROD_OUT%\producer.sqlite not found.
-    ECHO        Run: nsys export --sqlite "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
-    ECHO        Then re-run this script from the PAUSE line (or run analysis manually).
+    ECHO [WARN] %PROD_OUT%\producer.sqlite not found after export.
+    ECHO        Run manually: nsys export --sqlite "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
     EXIT /B 1
 )
 IF NOT EXIST "%CONS_OUT%\td_consumer.sqlite" (
     ECHO.
-    ECHO [WARN] %CONS_OUT%\td_consumer.sqlite not found.
-    ECHO        Run: nsys export --sqlite "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
-    ECHO        Then re-run this script from the PAUSE line (or run analysis manually).
+    ECHO [WARN] %CONS_OUT%\td_consumer.sqlite not found after export.
+    ECHO        Run manually: nsys export --sqlite "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
     EXIT /B 1
 )
 
@@ -175,7 +162,7 @@ IF %ERRORLEVEL% NEQ 0 (
     EXIT /B %ERRORLEVEL%
 )
 
-:: --- export nsys stats CSVs (mirrors v2/v3 directory layout) -------------------
+:: --- export nsys stats CSVs ---------------------------------------------------
 ECHO.
 ECHO [INFO] Exporting nsys stats CSVs...
 SET "STAT_REPORTS=nvtx_sum,cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_size_sum,cuda_gpu_mem_time_sum,wddm_queue_sum"
@@ -192,7 +179,7 @@ ECHO.
 ECHO  Open the .nsys-rep files in nsys-ui to inspect the GPU timeline:
 ECHO    nsys-ui "%PROD_OUT%\producer.nsys-rep" "%CONS_OUT%\td_consumer.nsys-rep"
 ECHO.
-ECHO  Expected regression signature (PROFILING.md ^[S4]):
+ECHO  Expected regression signature (PROFILING.md [S4]):
 ECHO    - ipc_stream and _rx_stream CUDA kernels stacking vertically (serialised)
 ECHO    - Multi-second settle gap after Receiver reactivation (if tested)
 ECHO    - EXPORT_PROFILE post= latency growing monotonically across reactivation cycles
