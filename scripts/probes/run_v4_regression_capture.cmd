@@ -87,7 +87,7 @@ ECHO.
 
 :: --- launch consumer (TD) first, then producer after a 5-second stagger -------
 ECHO [INFO] Launching consumer (TouchDesigner) in its own window...
-START "V4-Consumer (nsys)" cmd /k "%REPO_ROOT%\scripts\probes\v4_capture_consumer.cmd" "%TOE%" "%TD_EXE%"
+START "V4-Consumer (nsys)" cmd /k "%REPO_ROOT%\scripts\probes\v4_capture_consumer.cmd"
 
 TIMEOUT /T 5 /NOBREAK >NUL
 
