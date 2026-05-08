@@ -210,7 +210,7 @@ def main() -> None:
     _cuda_ref = cuda
 
     print("=" * 58)
-    print("  CUDA-Link Example  —  Python → TouchDesigner Sender")
+    print("  CUDA-Link Example  --  Python -> TouchDesigner Sender")
     print("=" * 58)
     print(f"  channel   : {SHM_NAME}")
     print(f"  resolution: {WIDTH}x{HEIGHT}  RGBA  {DTYPE}")
