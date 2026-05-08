@@ -19,6 +19,40 @@ timers capture aggregate latency but cannot show GPU-side serialisation. nsys sh
 
 ---
 
+## 0.5. Step 0: Napkin Math (Mandatory Pre-work)
+
+Before opening any profiler, calculate expected GPU time and compare to measured API call latency.
+This prevents misinterpreting WDDM enqueue overhead as a kernel performance problem.
+
+### cuda-link IPC D2D copy: worked example
+
+Payload: 1 MB (typical HD frame slice). GPU: RTX-class with ~600 GB/s device bandwidth.
+
+```
+Expected GPU kernel time = 1 MB / 600 GB/s ≈ 1.7 µs
+Expected GPU kernel time = 1 MB / 3,350 GB/s (H100 HBM3) ≈ 0.3 µs
+```
+
+**Measured v3 nsys results (producer-side CUDA API trace):**
+
+| CUDA API call | Median | Interpretation |
+|---|---:|---|
+| `cudaGraphLaunch` | ~30 µs | CPU-side WDDM API enqueue — **not GPU execution time** |
+| (D2D copy on GPU) | ~0.3 µs (calculated) | Actual kernel at 3.35 TB/s — healthy |
+| `cudaStreamSynchronize` | **~444 µs** | **WDDM batch-flush wait** — dominant cost |
+| Sender slot p50 | 562 µs | Sum of above + Python overhead |
+
+**Key conclusion:** The 30 µs `cudaGraphLaunch` is the Windows kernel transition to submit the
+GPU work item via WDDM. The GPU kernel itself completes in under 2 µs. The 444 µs
+`cudaStreamSynchronize` is the CPU blocking on the WDDM batch being submitted and acknowledged
+by the GPU driver — this is a WDDM scheduling artifact, not a kernel efficiency problem.
+
+`ncu` profiles GPU kernel execution. It will correctly show the D2D copy is memory-bandwidth
+bound at ~80–95% SOL. That is a healthy result. It does **not** explain the 444 µs sync.
+To investigate that, use nsys WDDM lane analysis (see §4 and §6).
+
+---
+
 ## 1. Setup
 
 ### Install the `nvtx` package
@@ -79,6 +113,13 @@ $env:CUDALINK_NVTX_VERBOSE = "1"
 #         benchmarks/results/nsys/_latest/analyze.txt (anti-pattern report)
 ```
 
+Run the automatic diagnostic report before opening the GUI:
+
+```powershell
+nsys analyze benchmarks/results/nsys/_latest/run.nsys-rep
+# writes benchmarks/results/nsys/_latest/analyze.txt — scan for anti-patterns first
+```
+
 Open the report:
 
 ```powershell
@@ -106,9 +147,42 @@ Open in the Nsight Compute GUI:
 ncu-ui benchmarks/results/ncu/_latest/sender.ncu-rep
 ```
 
+**SOL classification — use this table before drawing conclusions:**
+
+| SM% | DRAM% | Classification | Primary next step |
+|---|---|---|---|
+| ≥60% | any | Compute-bound | ComputeWorkloadAnalysis + warp stalls |
+| any | ≥60% | Memory-bandwidth bound | MemoryWorkloadAnalysis → Sectors/Request |
+| <30% | <30% but Memory %SOL ≥60% | Internal congestion (shared/L1) | L1/shared hit rate, bank conflicts |
+| <40% | <40% | Latency-bound | WarpStateStats, instruction-level stalls |
+
+**For the IPC D2D copy specifically:** expect DRAM ≥80% (memory-bandwidth bound). A healthy
+kernel will show near-peak bandwidth at very short duration. See §0.5 for why this does not
+explain the dominant `cudaStreamSynchronize` latency.
+
 Check the **Speed-of-Light** roofline: the IPC D2D `memcpy_async` should be memory-bandwidth
 bound (~90%+ of HBM/GDDR bandwidth on typical payloads). If SOL is unexpectedly low, check
 for coalescing issues in **Memory Workload Analysis → Sectors/Request**.
+
+**Two-pass ncu workflow (reduces WDDM TDR risk):**
+
+Run two separate invocations rather than `--set full` in a single session:
+
+- **HW pass (default, safe):** `SpeedOfLight` + `MemoryWorkloadAnalysis` — collects hardware
+  counters only. Runs in seconds. Use this first to classify the bottleneck. This is what
+  `run_ncu.ps1` does with no arguments.
+
+- **SW pass (higher TDR risk):** `--set full` or explicit `SourceCounters,InstructionStats,
+  WarpStateStats` — requires SW-patched replay, significantly more replay passes per kernel.
+  Keep `--launch-count 1` to limit exposure. Run as a second invocation only when the HW pass
+  identifies a kernel worth drilling into:
+
+  ```powershell
+  ./scripts/profiling/run_ncu.ps1 -Set full   # SW pass, sender path
+  ```
+
+The `--import-source yes` flag (already in both runners) is required for the Source/SASS
+correlation tab in ncu-ui and for the `ncu_report` Python API.
 
 ---
 
@@ -199,9 +273,11 @@ reset. Mitigations already baked into the runner scripts:
 
 - `--launch-count 5` — bounds the number of kernels replayed per invocation
 - `--launch-skip 5` — skips warmup kernels
-- `--replay-mode kernel` — **required**: replays one kernel at a time rather than re-executing
-  the full CUDA Graph (range/application replay would re-launch the graph and corrupt IPC state
-  across the producer/consumer boundary)
+- `--replay-mode kernel` — **required** for CUDA Graph workloads: replays one kernel at a time.
+  Range/application replay re-executes the entire CUDA Graph per pass (NVIDIA Nsight Compute
+  Kernel Profiling Guide §2.2.4). On the IPC export path this re-launches the producer→consumer
+  handoff graph, invalidating the cross-process IPC handle and producing corrupt or missing
+  counter data. Kernel replay avoids re-launching the graph entirely.
 
 If ncu still TDRs, reduce `--launch-count` to 2 or 3 in the script.
 
