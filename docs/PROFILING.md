@@ -219,6 +219,30 @@ ncu against that process will produce incomplete traces or CUPTI errors. Stop `t
 before attaching Nsight tools. This applies even though cuda-link itself does not use PyTorch —
 the constraint is per-process, not per-library.
 
+### Output file already exists — silent redirect to `%TEMP%`
+
+When the target `.nsys-rep` path already exists, nsys on Windows silently redirects output to
+`%TEMP%\nsys-Inter\` with no warning or error. The capture appears to complete successfully but
+the file at the expected path is unchanged; the new report is in a temp location that gets wiped
+on reboot.
+
+**Symptom**: timestamp on `run.nsys-rep` not updated after a re-run; new report found under
+`C:\Users\<user>\AppData\Local\Temp\nsys-<user>\`.
+
+**Fix**: always pass `--force-overwrite=true` to `nsys profile`:
+
+```powershell
+nsys profile --force-overwrite=true --trace=cuda,nvtx,wddm --output "$out/run" ...
+```
+
+`run_nsys.ps1` and `run_nsys.sh` both include this flag. For the TD-pipeline cross-process
+capture (where nsys attaches to a process you don't control via a wrapper script), pass it
+explicitly on the command line, e.g.:
+
+```
+nsys profile --force-overwrite=true --output benchmarks/results/nsys/td_pipeline_v4_producer/producer ...
+```
+
 ---
 
 ## 6. `CUDALINK_EXPORT_PROFILE` ↔ NVTX: What Each Measures

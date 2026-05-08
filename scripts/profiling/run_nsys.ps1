@@ -20,6 +20,7 @@ $env:CUDALINK_NVTX = "1"
 $env:CUDALINK_NVTX_VERBOSE = "1"
 
 nsys profile `
+    --force-overwrite=true `
     --trace=cuda,nvtx,wddm `
     --wddm-memory-trace=false `
     --wddm-additional-events=true `
