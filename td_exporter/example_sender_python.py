@@ -236,6 +236,7 @@ def main() -> None:
 
     graphs_active = bool(getattr(exporter, "_use_graphs", False) and not getattr(exporter, "_graphs_disabled", False))
     graphs_label = "ON" if graphs_active else "OFF"
+    profile_on = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
     env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
     try:
         rt_version = cuda.get_runtime_version()
@@ -274,14 +275,19 @@ def main() -> None:
                 elapsed = now - start_time
                 fps = frame_count / elapsed if elapsed > 0 else 0.0
                 export_us = (now - t0) * 1e6
-                stats = exporter.get_stats()
-                avg_total = stats.get("avg_total_us", 0.0)
-                avg_memcpy = stats.get("avg_memcpy_us", 0.0)
+                if profile_on:
+                    stats = exporter.get_stats()
+                    profile_suffix = (
+                        f" | avg_total={stats.get('avg_total_us', 0.0):.1f} µs"
+                        f" | avg_memcpy={stats.get('avg_memcpy_us', 0.0):.1f} µs"
+                    )
+                else:
+                    profile_suffix = ""
                 print(
                     f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
                     f"color={_COLOR_NAMES[color_idx]:<8s} | "
-                    f"export={export_us:.0f} µs | "
-                    f"avg_total={avg_total:.1f} µs | avg_memcpy={avg_memcpy:.1f} µs | "
+                    f"export={export_us:.0f} µs"
+                    f"{profile_suffix} | "
                     f"graphs={graphs_label}"
                 )
                 last_report = now
@@ -295,7 +301,7 @@ def main() -> None:
 
     finally:
         try:
-            final_stats = exporter.get_stats()
+            final_stats = exporter.get_stats() if profile_on else {}
         except Exception:
             final_stats = {}
         _do_cleanup()
