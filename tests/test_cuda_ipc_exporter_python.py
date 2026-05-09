@@ -44,7 +44,7 @@ def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exp.debug is False
     assert not exp.is_ready()
     assert exp._export_sync is True  # Phase 4: default flipped to ON
-    assert exp._barrier_enabled is True  # Phase 4: default flipped to ON
+    assert exp._barrier.enabled is True  # Phase 4: default flipped to ON
 
 
 def test_constructor_custom_params() -> None:
@@ -388,6 +388,7 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
         SLOT_SIZE,
         TIMESTAMP_SIZE,
         CUDAIPCExporter,
+        ProducerActivationBarrier,
         SHMLayout,
     )
 
@@ -435,11 +436,7 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp.total_flush_probe_us = 0.0
 
     # F9 activation barrier (disabled in mock)
-    exp._barrier_enabled = False
-    exp._barrier_stale_ns = 5_000_000_000
-    exp._barrier_shm = None
-    exp._barrier_skip_log_last_ns = 0
-    exp._barrier_stale_log_last_ns = 0
+    exp._barrier = ProducerActivationBarrier(enabled=False, stale_ns=5_000_000_000)
 
     # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
     mock_attrs = MagicMock()

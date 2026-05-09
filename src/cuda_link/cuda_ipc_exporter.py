@@ -50,6 +50,7 @@ import threading
 import time
 import traceback
 from ctypes import c_void_p
+from dataclasses import dataclass, field
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
@@ -100,6 +101,70 @@ _DTYPE_ITEMSIZE_MAP = {
 
 # _DTYPE_TO_KIND_BITS is now in shm_protocol.DtypeCodec.encode(); kept as alias for call sites below
 _DTYPE_TO_KIND_BITS = {k: DtypeCodec.encode(k) for k in ("float32", "float16", "uint8", "uint16")}
+
+
+@dataclass
+class ProducerActivationBarrier:
+    """Producer-side activation-barrier state.
+
+    Replaces five scattered attributes on CUDAIPCExporter (_barrier_enabled,
+    _barrier_stale_ns, _barrier_shm, _barrier_skip_log_last_ns,
+    _barrier_stale_log_last_ns) with a single cohesive value object.
+    """
+
+    enabled: bool
+    stale_ns: int
+    shm: SharedMemory | None = None
+    _skip_log_last_ns: int = field(init=False, default=0, repr=False)
+    _stale_log_last_ns: int = field(init=False, default=0, repr=False)
+
+    @classmethod
+    def from_env(cls) -> ProducerActivationBarrier:
+        return cls(
+            enabled=os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0",
+            stale_ns=int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000))),
+        )
+
+    def should_skip_publish(self) -> bool:
+        """Hot path: True ⇒ caller skips this frame.
+
+        Lazily opens the SHM segment on first call. Applies a stale-timeout so a
+        Sender that crashes mid-init cannot block the producer indefinitely.
+        """
+        if self.shm is None:
+            try:
+                self.shm = _ab_open(create=False)
+            except FileNotFoundError:
+                return False
+        try:
+            active_count, last_change_ns, _ = _ab_read(self.shm)
+        except (OSError, RuntimeError, struct.error):
+            return False
+        if active_count <= 0:
+            return False
+        now_ns = time.monotonic_ns()
+        if now_ns - last_change_ns > self.stale_ns:
+            if now_ns - self._stale_log_last_ns > 1_000_000_000:
+                logger.warning(
+                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
+                    active_count,
+                    (now_ns - last_change_ns) / 1e9,
+                )
+                self._stale_log_last_ns = now_ns
+            return False
+        with contextlib.suppress(OSError, RuntimeError, struct.error):
+            _ab_bump(self.shm)
+        if now_ns - self._skip_log_last_ns > 1_000_000_000:
+            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
+            self._skip_log_last_ns = now_ns
+        return True
+
+    def close(self) -> None:
+        """Idempotent: close SHM handle if held."""
+        if self.shm is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                self.shm.close()
+            self.shm = None
 
 
 def _read_hws_mode() -> str:
@@ -220,11 +285,7 @@ class CUDAIPCExporter:
         # Cross-process backpressure mechanism — no CUDA stream coupling.
         # Default on (Phase 3.6 — no-op when no TD-side Sender exists since the SHM
         # counter stays at 0; gracefully skipped if SHM is missing). Set to "0" to opt out.
-        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0"
-        self._barrier_stale_ns: int = int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000)))
-        self._barrier_shm: SharedMemory | None = None
-        self._barrier_skip_log_last_ns: int = 0
-        self._barrier_stale_log_last_ns: int = 0
+        self._barrier = ProducerActivationBarrier.from_env()
         if self._export_profile:
             self.debug = True  # profile mode requires timing path (mirrors TD L248-249)
 
@@ -660,7 +721,7 @@ class CUDAIPCExporter:
             logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
             return False
         # Activation-barrier check: skip publish if a TD-side Sender is in its activation window.
-        if self._barrier_enabled and self._check_activation_barrier():
+        if self._barrier.enabled and self._barrier.should_skip_publish():
             # Reassert the per-frame heartbeat even on the skip path.
             # The consumer reads shutdown_flag == 1 as "producer gone"; bypassing the
             # success-path heartbeat write on skip frames would leave any stale 1-byte
@@ -895,41 +956,6 @@ class CUDAIPCExporter:
         except (OSError, RuntimeError):
             return False
 
-    def _check_activation_barrier(self) -> bool:
-        """Return True if the activation barrier is held and this frame should be skipped.
-
-        Lazily opens the segment on first call. Applies a stale-timeout so a Sender
-        that crashes mid-init cannot block the producer indefinitely.
-        """
-        if self._barrier_shm is None:
-            try:
-                self._barrier_shm = _ab_open(create=False)
-            except FileNotFoundError:
-                return False  # no Sender has ever activated — fast path
-        try:
-            active_count, last_change_ns, _ = _ab_read(self._barrier_shm)
-        except (OSError, RuntimeError, struct.error):
-            return False
-        if active_count <= 0:
-            return False
-        now_ns = time.monotonic_ns()
-        if now_ns - last_change_ns > self._barrier_stale_ns:
-            # Sender crashed mid-init and never decremented — stale, ignore.
-            if now_ns - self._barrier_stale_log_last_ns > 1_000_000_000:
-                logger.warning(
-                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
-                    active_count,
-                    (now_ns - last_change_ns) / 1e9,
-                )
-                self._barrier_stale_log_last_ns = now_ns
-            return False
-        with contextlib.suppress(OSError, RuntimeError, struct.error):
-            _ab_bump(self._barrier_shm)
-        if now_ns - self._barrier_skip_log_last_ns > 1_000_000_000:
-            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
-            self._barrier_skip_log_last_ns = now_ns
-        return True
-
     def cleanup(self) -> None:
         """Cleanup all CUDA IPC resources.
 
@@ -1055,12 +1081,7 @@ class CUDAIPCExporter:
         except (OSError, RuntimeError) as e:
             logger.warning("Could not unlink SharedMemory: %s", e)
 
-        # Close activation-barrier SHM handle (producer never decrements, just closes).
-        _bshm = getattr(self, "_barrier_shm", None)
-        if _bshm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                _bshm.close()
-            self._barrier_shm = None
+        self._barrier.close()
 
         # Reset all state to prevent double-free on re-entry
         self.dev_ptrs = [None] * self.num_slots
