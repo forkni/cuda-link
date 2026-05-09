@@ -244,40 +244,19 @@ class CUDAIPCExtension:
         self._verbose = value
         self._engine.verbose_performance = value
 
-    @property
-    def _rx_frames_since_last_retry(self) -> int:
-        return getattr(self._engine, "_rx_frames_since_last_retry", 0)
+    def request_immediate_reconnect(self) -> None:
+        """Force next import_frame to attempt reconnection (called from parexecute callbacks)."""
+        if self._mode == "Receiver":
+            self._engine.request_immediate_reconnect()
 
-    @_rx_frames_since_last_retry.setter
-    def _rx_frames_since_last_retry(self, value: int) -> None:
-        with contextlib.suppress(AttributeError):
-            self._engine._rx_frames_since_last_retry = value
+    def consume_pending_resolution(self) -> tuple | None:
+        """Return (width, height) if resolution update is pending, else None.
 
-    @property
-    def _rx_retry_interval_frames(self) -> int:
-        return getattr(self._engine, "_rx_retry_interval_frames", 1)
-
-    @_rx_retry_interval_frames.setter
-    def _rx_retry_interval_frames(self, value: int) -> None:
-        with contextlib.suppress(AttributeError):
-            self._engine._rx_retry_interval_frames = value
-
-    @property
-    def _rx_needs_resolution_update(self) -> bool:
-        return getattr(self._engine, "_rx_needs_resolution_update", False)
-
-    @_rx_needs_resolution_update.setter
-    def _rx_needs_resolution_update(self, value: bool) -> None:
-        with contextlib.suppress(AttributeError):
-            self._engine._rx_needs_resolution_update = value
-
-    @property
-    def _rx_width(self) -> int:
-        return getattr(self._engine, "_rx_width", 0)
-
-    @property
-    def _rx_height(self) -> int:
-        return getattr(self._engine, "_rx_height", 0)
+        Called from script_top_callbacks.onCook to drive ImportBuffer Script TOP par updates.
+        """
+        if self._mode == "Receiver":
+            return self._engine.consume_pending_resolution()
+        return None
 
     # --- Engine state bridges (for tests and legacy attribute access) ---
 

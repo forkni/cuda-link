@@ -363,7 +363,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     from cuda_link.shm_protocol import SHMLayout
 
     with patch("TDReceiver.CUPY_AVAILABLE", use_cupy):
-        from TDReceiver import TDReceiverEngine
+        from TDReceiver import FormatDescriptor, ReceiverConnection, RetryState, TDReceiverEngine
 
     HEIGHT, WIDTH, COMPS = 4, 4, 4
     NUM_SLOTS = 2
@@ -392,49 +392,54 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
         verbose=False,
     )
 
-    # Inject state directly (bypasses real CUDA)
+    # Inject typed value objects (bypasses real CUDA initialization)
     engine._initialized = True
     engine.frame_count = 0
-    engine._rx_last_write_idx = 0
-    engine._rx_ipc_version = 1
-    engine._rx_num_slots = NUM_SLOTS
-    engine._rx_layout = SHMLayout(NUM_SLOTS)
-    engine._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
-    engine._rx_width = WIDTH
-    engine._rx_height = HEIGHT
-    engine._rx_num_comps = COMPS
-    engine._rx_format_kind = FORMAT_KIND_FLOAT
-    engine._rx_bits_per_comp = 16
-    engine._rx_flags = 0
-    engine._rx_buffer_size = F16_SIZE
-    engine._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
-    engine._rx_dev_ptrs[0].value = 0xDEAD0000
-    engine._rx_ipc_events = [MagicMock(), MagicMock()]
-    engine._rx_stream = MagicMock()
-    engine._rx_stream.value = 0x1234
+    engine._diag_frames_since_reinit = 999
 
-    engine._rx_f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
-    engine._rx_f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-    engine._rx_f16_pinned_ptr = None
+    mock_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
+    mock_dev_ptrs[0].value = 0xDEAD0000
+    mock_stream = MagicMock()
+    mock_stream.value = 0x1234
+    mock_shm = MagicMock()
+    mock_shm.buf = buf
 
-    mock_shape = MagicMock()
-    engine._rx_cached_shape = mock_shape
+    layout = SHMLayout(NUM_SLOTS)
+    engine._connection = ReceiverConnection(
+        shm_handle=mock_shm,
+        dev_ptrs=mock_dev_ptrs,
+        ipc_handles=[None] * NUM_SLOTS,
+        ipc_events=[MagicMock(), MagicMock()],
+        stream=mock_stream,
+        layout=layout,
+        num_slots=NUM_SLOTS,
+        ipc_version=1,
+        shutdown_offset=layout.shutdown_offset,
+        last_write_idx=0,
+    )
+    engine._format = FormatDescriptor(
+        width=WIDTH,
+        height=HEIGHT,
+        num_comps=COMPS,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=16,
+        flags=0,
+        buffer_size=F16_SIZE,
+    )
+    engine._retry = RetryState(connect_attempts=0, frames_since_last_retry=0)
 
-    engine.shm_handle = MagicMock()
-    engine.shm_handle.buf = buf
-
-    from unittest.mock import MagicMock as _MagicMock
+    # Engine-private F16 scratch (mutable working buffers, not value objects)
+    engine._f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
+    engine._f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+    engine._f16_pinned_ptr = None
+    engine._cached_shape = MagicMock()
 
     if use_cupy:
-        engine._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-        engine._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
+        engine._cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+        engine._cupy_f16_views = [MagicMock() for _ in range(NUM_SLOTS)]
     else:
-        engine._rx_cupy_f32_buf = None
-        engine._rx_cupy_f16_views = []
-
-    engine._rx_frames_since_last_retry = 0
-    engine._rx_connect_attempts = 0
-    engine._diag_frames_since_reinit = 999
+        engine._cupy_f32_buf = None
+        engine._cupy_f16_views = []
 
     return engine
 
@@ -473,8 +478,8 @@ def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
     mock_cp.float16 = "float16"
     mock_cp.float32 = "float32"
     # .data.ptr on the f32 buf must return an integer (GPU pointer)
-    ext._rx_cupy_f32_buf = MagicMock()
-    ext._rx_cupy_f32_buf.data.ptr = 0xF3200000
+    ext._cupy_f32_buf = MagicMock()
+    ext._cupy_f32_buf.data.ptr = 0xF3200000
 
     with patch("TDReceiver.CUPY_AVAILABLE", True), patch("TDReceiver.cp", mock_cp):
         result = ext.import_frame(import_buffer)

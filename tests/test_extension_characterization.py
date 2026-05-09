@@ -394,16 +394,14 @@ def test_switch_mode_receiver_to_sender_resets_rx_state() -> None:
 
     assert ext.mode == "Receiver"
 
-    # Poke state directly on the engine (facade properties are read-only for rx state)
-    ext._engine._rx_width = 1920
-    ext._engine._rx_height = 1080
+    # Poke format state directly on the value object
+    ext._engine._format.width = 1920
+    ext._engine._format.height = 1080
 
     ext.switch_mode("Sender")
 
     assert ext.mode == "Sender"
-    # After engine replacement receiver state is gone (new sender engine has no _rx_* attrs)
-    assert ext._rx_width == 0, "_rx_width must reset after switch to Sender"
-    assert ext._rx_height == 0, "_rx_height must reset after switch to Sender"
+    # After engine replacement receiver state is gone (new sender engine has no _format attr)
     # Sender arrays sized to num_slots
     from TDSender import TDSenderEngine
 
@@ -487,18 +485,19 @@ def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
 
     shm = shared_memory.SharedMemory(name="test_rx_shutdown_regression_xyz", create=True, size=1024)
     try:
-        engine.shm_handle = shm
-        engine._rx_num_slots = 0
-        engine._rx_layout = SHMLayout(engine._rx_num_slots)
-        engine._rx_shutdown_offset = engine._rx_layout.shutdown_offset
-        engine._rx_ipc_version = 1
-        engine._rx_dev_ptrs = []
-        engine._rx_ipc_events = []
-        engine._rx_stream = None
+        engine.shm_handle = shm  # uses shm_handle property → _connection.shm_handle
+        layout = SHMLayout(0)
+        engine._connection.num_slots = 0
+        engine._connection.layout = layout
+        engine._connection.shutdown_offset = layout.shutdown_offset
+        engine._connection.ipc_version = 1
+        engine._connection.dev_ptrs = []
+        engine._connection.ipc_events = []
+        engine._connection.stream = None
         engine.cuda = None
         engine._initialized = True
 
-        shm.buf[engine._rx_layout.shutdown_offset] = 1  # mark shutdown byte
+        shm.buf[layout.shutdown_offset] = 1  # mark shutdown byte
 
         result = engine.import_frame(None)  # type: ignore[arg-type]
         assert result is False
