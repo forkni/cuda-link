@@ -121,6 +121,28 @@ def _release_fence() -> None:
         pass
 
 
+def _read_hws_mode() -> str:
+    """Read WDDM Hardware-Accelerated GPU Scheduling registry key (Windows only).
+
+    Returns "0" (software scheduling), "2" (hardware scheduling enabled),
+    or "unknown" on any error (non-Windows, key absent, permission denied).
+    Emitted as cudalink.startup.hws_mode=<value> NVTX range at exporter init
+    so every nsys capture is self-documenting about the WDDM scheduling mode.
+    """
+    try:
+        import winreg  # noqa: PLC0415
+
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
+        )
+        value, _ = winreg.QueryValueEx(key, "HwSchMode")
+        winreg.CloseKey(key)
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 class CUDAIPCExporter:
     """Python-side exporter for CUDA IPC GPU memory.
 
@@ -296,6 +318,11 @@ class CUDAIPCExporter:
                     "cudaSetDevice() with a different index before initialize()."
                 )
             logger.info("Loaded CUDA runtime on device %d", actual_device)
+
+            hws_mode = _read_hws_mode()
+            logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
+            with _nvtx.annotate(f"cudalink.startup.hws_mode={hws_mode}", "cyan"):
+                pass
 
             # Create or reuse dedicated non-blocking IPC stream.
             # cudaStreamNonBlocking (0x01) prevents the default stream from

@@ -261,6 +261,11 @@ On the nsys timeline you will see:
 This deliberate regression is useful for validating that the NVTX instrumentation can see
 the failure mode that motivated this work.
 
+> **Note:** `scripts\probes\v4_capture_*.cmd` isolate the `PERSIST_STREAM=0` flag only
+> (`STREAM_PRIO` is left at the correct value `normal`). A separate v4b run with both
+> `STREAM_PRIO=high` and `PERSIST_STREAM=0` is needed to observe symptom #1 (stream stacking).
+> v4 data is sufficient for NVTX coverage validation of symptoms #2 and #3.
+
 ---
 
 ## 5. WDDM-Specific Caveats
@@ -342,3 +347,63 @@ is blocking on an unsubmitted WDDM batch — the deferred-submission accumulatio
 (`PERSIST_STREAM=1`) was designed to prevent during reactivation. Correlate with the nsys
 timeline: if the Sender stream shows no GPU activity during that window, the batch was buffered
 by WDDM and `flush_probe` is flushing it.
+
+---
+
+## 7. WDDM Hardware-Accelerated GPU Scheduling (GPU-P)
+
+### What it is
+
+Hardware-Accelerated GPU Scheduling (HWS, also called GPU-P) moves GPU work scheduling from
+the CPU-side WDDM kernel driver into the GPU hardware scheduler. On standard WDDM, the CPU
+driver batches GPU submissions and delivers completion notifications on a ~600–700 µs heartbeat.
+With HWS enabled, the GPU hardware processes the queue directly, reducing batch latency to
+~50–100 µs.
+
+**Effect on cuda-link:**
+
+| Metric | WDDM software scheduling | WDDM GPU-P (HWS on) |
+|---|---|---|
+| Producer `cudaStreamSynchronize` p50 | ~617 µs (v4 baseline) | Expected ~50–100 µs |
+| Consumer `import_frame` outlier max | ~36.5 ms (WDDM queue gap) | Expected < 5 ms |
+| WDDM Copy engine max queue entry | 116 ms (v4 baseline) | Expected < 20 ms |
+
+### How to toggle
+
+1. Open **Settings → System → Display → Graphics → Default graphics settings**.
+2. Toggle **"Hardware-accelerated GPU scheduling"** on or off.
+3. **Reboot required** — the change does not take effect until restart.
+
+Or via registry (requires reboot):
+```
+HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers
+  HwSchMode  REG_DWORD  0 = disabled, 2 = enabled
+```
+
+### Runbook: v4 HWS comparison
+
+Run the same protocol as v4 twice — once with HWS off (verify `HwSchMode=0`) and once with
+HWS on (`HwSchMode=2`). Use the standard v4 capture scripts:
+
+```cmd
+scripts\probes\run_v4_regression_capture.cmd
+```
+
+After each capture, run `v4_analyze.cmd` and compare:
+
+1. `producer_cuda_api_sum.csv` — `cudaStreamSynchronize` avg should drop from ~630 µs to < 100 µs.
+2. `td_consumer_wddm_queue_sum.csv` — engine 6 (Copy) max queue entry should drop from > 100 ms to < 20 ms.
+3. `td_pipeline_v4_findings.md` — consumer `import_frame` max outlier should drop from ~36 ms to < 5 ms.
+
+### Self-documenting captures
+
+The exporter emits the current HWS state as an NVTX startup range at initialization:
+
+```
+cudalink.startup.hws_mode=<value>
+```
+
+where `<value>` is `0` (software scheduling), `2` (hardware scheduling), or `unknown`
+(non-Windows or registry key absent). This range appears in the nsys timeline and in
+`nsys stats --report nvtx_sum`, so every archived `.nsys-rep` is self-documenting about
+the WDDM scheduling mode in effect during that capture.
