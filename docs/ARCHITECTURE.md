@@ -359,7 +359,7 @@ cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
 return tensors[read_slot]                        ← Zero-copy, 0µs
 ```
 
-**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (default) includes GPU D2D completion: p50 42 µs (512×512) → 400 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. See `bench_graphs.py` for resolution breakdown.
+**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (default) includes GPU D2D completion: p50 22 µs (512×512) → 367 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. See `bench_graphs.py` for resolution breakdown.
 
 ### Phase 3: Re-initialization
 
@@ -464,10 +464,10 @@ Produced by `benchmarks/bench_graphs.py` and `benchmarks/bench_sweep.py` (2000 f
 
 | Resolution | Graphs off p50 | Graphs on p50 |
 |---|---|---|
-| 512x512 f32 | 42 us | 45 us |
-| 1280x720 f32 | 59 us | 60 us |
-| 1920x1080 f32 | 138 us | 133 us |
-| 3840x2160 f32 | 400 us | 404 us |
+| 512x512 f32 | 22 us | 19 us |
+| 1280x720 f32 | 43 us | 42 us |
+| 1920x1080 f32 | 117 us | 116 us |
+| 3840x2160 f32 | 367 us | 367 us |
 
 With EXPORT_SYNC=1, GPU D2D copy time dominates both paths; CUDA Graphs provides <5% wall-clock difference at 1080p. In async mode (no EXPORT_SYNC), graphs reduce submission overhead from ~15.7 us to ~4.7 us at 1080p (WDDM transitions: 3 -> 2), but production default is EXPORT_SYNC=1.
 
@@ -475,14 +475,14 @@ With EXPORT_SYNC=1, GPU D2D copy time dominates both paths; CUDA Graphs provides
 
 | Resolution | dtype | export p50 | get_numpy p50 | IPC notify p50 |
 |---|---|---|---|---|
-| 512x512 | f32 | 1316 us | 1435 us | 259 us |
-| 512x512 | u8 | 970 us | 448 us | 255 us |
-| 1280x720 | f32 | 1743 us | 4599 us | 297 us |
-| 1280x720 | u8 | 1042 us | 1263 us | 254 us |
-| 1920x1080 | f32 | 585 us | 1995 us | 240 us |
-| 1920x1080 | u8 | 1234 us | 2650 us | 264 us |
-| 3840x2160 | f32 | 566 us | 5848 us | 300 us |
-| 3840x2160 | u8 | 566 us | 2585 us | 227 us |
+| 512x512 | f32 | 898 us | 1333 us | 172 us |
+| 512x512 | u8 | 871 us | 381 us | 203 us |
+| 1280x720 | f32 | 907 us | 4479 us | 160 us |
+| 1280x720 | u8 | 887 us | 1178 us | 179 us |
+| 1920x1080 | f32 | 1483 us | 5024 us | 136 us |
+| 1920x1080 | u8 | 873 us | 2537 us | 179 us |
+| 3840x2160 | f32 | 662 us | 5014 us | 286 us |
+| 3840x2160 | u8 | 1471 us | 5033 us | 196 us |
 
 - **export p50**: producer `export_frame()` wall-clock with concurrent consumer process (higher than isolated bench_graphs numbers due to cross-process WDDM contention).
 - **get_numpy p50**: consumer `get_frame_numpy()` D2H copy wall-clock.
@@ -496,8 +496,8 @@ Full results in `benchmarks/results/sweep_latest.csv`.
 
 ```
 FPS_max = 1 / export_frame_p50
-        = 1 / 138 us   (1080p f32)  ~= 7,200 FPS
-        = 1 / 400 us   (4K f32)     ~= 2,500 FPS
+        = 1 / 117 us   (1080p f32)  ~= 8,500 FPS
+        = 1 / 367 us   (4K f32)     ~= 2,700 FPS
 ```
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
@@ -512,8 +512,8 @@ FPS_actual = min(TD_FPS, 1 / inference_time)
 
 ```
 Latency ~= IPC_notify + D2H_copy
-        ~= 240 us + 1,350 us
-        ~= 1.6 ms
+        ~= 136 us + 1,320 us
+        ~= 1.5 ms
 ```
 
 This latency is **imperceptible** for real-time applications.
@@ -528,17 +528,17 @@ CUDA IPC zero-copies GPU memory across processes; CPU SharedMemory adds two memc
 
 | Metric | CPU SharedMemory | CUDA-Link | Speed-up |
 |--------|------------------|-----------|----------|
-| Producer write | 2.60 ms | 138 us (bench_graphs) / 585 us (bench_sweep) | 4.4x – 18.8x |
-| Consumer read (D2H) | 2.48 ms | 1.35 ms (bench_d2h_streams) / ~2.0 ms (bench_sweep) | 1.2x – 1.8x |
-| End-to-end | 5.37 ms | ~1.6 ms (IPC notify 240 us + D2H 1.35 ms) | ~3.4x |
+| Producer write | 2.60 ms | 117 us (bench_graphs) / 1483 us (bench_sweep) | 1.8x – 22.2x |
+| Consumer read (D2H) | 2.48 ms | 1.32 ms (bench_d2h_streams) / ~5.0 ms (bench_sweep) | 0.5x – 1.9x |
+| End-to-end | 5.37 ms | ~1.5 ms (IPC notify 136 us + D2H 1.32 ms) | ~3.6x |
 
 **512x512 float32 RGBA (4 MB/frame):**
 
 | Metric | CPU SharedMemory | CUDA-Link | Speed-up |
 |--------|------------------|-----------|----------|
-| Producer write | 361 us | 42 us (bench_graphs) | 8.6x |
-| Consumer read (D2H) | 350 us | 0.23 ms (bench_d2h_streams) | 1.5x |
-| End-to-end | 1.02 ms | ~0.49 ms (IPC notify 259 us + D2H 0.23 ms) | ~2.1x |
+| Producer write | 361 us | 22 us (bench_graphs) | 16.4x |
+| Consumer read (D2H) | 350 us | 0.18 ms (bench_d2h_streams) | 1.9x |
+| End-to-end | 1.02 ms | ~0.35 ms (IPC notify 172 us + D2H 0.18 ms) | ~2.9x |
 
 **Methodology notes:**
 

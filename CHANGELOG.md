@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`example_sender_python.py` Unicode banner** — replaced Unicode box-drawing
   characters with ASCII to prevent encoding errors on Windows console code pages other
   than UTF-8. (commit `30f7f2a`)
+- **`example_sender_python.py` progress-line cosmetics** — `avg_total` and
+  `avg_memcpy` columns are now suppressed when `CUDALINK_EXPORT_PROFILE=0`
+  (the default). Previously the two columns always printed as `0.0 µs`, which was
+  misleading. The leading `export=` wall-clock figure (always meaningful) is unaffected.
+  (commit `8658dbe`)
 
 ### Added — Diagnostics & Profiling Infrastructure
 
@@ -80,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TD installation path** bumped to `32820` in capture runners. (commit `18420de`)
 - **`pyproject.toml` dev-dep**: `nvtx>=0.2` added so contributors can run profiling
   scripts without a separate `pip install nvtx`. (commit `77af0b7`)
+- **Benchmark refresh (v1.2.1, 2026-05-09)** — re-ran `bench_sweep.py` (full 16-cell),
+  `bench_graphs.py` (4 resolutions), and `bench_d2h_streams.py` (4 resolutions) on
+  RTX 4090 / driver 596.36 / PCIe 4.0 x16 / Windows 11 under v1.2.1 defaults
+  (EXPORT_SYNC=1, CUDALINK_USE_GRAPHS=1). Updated README, ARCHITECTURE, and
+  INTEGRATION_EXAMPLES citations. Notable changes vs v1.2.0 sweep: isolated
+  `export_frame()` p50 improved (512×512: 42→22 µs, 1080p: 138→117 µs, 4K: 400→367 µs);
+  IPC notify p50 tightened (~250→~136–286 µs range); D2H bench_d2h_streams largely
+  unchanged. Fresh `sweep_latest.csv` / `sweep_latest.json` committed (16-cell,
+  2026-05-09 03:23).
 
 ### Internal
 
@@ -91,6 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (commits `1fbbb61`, `fec21ca`, `72e1354`)
 - **`TOXES/CUDAIPCLink_v1.2.0.tox`** added; `v1.1.0.tox` retired per `.gitignore`
   "only latest binary on main" policy. (commit `89a2b91`)
+- **`TOXES/CUDAIPCLink_v1.2.1.tox`** added (58 630 B, built 2026-05-09);
+  `v1.2.0.tox` retired from git index per the same policy. Updated
+  `docs/TOX_BUILD_GUIDE.md` filename and build-date references.
 
 ---
 

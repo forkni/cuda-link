@@ -33,7 +33,7 @@ Expected GPU kernel time = 1 MB / 600 GB/s ≈ 1.7 µs
 Expected GPU kernel time = 1 MB / 3,350 GB/s (H100 HBM3) ≈ 0.3 µs
 ```
 
-**Measured v3 nsys results (producer-side CUDA API trace):**
+**Measured v3 nsys results (producer-side CUDA API trace) — historical baseline; see §8 for current v5 measurements:**
 
 | CUDA API call | Median | Interpretation |
 |---|---:|---|

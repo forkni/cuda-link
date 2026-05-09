@@ -10,7 +10,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - `export_frame()` 42–400 µs p50 (512×512 → 4K float32, EXPORT_SYNC=1); `get_frame_numpy()` D2H 0.2–5.5 ms p50 (PCIe 4.0 ~23 GB/s); IPC notification ~250 µs cross-process (see [Benchmarks](#benchmarks))
+- **Low-overhead IPC** - `export_frame()` 22–367 µs p50 (512×512 → 4K float32, EXPORT_SYNC=1); `get_frame_numpy()` D2H 0.18–5.7 ms p50 (PCIe 4.0 ~22–24 GB/s); IPC notification ~136–286 µs cross-process (see [Benchmarks](#benchmarks))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -22,14 +22,14 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 | Operation | p50 | Notes |
 |-----------|-----|-------|
-| `export_frame()` — 512×512 RGBA float32 | 42 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
-| `export_frame()` — 1080p RGBA float32 | 138 µs | Standalone, EXPORT_SYNC=1 |
-| `export_frame()` — 4K RGBA float32 | 400 µs | Standalone, EXPORT_SYNC=1 |
-| `get_frame_numpy()` D2H — 512×512 float32 | 0.23 ms | Standalone, ~18 GB/s |
-| `get_frame_numpy()` D2H — 1080p float32 | 1.35 ms | Standalone, ~24 GB/s PCIe 4.0 |
-| `get_frame_numpy()` D2H — 4K float32 | 5.5 ms | Standalone, ~23 GB/s PCIe 4.0 |
+| `export_frame()` — 512×512 RGBA float32 | 22 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
+| `export_frame()` — 1080p RGBA float32 | 117 µs | Standalone, EXPORT_SYNC=1 |
+| `export_frame()` — 4K RGBA float32 | 367 µs | Standalone, EXPORT_SYNC=1 |
+| `get_frame_numpy()` D2H — 512×512 float32 | 0.18 ms | Standalone, ~22 GB/s |
+| `get_frame_numpy()` D2H — 1080p float32 | 1.32 ms | Standalone, ~24 GB/s PCIe 4.0 |
+| `get_frame_numpy()` D2H — 4K float32 | 5.7 ms | Standalone, ~21 GB/s PCIe 4.0 |
 | `get_frame()` / `get_frame_cupy()` GPU | <5 µs | Zero-copy tensor/array view, no D2H |
-| IPC notification latency | ~250–300 µs | Producer publish → consumer detect (cross-process) |
+| IPC notification latency | ~136–286 µs | Producer publish → consumer detect (cross-process) |
 | Initialization | ~50–100 µs | One-time IPC handle opening |
 
 ## Requirements
@@ -243,10 +243,10 @@ Single-process, EXPORT_SYNC=1 (CPU waits for GPU D2D completion), 2000 frames:
 ```
 Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
 ----------    -------------------   ------------------
-512x512                      41.7                 45.3
-1280x720                     59.0                 59.6
-1920x1080                   138.3                133.3
-3840x2160                   400.2                404.0
+512x512                      22.4                 19.4
+1280x720                     42.7                 41.7
+1920x1080                   117.1                115.7
+3840x2160                   367.4                366.9
 ```
 
 With EXPORT_SYNC=1 the GPU D2D copy dominates; CUDA Graphs saves WDDM submission transitions but the net wall-clock difference is small (<5%). The Graphs path stays on by default for consistency with async workflows.
@@ -262,10 +262,10 @@ Standalone D2H copy, no IPC overhead, 2000 frames:
 ```
 Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 ----------    -----------------   ------------------   -------------
-512x512                    0.23                 0.22            17.7
-1280x720                   0.62                 0.62            22.6
-1920x1080                  1.35                 1.35            23.7
-3840x2160                  5.54                 5.55            23.1
+512x512                    0.18                 0.19            22.2
+1280x720                   0.61                 0.61            23.1
+1920x1080                  1.32                 1.34            23.7
+3840x2160                  5.69                 6.82            21.4
 ```
 
 PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_STREAMS=1` (default) is optimal for this platform.
@@ -281,14 +281,14 @@ Two separate Python processes (producer + consumer), 500 warmup + 2000 measureme
 ```
 Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC notify p50 (µs)
 ----------    -------   ------   ---------------   ------------------   -------------------
-512x512       float32   off               1316                 1.44                     259
-512x512       float32   on                1076                 1.45                     257
-512x512       uint8     off                970                 0.45                     255
-1280x720      float32   off               1743                 4.60                     297
-1920x1080     float32   off                585                 2.00                     240
-1920x1080     uint8     off               1234                 2.65                     265
-3840x2160     float32   off                566                 5.85                     300
-3840x2160     uint8     off                566                 2.59                     227
+512x512       float32   off                898                 1.33                     172
+512x512       float32   on                 885                 1.33                     200
+512x512       uint8     off                871                 0.38                     203
+1280x720      float32   off                907                 4.48                     160
+1920x1080     float32   off               1483                 5.02                     136
+1920x1080     uint8     off                873                 2.54                     179
+3840x2160     float32   off                662                 5.01                     286
+3840x2160     uint8     off               1471                 5.03                     196
 ```
 
 Full results (all 16 cells, CSV + JSON): `benchmarks/results/sweep_latest.csv` / `sweep_latest.json`.
