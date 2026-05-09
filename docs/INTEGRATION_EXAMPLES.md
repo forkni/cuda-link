@@ -561,5 +561,5 @@ for i in range(max_retries):
 
 ---
 
-**Last Updated**: 2026-05-07
+**Last Updated**: 2026-05-09
 **Version**: 1.2.0

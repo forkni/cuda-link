@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v1.0.1.tox` into your TD network
+1. Drag `CUDAIPCLink_v1.2.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -72,12 +72,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-0.7.3-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-1.2.1-py3-none-any.whl
 
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -327,6 +327,8 @@ Producer write is 4–19x faster (no CPU transit). With zero-copy GPU consumers 
 | `CUDALINK_TD_STREAM_PRIO` | `normal` | CUDA stream priority for the TD Sender's IPC stream. Default `normal` is safe for both single-pair and concurrent topologies — in single-pair only one stream exists per process so priority is moot; in concurrent, equal priorities prevent WDDM contention accumulation across reactivation cycles (high/high contention produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed). Set to `high` only for explicit single-pair lowest-latency optimisation. |
 | `CUDALINK_EXPORT_FLUSH_PROBE` | `1` | Insert a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when `EXPORT_SYNC=0`. Forces WDDM-deferred CUDA submissions to drain each frame, preventing Windows Task Manager's 3D-engine counter from inflating when true compute load (per NVML) is low. NVML readings are unchanged — purely cosmetic/observability. Set to `0` to disable. |
 | `CUDALINK_EXPORT_PROFILE` | `0` | Enable fine-grained per-region sub-timers in `export_frame()` and emit a `[PROFILE] pre=…us interop=…us post=…us memcpy=…us record=…us sync=…us sticky=…us flush_probe=…us shm=…us unacc=…us` line every 97 frames. Force-enables `verbose_performance` (TD) / `debug` (lib). Diagnostic-only; negligible overhead when on, zero when unset. |
+| `CUDALINK_NVTX` | `0` | Enable NVTX range annotations on top-level phase boundaries (`cudalink.exporter.flush_probe`, `cudalink.receiver.import_frame`, `cudalink.receiver.event_wait`, etc.) for Nsight Systems GPU timeline correlation. Zero overhead when off. Set to `1` before running any `nsys` capture; see [docs/PROFILING.md](docs/PROFILING.md). |
+| `CUDALINK_NVTX_VERBOSE` | `0` | Enable additional sub-operation NVTX ranges (sticky-error check, D2A copy submit, SHM header read) inside the top-level phase ranges. Only useful for deep per-frame breakdown captures; implies `CUDALINK_NVTX=1`. |
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](docs/PROFILING.md).
 
@@ -383,16 +385,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-0.7.3-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.2.1-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -427,7 +429,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v1.0.1.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v1.2.0.tox` into your TouchDesigner network from the project root.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -453,14 +455,7 @@ Both sides communicate through the 433-byte SharedMemory protocol — zero impor
 
 ## Changelog
 
-### v0.7.3
-Maintainability & performance: merged fast/debug method pairs into single methods with local debug flag, cached operator lookups with lazy fallback, lazy CuPy import, pre-cached f16 views per slot, export size validation, named `CUDAError.NOT_READY` constant.
-
-### v0.7.2
-Performance optimizations: cached SHM offsets, pre-compiled struct objects, debug-path elimination, TD hot-path cleanup.
-
-### v0.7.1
-Initial public release with dual Sender/Receiver mode, ring buffer architecture, and triple output modes (PyTorch, CuPy, NumPy).
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ---
 
