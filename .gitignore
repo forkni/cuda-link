@@ -185,6 +185,13 @@ Receiver_benchmark.*.toe
 Sender_benchmark.toe
 Sender_benchmark.*.toe
 
+# Test receiver .toe files (local-only)
+Test_TD_Receiver1.toe
+Test_TD_Receiver1.*.toe
+
+# Session log (local-only; also listed in CGW_LOCAL_FILES)
+SESSION_LOG.md
+
 # Audit reports (local-only)
 audit_reports/
 
