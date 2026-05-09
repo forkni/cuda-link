@@ -324,6 +324,48 @@ explicitly on the command line, e.g.:
 nsys profile --force-overwrite=true --output benchmarks/results/nsys/td_pipeline_v4_producer/producer ...
 ```
 
+### Parallel IPC consumers under nsys profiling
+
+**Symptom:** A second TD receiver (or any second process calling
+`cudaIpcOpenMemHandle`) that connects while the producer or first consumer is
+being profiled by nsys with `--trace=cuda` sees:
+
+```
+[CUDAIPCExtension:Receiver] Slot N: cudaIpcOpenMemHandle failed:
+    invalid resource handle (error 400: UNKNOWN_ERROR_400)
+```
+
+The producer's `write_idx` is actively incrementing — the IPC memory is live.
+In normal (non-nsys) runs the same topology works without error.
+
+**Root cause (status: triage-level, not fully attributed):**
+
+nsys with `--trace=cuda` installs a CUDA driver-level interception hook in the
+profiled process. This hook alters the driver-context metadata associated with
+IPC export handles. A second process opening the same handle may receive an
+invalid or stale handle descriptor because the driver-context tag used by the
+first process has been remapped by the nsys hook.
+
+Three hypotheses (probe matrix, in priority order):
+
+| Probe | Action | If passes → | If fails → |
+|---|---|---|---|
+| P1 | Use `--trace=nvtx` only on the first process (drop `cuda,wddm`) | nsys `cuda` hook is the cause; file nsys bug report | P2 |
+| P2 | Run both processes under nsys (`--output` different dirs for each) | Shared nsys hook context resolves it; workaround is dual-nsys | H2/H3 |
+| P3 | HWS off + nsys on (requires reboot) | HWS=2 + nsys combination is the cause | Multi-factor |
+
+**Known workaround:**
+
+- Do **not** attach a second consumer while any process in the IPC topology is
+  under `nsys --trace=cuda`.
+- For topology testing with multiple consumers, run without nsys. Alternatively,
+  profile all consumers simultaneously (each with its own `--output` path) rather
+  than attaching one at a time.
+
+**Status:** Known nsys instrumentation interaction. Not a cuda-link bug. No fix
+in `TDConfig.py` or `CUDAIPCWrapper.py` — the IPC export handle is conformant;
+the issue is in nsys's CUDA hook affecting cross-process handle visibility.
+
 ---
 
 ## 6. `CUDALINK_EXPORT_PROFILE` ↔ NVTX: What Each Measures
@@ -407,3 +449,79 @@ where `<value>` is `0` (software scheduling), `2` (hardware scheduling), or `unk
 (non-Windows or registry key absent). This range appears in the nsys timeline and in
 `nsys stats --report nvtx_sum`, so every archived `.nsys-rep` is self-documenting about
 the WDDM scheduling mode in effect during that capture.
+
+---
+
+## 8. Async Export Path for Python-Sender Topologies
+
+### When this applies
+
+Standalone Python-sender deployments where no TD-Sender process shares the CUDA
+context. Validated in the v5 capture (`benchmarks/results/nsys/td_pipeline_v5_*`);
+findings documented in `td_pipeline_v5_findings_extended.md`.
+
+### Flags
+
+```cmd
+SET CUDALINK_EXPORT_SYNC=0
+SET CUDALINK_EXPORT_FLUSH_PROBE=1
+```
+
+These complement the standard topology flags from §4 and work best after enabling
+HWS=2 (§7).
+
+### Measured trade-off (v4 blocking → v5 async, same HWS=2 machine)
+
+| Side | v4 baseline (`EXPORT_SYNC=1`) | v5 async (`EXPORT_SYNC=0 + FLUSH_PROBE=1`) | Δ |
+|---|---|---|---|
+| Producer `cudaStreamSynchronize` avg | 629.8 µs | **absent** | −629.8 µs (−100%) |
+| Producer `flush_probe` NVTX avg | absent | 6.1 µs | +6.1 µs (replacement cost) |
+| Producer slot p50 (`export_frame`) | 693.7 µs | **90.6 µs** | −603 µs (−87%) |
+| Producer slot p99 | 2,997 µs | 225.5 µs | −2,771 µs (−92%) |
+| Consumer `event_wait` p50 | 19.6 µs | 38.8 µs | +19.2 µs (redistributed wait) |
+| Consumer `import_frame` p50 | 182.7 µs | 157.7 µs | −25 µs |
+| Effective producer FPS | 58.7 | ~60 | +1.3 FPS |
+| Net per-frame savings (producer − consumer overhead) | — | — | **~−584 µs** |
+
+**How it works:** `EXPORT_SYNC=0` replaces `cudaStreamSynchronize` (~630 µs blocking
+GPU fence) with a `cudaStreamQuery` poll loop (`cudalink.exporter.flush_probe`, avg
+6.1 µs). The producer updates the SHM header as soon as `cudaStreamQuery` returns
+success — before the D2D event fires on the GPU timeline. The consumer receives the
+update earlier and calls `cudaStreamWaitEvent` to wait for the event itself, which
+increases consumer `event_wait` by ~19 µs on average. The wait is redistributed,
+not eliminated.
+
+### Why `EXPORT_SYNC=1` remains the global default
+
+`EXPORT_SYNC=1` (blocking) is load-bearing for **shared-process topologies** where
+a TD-Sender and TD-Receiver coexist in the same TouchDesigner process. In that
+topology, the blocking sync provides a hard ordering guarantee between the sender's
+D2D write and the receiver's next import. Switching to the async path without
+full cycle-2 regression testing (TD Sender + TD Receiver in the same TD instance,
+sustained for multiple session reconnect cycles) risks subtle TDR-cascade failures.
+
+Do **not** change `TDConfig.py` defaults. Set `EXPORT_SYNC=0` per-session via env
+var for standalone Python-sender deployments only.
+
+### Prerequisites
+
+1. **HWS=2 (§7).** The async path moves the WDDM flush wait from the producer
+   to the consumer's `event_wait`. With HWS=0 the consumer's event_wait tail
+   still sees WDDM epoch gaps (~116 ms in v4). Enable HWS=2 and reboot before
+   evaluating this config.
+2. **NVTX enabled.** Use `SET CUDALINK_NVTX=1` and confirm
+   `cudalink.exporter.flush_probe` ranges appear in nsys (target avg ~6 µs).
+3. **Capture ≥ 60 s.** Producer slot p50 should stabilise in the 80–100 µs
+   range. If it doesn't drop below 200 µs, check that both env vars are set
+   in the process that launched the Python sender.
+
+### Verification
+
+Run `v5_analyze.cmd` after a capture and check:
+
+```
+nsys stats --report cuda_api_sum producer.nsys-rep | findstr cudaStreamSynchronize
+```
+
+Should return **no rows** — `cudaStreamSynchronize` must be absent from the
+producer when async mode is active.
