@@ -73,33 +73,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Protocol layout constants (must match CUDAIPCExtension and CUDAIPCImporter)
-PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
-SHM_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
-
-# Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
-
-# CUDA-aligned dtype encoding (cudaChannelFormatKind values):
-FORMAT_KIND_SIGNED = 0  # cudaChannelFormatKindSigned
-FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned
-FORMAT_KIND_FLOAT = 2  # cudaChannelFormatKindFloat
-FLAGS_BFLOAT16 = 0x0001  # flag bit: bfloat16 (kind=Float, bits=16)
-
-# Map dtype string → (format_kind, bits_per_component, flags)
-_DTYPE_TO_KIND_BITS: dict[str, tuple[int, int, int]] = {
-    "float32": (FORMAT_KIND_FLOAT, 32, 0),
-    "float16": (FORMAT_KIND_FLOAT, 16, 0),
-    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0),
-    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0),
-}
+from .shm_protocol import (  # noqa: E402
+    _ST_U32,
+    MAGIC_OFFSET,
+    METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    TIMESTAMP_SIZE,
+    WRITE_IDX_OFFSET,
+    DtypeCodec,
+    Metadata,
+    SHMLayout,
+    bump_version,
+    publish_frame,
+)
 
 _DTYPE_ITEMSIZE_MAP = {
     "float32": 4,
@@ -108,17 +98,8 @@ _DTYPE_ITEMSIZE_MAP = {
     "uint16": 2,
 }
 
-# C3: CPU release-fence between shutdown_flag write and write_idx publish.
-# On x86/x64 the hardware guarantees TSO (total-store-order) for plain stores,
-# but CPython makes no compiler-level ordering guarantee between two separate
-# bytearray writes. threading.Lock acquire/release issues OS-level memory barriers
-# on all supported platforms, providing the needed release semantics. Cost: ~80ns.
-_fence_lock = threading.Lock()
-
-
-def _release_fence() -> None:
-    with _fence_lock:
-        pass
+# _DTYPE_TO_KIND_BITS is now in shm_protocol.DtypeCodec.encode(); kept as alias for call sites below
+_DTYPE_TO_KIND_BITS = {k: DtypeCodec.encode(k) for k in ("float32", "float16", "uint8", "uint16")}
 
 
 def _read_hws_mode() -> str:
@@ -279,9 +260,10 @@ class CUDAIPCExporter:
         self.total_sticky_check_us: float = 0.0
         self.total_flush_probe_us: float = 0.0
 
-        # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
-        self._ts_offset: int = 0
-        self._shutdown_offset: int = 0
+        # Cached layout + offsets (set by _write_handles_to_shm, constant thereafter)
+        self._layout: SHMLayout = SHMLayout(num_slots)
+        self._ts_offset: int = self._layout.timestamp_offset
+        self._shutdown_offset: int = self._layout.shutdown_offset
 
         # C2: device-affinity validation
         # CUDALINK_STRICT_DEVICE=1 raises ValueError on mismatch; default warns+continues.
@@ -396,8 +378,8 @@ class CUDAIPCExporter:
             self._write_handles_to_shm()
             self._write_metadata_to_shm()
 
-            # Cache constant SharedMemory offsets so export_frame() avoids per-frame arithmetic
-            self._ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+            # Cache timestamp offset from the pre-computed layout (set by _write_handles_to_shm)
+            self._ts_offset = self._layout.timestamp_offset
 
             self._initialized = True
 
@@ -455,18 +437,11 @@ class CUDAIPCExporter:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
 
-        # Increment version (detect re-initialization from consumer side)
-        try:
-            current_version = struct.unpack_from("<Q", self.shm_handle.buf, 4)[0]
-        except (struct.error, ValueError, IndexError):
-            current_version = 0
-        new_version = current_version + 1
-
-        # Write header
-        struct.pack_into("<I", self.shm_handle.buf, 0, PROTOCOL_MAGIC)
-        struct.pack_into("<Q", self.shm_handle.buf, 4, new_version)
-        struct.pack_into("<I", self.shm_handle.buf, 12, self.num_slots)
-        struct.pack_into("<I", self.shm_handle.buf, 16, 0)  # write_idx = 0 initially
+        # Write protocol header: magic, bump version, reset num_slots and write_idx
+        _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+        new_version = bump_version(self.shm_handle.buf)
+        _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)  # write_idx = 0 initially
 
         # Write per-slot handles
         for slot in range(self.num_slots):
@@ -479,9 +454,10 @@ class CUDAIPCExporter:
                 event_handle_bytes = bytes(self.ipc_event_handles[slot].reserved)
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = event_handle_bytes
 
-        # Initialize shutdown flag to 0 and cache its offset for export_frame() reassertion
-        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        struct.pack_into("<B", self.shm_handle.buf, self._shutdown_offset, 0)
+        # Pre-compute layout once; cache derived offsets for export_frame() hot-path
+        self._layout = SHMLayout(self.num_slots)
+        self._shutdown_offset = self._layout.shutdown_offset
+        self.shm_handle.buf[self._shutdown_offset] = 0
 
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
@@ -500,16 +476,16 @@ class CUDAIPCExporter:
         if self.shm_handle is None or self.data_size == 0:
             return
 
-        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
-
-        kind, bits, flags = _DTYPE_TO_KIND_BITS[self.dtype]
-
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset, self.width)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 4, self.height)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 8, self.channels)
-        _ST_BBH.pack_into(self.shm_handle.buf, metadata_offset + 12, kind, bits, flags)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 16, self.data_size)
+        kind, bits, flags = DtypeCodec.encode(self.dtype)
+        Metadata(
+            width=self.width,
+            height=self.height,
+            num_comps=self.channels,
+            format_kind=kind,
+            bits_per_comp=bits,
+            flags=flags,
+            data_size=self.data_size,
+        ).pack_into(self.shm_handle.buf, self._layout)
 
         logger.debug(
             "Wrote metadata: %dx%dx%d, dtype=%s (kind=%d bits=%d flags=0x%04x), data_size=%dB",
@@ -842,10 +818,7 @@ class CUDAIPCExporter:
                 _t = time.perf_counter()
             with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
                 self.write_idx += 1
-                _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
-                self.shm_handle.buf[self._shutdown_offset] = 0
-                _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
-                _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
+                publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
             if debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 

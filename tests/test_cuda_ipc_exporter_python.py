@@ -392,6 +392,7 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
         SLOT_SIZE,
         TIMESTAMP_SIZE,
         CUDAIPCExporter,
+        SHMLayout,
     )
 
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
@@ -413,8 +414,9 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp.cuda = MagicMock()
     exp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
     exp.ipc_events = [None] * num_slots
-    exp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
-    exp._ts_offset = exp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+    exp._layout = SHMLayout(num_slots)
+    exp._shutdown_offset = exp._layout.shutdown_offset
+    exp._ts_offset = exp._layout.timestamp_offset
     exp._initialized = True
     exp._export_sync = False
 
@@ -519,8 +521,8 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
     exp.shm_handle.buf = spy_buf
 
     with (
-        patch("cuda_link.cuda_ipc_exporter._ST_U32", mock_st_u32),
-        patch("cuda_link.cuda_ipc_exporter._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
+        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
     ):
         result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
 
@@ -587,9 +589,9 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
     exp.shm_handle.buf = spy_buf
 
     with (
-        patch("cuda_link.cuda_ipc_exporter._ST_U32", mock_st_u32),
-        patch("cuda_link.cuda_ipc_exporter._ST_F64", mock_st_f64),
-        patch("cuda_link.cuda_ipc_exporter._release_fence", spy_fence),
+        patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
+        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._release_fence", spy_fence),
     ):
         result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
 

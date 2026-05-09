@@ -25,6 +25,7 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
         TIMESTAMP_SIZE,
         CUDAIPCExporter,
     )
+    from cuda_link.shm_protocol import SHMLayout
 
     num_slots = 2
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
@@ -46,6 +47,7 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     exp._strict_device = strict
     exp._source_sync_device_warned = False
     exp._ptr_device_cache = set()
+    exp._layout = SHMLayout(num_slots)
     exp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
     exp._ts_offset = exp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
 

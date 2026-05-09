@@ -30,34 +30,29 @@ from CUDAIPCWrapper import (  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
+from SHMProtocol import (  # noqa: E402
+    _ST_BBH,
+    FLAGS_BFLOAT16,
+    FORMAT_KIND_FLOAT,
+    FORMAT_KIND_UNSIGNED,
+    MAGIC_OFFSET,
+    MAGIC_SIZE,
+    METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    NUM_SLOTS_SIZE,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    VERSION_OFFSET,
+    VERSION_SIZE,
+    WRITE_IDX_OFFSET,
+    SHMLayout,
+    SlotState,
+    acquire_slot,
+)
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import RealTOPHandle, TDHost  # noqa: E402
-
-# Protocol layout constants (mirrors CUDAIPCExtension.py - both must stay in sync)
-PROTOCOL_MAGIC = 0x43495044
-MAGIC_OFFSET = 0
-MAGIC_SIZE = 4
-VERSION_OFFSET = 4
-VERSION_SIZE = 8
-NUM_SLOTS_OFFSET = 12
-NUM_SLOTS_SIZE = 4
-WRITE_IDX_OFFSET = 16
-WRITE_IDX_SIZE = 4
-SHM_HEADER_SIZE = 20
-SLOT_SIZE = 128
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20
-TIMESTAMP_SIZE = 8
-
-FORMAT_KIND_SIGNED = 0
-FORMAT_KIND_UNSIGNED = 1
-FORMAT_KIND_FLOAT = 2
-FLAGS_BFLOAT16 = 0x0001
-
-_ST_U32 = struct.Struct("<I")
-_ST_U64 = struct.Struct("<Q")
-_ST_F64 = struct.Struct("<d")
-_ST_BBH = struct.Struct("<BBH")
 
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
@@ -98,6 +93,7 @@ class TDReceiverEngine:
         self._rx_ipc_events = [None] * self.num_slots
         self._rx_ipc_version = 0
         self._rx_num_slots = 0
+        self._rx_layout: SHMLayout | None = None
         self._rx_shutdown_offset = 0
         self._rx_width = 0
         self._rx_height = 0
@@ -193,28 +189,29 @@ class TDReceiverEngine:
             f"cudalink.receiver.import_frame.slot{(self._rx_last_write_idx) % max(self._rx_num_slots, 1)}", "blue"
         )
         try:
-            # Check for shutdown signal
-            if self.shm_handle.buf[self._rx_shutdown_offset] == 1:
+            result = acquire_slot(
+                self.shm_handle.buf,
+                self._rx_layout,
+                self._rx_last_write_idx,
+                self._rx_ipc_version,
+            )
+            if result.state is SlotState.SHUTDOWN:
                 self._log("Sender shutdown detected. Cleaning up.", force=True)
                 self.cleanup()
                 return False
-
-            # Check for version change (sender re-initialized)
-            current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-            if current_version != self._rx_ipc_version:
+            if result.state is SlotState.VERSION_CHANGED:
                 self._log(
-                    f"Sender re-initialized (v{self._rx_ipc_version} -> v{current_version}). Reconnecting...",
+                    f"Sender re-initialized (v{self._rx_ipc_version} -> v{result.new_version}). Reconnecting...",
                     force=True,
                 )
                 self.cleanup()
                 return False  # Will reinitialize on next frame
+            if result.state is SlotState.NO_FRAME:
+                return False
 
-            # Read write_idx and calculate read slot
-            write_idx = _ST_U32.unpack_from(self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
-            if write_idx == 0:
-                return False  # No frames written yet
-
-            read_slot = (write_idx - 1) % self._rx_num_slots
+            self._rx_last_write_idx = result.write_idx
+            write_idx = result.write_idx
+            read_slot = result.slot
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -420,8 +417,9 @@ class TDReceiverEngine:
             # Receiver always uses self._rx_num_slots for its own arrays.
             self._host.set_param_value("Numslots", self._rx_num_slots)
 
-            # Cache receiver shutdown offset once — avoids per-frame arithmetic in import_frame()
-            self._rx_shutdown_offset = SHM_HEADER_SIZE + (self._rx_num_slots * SLOT_SIZE)
+            # Cache receiver layout once — avoids per-frame arithmetic in import_frame()
+            self._rx_layout = SHMLayout(self._rx_num_slots)
+            self._rx_shutdown_offset = self._rx_layout.shutdown_offset
 
             # Read extended metadata (if available)
             shutdown_offset = self._rx_shutdown_offset

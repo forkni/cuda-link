@@ -360,6 +360,8 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     import numpy as np
     from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE
 
+    from cuda_link.shm_protocol import SHMLayout
+
     with patch("TDReceiver.CUPY_AVAILABLE", use_cupy):
         from TDReceiver import TDReceiverEngine
 
@@ -396,6 +398,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     engine._rx_last_write_idx = 0
     engine._rx_ipc_version = 1
     engine._rx_num_slots = NUM_SLOTS
+    engine._rx_layout = SHMLayout(NUM_SLOTS)
     engine._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
     engine._rx_width = WIDTH
     engine._rx_height = HEIGHT

@@ -10,6 +10,15 @@ from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 from .nvml_observer import NVML_AVAILABLE, NVMLObserver
+from .shm_protocol import (
+    AcquireResult,
+    DtypeCodec,
+    Metadata,
+    SHMLayout,
+    SlotState,
+    acquire_slot,
+    publish_frame,
+)
 
 __version__ = "1.2.1"
 __all__ = [
@@ -22,4 +31,11 @@ __all__ = [
     "TORCH_AVAILABLE",
     "NVML_AVAILABLE",
     "NVMLObserver",
+    "AcquireResult",
+    "DtypeCodec",
+    "Metadata",
+    "SHMLayout",
+    "SlotState",
+    "acquire_slot",
+    "publish_frame",
 ]

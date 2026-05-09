@@ -231,6 +231,7 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
         TIMESTAMP_SIZE,
         CUDAIPCImporter,
     )
+    from cuda_link.shm_protocol import SHMLayout
 
     # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
@@ -261,6 +262,7 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     imp.total_shm_read_us = 0.0
     imp.last_latency = 0.0
     imp.ipc_version = 1  # matches version=1 written into buf above
+    imp._layout = SHMLayout(num_slots)
     imp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
     imp._timestamp_offset = imp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
     imp._initialized = True

@@ -14,6 +14,15 @@ import struct
 
 import pytest
 
+from cuda_link.shm_protocol import (
+    PROTOCOL_MAGIC,
+    SHMLayout,
+    read_magic,
+    read_num_slots,
+    read_version,
+    read_write_idx,
+)
+
 # ---------------------------------------------------------------------------
 # Minimal TouchDesigner stubs (no TD runtime needed)
 # ---------------------------------------------------------------------------
@@ -87,24 +96,15 @@ def _make_sender_comp(shm_name: str, num_slots: int = 3) -> _COMP:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SHM_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-_SLOT_SIZE = 128
-_PROTOCOL_MAGIC = 0x43495044
-
 
 def _shm_header(buf: memoryview) -> tuple[int, int, int, int]:
     """Parse (magic, version, num_slots, write_idx) from raw SHM buffer."""
-    magic = struct.unpack_from("<I", buf, 0)[0]
-    version = struct.unpack_from("<Q", buf, 4)[0]
-    num_slots = struct.unpack_from("<I", buf, 12)[0]
-    write_idx = struct.unpack_from("<I", buf, 16)[0]
-    return magic, version, num_slots, write_idx
+    return read_magic(buf), read_version(buf), read_num_slots(buf), read_write_idx(buf)
 
 
 def _shutdown_byte(buf: memoryview, num_slots: int) -> int:
     """Return the shutdown flag byte (1 = shutdown signalled)."""
-    offset = _SHM_HEADER_SIZE + num_slots * _SLOT_SIZE
-    return buf[offset]
+    return buf[SHMLayout(num_slots).shutdown_offset]
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ def test_sender_initialize_sets_correct_shm_layout(
     buf = ext.shm_handle.buf
     magic, version, num_slots, write_idx = _shm_header(buf)
 
-    assert magic == _PROTOCOL_MAGIC, f"SHM magic mismatch: {magic:#x}"
+    assert magic == PROTOCOL_MAGIC, f"SHM magic mismatch: {magic:#x}"
     assert version >= 1, "SHM version must be ≥ 1 after init"
     assert num_slots == 3
     assert write_idx == 0, "write_idx must be 0 directly after init"
@@ -158,7 +158,7 @@ def test_sender_shm_size_matches_protocol(
     ext.initialize(width=16, height=16, channels=4)
 
     # 20 header + 3*128 slots + 1 shutdown + 20 metadata + 8 timestamp = 433
-    expected = _SHM_HEADER_SIZE + NUM_SLOTS * _SLOT_SIZE + 1 + 20 + 8
+    expected = SHMLayout(NUM_SLOTS).total_size
     assert len(ext.shm_handle.buf) >= expected, f"SHM too small: {len(ext.shm_handle.buf)} < {expected}"
 
     ext.cleanup()
@@ -305,7 +305,7 @@ def test_sender_cleanup_sets_shutdown_flag(
     # Temporarily open a second handle so we can read after ext.cleanup() closes its handle
     shm_reader = SharedMemory(name=shm_name)
     try:
-        shutdown_offset = _SHM_HEADER_SIZE + NUM_SLOTS * _SLOT_SIZE
+        shutdown_offset = SHMLayout(NUM_SLOTS).shutdown_offset
         assert shm_reader.buf[shutdown_offset] == 0, "shutdown flag should be 0 before cleanup"
         # cleanup() writes flag=1, then closes the sender's SHM handle, then unlinks.
         # Our reader's handle keeps the Windows kernel object alive so we can still read.
@@ -488,16 +488,17 @@ def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
     shm = shared_memory.SharedMemory(name="test_rx_shutdown_regression_xyz", create=True, size=1024)
     try:
         engine.shm_handle = shm
-        engine._rx_shutdown_offset = 100
+        engine._rx_num_slots = 0
+        engine._rx_layout = SHMLayout(engine._rx_num_slots)
+        engine._rx_shutdown_offset = engine._rx_layout.shutdown_offset
         engine._rx_ipc_version = 1
         engine._rx_dev_ptrs = []
         engine._rx_ipc_events = []
-        engine._rx_num_slots = 0
         engine._rx_stream = None
         engine.cuda = None
         engine._initialized = True
 
-        shm.buf[100] = 1  # mark shutdown byte
+        shm.buf[engine._rx_layout.shutdown_offset] = 1  # mark shutdown byte
 
         result = engine.import_frame(None)  # type: ignore[arg-type]
         assert result is False

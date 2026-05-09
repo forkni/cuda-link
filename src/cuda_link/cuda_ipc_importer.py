@@ -101,45 +101,27 @@ from .cuda_ipc_wrapper import CUDARuntimeAPI, cudaIpcEventHandle_t, cudaIpcMemHa
 # Byte size per dtype — module-level constant avoids dict construction on every _dtype_itemsize() call
 _DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "uint8": 1, "uint16": 2}
 
-# Protocol layout constants (must match td_exporter/CUDAIPCExtension.py)
-PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
-MAGIC_OFFSET = 0
-MAGIC_SIZE = 4
-VERSION_OFFSET = 4
-VERSION_SIZE = 8
-NUM_SLOTS_OFFSET = 12
-NUM_SLOTS_SIZE = 4
-WRITE_IDX_OFFSET = 16
-WRITE_IDX_SIZE = 4
-SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
-SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
-# TIMESTAMP_OFFSET calculated at runtime: SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-
-# Pre-compiled struct objects for hot-path SHM reads (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
-
-# CUDA-aligned dtype decoding constants (must match sender constants)
-_FORMAT_KIND_FLOAT = 2
-_FLAGS_BFLOAT16 = 0x0001
+from .shm_protocol import (  # noqa: E402
+    _ST_BBH,
+    MAGIC_OFFSET,
+    MAGIC_SIZE,
+    NUM_SLOTS_OFFSET,
+    NUM_SLOTS_SIZE,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SLOT_SIZE,
+    VERSION_OFFSET,
+    VERSION_SIZE,
+    AcquireResult,
+    DtypeCodec,
+    SHMLayout,
+    SlotState,
+    acquire_slot,
+)
 
 
 def _decode_dtype_str(kind: int, bits: int, flags: int) -> str:
-    """Decode (format_kind, bits_per_comp, flags) → dtype string."""
-    if kind == _FORMAT_KIND_FLOAT and bits == 16 and not (flags & _FLAGS_BFLOAT16):
-        return "float16"
-    if kind == _FORMAT_KIND_FLOAT:
-        return "float32"
-    if bits == 8:
-        return "uint8"
-    if bits == 16:
-        return "uint16"
-    return "float32"  # safe fallback for future extensions
+    return DtypeCodec.decode(kind, bits, flags)
 
 
 class CUDAIPCImporter:
@@ -234,6 +216,7 @@ class CUDAIPCImporter:
         self.wait_sleep_hits: int = 0  # frames resolved in Phase 2
 
         # Cached SharedMemory offsets (computed once in _initialize(), constant thereafter)
+        self._layout: SHMLayout | None = None
         self._shutdown_offset: int = 0
         self._timestamp_offset: int = 0
 
@@ -513,8 +496,9 @@ class CUDAIPCImporter:
             logger.info("Opened %d IPC buffer slots with GPU-side sync", self.num_slots)
 
             # Cache constant SharedMemory offsets so hot paths avoid per-frame arithmetic
-            self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-            self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+            self._layout = SHMLayout(self.num_slots)
+            self._shutdown_offset = self._layout.shutdown_offset
+            self._timestamp_offset = self._layout.timestamp_offset
 
             self._initialized = True
             logger.info("Initialization complete - ready for zero-copy GPU access")
@@ -628,22 +612,33 @@ class CUDAIPCImporter:
 
         return cupy_array
 
-    def _get_read_slot(self) -> int | None:
-        """Read write_idx from SharedMemory and compute read slot.
+    def _try_acquire(self) -> AcquireResult | None:
+        """Acquire next frame via acquire_slot(); dispatch on state.
 
         Returns:
-            Slot index to read from, or None if no new frame available
+            AcquireResult on NEW_FRAME (slot/timestamp/write_idx populated), else None.
+        Side-effects:
+            cleanup() on SHUTDOWN; _reinitialize() on VERSION_CHANGED (single-tick stall).
         """
-        write_idx = _ST_U32.unpack_from(self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
-
-        if write_idx == 0:
-            return None  # No frames written yet
-
-        if write_idx == self._last_write_idx:
-            return None  # Same frame as last read
-
-        self._last_write_idx = write_idx
-        return (write_idx - 1) % self.num_slots
+        try:
+            result = acquire_slot(self.shm_handle.buf, self._layout, self._last_write_idx, self.ipc_version)
+        except (OSError, BufferError) as e:
+            logger.debug("SHM buffer inaccessible: %s", e)
+            return None
+        if result.state is SlotState.SHUTDOWN:
+            logger.info("Producer shutdown detected - cleaning up gracefully")
+            self.cleanup()
+            return None
+        if result.state is SlotState.VERSION_CHANGED:
+            logger.debug(
+                "TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, result.new_version
+            )
+            self._reinitialize()
+            return None  # pick up frame next call
+        if result.state is SlotState.NO_FRAME:
+            return None
+        self._last_write_idx = result.write_idx
+        return result
 
     def _wait_for_slot(self, slot: int) -> float:
         """Wait for producer to finish writing slot, with timeout.
@@ -727,27 +722,13 @@ class CUDAIPCImporter:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        # Check for producer shutdown + version change + read slot (all SharedMemory reads)
         if debug:
             _shm_t = time.perf_counter()
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
         if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
@@ -829,24 +810,11 @@ class CUDAIPCImporter:
 
         if debug:
             _shm_t = time.perf_counter()
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
         if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
@@ -1017,25 +985,11 @@ class CUDAIPCImporter:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        # Check for producer shutdown + version change + read slot (all SharedMemory reads)
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
         if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
             self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
         else:
@@ -1089,11 +1043,12 @@ class CUDAIPCImporter:
         )[0]
 
         # Recompute cached offsets (num_slots may have changed)
-        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+        self._layout = SHMLayout(self.num_slots)
+        self._shutdown_offset = self._layout.shutdown_offset
+        self._timestamp_offset = self._layout.timestamp_offset
 
         # Re-read metadata (shape/dtype may have changed since last init)
-        metadata_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE
+        metadata_offset = self._layout.metadata_offset
         try:
             width = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset : metadata_offset + 4]))[0]
             height = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
