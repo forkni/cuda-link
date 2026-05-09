@@ -53,6 +53,7 @@ from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
+from . import _nvtx
 from .activation_barrier import bump_skip as _ab_bump
 from .activation_barrier import open_or_create as _ab_open
 from .activation_barrier import read_state as _ab_read
@@ -118,6 +119,28 @@ _fence_lock = threading.Lock()
 def _release_fence() -> None:
     with _fence_lock:
         pass
+
+
+def _read_hws_mode() -> str:
+    """Read WDDM Hardware-Accelerated GPU Scheduling registry key (Windows only).
+
+    Returns "0" (software scheduling), "2" (hardware scheduling enabled),
+    or "unknown" on any error (non-Windows, key absent, permission denied).
+    Emitted as cudalink.startup.hws_mode=<value> NVTX range at exporter init
+    so every nsys capture is self-documenting about the WDDM scheduling mode.
+    """
+    try:
+        import winreg  # noqa: PLC0415
+
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
+        )
+        value, _ = winreg.QueryValueEx(key, "HwSchMode")
+        winreg.CloseKey(key)
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 class CUDAIPCExporter:
@@ -295,6 +318,11 @@ class CUDAIPCExporter:
                     "cudaSetDevice() with a different index before initialize()."
                 )
             logger.info("Loaded CUDA runtime on device %d", actual_device)
+
+            hws_mode = _read_hws_mode()
+            logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
+            with _nvtx.annotate(f"cudalink.startup.hws_mode={hws_mode}", "cyan"):
+                pass
 
             # Create or reuse dedicated non-blocking IPC stream.
             # cudaStreamNonBlocking (0x01) prevents the default stream from
@@ -668,6 +696,7 @@ class CUDAIPCExporter:
         debug = self.debug
         if debug:
             frame_start = time.perf_counter()
+        _nvtx.push_range(f"cudalink.exporter.slot{self.write_idx % self.num_slots}", "green")
         try:
             slot = self.write_idx % self.num_slots
 
@@ -750,20 +779,22 @@ class CUDAIPCExporter:
 
                 if debug:
                     memcpy_start = time.perf_counter()
-                self.cuda.memcpy_async(
-                    dst=self.dev_ptrs[slot],
-                    src=c_void_p(gpu_ptr),
-                    count=self.data_size,
-                    kind=3,  # cudaMemcpyDeviceToDevice
-                    stream=self.ipc_stream,
-                )
+                with _nvtx.verbose_range("cudalink.exporter.memcpy", "green"):
+                    self.cuda.memcpy_async(
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(gpu_ptr),
+                        count=self.data_size,
+                        kind=3,  # cudaMemcpyDeviceToDevice
+                        stream=self.ipc_stream,
+                    )
                 if debug:
                     self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
 
                 if debug:
                     _t = time.perf_counter()
-                if self.ipc_events[slot]:
-                    self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                with _nvtx.verbose_range("cudalink.exporter.record_event", "green"):
+                    if self.ipc_events[slot]:
+                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 if debug:
                     self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -798,7 +829,8 @@ class CUDAIPCExporter:
             if self._export_flush_probe and not self._export_sync:
                 if debug and self._export_profile:
                     _t_fp = time.perf_counter()
-                self.cuda.stream_query(self.ipc_stream)
+                with _nvtx.verbose_range("cudalink.exporter.flush_probe", "green"):
+                    self.cuda.stream_query(self.ipc_stream)
                 if debug and self._export_profile:
                     self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
 
@@ -808,11 +840,12 @@ class CUDAIPCExporter:
             # shutdown_flag=0 when it detects a new frame (atomicity improvement).
             if debug:
                 _t = time.perf_counter()
-            self.write_idx += 1
-            _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
-            self.shm_handle.buf[self._shutdown_offset] = 0
-            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
-            _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
+            with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
+                self.write_idx += 1
+                _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
+                self.shm_handle.buf[self._shutdown_offset] = 0
+                _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
+                _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
             if debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -867,6 +900,8 @@ class CUDAIPCExporter:
             logger.error("Export failed: %s", e)
             traceback.print_exc()
             return False
+        finally:
+            _nvtx.pop_range()
 
     # ------------------------------------------------------------------
     # Cleanup

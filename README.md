@@ -10,7 +10,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - `export_frame()` 42–400 µs p50 (512×512 → 4K float32, EXPORT_SYNC=1); `get_frame_numpy()` D2H 0.2–5.5 ms p50 (PCIe 4.0 ~23 GB/s); IPC notification ~250 µs cross-process (see [Benchmarks](#benchmarks))
+- **Low-overhead IPC** - `export_frame()` 22–367 µs p50 (512×512 → 4K float32, EXPORT_SYNC=1); `get_frame_numpy()` D2H 0.18–5.7 ms p50 (PCIe 4.0 ~22–24 GB/s); IPC notification ~136–286 µs cross-process (see [Benchmarks](#benchmarks))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -22,14 +22,14 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 | Operation | p50 | Notes |
 |-----------|-----|-------|
-| `export_frame()` — 512×512 RGBA float32 | 42 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
-| `export_frame()` — 1080p RGBA float32 | 138 µs | Standalone, EXPORT_SYNC=1 |
-| `export_frame()` — 4K RGBA float32 | 400 µs | Standalone, EXPORT_SYNC=1 |
-| `get_frame_numpy()` D2H — 512×512 float32 | 0.23 ms | Standalone, ~18 GB/s |
-| `get_frame_numpy()` D2H — 1080p float32 | 1.35 ms | Standalone, ~24 GB/s PCIe 4.0 |
-| `get_frame_numpy()` D2H — 4K float32 | 5.5 ms | Standalone, ~23 GB/s PCIe 4.0 |
+| `export_frame()` — 512×512 RGBA float32 | 22 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
+| `export_frame()` — 1080p RGBA float32 | 117 µs | Standalone, EXPORT_SYNC=1 |
+| `export_frame()` — 4K RGBA float32 | 367 µs | Standalone, EXPORT_SYNC=1 |
+| `get_frame_numpy()` D2H — 512×512 float32 | 0.18 ms | Standalone, ~22 GB/s |
+| `get_frame_numpy()` D2H — 1080p float32 | 1.32 ms | Standalone, ~24 GB/s PCIe 4.0 |
+| `get_frame_numpy()` D2H — 4K float32 | 5.7 ms | Standalone, ~21 GB/s PCIe 4.0 |
 | `get_frame()` / `get_frame_cupy()` GPU | <5 µs | Zero-copy tensor/array view, no D2H |
-| IPC notification latency | ~250–300 µs | Producer publish → consumer detect (cross-process) |
+| IPC notification latency | ~136–286 µs | Producer publish → consumer detect (cross-process) |
 | Initialization | ~50–100 µs | One-time IPC handle opening |
 
 ## Requirements
@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v1.0.1.tox` into your TD network
+1. Drag `CUDAIPCLink_v1.2.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -72,12 +72,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-0.7.3-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-1.2.1-py3-none-any.whl
 
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -158,20 +158,23 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 ```
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
-CUDAIPCExtension (Sender)          CUDAIPCImporter
-  │ export_frame(top_op)             │ get_frame() / get_frame_numpy()
-  │ cudaMemcpy D2D → ring buffer    │ Waits on IPC event
-  └─→ SharedMemory ←─────────────────┘
+CUDAIPCExtension facade
+  └── TDSenderEngine               CUDAIPCImporter
+        │ export_frame(top_op)       │ get_frame() / get_frame_numpy()
+        │ cudaMemcpy D2D → ring buf  │ Waits on IPC event
+        └─→ SharedMemory ←───────────┘
 
 Direction B: Python (Producer) → TD (Consumer)
 ───────────────────────────────────────────────
-CUDAIPCExporter                    CUDAIPCExtension (Receiver)
-  │ export_frame(gpu_ptr, size)     │ import_frame(script_top)
-  │ cudaMemcpy D2D → ring buffer    │ copyCUDAMemory()
-  └─→ SharedMemory ←─────────────────┘
+CUDAIPCExporter                    CUDAIPCExtension facade
+  │ export_frame(gpu_ptr, size)      └── TDReceiverEngine
+  │ cudaMemcpy D2D → ring buf             │ import_frame(script_top)
+  └─→ SharedMemory ←──────────────────────┘ copyCUDAMemory()
 
 Both directions share the same v0.5.0 binary protocol.
 ```
+
+The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
 
 ### Ring Buffer (3 Slots)
 
@@ -240,10 +243,10 @@ Single-process, EXPORT_SYNC=1 (CPU waits for GPU D2D completion), 2000 frames:
 ```
 Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
 ----------    -------------------   ------------------
-512x512                      41.7                 45.3
-1280x720                     59.0                 59.6
-1920x1080                   138.3                133.3
-3840x2160                   400.2                404.0
+512x512                      22.4                 19.4
+1280x720                     42.7                 41.7
+1920x1080                   117.1                115.7
+3840x2160                   367.4                366.9
 ```
 
 With EXPORT_SYNC=1 the GPU D2D copy dominates; CUDA Graphs saves WDDM submission transitions but the net wall-clock difference is small (<5%). The Graphs path stays on by default for consistency with async workflows.
@@ -259,10 +262,10 @@ Standalone D2H copy, no IPC overhead, 2000 frames:
 ```
 Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 ----------    -----------------   ------------------   -------------
-512x512                    0.23                 0.22            17.7
-1280x720                   0.62                 0.62            22.6
-1920x1080                  1.35                 1.35            23.7
-3840x2160                  5.54                 5.55            23.1
+512x512                    0.18                 0.19            22.2
+1280x720                   0.61                 0.61            23.1
+1920x1080                  1.32                 1.34            23.7
+3840x2160                  5.69                 6.82            21.4
 ```
 
 PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_STREAMS=1` (default) is optimal for this platform.
@@ -278,14 +281,14 @@ Two separate Python processes (producer + consumer), 500 warmup + 2000 measureme
 ```
 Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC notify p50 (µs)
 ----------    -------   ------   ---------------   ------------------   -------------------
-512x512       float32   off               1316                 1.44                     259
-512x512       float32   on                1076                 1.45                     257
-512x512       uint8     off                970                 0.45                     255
-1280x720      float32   off               1743                 4.60                     297
-1920x1080     float32   off                585                 2.00                     240
-1920x1080     uint8     off               1234                 2.65                     265
-3840x2160     float32   off                566                 5.85                     300
-3840x2160     uint8     off                566                 2.59                     227
+512x512       float32   off                898                 1.33                     172
+512x512       float32   on                 885                 1.33                     200
+512x512       uint8     off                871                 0.38                     203
+1280x720      float32   off                907                 4.48                     160
+1920x1080     float32   off               1483                 5.02                     136
+1920x1080     uint8     off                873                 2.54                     179
+3840x2160     float32   off                662                 5.01                     286
+3840x2160     uint8     off               1471                 5.03                     196
 ```
 
 Full results (all 16 cells, CSV + JSON): `benchmarks/results/sweep_latest.csv` / `sweep_latest.json`.
@@ -324,6 +327,10 @@ Producer write is 4–19x faster (no CPU transit). With zero-copy GPU consumers 
 | `CUDALINK_TD_STREAM_PRIO` | `normal` | CUDA stream priority for the TD Sender's IPC stream. Default `normal` is safe for both single-pair and concurrent topologies — in single-pair only one stream exists per process so priority is moot; in concurrent, equal priorities prevent WDDM contention accumulation across reactivation cycles (high/high contention produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed). Set to `high` only for explicit single-pair lowest-latency optimisation. |
 | `CUDALINK_EXPORT_FLUSH_PROBE` | `1` | Insert a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when `EXPORT_SYNC=0`. Forces WDDM-deferred CUDA submissions to drain each frame, preventing Windows Task Manager's 3D-engine counter from inflating when true compute load (per NVML) is low. NVML readings are unchanged — purely cosmetic/observability. Set to `0` to disable. |
 | `CUDALINK_EXPORT_PROFILE` | `0` | Enable fine-grained per-region sub-timers in `export_frame()` and emit a `[PROFILE] pre=…us interop=…us post=…us memcpy=…us record=…us sync=…us sticky=…us flush_probe=…us shm=…us unacc=…us` line every 97 frames. Force-enables `verbose_performance` (TD) / `debug` (lib). Diagnostic-only; negligible overhead when on, zero when unset. |
+| `CUDALINK_NVTX` | `0` | Enable NVTX range annotations on top-level phase boundaries (`cudalink.exporter.flush_probe`, `cudalink.receiver.import_frame`, `cudalink.receiver.event_wait`, etc.) for Nsight Systems GPU timeline correlation. Zero overhead when off. Set to `1` before running any `nsys` capture; see [docs/PROFILING.md](docs/PROFILING.md). |
+| `CUDALINK_NVTX_VERBOSE` | `0` | Enable additional sub-operation NVTX ranges (sticky-error check, D2A copy submit, SHM header read) inside the top-level phase ranges. Only useful for deep per-frame breakdown captures; implies `CUDALINK_NVTX=1`. |
+
+For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](docs/PROFILING.md).
 
 
 ## Troubleshooting
@@ -378,16 +385,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-0.7.3-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.2.1-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-0.7.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.2.1-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-0.7.3-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.2.1-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -422,7 +429,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v1.0.1.tox` into your TouchDesigner network from the project root.
+Drag `CUDAIPCLink_v1.2.0.tox` into your TouchDesigner network from the project root.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -448,14 +455,7 @@ Both sides communicate through the 433-byte SharedMemory protocol — zero impor
 
 ## Changelog
 
-### v0.7.3
-Maintainability & performance: merged fast/debug method pairs into single methods with local debug flag, cached operator lookups with lazy fallback, lazy CuPy import, pre-cached f16 views per slot, export size validation, named `CUDAError.NOT_READY` constant.
-
-### v0.7.2
-Performance optimizations: cached SHM offsets, pre-compiled struct objects, debug-path elimination, TD hot-path cleanup.
-
-### v0.7.1
-Initial public release with dual Sender/Receiver mode, ring buffer architecture, and triple output modes (PyTorch, CuPy, NumPy).
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ---
 

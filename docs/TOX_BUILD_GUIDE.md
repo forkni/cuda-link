@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v0.7.3.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.2.1.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -11,7 +11,13 @@ Step-by-step instructions for building the `CUDAIPCLink_v0.7.3.tox` component in
 ```
 CUDAIPCExporter (Base COMP)
 ├── CUDAIPCWrapper    (Text DAT)     ← Copy from td_exporter/CUDAIPCWrapper.py
-├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py
+├── ActivationBarrier (Text DAT)     ← Copy from td_exporter/ActivationBarrier.py
+├── NVMLObserver      (Text DAT)     ← Copy from td_exporter/NVMLObserver.py
+├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
+├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
+├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
+├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
 ├── callbacks         (Execute DAT)  ← Copy from td_exporter/callbacks_template.py
 ├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
@@ -63,23 +69,58 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 
 ### Step 3: Create Text DATs
 
-Inside the `CUDAIPCExporter` COMP, create two Text DATs:
+Inside the `CUDAIPCExporter` COMP, create eight Text DATs in the order shown below. Imports between them resolve automatically because all Text DATs in the same COMP share a module namespace — `from TDHost import RealTDHost` works because `TDHost` is a sibling Text DAT.
+
+**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing. Alternatively, set **File** on the DAT page to the source path and enable **Load on Start**.
 
 #### 3a. CUDAIPCWrapper Text DAT
 
 1. Create a **Text DAT**, rename to `CUDAIPCWrapper`
-2. On the **DAT** page:
-   - **File** → Browse to `td_exporter/CUDAIPCWrapper.py`
-   - Click **Load on Start** toggle (optional, for loading from disk)
-3. **OR** paste the entire contents of `td_exporter/CUDAIPCWrapper.py` into the DAT
+2. Paste the entire contents of `td_exporter/CUDAIPCWrapper.py`
 
-**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing.
+#### 3b. ActivationBarrier Text DAT
 
-#### 3b. CUDAIPCExporter Text DAT
+1. Create a **Text DAT**, rename to `ActivationBarrier`
+2. Paste the entire contents of `td_exporter/ActivationBarrier.py`
+
+#### 3c. NVMLObserver Text DAT
+
+1. Create a **Text DAT**, rename to `NVMLObserver`
+2. Paste the entire contents of `td_exporter/NVMLObserver.py`
+
+#### 3d. TDHost Text DAT
+
+1. Create a **Text DAT**, rename to `TDHost`
+2. Paste the entire contents of `td_exporter/TDHost.py`
+
+This module provides the `RealTDHost` and `RealTOPHandle` adapters that isolate all `ownerComp.par.*` and `top.cudaMemory()` calls from the engine logic.
+
+#### 3e. TDConfig Text DAT
+
+1. Create a **Text DAT**, rename to `TDConfig`
+2. Paste the entire contents of `td_exporter/TDConfig.py`
+
+This module provides the `TDSenderConfig` frozen dataclass that centralises all `CUDALINK_*` environment-variable reads.
+
+#### 3f. TDSender Text DAT
+
+1. Create a **Text DAT**, rename to `TDSender`
+2. Paste the entire contents of `td_exporter/TDSender.py`
+
+This module provides `TDSenderEngine` — the Sender-mode engine that owns GPU ring-buffer allocation, IPC handle export, SHM write-back, and CUDA graph capture.
+
+#### 3g. TDReceiver Text DAT
+
+1. Create a **Text DAT**, rename to `TDReceiver`
+2. Paste the entire contents of `td_exporter/TDReceiver.py`
+
+This module provides `TDReceiverEngine` — the Receiver-mode engine that owns SHM attachment, IPC handle opening, and Script TOP copyCUDAMemory calls.
+
+#### 3h. CUDAIPCExporter Text DAT
 
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
-3. Verify the import line reads: `from CUDAIPCWrapper import get_cuda_runtime`
+3. Verify the import line reads: `from TDSender import TDSenderEngine`
    - This works because both Text DATs are in the same COMP namespace
 
 ### Step 4: Register Extension
@@ -161,9 +202,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v0.7.3.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.2.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v0.7.3.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.2.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -171,7 +212,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v0.7.3.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.2.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -320,12 +361,18 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | File | Location | Purpose |
 |------|----------|---------|
 | `CUDAIPCWrapper.py` | `td_exporter/` | CUDA runtime ctypes wrapper |
-| `CUDAIPCExtension.py` | `td_exporter/` | TD extension class (main logic) |
+| `ActivationBarrier.py` | `td_exporter/` | Cross-process activation barrier |
+| `NVMLObserver.py` | `td_exporter/` | NVML GPU telemetry observer |
+| `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
+| `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
+| `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
+| `TDReceiver.py` | `td_exporter/` | `TDReceiverEngine` — Receiver-mode engine (SHM attach, IPC open, copyCUDAMemory) |
+| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v0.7.3.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.2.1.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
@@ -337,6 +384,6 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-02-09
-**Component Version**: 1.0.0
+**Build Date**: 2026-05-09
+**Component Version**: 1.2.1
 **TouchDesigner Version**: 2022.x or later

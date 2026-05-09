@@ -185,6 +185,13 @@ Receiver_benchmark.*.toe
 Sender_benchmark.toe
 Sender_benchmark.*.toe
 
+# Test receiver .toe files (local-only)
+Test_TD_Receiver1.toe
+Test_TD_Receiver1.*.toe
+
+# Session log (local-only; also listed in CGW_LOCAL_FILES)
+SESSION_LOG.md
+
 # Audit reports (local-only)
 audit_reports/
 
@@ -195,8 +202,12 @@ init_heatmap.png
 # Reference materials (local-only)
 References/
 
-# Benchmarks (local development only)
-benchmarks/
+# Benchmarks — large binary captures and raw sweep data stay local
+benchmarks/results/nsys/**/*.nsys-rep
+benchmarks/results/nsys/**/*.sqlite
+benchmarks/results/nsys/**/*.qdstrm
+benchmarks/bench_sweep/
+benchmarks/raw/
 
 # Claude Code commands, skills, and local docs (local-only)
 .claude/commands/

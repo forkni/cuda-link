@@ -5,7 +5,157 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.1] — 2026-05-09
+
+### Fixed
+
+- **TDReceiver.import_frame() reconnect crash** — corrected two remaining calls to
+  `self.cleanup_receiver()` (left over from the v1.2.0 engine-split refactor) to call
+  `self.cleanup()`. Without this, the receiver crashed with `AttributeError:
+  'TDReceiverEngine' object has no attribute 'cleanup_receiver'` when the sender shut
+  down or restarted mid-session. Note: this fix was already mentioned in the v1.2.0
+  entry's `### Fixed` section but landed in commit `05cda3a` after the logical v1.2.0
+  release. v1.2.1 is the first tagged release where it ships.
+  (`td_exporter/TDReceiver.py`)
+- **`example_sender_python.py` Unicode banner** — replaced Unicode box-drawing
+  characters with ASCII to prevent encoding errors on Windows console code pages other
+  than UTF-8. (commit `30f7f2a`)
+- **`example_sender_python.py` progress-line cosmetics** — `avg_total` and
+  `avg_memcpy` columns are now suppressed when `CUDALINK_EXPORT_PROFILE=0`
+  (the default). Previously the two columns always printed as `0.0 µs`, which was
+  misleading. The leading `export=` wall-clock figure (always meaningful) is unaffected.
+  (commit `8658dbe`)
+
+### Added — Diagnostics & Profiling Infrastructure
+
+- **`scripts/profiling/v4_*` and `v5_*` capture runners** — cmd.exe scripts that
+  launch Nsight Systems against the TD pipeline with pinned consumer/producer process
+  pairs. v4 baseline (EXPORT_SYNC=1) and v5 (async-flush-probe: `EXPORT_SYNC=0` +
+  `EXPORT_FLUSH_PROBE=1` + HWS=2) recipes validated end-to-end. Each runner emits
+  standard Nsight summary CSVs via `nsys stats`. Includes `v4_analyze.cmd`
+  post-capture decomposition. (commits `c41fda0`, `2e6a20f`, `18420de`, `c3f4e19`,
+  plus reliability fixes `df0ec67`, `727634c`, `7862916`, `63f6036`, `112b620`)
+- **`scripts/profiling/v5b_slot0_outlier_mine.py`** — sqlite3-only Python script that
+  mines the v5 consumer nsys SQLite to classify every `import_frame.slot0` outlier
+  (>2 ms) into one of four hypotheses: H5 (D2A WDDM stall), H4 (event_wait blocking),
+  H2 (SHM poll wait / preemption), H1 (producer write-bias). Used to attribute the
+  residual 30 ms slot0 outlier to a single `cudaMemcpy2DToArrayAsync` CPU-side WDDM
+  fence. (commit `8cadef1`, documented in
+  `benchmarks/results/nsys/td_pipeline_v5_findings_extended.md §G`)
+- **WDDM queue capture flags** in nsys runners (`--trace=cuda,nvtx,wddm`,
+  WDDM_QUEUE_PACKET / DMA_PACKET event capture) — adds GPU command-buffer queue-depth
+  visibility for diagnosing WDDM scheduling-epoch gaps. (commit `c41fda0`)
+- **HWS state probe** — Python helper that reads
+  `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode` and reports
+  whether hardware-accelerated GPU scheduling is active. Used to verify the HWS=2
+  prerequisite before v5 captures. (commit `c3f4e19`)
+
+### Added — Documentation
+
+- **`docs/PROFILING.md` §5: "Parallel IPC consumers under nsys profiling"** — triage
+  note for the `cudaIpcOpenMemHandle err 400` failure mode when a second TD receiver
+  attaches while a first is profiled under `nsys --trace=cuda`. Documented as a known
+  nsys CUDA-driver-hook interaction (not a cuda-link bug) with workaround.
+  (commit `89546e8`)
+- **`docs/PROFILING.md` §8: "Async Export Path for Python-Sender Topologies"** —
+  flag-set documentation for `CUDALINK_EXPORT_SYNC=0` + `CUDALINK_EXPORT_FLUSH_PROBE=1`
+  in standalone Python-sender deployments. Includes measured trade-off table (producer
+  slot p50: 693.7 µs → 90.6 µs, −87 %; consumer event_wait +19 µs redistributed),
+  rationale for not flipping the global default, and HWS=2 prerequisite.
+  (commit `89546e8`)
+- **`docs/PROFILING.md` napkin math + SOL classification table + two-pass workflow +
+  CUDA Graph note** — restructured to lead with quick-decision tooling (when to use
+  nsys vs ncu) before diving into recipes. (commit `b40c943`)
+- **`docs/PROFILING.md` silent-redirect trap note** — documents that cmd.exe `>`
+  silently swallows `nsys export` errors; `--force-overwrite=true` and exit-code
+  checks added to all runners. (commit `5cebac6`)
+- **`benchmarks/results/nsys/td_pipeline_v5_findings_extended.md`** — v5 capture
+  analysis, async-flush-probe + HWS=2 validation (six acceptance criteria passed),
+  and §G slot0 outlier root-cause attribution table. (commit `41d9a14`, F1 closure
+  `8cadef1`)
+
+### Changed
+
+- **nsys / ncu runners hardened** — `--force-overwrite=true` on nsys;
+  `--cache-control all`, `--import-source yes`, and `--set` flag on ncu. Eliminates
+  silent-redirect failures and stale-cache misattributions. (commits `5cebac6`,
+  `404917e`, `2e6a20f`)
+- **`analyze_td_pipeline.py`** — gained CLI path arguments so the same script
+  analyses v4 and v5 captures without env-var hardcoding. (commit `2e6a20f`)
+- **TD installation path** bumped to `32820` in capture runners. (commit `18420de`)
+- **`pyproject.toml` dev-dep**: `nvtx>=0.2` added so contributors can run profiling
+  scripts without a separate `pip install nvtx`. (commit `77af0b7`)
+- **Benchmark refresh (v1.2.1, 2026-05-09)** — re-ran `bench_sweep.py` (full 16-cell),
+  `bench_graphs.py` (4 resolutions), and `bench_d2h_streams.py` (4 resolutions) on
+  RTX 4090 / driver 596.36 / PCIe 4.0 x16 / Windows 11 under v1.2.1 defaults
+  (EXPORT_SYNC=1, CUDALINK_USE_GRAPHS=1). Updated README, ARCHITECTURE, and
+  INTEGRATION_EXAMPLES citations. Notable changes vs v1.2.0 sweep: isolated
+  `export_frame()` p50 improved (512×512: 42→22 µs, 1080p: 138→117 µs, 4K: 400→367 µs);
+  IPC notify p50 tightened (~250→~136–286 µs range); D2H bench_d2h_streams largely
+  unchanged. Fresh `sweep_latest.csv` / `sweep_latest.json` committed (16-cell,
+  2026-05-09 03:23).
+
+### Internal
+
+- **CGW PreToolUse guardrail** — `cgw-pre-bash.sh` intercepts `git reset --hard` /
+  `git push --force` to non-PR branches before they execute. Local-only; not shipped
+  in the package. (commit `0a14945`)
+- **Example .toe project** bumped to `CUDA_Link_Example.45.toe`; new
+  `Test_TD_Receiver1.toe` added for parallel-receiver topology testing.
+  (commits `1fbbb61`, `fec21ca`, `72e1354`)
+- **`TOXES/CUDAIPCLink_v1.2.0.tox`** added; `v1.1.0.tox` retired per `.gitignore`
+  "only latest binary on main" policy. (commit `89a2b91`)
+- **`TOXES/CUDAIPCLink_v1.2.1.tox`** added (58 630 B, built 2026-05-09);
+  `v1.2.0.tox` retired from git index per the same policy. Updated
+  `docs/TOX_BUILD_GUIDE.md` filename and build-date references.
+
+---
+
+## [1.2.0] — 2026-05-07
+
+### Added
+
+- NVTX annotations on Sender/Receiver/Exporter/Importer phase boundaries
+  (env-gated via `CUDALINK_NVTX=1` / `CUDALINK_NVTX_VERBOSE=1`; zero cost when off).
+- `scripts/profiling/` — runner scripts for compute-sanitizer, nsys, and ncu
+  (Windows `.cmd`/`.ps1` + POSIX `.sh` parity).
+- `docs/PROFILING.md` — operational guide for Nsight workflow,
+  WDDM caveats, and `EXPORT_PROFILE` ↔ NVTX bridging.
+
+### Changed
+
+- **TD extension refactored into facade + engine split** (`CUDAIPCExtension.py` → ~300 LOC facade;
+  new `TDSender.py` / `TDReceiver.py` engine classes). `TDSenderEngine` owns all Sender-mode GPU
+  resources; `TDReceiverEngine` owns all Receiver-mode resources. Mode switches tear down the old
+  engine and construct a fresh one — zero cross-mode state leak. Public API (`export_frame`,
+  `import_frame`, `switch_mode`, etc.) is unchanged; existing `.tox` callback templates work
+  without modification.
+- **`TDHost` adapter seam** (`TDHost.py`) isolates all `ownerComp.par.*`, `op(...)`,
+  `top.cudaMemory()`, and `copyCUDAMemory()` calls from engine logic. Tests inject `FakeTDHost`
+  / `FakeTOPHandle` — no TD runtime required.
+- **`TDSenderConfig` frozen dataclass** (`TDConfig.py`) centralises all 11 `CUDALINK_*`
+  environment-variable reads. Constructed once at extension init; engines read only
+  `self._config.<field>`.
+- **`docs/TOX_BUILD_GUIDE.md`** updated: Component Structure diagram now shows all eight Text DATs
+  (`CUDAIPCWrapper`, `ActivationBarrier`, `NVMLObserver`, `TDHost`, `TDConfig`, `TDSender`,
+  `TDReceiver`, `CUDAIPCExporter`); Step 3 expanded with per-DAT assembly instructions.
+- **`docs/ARCHITECTURE.md`** and **`README.md`** Architecture section updated to document the
+  facade-with-delegation layout and TDHost seam.
+- **`CONTEXT.md`** created at repo root with canonical vocabulary for the new architecture.
+
+### Fixed
+
+- **Facade mode-gating** — `CUDAIPCExtension.import_frame()` / `export_frame()` now
+  return `False` when called in the wrong mode instead of dispatching to an engine that
+  lacks the method. Added `_check_deferred_cleanup()` and `update_receiver_resolution()`
+  delegations so `callbacks_template.py` / `script_top_callbacks.py` continue to work
+  without modification after the engine split. (`td_exporter/CUDAIPCExtension.py`)
+
+- **`TDReceiver.import_frame()` reconnect crash** — two internal calls to the removed
+  `self.cleanup_receiver()` (left over from the engine-split refactor) now correctly
+  call `self.cleanup()`. Without this, the receiver crashed with `AttributeError:
+  'TDReceiverEngine' object has no attribute 'cleanup_receiver'` the moment the sender
+  shut down or restarted mid-session. (`td_exporter/TDReceiver.py`)
 
 ## [1.1.0] — 2026-05-06
 
@@ -154,6 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuda-link"
-version = "1.1.0"
+version = "1.2.1"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -43,6 +43,7 @@ dev = [
     "mypy",
     "snoop>=0.4",
     "py-heat>=0.0.6",
+    "nvtx>=0.2",
 ]
 
 [project.urls]
