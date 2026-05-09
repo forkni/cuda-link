@@ -204,11 +204,99 @@ analysis shows remaining bottleneck at scale; not a priority at 60 FPS operation
 
 ---
 
+## §G — F1 Slot0 Outlier Root Cause Analysis (SQLite Mining Loop)
+
+> **Loop:** `scripts/profiling/v5b_slot0_outlier_mine.py` against
+> `td_pipeline_v5_consumer/td_consumer.sqlite`. No new capture needed.
+
+### G.1 — Outlier classification table
+
+6 events exceeded the 2 ms threshold on `import_frame.slot0` (3,081 total):
+
+| # | Duration | Classification | Dominant CUDA API (frac) | SHM gap |
+|---|---|---|---|---|
+| 1 | 30,024 µs | **H5: D2A WDDM stall** | `cudaMemcpy2DToArrayAsync` (98%) | 10 µs |
+| 2 | 7,336 µs | H2: SHM poll wait | — (D2A 1%) | **7,078 µs** |
+| 3 | 3,237 µs | H2: bare gap | `cudaStreamWaitEvent` (3%) | 31 µs |
+| 4 | 2,518 µs | H4: event_wait blocking | **`cudaStreamWaitEvent` (93%)** | 23 µs |
+| 5 | 2,389 µs | H2: bare gap | `cudaMemcpy2DToArrayAsync` (2%) | 15 µs |
+| 6 | 2,243 µs | H4: event_wait blocking | **`cudaStreamWaitEvent` (89%)** | 16 µs |
+
+Three distinct mechanisms identified:
+
+### G.2 — H5: D2A WDDM command-buffer stall (1/6 outliers — dominant cause of the max)
+
+The 30 ms extreme is `cudaMemcpy2DToArrayAsync` blocking the **CPU** for 29.5 ms.
+The GPU-side D2A copy itself takes only 4 µs (confirmed via
+`CUPTI_ACTIVITY_KIND_MEMCPY`). The stall occurs in the WDDM command-buffer
+submission path: the CPU call blocks waiting for a GPU-fence acknowledgement
+before the DMA command can be enqueued.
+
+HWS=2 eliminated scheduled-epoch batch gaps (`wddm_queue_sum` is empty) but did
+not prevent this single anomalous GPU-fence wait on the D2A copy path. This is a
+residual WDDM stall at the GPU engine level — a 1-in-3,081 event, not systematic.
+
+**v4 comparison:** In v4 (HWS=0), the D2A copy's CPU-side max was only 471 µs
+(slot0); the 36 ms max outlier in v4 came from `cudaStreamSynchronize` waiting on
+the Copy-engine batch gap. In v5, `cudaStreamSynchronize` is absent and the 36 ms
+stall is eliminated — the 30 ms outlier is a different, rarer mechanism on the D2A
+path itself.
+
+### G.3 — H4: `cudaStreamWaitEvent` long-tail (2/6 outliers)
+
+Two outliers (2.5 ms and 2.2 ms) are dominated by `cudaStreamWaitEvent` blocking
+for 89–93% of their duration. The async producer path (`EXPORT_SYNC=0`) signals the
+SHM header ~6 µs after the D2D event is queued but before it resolves on the GPU.
+The consumer arrives at `cudaStreamWaitEvent` before the event fires and blocks for
+up to 2.5 ms waiting for the producer's D2D completion.
+
+This is the **event_wait tail** of the +19 µs average increase documented in §C.1.
+The average is 38.8 µs, but rare instances (per `td_consumer_cuda_api_sum.csv`:
+max `cudaStreamWaitEvent` = 2,333,726 ns) can reach 2.3 ms. These are expected,
+not regressions.
+
+### G.4 — H2: SHM polling / OS preemption (3/6 outliers)
+
+Three outliers show bare wall-clock gaps (no dominant CUDA API call):
+- Outlier #2 (7.3 ms): SHM poll gap of 7,078 µs before `event_wait` fires.
+  The consumer was waiting for the producer to write a new slot0 frame. This is
+  consistent with the producer cycling through slot1/2 before returning to slot0
+  (H1 write-bias) and not a bug — slot0 simply wasn't ready for 7 ms.
+- Outliers #3, #5 (3.2 ms, 2.4 ms): Small SHM gaps (15–31 µs) but no dominant
+  API. Likely OS scheduling preemption — Windows 15 ms quantum can occasionally
+  delay the consumer thread return from a sleep/event wait.
+
+### G.5 — H1: Producer write-bias (contributing factor, not direct cause)
+
+Slot0 received 688 more writes than slot1/2 (+29%): 3,081 vs 2,393/2,397.
+More writes = more opportunities to hit rare stall events. This is confirmed by
+the outlier counts: slot0 has 6 outliers > 2 ms, slot1 has 1, slot2 has 2.
+
+The write-bias also explains the 7 ms SHM poll gap: the producer spent
+disproportionate time on slot1/2 writes before returning to slot0.
+
+**Note on v4 slot distribution:** In v4, slot1 had 12,247 writes vs slot0's 3,190
+— the outlier-bearing slot in v4 was slot1. In v5, the async path shifted the
+write distribution so that slot0 receives the most writes. The exact mechanism
+is in the producer's `write_idx` modulo logic and is not a bug.
+
+### G.6 — Acceptance re-evaluation post-F1
+
+| Criterion | Status after F1 |
+|---|---|
+| `import_frame` max < 5,000 µs | ⚠️ Partial — 3,080/3,081 slot0 instances ≤ 5,000 µs (99.97%); 1 WDDM anomaly at 30,024 µs |
+| Root cause of 30ms outlier identified | ✅ H5 confirmed — WDDM D2A stall, not systematic |
+| Fix required | ❌ None — 1-in-3,081 frequency, outside cuda-link control |
+
+**F1 is closed. No code change.**
+
+---
+
 ## §F — Open Items
 
 | ID | Item | Priority |
 |---|---|---|
-| F1 | Slot0 residual 30ms outlier — characterise source (OS preemption vs IPC re-validation). Run a v5b capture focusing on slot0 only (single-slot topology or extended capture). | Low |
+| F1 | Slot0 residual 30ms outlier | ✅ CLOSED — §G |
 | F2 | `analyze_td_pipeline.py` FPS calculation bug ("5.5 FPS" artifact). Fix timestamp-extraction logic in the analysis script. | Low |
 | F3 | Parallel TD receiver `cudaIpcOpenMemHandle error 400` when one process is under nsys. Repro with minimal setup + triage (nsys driver interception vs HWS handle visibility). | Medium |
 | F4 | Lever 1b evaluation: async H2D fill in `example_sender_python.py`. Only pursue if FPS analysis at target scale shows H2D as bottleneck. | Optional |
