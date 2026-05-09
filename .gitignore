@@ -195,8 +195,12 @@ init_heatmap.png
 # Reference materials (local-only)
 References/
 
-# Benchmarks (local development only)
-benchmarks/
+# Benchmarks — large binary captures and raw sweep data stay local
+benchmarks/results/nsys/**/*.nsys-rep
+benchmarks/results/nsys/**/*.sqlite
+benchmarks/results/nsys/**/*.qdstrm
+benchmarks/bench_sweep/
+benchmarks/raw/
 
 # Claude Code commands, skills, and local docs (local-only)
 .claude/commands/
