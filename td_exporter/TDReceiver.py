@@ -53,7 +53,7 @@ from SHMProtocol import (  # noqa: E402
     acquire_slot,
 )
 from TDConfig import TDSenderConfig  # noqa: E402
-from TDHost import RealTOPHandle, TDHost  # noqa: E402
+from TDHost import TDHost  # noqa: E402
 
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
@@ -312,7 +312,7 @@ class TDReceiverEngine:
             "rx_dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self._connection.dev_ptrs],
         }
 
-    def import_frame(self, import_buffer: object) -> bool:
+    def import_frame(self, handle: object) -> bool:
         """Import frame from CUDA IPC into ImportBuffer (Script TOP).
 
         Can be called from:
@@ -320,7 +320,7 @@ class TDReceiverEngine:
         - Execute DAT onFrameStart with modoutsidecook enabled (TD 2025+)
 
         Args:
-            import_buffer: The ImportBuffer Script TOP operator
+            handle: TOPHandle wrapping the ImportBuffer Script TOP (wrapped by facade)
 
         Returns:
             True if import successful, False otherwise.
@@ -349,9 +349,6 @@ class TDReceiverEngine:
                 elif self._retry.connect_attempts == self._retry.max_connect_attempts + 1:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
-
-        # Wrap import_buffer for TOPHandle-style access (Phase 3 will pass handle directly)
-        _ib = RealTOPHandle(import_buffer) if import_buffer is not None else None
 
         _nvtx_push(
             f"cudalink.receiver.import_frame.slot{(self._connection.last_write_idx) % max(self._connection.num_slots, 1)}",
@@ -426,7 +423,7 @@ class TDReceiverEngine:
                     with cp.cuda.ExternalStream(rx_stream_int):
                         cp.copyto(self._cupy_f32_buf, cupy_f16, casting="same_kind")
 
-                    _ib.copy_cuda_memory(
+                    handle.copy_cuda_memory(
                         self._cupy_f32_buf.data.ptr,
                         f32_size,
                         self._cached_shape,  # dataType=float32 set during initialize_receiver()
@@ -450,9 +447,9 @@ class TDReceiverEngine:
                         self._f16_cpu_buf.reshape(self._format.height, self._format.width, self._format.num_comps),
                         casting="same_kind",
                     )
-                    _ib.copy_numpy_array(self._f32_cpu_buf)
+                    handle.copy_numpy_array(self._f32_cpu_buf)
             else:
-                _ib.copy_cuda_memory(
+                handle.copy_cuda_memory(
                     address,
                     self._format.buffer_size,
                     self._cached_shape,
@@ -485,14 +482,14 @@ class TDReceiverEngine:
         finally:
             _nvtx_pop()
 
-    def update_receiver_resolution(self, import_buffer: object) -> bool:
+    def update_receiver_resolution(self, handle: object) -> bool:
         """Update ImportBuffer resolution from outside the cook cycle.
 
         Safe to call from Execute DAT when modoutsidecook is enabled on the Script TOP (TD 2025+).
         When modoutsidecook is NOT available, this is a no-op (resolution handled in onCook).
 
         Args:
-            import_buffer: The ImportBuffer Script TOP operator
+            handle: TOPHandle wrapping the ImportBuffer Script TOP (wrapped by facade)
 
         Returns:
             True if resolution was updated, False if no update needed or not applicable
@@ -501,7 +498,7 @@ class TDReceiverEngine:
             return False
 
         try:
-            RealTOPHandle(import_buffer).set_resolution(self._format.width, self._format.height)
+            handle.set_resolution(self._format.width, self._format.height)
             self._retry.needs_resolution_update = False
             self._log(
                 f"Set ImportBuffer resolution to {self._format.width}x{self._format.height} (from Execute DAT)",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 
 import pytest
+from conftest import FakeTDHost, FakeTOPHandle
 
 from cuda_link.shm_protocol import (
     PROTOCOL_MAGIC,
@@ -24,77 +25,33 @@ from cuda_link.shm_protocol import (
 )
 
 # ---------------------------------------------------------------------------
-# Minimal TouchDesigner stubs (no TD runtime needed)
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-class _Shape:
-    def __init__(self, width: int, height: int, channels: int) -> None:
-        self.width = width
-        self.height = height
-        self.numComps = channels
-
-
-class _CUDAMemory:
-    def __init__(self, width: int, height: int, channels: int, dtype_size: int = 4) -> None:
-        self.ptr = 0xDEADBEEF0000
-        self.shape = _Shape(width, height, channels)
-        self.size = width * height * channels * dtype_size
-
-
-class _TOP:
-    """Minimal TOP stub — cudaMemory() returns a pre-configured _CUDAMemory."""
-
-    def __init__(self, width: int, height: int, channels: int = 4) -> None:
-        self._mem = _CUDAMemory(width, height, channels)
-        self.pixelFormat = "rgba32float"
-
-    def cudaMemory(self, **_kwargs: object) -> _CUDAMemory:
-        return self._mem
-
-
-class _ParValue:
-    def __init__(self, value: object) -> None:
-        self._v = value
-        self.enable = True  # mimics TD par enable flag
-
-    def eval(self) -> object:
-        return self._v
-
-
-class _Par:
-    def __init__(self, **kwargs: object) -> None:
-        for k, v in kwargs.items():
-            setattr(self, k, _ParValue(v))
-
-
-class _COMP:
-    """Minimal COMP stub."""
-
-    def __init__(self, **params: object) -> None:
-        self.name = "test_comp"
-        self.par = _Par(**params)
-        self._ops: dict[str, object] = {}
-        self.showCustomOnly = False
-
-    def op(self, name: str) -> object:
-        return self._ops.get(name)
-
-
-def _make_sender_comp(shm_name: str, num_slots: int = 3) -> _COMP:
-    return _COMP(
-        Mode="Sender",
-        Ipcmemname=shm_name,
-        Numslots=num_slots,
-        Active=True,
-        Debug=False,
-        Hidebuiltin=False,
+def _make_sender_host(shm_name: str, num_slots: int = 3) -> FakeTDHost:
+    return FakeTDHost(
+        params={
+            "Mode": "Sender",
+            "Ipcmemname": shm_name,
+            "Numslots": num_slots,
+            "Active": True,
+            "Debug": False,
+            "Hidebuiltin": False,
+        }
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _make_receiver_host(shm_name: str, num_slots: int = 3) -> FakeTDHost:
+    return FakeTDHost(
+        params={
+            "Mode": "Receiver",
+            "Ipcmemname": shm_name,
+            "Numslots": num_slots,
+            "Active": True,
+            "Debug": False,
+        }
+    )
 
 
 def _shm_header(buf: memoryview) -> tuple[int, int, int, int]:
@@ -121,10 +78,10 @@ def test_sender_initialize_sets_correct_shm_layout(
     """initialize() writes a well-formed SHM header (magic, version, num_slots, write_idx=0)."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp(temp_shm_name, num_slots=3)
+    host = _make_sender_host(temp_shm_name, num_slots=3)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     assert ext.initialize(width=16, height=16, channels=4)
 
@@ -150,10 +107,10 @@ def test_sender_shm_size_matches_protocol(
     from CUDAIPCExtension import CUDAIPCExtension
 
     NUM_SLOTS = 3
-    owner = _make_sender_comp(temp_shm_name, num_slots=NUM_SLOTS)
+    host = _make_sender_host(temp_shm_name, num_slots=NUM_SLOTS)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
@@ -180,18 +137,16 @@ def test_sender_export_loop_write_idx_monotone(
 
     NUM_SLOTS = 3
     W, H = 8, 8
-    owner = _make_sender_comp(temp_shm_name, num_slots=NUM_SLOTS)
+    host = _make_sender_host(temp_shm_name, num_slots=NUM_SLOTS)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=W, height=H, channels=4)
 
     # Provide a real GPU pointer so memcpy succeeds
     gpu_ptr = cuda_runtime.malloc(W * H * 4 * 4)  # float32 RGBA
-    top = _TOP(W, H, 4)
-    top._mem.ptr = gpu_ptr.value
-    owner._ops["ExportBuffer"] = top
+    host._tops["ExportBuffer"] = FakeTOPHandle(width=W, height=H, channels=4, gpu_ptr=gpu_ptr.value)
 
     NUM_FRAMES = 7
     try:
@@ -222,17 +177,15 @@ def test_sender_slot_wraps_at_num_slots(
 
     NUM_SLOTS = 3
     W, H = 8, 8
-    owner = _make_sender_comp(temp_shm_name, num_slots=NUM_SLOTS)
+    host = _make_sender_host(temp_shm_name, num_slots=NUM_SLOTS)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=W, height=H, channels=4)
 
     gpu_ptr = cuda_runtime.malloc(W * H * 4 * 4)
-    top = _TOP(W, H, 4)
-    top._mem.ptr = gpu_ptr.value
-    owner._ops["ExportBuffer"] = top
+    host._tops["ExportBuffer"] = FakeTOPHandle(width=W, height=H, channels=4, gpu_ptr=gpu_ptr.value)
 
     # Expected slot sequence for 6 frames with 3 slots: 0 1 2 0 1 2
     expected_slots = [i % NUM_SLOTS for i in range(6)]
@@ -260,10 +213,10 @@ def test_sender_cleanup_resets_all_state(
     """After cleanup(): _initialized=False, dev_ptrs=[], shm_handle=None, write_idx=0."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp(temp_shm_name, num_slots=3)
+    host = _make_sender_host(temp_shm_name, num_slots=3)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
@@ -292,10 +245,10 @@ def test_sender_cleanup_sets_shutdown_flag(
     from CUDAIPCExtension import CUDAIPCExtension
 
     NUM_SLOTS = 3
-    owner = _make_sender_comp(temp_shm_name, num_slots=NUM_SLOTS)
+    host = _make_sender_host(temp_shm_name, num_slots=NUM_SLOTS)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
@@ -327,10 +280,10 @@ def test_sender_double_cleanup_is_idempotent(
     """cleanup() called twice does not raise and leaves state consistent."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp(temp_shm_name, num_slots=3)
+    host = _make_sender_host(temp_shm_name, num_slots=3)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
@@ -355,10 +308,10 @@ def test_switch_mode_sender_to_receiver_no_shm_leak(
     """After switch_mode(Receiver): shm_handle=None, dev_ptrs=[], _graph_execs all None."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp(temp_shm_name, num_slots=3)
+    host = _make_sender_host(temp_shm_name, num_slots=3)
     shared_memory_cleanup.append(temp_shm_name)
 
-    ext = CUDAIPCExtension(owner)
+    ext = CUDAIPCExtension(None, host=host)
     ext.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
@@ -383,14 +336,8 @@ def test_switch_mode_receiver_to_sender_resets_rx_state() -> None:
     from CUDAIPCExtension import CUDAIPCExtension
 
     # Receiver mode — no CUDA needed for this structural test
-    owner = _COMP(
-        Mode="Receiver",
-        Ipcmemname="dummy_shm",
-        Numslots=3,
-        Active=True,
-        Debug=False,
-    )
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
 
     assert ext.mode == "Receiver"
 
@@ -415,8 +362,8 @@ def test_switch_mode_noop_same_mode() -> None:
     """switch_mode() with the same mode does nothing and does not crash."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp("dummy_shm", num_slots=3)
-    ext = CUDAIPCExtension(owner)
+    host = _make_sender_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
 
     # Should be a silent no-op
     ext.switch_mode("Sender")
@@ -432,14 +379,8 @@ def test_receiver_init_fails_gracefully_when_no_shm() -> None:
     """initialize_receiver() returns False when SharedMemory does not exist (no crash)."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(
-        Mode="Receiver",
-        Ipcmemname="nonexistent_shm_xyz_12345",
-        Numslots=3,
-        Active=True,
-        Debug=False,
-    )
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("nonexistent_shm_xyz_12345", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
 
     result = ext.initialize_receiver()
 
@@ -452,16 +393,10 @@ def test_receiver_import_frame_lazy_retry_without_shm() -> None:
     """import_frame() with no SHM triggers retry logic and returns False (no crash)."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(
-        Mode="Receiver",
-        Ipcmemname="nonexistent_shm_xyz_12345",
-        Numslots=3,
-        Active=True,
-        Debug=False,
-    )
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("nonexistent_shm_xyz_12345", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
 
-    # First call: _rx_frames_since_last_retry=0 → increments to 1 ≥ 1 → attempt → fail
+    # First call: frames_since_last_retry=0 → increments to 1 ≥ 1 → attempt → fail
     result = ext.import_frame(None)  # type: ignore[arg-type]
 
     assert result is False, "import_frame() must return False when uninitialized and SHM absent"
@@ -479,8 +414,8 @@ def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
 
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm_xyz", Numslots=3, Active=True, Debug=False)
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("dummy_shm_xyz", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     engine = ext._engine
 
     shm = shared_memory.SharedMemory(name="test_rx_shutdown_regression_xyz", create=True, size=1024)
@@ -513,12 +448,12 @@ def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
 
 
 def test_mode_property_reflects_owner_par() -> None:
-    """mode property returns the Mode parameter value from ownerComp."""
+    """mode property returns the Mode parameter value from host."""
     from CUDAIPCExtension import CUDAIPCExtension
 
     for mode in ("Sender", "Receiver"):
-        owner = _COMP(Mode=mode, Ipcmemname="x", Numslots=3, Active=True)
-        ext = CUDAIPCExtension(owner)
+        host = FakeTDHost(params={"Mode": mode, "Ipcmemname": "x", "Numslots": 3, "Active": True})
+        ext = CUDAIPCExtension(None, host=host)
         assert ext.mode == mode
 
 
@@ -526,8 +461,8 @@ def test_get_stats_sender_contains_required_keys() -> None:
     """get_stats() in Sender mode returns all expected keys."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp("dummy_shm", num_slots=3)
-    ext = CUDAIPCExtension(owner)
+    host = _make_sender_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     stats = ext.get_stats()
 
     required = {
@@ -549,8 +484,8 @@ def test_get_stats_receiver_contains_required_keys() -> None:
     """get_stats() in Receiver mode returns all expected keys."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(Mode="Receiver", Ipcmemname="dummy", Numslots=3, Active=True)
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("dummy", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     stats = ext.get_stats()
 
     required = {
@@ -573,8 +508,8 @@ def test_is_ready_false_before_init() -> None:
     from CUDAIPCExtension import CUDAIPCExtension
 
     for mode in ("Sender", "Receiver"):
-        owner = _COMP(Mode=mode, Ipcmemname="x", Numslots=3, Active=True)
-        ext = CUDAIPCExtension(owner)
+        host = FakeTDHost(params={"Mode": mode, "Ipcmemname": "x", "Numslots": 3, "Active": True})
+        ext = CUDAIPCExtension(None, host=host)
         assert not ext.is_ready(), f"is_ready() should be False before init in {mode} mode"
 
 
@@ -587,43 +522,39 @@ def test_check_deferred_cleanup_no_attr_error_in_sender_mode() -> None:
     """_check_deferred_cleanup() must not raise AttributeError when in Sender mode."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp("dummy_shm", num_slots=3)
-    ext = CUDAIPCExtension(owner)
+    host = _make_sender_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     assert ext.mode == "Sender"
     ext._check_deferred_cleanup()  # must not raise
 
 
 def test_import_frame_returns_false_in_sender_mode() -> None:
     """import_frame() in Sender mode must return False, not crash."""
-    from unittest.mock import MagicMock
-
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _make_sender_comp("dummy_shm", num_slots=3)
-    ext = CUDAIPCExtension(owner)
+    host = _make_sender_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     assert ext.mode == "Sender"
-    result = ext.import_frame(MagicMock())
+    result = ext.import_frame(None)  # type: ignore[arg-type]
     assert result is False
 
 
 def test_update_receiver_resolution_no_attr_error_in_receiver_mode() -> None:
     """update_receiver_resolution() must not raise AttributeError when in Receiver mode."""
-    from unittest.mock import MagicMock
-
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm", Numslots=3, Active=True)
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     assert ext.mode == "Receiver"
-    ext.update_receiver_resolution(MagicMock())  # must not raise
+    ext.update_receiver_resolution(None)  # must not raise (needs_resolution_update=False → early return)
 
 
 def test_export_frame_returns_false_in_receiver_mode() -> None:
     """export_frame() in Receiver mode must return False, not crash."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = _COMP(Mode="Receiver", Ipcmemname="dummy_shm", Numslots=3, Active=True)
-    ext = CUDAIPCExtension(owner)
+    host = _make_receiver_host("dummy_shm", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
     assert ext.mode == "Receiver"
     result = ext.export_frame()
     assert result is False

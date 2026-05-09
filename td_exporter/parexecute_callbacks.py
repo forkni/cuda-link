@@ -136,12 +136,9 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
 
     # Skip if component is active — Numslots should be disabled in UI, but guard
     # against script-based changes which bypass the UI parameter enable state.
-    try:
-        if bool(ext.ownerComp.par.Active.eval()):
-            ext._log("Numslots change ignored while Active (deactivate first)", force=True)
-            return
-    except AttributeError:
-        pass
+    if ext.is_active():
+        ext._log("Numslots change ignored while Active (deactivate first)", force=True)
+        return
 
     # Validate slot count (2-5 slots supported)
     if new_value < 2 or new_value > 5:

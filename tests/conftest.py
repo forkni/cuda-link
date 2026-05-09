@@ -21,6 +21,9 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+# TDHost import deferred until after sys.path setup (td_exporter not in path until above)
+from TDHost import TDHost, TOPHandle  # noqa: E402
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Configure pytest with custom markers."""
@@ -121,7 +124,7 @@ class FakeCUDAMemoryRef:
         self.data_type = data_type
 
 
-class FakeTOPHandle:
+class FakeTOPHandle(TOPHandle):
     """In-process test double for TOPHandle.
 
     Stores calls so tests can assert on what was invoked.
@@ -181,7 +184,7 @@ class FakeTOPHandle:
         return True
 
 
-class FakeTDHost:
+class FakeTDHost(TDHost):
     """In-process test double for TDHost.
 
     Backed by a plain dict of parameter values; records all write calls.
