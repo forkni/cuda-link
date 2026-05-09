@@ -214,16 +214,21 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
 
 
 def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1) -> object:
-    """Build a CUDAIPCImporter with manually-injected state (no real CUDA IPC handles).
+    """Build a CUDAIPCImporter with manually-injected value-object state (no real CUDA IPC handles).
 
     CUDA IPC handles cannot be opened in the same process that created them, so tests
-    that check routing logic inject all state via MagicMock and a bytearray SHM buffer.
+    that check routing logic inject all state via value objects and a bytearray SHM buffer.
     """
     from unittest.mock import MagicMock
 
     import numpy as np
 
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    from cuda_link.cuda_ipc_importer import (
+        CUDAIPCImporter,
+        Format,
+        IPCConnection,
+        NumpyBuffers,
+    )
     from cuda_link.shm_protocol import (
         METADATA_SIZE,
         SHM_HEADER_SIZE,
@@ -241,50 +246,71 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     struct.pack_into("<I", buf, 12, num_slots)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1
 
-    # Bypass __init__ entirely, inject all attributes manually
+    # Build value objects
+    fmt = Format.from_overrides(shape, dtype)
+    layout = SHMLayout(num_slots)
+
+    mock_cuda = MagicMock()
+    mock_shm = MagicMock()
+    mock_shm.buf = buf
+
+    conn = IPCConnection(
+        cuda=mock_cuda,
+        shm_handle=mock_shm,
+        ipc_version=1,
+        num_slots=num_slots,
+        ipc_handles=[None] * num_slots,
+        dev_ptrs=[MagicMock() for _ in range(num_slots)],
+        ipc_events=[None] * num_slots,
+        layout=layout,
+        shutdown_offset=layout.shutdown_offset,
+        timestamp_offset=layout.timestamp_offset,
+    )
+
+    # Pre-build NumpyBuffers with a real numpy buffer so get_frame_numpy() skips
+    # reallocation and memcpy_async receives a valid ctypes pointer.
+    mock_stream = MagicMock()
+    nb = NumpyBuffers(
+        cuda=mock_cuda,
+        fmt=fmt,
+        buffer=np.zeros(shape, dtype=np.dtype(dtype)),
+        pinned_ptr=None,
+        host_registered_arr=None,
+        pinned_memory_available=False,
+        primary_stream=mock_stream,
+        d2h_streams=[mock_stream],
+        d2h_events=[],
+        num_streams=1,
+    )
+
+    # Bypass __init__ and inject value objects directly
     imp = object.__new__(CUDAIPCImporter)
     imp.shm_name = "mock_shm"
     imp.shape = shape
     imp.dtype = dtype
     imp.debug = False
     imp.timeout_ms = 5000.0
-    imp.num_slots = num_slots
-    imp.ipc_handles = [None] * num_slots
-    imp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
-    imp.ipc_events = [None] * num_slots
-    imp.tensors = [None] * num_slots
-    imp._wrappers = [None] * num_slots
-    imp.cupy_arrays = [None] * num_slots
+    imp.device = 0
+    imp._spin_us = 0
+    imp._d2h_num_streams = 1
+    imp._initialized = True
+    imp._conn = conn
+    imp._format = fmt
+    imp._torch = None
+    imp._cupy = None
+    imp._numpy = nb
     imp.frame_count = 0
     imp._last_write_idx = 0
     imp.total_wait_event_time = 0.0
     imp.total_get_frame_time = 0.0
     imp.total_shm_read_us = 0.0
     imp.last_latency = 0.0
-    imp.ipc_version = 1  # matches version=1 written into buf above
-    imp._layout = SHMLayout(num_slots)
-    imp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
-    imp._timestamp_offset = imp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-    imp._initialized = True
-
-    # Inject mock CUDA runtime and numpy stream
-    imp.cuda = MagicMock()
-    imp._numpy_stream = MagicMock()
-
-    # Inject mock SharedMemory whose .buf is our bytearray
-    imp.shm_handle = MagicMock()
-    imp.shm_handle.buf = buf
-
-    # Pre-allocate real numpy buffer so get_frame_numpy() skips reallocation and
-    # memcpy_async receives a valid ctypes pointer
-    imp._numpy_buffer = np.zeros(shape, dtype=np.dtype(dtype))
-    imp._pinned_ptr = None
-    imp._host_registered_arr = None
-
-    # Phase 3 multi-stream D2H state (single stream in mock — matches N=1 default)
-    imp._d2h_num_streams = 1
-    imp._d2h_streams = [imp._numpy_stream]
-    imp._d2h_events = []
+    imp.total_wait_spin_us = 0.0
+    imp.total_wait_sleep_us = 0.0
+    imp.wait_spin_hits = 0
+    imp.wait_sleep_hits = 0
+    imp._cached_dtype_str = ""
+    imp._cached_numpy_dtype = None
 
     return imp
 
@@ -301,14 +327,14 @@ def test_get_frame_numpy_always_uses_cpu_poll() -> None:
     for has_event in (False, True):
         imp = _make_importer_with_mock_state(shape=(8, 8, 4), dtype="float32")
         sentinel_event = object() if has_event else None
-        imp.ipc_events[0] = sentinel_event
+        imp._conn.ipc_events[0] = sentinel_event
 
         poll_calls: list[int] = []
         stream_wait_calls: list[tuple] = []
 
         with (
             patch.object(imp, "_wait_for_slot", side_effect=lambda s: poll_calls.append(s) or 0.0),  # noqa: B023
-            patch.object(imp.cuda, "stream_wait_event", side_effect=lambda *a: stream_wait_calls.append(a)),  # noqa: B023
+            patch.object(imp._conn.cuda, "stream_wait_event", side_effect=lambda *a: stream_wait_calls.append(a)),  # noqa: B023
         ):
             imp.get_frame_numpy()
 
@@ -317,17 +343,9 @@ def test_get_frame_numpy_always_uses_cpu_poll() -> None:
         assert len(stream_wait_calls) == 0, f"has_event={has_event}: stream_wait_event must NOT be called in numpy path"
 
 
-@pytest.mark.requires_cuda
 def test_read_slot_calculation() -> None:
-    """Test _get_read_slot() logic."""
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
-
-    # Create importer (won't initialize without real SharedMemory)
-    importer = CUDAIPCImporter(shm_name="test_dummy", shape=(64, 64, 4))
-    importer.num_slots = 3
-
-    # Manually test the read slot calculation logic
-    # (write_idx - 1) % num_slots
+    """The read slot formula (write_idx - 1) % num_slots handles wrap-around correctly."""
+    num_slots = 3
 
     test_cases = [
         (0, 0),  # Special case
@@ -339,5 +357,5 @@ def test_read_slot_calculation() -> None:
     ]
 
     for write_idx, expected_read_slot in test_cases:
-        read_slot = 0 if write_idx == 0 else (write_idx - 1) % importer.num_slots
+        read_slot = 0 if write_idx == 0 else (write_idx - 1) % num_slots
         assert read_slot == expected_read_slot

@@ -16,8 +16,26 @@ import pytest
 
 
 def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
-    """Build a CUDAIPCImporter with mocked state (no real CUDA/SHM required)."""
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    """Build a CUDAIPCImporter with mocked IPCConnection state (no real CUDA/SHM required)."""
+    from ctypes import c_void_p
+
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter, IPCConnection
+    from cuda_link.shm_protocol import SHMLayout
+
+    mock_cuda = MagicMock()
+    layout = SHMLayout(2)
+    conn = IPCConnection(
+        cuda=mock_cuda,
+        shm_handle=None,
+        ipc_version=1,
+        num_slots=2,
+        ipc_handles=[None, None],
+        dev_ptrs=[c_void_p(0x1000), c_void_p(0x2000)],
+        ipc_events=[MagicMock(), MagicMock()],  # both non-None → GPU event path
+        layout=layout,
+        shutdown_offset=layout.shutdown_offset,
+        timestamp_offset=layout.timestamp_offset,
+    )
 
     imp = object.__new__(CUDAIPCImporter)
     imp.device = 0
@@ -28,7 +46,7 @@ def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
     imp.shm_name = "mock"
     imp.shape = (8, 8, 4)
     imp.dtype = "uint8"
-    imp.num_slots = 2
+    imp._d2h_num_streams = 1
     imp.frame_count = 0
     imp._last_write_idx = 0
 
@@ -38,26 +56,20 @@ def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
     imp.wait_spin_hits = 0
     imp.wait_sleep_hits = 0
 
-    # Other perf counters (not N1 but accessed by get_stats / log)
+    # Other perf counters
     imp.total_wait_event_time = 0.0
     imp.total_get_frame_time = 0.0
     imp.total_shm_read_us = 0.0
     imp.last_latency = 0.0
+    imp._cached_dtype_str = ""
+    imp._cached_numpy_dtype = None
 
-    from ctypes import c_void_p
-
-    imp.cuda = MagicMock()
-    imp.ipc_events = [MagicMock(), MagicMock()]  # both non-None → GPU path
-    imp.dev_ptrs = [c_void_p(0x1000), c_void_p(0x2000)]
-    imp.tensors = [None, None]
-    imp._wrappers = []
-    imp.cupy_arrays = []
-    imp._numpy_buffer = None
-    imp._pinned_ptr = None
-    imp._shutdown_offset = 0
-    imp._timestamp_offset = 0
-    imp._numpy_stream = MagicMock()
-    imp.shm_handle = None
+    # Value-object references
+    imp._conn = conn
+    imp._format = None
+    imp._torch = None
+    imp._cupy = None
+    imp._numpy = None
 
     return imp
 
@@ -70,7 +82,7 @@ def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
 def test_spin_resolves_immediately_no_sleep() -> None:
     """When query_event returns True on first try, no time.sleep call is made."""
     imp = _make_importer(spin_us=200)
-    imp.cuda.query_event.return_value = True
+    imp._conn.cuda.query_event.return_value = True
 
     with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
         # Calls: wait_start(1), while-check(2), spin_us-calc(3)
@@ -86,7 +98,7 @@ def test_spin_resolves_immediately_no_sleep() -> None:
 def test_spin_resolves_on_second_poll_no_sleep() -> None:
     """query_event returns False, True on consecutive calls — still no sleep."""
     imp = _make_importer(spin_us=200)
-    imp.cuda.query_event.side_effect = [False, True]
+    imp._conn.cuda.query_event.side_effect = [False, True]
 
     with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
         # Calls: wait_start(1), while-check(2), timeout-check(3),
@@ -114,7 +126,7 @@ def test_falls_through_to_sleep_after_spin_budget() -> None:
         call_count[0] += 1
         return call_count[0] > 5  # eventually returns True
 
-    imp.cuda.query_event.side_effect = query_side_effect
+    imp._conn.cuda.query_event.side_effect = query_side_effect
 
     # perf_counter: start=0, then rapidly exceed spin_deadline (0.0002s),
     # then timeout check in phase 2 passes, then True returned
@@ -148,7 +160,7 @@ def test_spin_us_zero_disables_phase_one() -> None:
         call_count[0] += 1
         return call_count[0] > 2
 
-    imp.cuda.query_event.side_effect = query_side_effect
+    imp._conn.cuda.query_event.side_effect = query_side_effect
 
     times = iter([0.0] + [0.0001] * 20 + [0.0002] * 20)
     with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
@@ -169,7 +181,7 @@ def test_spin_us_zero_disables_phase_one() -> None:
 def test_timeout_still_raised() -> None:
     """TimeoutError is raised after timeout_ms regardless of spin configuration."""
     imp = _make_importer(spin_us=200, timeout_ms=1.0)  # 1ms timeout
-    imp.cuda.query_event.return_value = False  # never ready
+    imp._conn.cuda.query_event.return_value = False  # never ready
 
     # wait_start=0.0; all subsequent calls return 2.0, which is:
     # - past spin_deadline (0.0002) → Phase 1 exits immediately
