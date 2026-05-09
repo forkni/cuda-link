@@ -26,10 +26,7 @@ except ImportError:
 
     CUDAMemoryShape = None
 
-from TDConfig import TDSenderConfig  # noqa: E402
-from TDHost import RealTDHost, TDHost  # noqa: E402
-from TDReceiver import TDReceiverEngine  # noqa: E402
-from TDSender import (  # noqa: E402
+from SHMProtocol import (  # noqa: E402
     FLAGS_BFLOAT16,
     FORMAT_KIND_FLOAT,
     FORMAT_KIND_SIGNED,
@@ -37,8 +34,11 @@ from TDSender import (  # noqa: E402
     PROTOCOL_MAGIC,
     SHM_HEADER_SIZE,
     SLOT_SIZE,
-    TDSenderEngine,
 )
+from TDConfig import TDSenderConfig  # noqa: E402
+from TDHost import RealTDHost, TDHost  # noqa: E402
+from TDReceiver import TDReceiverEngine  # noqa: E402
+from TDSender import TDSenderEngine  # noqa: E402
 
 # Re-export protocol constants for backward compatibility (tests import these from here)
 __all__ = [

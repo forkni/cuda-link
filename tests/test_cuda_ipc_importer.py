@@ -223,15 +223,15 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
 
     import numpy as np
 
-    from cuda_link.cuda_ipc_importer import (
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    from cuda_link.shm_protocol import (
         METADATA_SIZE,
         SHM_HEADER_SIZE,
         SHUTDOWN_FLAG_SIZE,
         SLOT_SIZE,
         TIMESTAMP_SIZE,
-        CUDAIPCImporter,
+        SHMLayout,
     )
-    from cuda_link.shm_protocol import SHMLayout
 
     # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
