@@ -20,7 +20,7 @@ from .shm_protocol import (
     publish_frame,
 )
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __all__ = [
     "CUDAIPCExporter",
     "CUDAIPCImporter",
