@@ -22,37 +22,29 @@ _logger = logging.getLogger(__name__)
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
-        CUDART_GRAPHS_MIN_VERSION,
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
-        cudaExtent,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
         cudaMemcpy3DParms,
-        cudaPitchedPtr,
         cudaPointerAttributes,
-        cudaPos,
     )
 except ImportError:
     from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
-        CUDART_GRAPHS_MIN_VERSION,
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
-        cudaExtent,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
         cudaMemcpy3DParms,
-        cudaPitchedPtr,
         cudaPointerAttributes,
-        cudaPos,
     )
 
 try:

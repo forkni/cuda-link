@@ -104,7 +104,8 @@ except ImportError:
     cp = None
     CUPY_AVAILABLE = False
 
-from .cuda_ipc_wrapper import CUDARuntimeAPI, cudaIpcEventHandle_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: E402
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime  # noqa: E402
+from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 
 # Byte size per dtype — module-level constant avoids dict construction on every _dtype_itemsize() call
 _DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "bfloat16": 2, "uint8": 1, "uint16": 2, "int8": 1, "int16": 2}
