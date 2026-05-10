@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-09
+
+### Changed — Internal Architecture (Deepening pass)
+
+- **SHM protocol extracted to standalone module** — `SHMProtocol.py` now owns the v0.5.0 binary layout (20-byte header, 128-byte slots, shutdown flag, metadata, timestamp). Mirror pair `src/cuda_link/shm_protocol.py` ↔ `td_exporter/SHMProtocol.py` is byte-identical (commit `0ee8cbf`, Deepening A).
+- **TDReceiverEngine deepened with value objects** — `ReceiverConnection`, `FormatDescriptor`, and `RetryState` replace ad-hoc state attributes; retry logic concentrated in one place (commit `3ceab97`, Deepening B).
+- **TDHost seam activated in engines** — `TDSenderEngine` and `TDReceiverEngine` now talk to TouchDesigner exclusively through the `TDHost` / `TOPHandle` adapter protocol; `RealTDHost` and `FakeTDHost` are interchangeable for tests (commit `1c9aa98`, Deepening C).
+- **CUDAIPCImporter deepened** — split into `IPCConnection` + `Format` + per-backend value objects, replacing shallow attribute access with an explicit lifecycle (commit `e2cdb45`, Deepening D, retires deferred item #6).
+- **Activation barrier extracted into dataclasses** — `ProducerActivationBarrier` (`src/cuda_link/cuda_ipc_exporter.py:107`) and `SenderActivationBarrier` (`td_exporter/TDSender.py:65`) replace 5 scattered `_barrier_*` attrs per consumer. Lifecycle now flows through `from_env` / `from_config` / `acquire` / `arm_settle_countdown` / `tick_and_maybe_release` / `force_release` / `should_skip_publish` / `close`. Behavior preserved; log line origins shift but shape unchanged. `CUDALINK_ACTIVATION_BARRIER` default remains `"1"` (commit `d67c143`, Deferred #7).
+
+### Removed — Internal
+
+- **7 test-only `@property` bridges deleted from `CUDAIPCExtension` facade** — approximately 50 test sites in `tests/test_extension_characterization.py` and `tests/test_cuda_ipc_exporter.py` rewritten to access `ext._engine.X` / `exporter._engine.X` directly. Three production bridges (`shm_name`, `num_slots`, `verbose_performance` at `td_exporter/CUDAIPCExtension.py:226-244`) are retained intentionally for parexecute-DAT callbacks. Out-of-tree consumers that touched the deleted bridges will need to migrate to `_engine` access (commit `4ad2a5c`, Deferred #5).
+
+### Fixed
+
+- **Progress columns suppressed when `EXPORT_PROFILE` is off** — `avg_total` and `avg_memcpy` no longer print misleading `0.0 µs` when profiling is disabled (commit `8658dbe`).
+- **Protocol constants now route directly from `SHMProtocol`** in `CUDAIPCExtension` (commit `eb8b443`).
+
+### Docs
+
+- **Refreshed v1.2.1 benchmark numbers and aligned cross-doc citations** (commit `9f98a72`).
+
+### Internal
+
+- **`pyproject.toml` version**: `1.2.1` → `1.3.0`.
+- **TOX artifact rotation**: retired `TOXES/CUDAIPCLink_v1.2.1.tox`, shipped `CUDAIPCLink_v1.3.0.tox` (per project policy: only the latest `.tox` lives on `master`).
+- **Example `.toe` snapshot**: `CUDA_Link_Example.49.toe` replaces the v1.2.1-era `.45`. `Test_TD_Receiver1*.toe` and `SESSION_LOG.md` now gitignored (commit `e0a5f49`).
+- **Mirror invariant** preserved across three module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py` ↔ their `td_exporter/` twins.
+- **Test gate**: `201 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
+
+---
+
 ## [1.2.1] — 2026-05-09
 
 ### Fixed
@@ -304,6 +337,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
