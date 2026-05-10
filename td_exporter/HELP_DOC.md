@@ -174,7 +174,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `CUDAIPCLink_v0.x.x.tox` into your TD network.
+1. Drop `CUDAIPCLink_v1.4.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.

@@ -716,9 +716,8 @@ class TDSenderEngine:
     def export_frame(self, top_op: TOP | None = None) -> bool:
         """Export the ExportBuffer TOP texture via CUDA IPC.
 
-        Resolves ExportBuffer internally (downstream of dtype_converter) so the
-        correct post-conversion frame is always exported regardless of what the
-        caller previously passed.
+        Resolves ExportBuffer internally from ownerComp so the correct frame
+        is always exported regardless of what the caller previously passed.
 
         Args:
             top_op: Deprecated. Accepted for backwards compatibility but ignored.
@@ -790,7 +789,7 @@ class TDSenderEngine:
                 if not self._warned_format:
                     self._log(
                         f"Pixel format {src_fmt!r} unsupported by cudaMemory() — "
-                        "transfer suspended; component tinted yellow + badge",
+                        "transfer suspended; component tinted yellow",
                         force=True,
                     )
                     self._warned_format = True

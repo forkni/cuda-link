@@ -52,6 +52,15 @@ def _make_receiver(shm_name: str):
         def find_top(self, name):
             return None
 
+        def set_warning_status(self, msg):
+            pass
+
+        def set_error_status(self, msg):
+            pass
+
+        def clear_status(self):
+            pass
+
     config = TDSenderConfig()
     return TDReceiverEngine(
         host=_NullHost(),

@@ -5,15 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] — 2026-05-10
 
 ### Changed
 
 - **Unsupported pixel formats now tint the component yellow instead of auto-converting** (**breaking**) — `TDSenderEngine` no longer routes float16, 10:10:10:2, and 11:11:10 pixel formats through a `dtype_converter` Transform TOP. Instead, when `cudaMemory()` would reject or silently corrupt the source format, the sender skips frames and tints the component node body **yellow** (`parent().color`) every bad frame; the first bad frame per episode also logs once. The tint clears automatically as soon as the upstream source TOP format is corrected and transfer resumes. Engine-fatal errors (IPC/GPU init failure) tint the component **red** and emit a red `addScriptError` badge. Users who previously relied on silent auto-conversion must fix the upstream source TOP's Pixel Format parameter. The `dtype_converter` Transform TOP inside the `.tox` is now dead weight; rebuild without it as `CUDAIPCLink_v1.4.0.tox` (wire `input → ExportBuffer` directly). API rename: `_needs_format_conversion` → `_is_unsupported_format`; `TDHost.add_warning`/`clear_warning` → `set_warning_status`/`set_error_status`/`clear_status`. Regression test: `tests/test_tdsender_format_warning.py`.
+
 ### Fixed
 
 - **Yellow tint no longer sticks after a bad-format episode is resolved** (Bug 1 — H1 confirmed) — `RealTDHost` previously cached `parent().color` at construction time; if the `.tox` was saved while tinted, or the extension re-initialised after a bad frame had already run, `_default_color` was stored as the warning colour and `clear_status()` faithfully restored it to yellow. `_default_color` is now captured lazily on the first `set_warning_status` / `set_error_status` call and excluded from the cache when it equals a managed colour, falling back to TD's default node grey. Regression test: `tests/test_tdhost_default_color_cache.py`.
 - **Dead `cooking_op=me` plumbing removed** (Bug 2 — H5 confirmed; H1–H4 and cook-context-propagation theory disproved) — Phase E shipped `callbacks_template.py:onFrameEnd` passing `cooking_op=me` to `export_frame()`, which called `me.addWarning(msg)` to emit a yellow badge on the Execute DAT. Live TD probes (`verification/results/probe_addwarning_*`, `verification/results/probe_cook_context_*`) disproved every plausible path: H5 (`tdError: Cannot set warning outside of cook` — `addWarning` is illegal in `onFrameEnd`) blocked the Execute DAT path; the child-Script-TOP-cook path (`addWarning` succeeds in `onCook` per H5a, confirmed) was blocked by H5b (TD does not propagate the child warning to the parent COMP boundary tile — neither `comp.warnings()` aggregates it, nor does a visual badge appear). The COMP body tint is the only COMP-local warning surface. All `cooking_op` plumbing removed: `TDSender.export_frame` signature, `CUDAIPCExtension.export_frame` wrapper, `callbacks_template.py:onFrameEnd`. The `_FakeCookingOp` helper and the three `test_cooking_op_*` tests locked in the wrong contract and are dropped; replaced by two host-boundary regression tests (`test_export_frame_bad_format_returns_false_and_warns_host`, `test_export_frame_good_format_after_bad_calls_clear_status`) in `tests/test_tdsender_format_warning.py`.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.3.0` → `1.4.0`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.4.0.tox` to be built from the updated component tree (no `dtype_converter` Transform TOP — wire `input → ExportBuffer` directly per `docs/TOX_BUILD_GUIDE.md`). Prior `.tox` versions (`v1.2.1`, `v1.3.0`) retained per versioned-binary tracking policy.
+- **Test gate**: `247 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
 
 ## [1.3.0] — 2026-05-09
 
@@ -352,6 +360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
