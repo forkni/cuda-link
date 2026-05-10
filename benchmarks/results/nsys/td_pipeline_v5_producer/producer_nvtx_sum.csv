@@ -1,7 +1,0 @@
-Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
-30.0,239752032,2401,99855.1,90610.0,0,2929445,71522.9,PushPop,:cudalink.exporter.slot2
-29.5,235579197,2401,98117.1,90205.0,55537,1378353,43673.0,PushPop,:cudalink.exporter.slot0
-29.3,233714818,2401,97340.6,90340.0,52853,447414,32053.0,PushPop,:cudalink.exporter.slot1
-5.7,45894351,7202,6372.4,5600.0,3451,280550,6190.6,PushPop,:cudalink.exporter.shm_write
-5.5,43783507,7202,6079.4,4941.0,3320,1158436,15114.7,PushPop,:cudalink.exporter.flush_probe
-0.0,2244,1,2244.0,2244.0,2244,2244,0.0,PushPop,:cudalink.startup.hws_mode=2
