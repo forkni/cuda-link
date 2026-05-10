@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TDHost seam activated in engines** — `TDSenderEngine` and `TDReceiverEngine` now talk to TouchDesigner exclusively through the `TDHost` / `TOPHandle` adapter protocol; `RealTDHost` and `FakeTDHost` are interchangeable for tests (commit `1c9aa98`, Deepening C).
 - **CUDAIPCImporter deepened** — split into `IPCConnection` + `Format` + per-backend value objects, replacing shallow attribute access with an explicit lifecycle (commit `e2cdb45`, Deepening D, retires deferred item #6).
 - **Activation barrier extracted into dataclasses** — `ProducerActivationBarrier` (`src/cuda_link/cuda_ipc_exporter.py:107`) and `SenderActivationBarrier` (`td_exporter/TDSender.py:65`) replace 5 scattered `_barrier_*` attrs per consumer. Lifecycle now flows through `from_env` / `from_config` / `acquire` / `arm_settle_countdown` / `tick_and_maybe_release` / `force_release` / `should_skip_publish` / `close`. Behavior preserved; log line origins shift but shape unchanged. `CUDALINK_ACTIVATION_BARRIER` default remains `"1"` (commit `d67c143`, Deferred #7).
+- **CUDA wrapper split into types + graphs** — `cuda_runtime_types.py` (ctypes structs, type aliases, `CUDAError`, `CUDART_GRAPHS_MIN_VERSION`) and `cuda_graphs.py` (`CUDAGraphsMixin`, 13 graph-lifecycle methods) extracted from the 1455-LOC `cuda_ipc_wrapper.py`. `CUDARuntimeAPI(CUDAGraphsMixin)` keeps the public API byte-stable; callers (`cuda_ipc_exporter`, `cuda_ipc_importer`, `TDSender`, `TDReceiver`, tests) migrated off the wrapper shim to import types from the canonical location. Mirror invariant extended: `cuda_runtime_types.py` ↔ `td_exporter/CUDARuntimeTypes.py` and `cuda_graphs.py` ↔ `td_exporter/CUDAGraphs.py`. Wrapper shrinks from 1455 → ~660 LOC (commits `415f7b2`, `7a4b5cb`, `67f20a2`; merge `43fd4b9`; Deferred #3).
 
 ### Removed — Internal
 
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TDSender metadata invariant with padded GPU allocations** — `TDSenderEngine._write_metadata_to_shm()` now writes `data_size = W*H*C*(bits/8)` (active-region size) instead of `self.data_size` (GPU allocation size). Previously, when TD reported the same `cuda_mem.size` across frames with different dimensions (padded or atlas allocations), the metadata-only-update branch updated `width`/`height`/`channels` but left `data_size` at the old allocation value. The new pixel count no longer divided evenly into the old allocation, `bits` fell back to 32, and the receiver invariant `W*H*C*(bits/8) == data_size` failed — causing the receiver to log `"Metadata size invariant failed … Sender/receiver protocol mismatch."` and loop indefinitely in `"Waiting for sender"`. In normal TD operation (no padding) the active-region size equals the allocation size, so there is no regression for existing users. Matches `CUDAIPCExporter` behaviour and the v1.0.0 protocol spec. Latent since `ddd8f0f`; surfaced by the v1.0.0 strict receiver invariant (`6afc49d`). Regression test: `tests/test_tdsender_metadata_only_update.py` (commit `a23b768`).
 - **Progress columns suppressed when `EXPORT_PROFILE` is off** — `avg_total` and `avg_memcpy` no longer print misleading `0.0 µs` when profiling is disabled (commit `8658dbe`).
 - **Protocol constants now route directly from `SHMProtocol`** in `CUDAIPCExtension` (commit `eb8b443`).
 
@@ -31,10 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - **`pyproject.toml` version**: `1.2.1` → `1.3.0`.
-- **TOX artifact rotation**: retired `TOXES/CUDAIPCLink_v1.2.1.tox`, shipped `CUDAIPCLink_v1.3.0.tox` (per project policy: only the latest `.tox` lives on `master`).
-- **Example `.toe` snapshot**: `CUDA_Link_Example.49.toe` replaces the v1.2.1-era `.45`. `Test_TD_Receiver1*.toe` and `SESSION_LOG.md` now gitignored (commit `e0a5f49`).
-- **Mirror invariant** preserved across three module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py` ↔ their `td_exporter/` twins.
-- **Test gate**: `201 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.3.0.tox` rebuilt to include `CUDARuntimeTypes` and `CUDAGraphs` textDATs from the wrapper split. `TOXES/CUDAIPCLink_v1.2.1.tox` retained per versioned-binary tracking policy.
+- **Example `.toe` snapshots**: `CUDA_Link_Example.50.toe` (pre-wrapper-split, initial v1.3.0) retained as historical; `CUDA_Link_Example.51.toe` captures the post-wrapper-split COMP state. `Test_TD_Receiver1*.toe` and `SESSION_LOG.md` gitignored (commit `e0a5f49`).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
+- **Test gate**: `205 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
 
 ---
 
