@@ -23,6 +23,7 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
+├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -159,11 +160,11 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 | State | Visual | Cause |
 |---|---|---|
-| **Warning** | COMP node body tints **yellow** | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
-| **Error** | COMP node body tints **red** + red `addScriptError` badge | Engine-fatal error (IPC/GPU init failure) |
-| **Healthy** | Original node color restored | Condition cleared automatically |
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
+| **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. There is no yellow badge on the COMP boundary — `addWarning` requires an active cook context and `onFrameEnd` runs post-cook; the COMP body tint is the only available warning surface (see ARCHITECTURE.md for the full probe trail).
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
@@ -179,6 +180,22 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 - Simplifies data flow (Execute DAT drives import directly)
 
 **Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
+
+### Step 6c: Create warning_emitter Script TOP
+
+1. Inside the `CUDAIPCExporter` COMP, create a **Script TOP**, rename to `warning_emitter`.
+2. Paste the contents of `td_exporter/warning_emitter_callbacks.py` into the auto-generated
+   callbacks DAT (accessible via the Script TOP's **Callbacks DAT** parameter).
+3. Open the Script TOP parameter page and set **Cook Type** → **Off (Pulse to Cook)**.
+   The operator cooks only when `RealTDHost` force-cooks it on status transitions — there
+   is no need for continuous cooking.
+4. Leave it unwired: `warning_emitter` has no inputs and no outputs connected to the
+   rendering chain. It exists solely as a status badge host.
+
+**What it does**: `onCook` reads `ownerComp.fetch("cuda_link_status_msg", None)` and calls
+`scriptOp.addWarning(msg)` when a status message is present. The badge clears automatically
+when the next cook finds no message (after `clear_status` unstores the key and
+force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-body tint.
 
 ### Step 7: Optional Info DAT
 

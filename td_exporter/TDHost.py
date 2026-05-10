@@ -211,6 +211,8 @@ class RealTDHost(TDHost):
         # _reset_stale_tint() clears any visible managed-colour tint immediately
         # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
+        self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
+        self._status_msg: str | None = None  # current stored status; drives cook-on-transition
         self._reset_stale_tint()
 
     def param_value(self, name: str) -> Any:
@@ -246,6 +248,14 @@ class RealTDHost(TDHost):
         except (AttributeError, RuntimeError):
             return None
 
+    def _cook_warning_emitter(self) -> None:
+        if self._warning_emitter is None:
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self._warning_emitter = self._comp.op("warning_emitter") or False
+        if self._warning_emitter:
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self._warning_emitter.cook(force=True)
+
     def _reset_stale_tint(self) -> None:
         with contextlib.suppress(AttributeError, RuntimeError):
             c = self._comp.color
@@ -272,20 +282,34 @@ class RealTDHost(TDHost):
 
     def set_warning_status(self, msg: str) -> None:
         self._capture_default_color()
+        full_msg = f"WARNING: {msg}"
+        needs_cook = self._status_msg != full_msg
+        self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _WARNING_COLOR
-            self._comp.store("cuda_link_status_msg", f"WARNING: {msg}")
+            self._comp.store("cuda_link_status_msg", full_msg)
+        if needs_cook:
+            self._cook_warning_emitter()
 
     def set_error_status(self, msg: str) -> None:
         self._capture_default_color()
+        full_msg = f"ERROR: {msg}"
+        needs_cook = self._status_msg != full_msg
+        self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _ERROR_COLOR
             self._comp.addScriptError(msg)
-            self._comp.store("cuda_link_status_msg", f"ERROR: {msg}")
+            self._comp.store("cuda_link_status_msg", full_msg)
+        if needs_cook:
+            self._cook_warning_emitter()
 
     def clear_status(self) -> None:
+        needs_cook = self._status_msg is not None
+        self._status_msg = None
         with contextlib.suppress(AttributeError, RuntimeError):
             if self._default_color is not None:
                 self._comp.color = self._default_color
             self._comp.clearScriptErrors(error="*")
             self._comp.unstore("cuda_link_status_msg")
+        if needs_cook:
+            self._cook_warning_emitter()
