@@ -139,3 +139,56 @@ def test_multiple_warn_clear_cycles_do_not_drift() -> None:
         assert comp.color == _WARNING_COLOR
         host.clear_status()
         assert comp.color == original, "each clear_status must restore to original custom colour"
+
+
+# ---------------------------------------------------------------------------
+# Init-reset regression — COMP boots tinted; __init__ must restore grey
+# ---------------------------------------------------------------------------
+
+
+class FakeOwnerCompWithFetch(FakeOwnerComp):
+    """FakeOwnerComp with fetch() and a _NoPar so RealTDHost __init__ runs cleanly."""
+
+    par = _NoPar()
+
+    def fetch(self, key: str, default: object = None) -> object:
+        return self._store.get(key, default)
+
+
+def test_init_resets_yellow_tint_to_default_grey() -> None:
+    """COMP saved yellow → __init__ must restore to _DEFAULT_NODE_COLOR immediately."""
+    from TDHost import _DEFAULT_NODE_COLOR
+
+    comp = FakeOwnerCompWithFetch(initial_color=_WARNING_COLOR)
+    RealTDHost(comp)
+    assert comp.color not in (_WARNING_COLOR, _ERROR_COLOR), (
+        "__init__ must reset a stale yellow tint to a non-managed colour"
+    )
+    assert comp.color == _DEFAULT_NODE_COLOR
+
+
+def test_init_resets_red_tint_to_default_grey() -> None:
+    """COMP saved red → __init__ must restore to _DEFAULT_NODE_COLOR immediately."""
+    from TDHost import _DEFAULT_NODE_COLOR
+
+    comp = FakeOwnerCompWithFetch(initial_color=_ERROR_COLOR)
+    RealTDHost(comp)
+    assert comp.color == _DEFAULT_NODE_COLOR
+
+
+def test_init_does_not_change_neutral_colour() -> None:
+    """COMP with a custom (non-managed) colour → __init__ must NOT change it."""
+    custom = (0.3, 0.6, 0.9)
+    comp = FakeOwnerCompWithFetch(initial_color=custom)
+    RealTDHost(comp)
+    assert comp.color == custom, "__init__ must not touch a non-managed colour"
+
+
+def test_init_clears_stale_storage_on_yellow_boot() -> None:
+    """COMP saved yellow with a stale status message → __init__ must unstore it."""
+    comp = FakeOwnerCompWithFetch(initial_color=_WARNING_COLOR)
+    comp.store("cuda_link_status_msg", "WARNING: stale from prior session")
+    RealTDHost(comp)
+    assert comp.fetch("cuda_link_status_msg") is None, (
+        "__init__ must unstore cuda_link_status_msg when resetting stale tint"
+    )

@@ -206,10 +206,12 @@ class RealTDHost(TDHost):
             self._active_par = owner_comp.par.Active
         except AttributeError:
             self._active_par = None
-        # Deliberately NOT cached here: the COMP may be tinted from a prior session
-        # (.tox saved while yellow/red) which would poison the cache.  Captured lazily
-        # on the first set_warning_status / set_error_status call instead.
+        # _default_color is captured lazily on the first set_warning_status /
+        # set_error_status call so a tinted .tox save doesn't poison the cache.
+        # _reset_stale_tint() clears any visible managed-colour tint immediately
+        # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
+        self._reset_stale_tint()
 
     def param_value(self, name: str) -> Any:
         try:
@@ -243,6 +245,15 @@ class RealTDHost(TDHost):
             return RealTOPHandle(top) if top is not None else None
         except (AttributeError, RuntimeError):
             return None
+
+    def _reset_stale_tint(self) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            c = self._comp.color
+            current = (float(c[0]), float(c[1]), float(c[2]))
+            if current in _MANAGED_COLORS:
+                self._comp.color = _DEFAULT_NODE_COLOR
+                self._comp.clearScriptErrors(error="*")
+                self._comp.unstore("cuda_link_status_msg")
 
     def _capture_default_color(self) -> None:
         if self._default_color is not None:
