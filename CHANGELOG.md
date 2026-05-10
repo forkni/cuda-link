@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-05-10
+
+### Added
+
+- **Read-only `Status` custom parameter** on the CUDAIPCLink COMP surfaces engine state at a glance. Displays `"WARNING: <msg>"` / `"ERROR: <msg>"` during fault conditions; `"<W>x<H> <dtype> <ch>ch"` (e.g. `"1920x1080 float32 4ch"`) on each successful frame; `"Idle"` when the component is inactive or clear. Wired via the new `TDHost.set_info_status()` protocol method and `_write_status_par()` dedup helper (`td_exporter/TDHost.py`); call sites in `TDSenderEngine` (after a successful `cuda_memory()` fetch) and `TDReceiverEngine` (after `copyCUDAMemory`). Per-frame dedup avoids hammering the par on steady-state transfers. Regression test: `tests/test_tdhost_status_par.py` (12 cases).
+- **`warning_emitter` Script TOP child** driven by COMP storage emits a local `addWarning` badge INSIDE the COMP alongside the COMP-body tint. Provides a second visible warning surface when the user opens the COMP network. New file `td_exporter/warning_emitter_callbacks.py`. State-transition-gated to avoid redundant force-cooks every bad frame. Regression test: `tests/test_tdhost_warning_emitter.py`.
+
+### Fixed
+
+- **Stale COMP tint at extension boot** — `RealTDHost.__init__` now invokes `_reset_stale_tint()`, which detects a COMP saved in a warning/error-tinted state, restores the default grey colour, clears script errors, and unstores the `"cuda_link_status_msg"` key. Previously the `.tox` booted yellow if it had been saved mid-warning (e.g. during development). Regression test: `tests/test_tdhost_init_reset.py`.
+- **Active toggle off now resets COMP to grey and writes `"Idle"` to Status par** — `parexecute_callbacks.py:handle_active_change` deactivation branch calls `ext._host.clear_status()` after `ext.cleanup()`. Previously the COMP stayed tinted and the Status par retained the last frame's resolution/dtype or warning string after deactivation.
+- **Status-par dtype label showed `"<class 'numpy.uint8'>"` instead of `"uint8"`** — TD's `shape.dataType` is the numpy TYPE class, not a dtype instance (no `.name` attribute). Fixed by chaining `getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt))` in both `TDSender.py` and `TDReceiver.py`.
+- **Unsupported-pixel-format warning message shortened** — `TDSender.py:783` now emits `f"unsupported pixel format {src_fmt!r}"` instead of a verbose 3-line instructional string. The full instructional text remains in the per-episode `_log()` call (textport output). Status par now displays `"WARNING: unsupported pixel format '11:11:10'"` — readable at a glance in the Custom Pars panel.
+- **`clear_status()` sentinel renamed `"OK"` → `"Idle"`** — better semantic match for "no transfer in progress, no warning"; used in Status par and `warning_emitter` state.
+- **`test_activation_barrier` failures on Windows when a live TD session holds the named SHM segment** — Windows SHM lifetime is handle-bound; `SharedMemory.unlink()` is a no-op while another process holds an open handle, so the test fixture's cleanup silently failed and subsequent counter assertions read production-accumulated values (e.g. `assert 73 == 3`). Fixed in `tests/test_activation_barrier.py`: `cleanup_barrier` fixture now re-zeros the SHM header in-place if external cleanup fails, giving each test a deterministic zero state; `test_open_or_create_raises_when_missing_and_no_create` conditionally skips with a descriptive reason when an external holder is detected.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.4.0` → `1.4.1`.
+- **`docs/BENCHMARKS.md` added** — consolidates every benchmark table previously embedded in `README.md` §Performance / §Benchmarks (RTX 4090 / PCIe 4.0 / driver 596.36 numbers). `README.md` §Benchmarks is now a concise summary linking here.
+- **`benchmarks/` moved to local-only** — gitignored and removed from the git index (`git rm --cached -r`). Scripts remain on contributor disks; numbers are preserved in `docs/BENCHMARKS.md`.
+- **`CONTEXT.md` moved to local-only** — gitignored and removed from the git index. Architecture vocabulary is covered by `docs/ARCHITECTURE.md`.
+- **Test gate**: `272 passed, 3 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts; `test_activation_barrier` SHM-external-holder test skips when a live TD session is running).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.4.1.tox` to be built by the user separately. `v1.4.0` retained per versioned-binary tracking policy.
+
+---
+
 ## [1.4.0] — 2026-05-10
 
 ### Changed
@@ -360,6 +388,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
