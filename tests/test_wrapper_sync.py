@@ -3,6 +3,7 @@
 Duplicated pairs (byte-identical):
   src/cuda_link/cuda_ipc_wrapper.py   <-> td_exporter/CUDAIPCWrapper.py
   src/cuda_link/cuda_runtime_types.py <-> td_exporter/CUDARuntimeTypes.py
+  src/cuda_link/cuda_graphs.py        <-> td_exporter/CUDAGraphs.py
   src/cuda_link/nvml_observer.py      <-> td_exporter/NVMLObserver.py
 
 Run scripts/sync_td_wrapper.py to regenerate the TD-exporter copies.
@@ -26,13 +27,19 @@ _SYNC_PAIRS = [
         _PROJECT_ROOT / "td_exporter" / "CUDARuntimeTypes.py",
     ),
     (
+        _PROJECT_ROOT / "src" / "cuda_link" / "cuda_graphs.py",
+        _PROJECT_ROOT / "td_exporter" / "CUDAGraphs.py",
+    ),
+    (
         _PROJECT_ROOT / "src" / "cuda_link" / "nvml_observer.py",
         _PROJECT_ROOT / "td_exporter" / "NVMLObserver.py",
     ),
 ]
 
 
-@pytest.mark.parametrize("canonical,derived", _SYNC_PAIRS, ids=["CUDAIPCWrapper", "CUDARuntimeTypes", "NVMLObserver"])
+@pytest.mark.parametrize(
+    "canonical,derived", _SYNC_PAIRS, ids=["CUDAIPCWrapper", "CUDARuntimeTypes", "CUDAGraphs", "NVMLObserver"]
+)
 def test_td_exporter_file_is_identical(canonical: Path, derived: Path) -> None:
     """Verify each TD-exporter copy is byte-identical to its canonical source."""
     assert canonical.exists(), f"Canonical source not found: {canonical}"
@@ -63,8 +70,8 @@ def test_wrapper_contains_key_definitions() -> None:
     assert "class cudaIpcMemHandle_t(ctypes.Structure):" in types_content
     assert "class cudaIpcEventHandle_t(ctypes.Structure):" in types_content
 
-    # Runtime API and factory stay in cuda_ipc_wrapper
-    assert "class CUDARuntimeAPI:" in wrapper_content
+    # Runtime API and factory stay in cuda_ipc_wrapper (inherits from CUDAGraphsMixin after Phase 2)
+    assert "class CUDARuntimeAPI(" in wrapper_content
     assert "def get_cuda_runtime(" in wrapper_content
 
     # Check for key methods

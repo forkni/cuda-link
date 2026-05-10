@@ -85,6 +85,7 @@ ignore = ["E501"]  # Line length handled by formatter
 "src/cuda_link/cuda_ipc_wrapper.py" = ["N801", "F401"]  # C-struct naming; re-exports (types + graphs shim)
 "src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 "td_exporter/CUDAIPCWrapper.py" = ["F401"]  # re-exports for TDSender/TDReceiver (mirrors cuda_ipc_wrapper.py)
+"src/cuda_link/cuda_graphs.py" = ["F401"]  # re-exports type aliases used by host class
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
 
 [tool.ruff.format]
