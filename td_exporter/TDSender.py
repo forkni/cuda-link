@@ -625,30 +625,38 @@ class TDSenderEngine:
         if self.shm_handle is None or self.data_size == 0:
             return
 
-        # Encode format as CUDA-aligned (kind, bits, flags) — self-describing, no enum lookup.
-        # bits_per_component is authoritative (derived from data_size, which TD allocated).
-        # format_kind is derived from shape.dataType hint for the ambiguous 16-bit case.
+        # Encode format as (kind, bits, flags) — self-describing, receiver-compatible.
+        # Primary source: _detected_numpy_dtype from cuda_mem.data_type (authoritative).
+        # The GPU allocation size (self.data_size) may be padded or reflect the previous
+        # format when dtype changes with a constant allocation, so it must not drive
+        # kind/bits alone. Ratio-based fallback is used only when dtype is unavailable.
         pixel_count = self.width * self.height * self.channels if (self.width and self.height and self.channels) else 0
-        bits = self.data_size // pixel_count * 8 if pixel_count > 0 and self.data_size % pixel_count == 0 else 32
 
         flags = 0
-        if bits == 8:
-            kind = FORMAT_KIND_UNSIGNED
-        elif bits == 16:
-            # Disambiguate float16 vs uint16 using shape.dataType hint (normalized to np.dtype).
-            # dtype_converter promotes float16→float32 upstream in normal TD pipelines,
-            # so 16-bit reaching here is typically uint16 fixed-point.
-            hint = self._detected_numpy_dtype
+        # Fallback: derive bits/kind from GPU allocation ratio.
+        _ratio_bits = self.data_size // pixel_count * 8 if pixel_count > 0 and self.data_size % pixel_count == 0 else 32
+        bits = _ratio_bits
+        kind = FORMAT_KIND_UNSIGNED if bits == 8 else FORMAT_KIND_FLOAT
+
+        # Override with authoritative dtype hint when cuda_mem.data_type was reported.
+        _hint = self._detected_numpy_dtype
+        if _hint is not None:
             try:
                 import numpy as _np
 
-                hint = _np.dtype(hint) if hint is not None else None
-                hint_is_float16 = hint is not None and hint == _np.dtype("float16")
+                _hint = _np.dtype(_hint)
+                if _hint == _np.dtype("uint8"):
+                    bits, kind = 8, FORMAT_KIND_UNSIGNED
+                elif _hint == _np.dtype("uint16"):
+                    bits, kind = 16, FORMAT_KIND_UNSIGNED
+                elif _hint == _np.dtype("float16"):
+                    bits, kind = 16, FORMAT_KIND_FLOAT
+                elif _hint == _np.dtype("float64"):
+                    bits, kind = 64, FORMAT_KIND_FLOAT
+                else:  # float32 and any future dtype
+                    bits, kind = 32, FORMAT_KIND_FLOAT
             except Exception:  # noqa: BLE001
-                hint_is_float16 = False
-            kind = FORMAT_KIND_FLOAT if hint_is_float16 else FORMAT_KIND_UNSIGNED
-        else:
-            kind = FORMAT_KIND_FLOAT  # float32 / float64
+                pass  # keep ratio-derived fallback
 
         # Use active-region size (W*H*C*(bits/8)) as the metadata data_size so
         # the receiver invariant W*H*C*(bits/8)==data_size is always satisfied.

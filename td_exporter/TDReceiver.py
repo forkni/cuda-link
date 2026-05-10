@@ -364,11 +364,13 @@ class TDReceiverEngine:
                 return False
             if result.state is SlotState.VERSION_CHANGED:
                 self._log(
-                    f"Sender re-initialized (v{self._connection.ipc_version} -> v{result.new_version}). Reconnecting...",
+                    f"Sender updated (v{self._connection.ipc_version} -> v{result.new_version}). Refreshing in-place...",
                     force=True,
                 )
-                self.cleanup()
-                return False  # Will reinitialize on next frame
+                if not self._refresh_on_version_change(result.new_version):
+                    self._log("In-place refresh failed — falling back to full reinit.", force=True)
+                    self.cleanup()
+                return False  # No frame to consume this tick regardless of refresh outcome
             if result.state is SlotState.NO_FRAME:
                 return False
 
@@ -904,3 +906,148 @@ class TDReceiverEngine:
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+
+    def _refresh_on_version_change(self, new_version: int) -> bool:
+        """Refresh format and IPC handles in-place after a sender version bump.
+
+        Keeps SHM, stream, and unchanged IPC handles open. Only re-reads the
+        20-byte metadata block and rebuilds self._format and self._cached_shape.
+        For genuine sender re-inits (new IPC handles), also closes old handles
+        and opens the new ones — preserving the SHM connection throughout.
+
+        Mirrors src/cuda_link/cuda_ipc_importer.py:_reinitialize.
+
+        Returns:
+            True if refresh succeeded (caller skips cleanup and continues).
+            False on any error (caller falls back to cleanup + full reinit).
+        """
+        conn = self._connection
+        shm = conn.shm_handle
+        if shm is None or conn.layout is None:
+            return False
+
+        layout = conn.layout
+        metadata_offset = layout.metadata_offset
+        try:
+            if len(shm.buf) < metadata_offset + METADATA_SIZE:
+                return False
+            width = struct.unpack("<I", bytes(shm.buf[metadata_offset : metadata_offset + 4]))[0]
+            height = struct.unpack("<I", bytes(shm.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
+            num_comps = struct.unpack("<I", bytes(shm.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
+            format_kind, bits_per_comp, flags = _ST_BBH.unpack(
+                bytes(shm.buf[metadata_offset + 12 : metadata_offset + 16])
+            )
+            buffer_size = struct.unpack("<I", bytes(shm.buf[metadata_offset + 16 : metadata_offset + 20]))[0]
+        except (struct.error, ValueError, IndexError):
+            return False
+
+        # Validate metadata invariant before accepting new format
+        if bits_per_comp == 0 or width == 0 or height == 0 or num_comps == 0:
+            return False
+        expected_size = width * height * num_comps * (bits_per_comp // 8)
+        if buffer_size != expected_size:
+            self._log(
+                f"Metadata invariant failed during refresh: "
+                f"W*H*C*(bits/8)={expected_size} but buf_size={buffer_size}. "
+                "Falling back to full reinit.",
+                force=True,
+            )
+            return False
+
+        # Detect whether IPC handles changed (metadata-only bump vs genuine sender re-init)
+        handles_changed = False
+        if self.cuda is not None and conn.ipc_handles:
+            for slot in range(conn.num_slots):
+                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+                new_mem_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+                old_handle = conn.ipc_handles[slot] if slot < len(conn.ipc_handles) else None
+                if old_handle is None or bytes(old_handle) != new_mem_bytes:
+                    handles_changed = True
+                    break
+
+        if handles_changed and self.cuda is not None:
+            # Genuine sender re-init: close old IPC imports, open new ones (keep SHM+stream).
+            for dev_ptr in conn.dev_ptrs:
+                if dev_ptr:
+                    with contextlib.suppress(RuntimeError, OSError):
+                        self.cuda.ipc_close_mem_handle(dev_ptr)
+            for event in conn.ipc_events:
+                if event:
+                    with contextlib.suppress(RuntimeError, OSError):
+                        self.cuda.destroy_event(event)
+
+            new_dev_ptrs = [None] * conn.num_slots
+            new_ipc_handles = [None] * conn.num_slots
+            new_ipc_events = [None] * conn.num_slots
+            for slot in range(conn.num_slots):
+                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+                mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+                if not any(mem_handle_bytes):
+                    self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
+                    return False
+                new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+                try:
+                    new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
+                except RuntimeError as e:
+                    self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
+                    return False
+                event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
+                if any(event_handle_bytes):
+                    with contextlib.suppress(RuntimeError, OSError):
+                        ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
+                        new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
+
+            conn.dev_ptrs = new_dev_ptrs
+            conn.ipc_handles = new_ipc_handles
+            conn.ipc_events = new_ipc_events
+
+        # Rebuild format descriptor
+        prev_format = self._format
+        self._format = FormatDescriptor(
+            width=width,
+            height=height,
+            num_comps=num_comps,
+            format_kind=format_kind,
+            bits_per_comp=bits_per_comp,
+            flags=flags,
+            buffer_size=buffer_size,
+        )
+
+        # Rebuild _cached_shape when available (requires CUDAMemoryShape from TD runtime)
+        if self._cached_shape is not None:
+            if numpy is None:
+                import numpy as np_module
+            else:
+                np_module = numpy
+
+            if format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 8:
+                np_dtype = np_module.uint8
+            elif format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 16:
+                np_dtype = np_module.uint16
+            elif self._format.is_float16:
+                np_dtype = np_module.float32
+            else:
+                np_dtype = np_module.float32
+
+            try:
+                new_shape = CUDAMemoryShape()
+                new_shape.width = width
+                new_shape.height = height
+                new_shape.numComps = num_comps
+                new_shape.dataType = np_dtype
+                self._cached_shape = new_shape
+            except NameError:
+                pass  # CUDAMemoryShape not available outside TD runtime (e.g. unit tests)
+
+        # Advance version counter and signal resolution update if dims changed
+        conn.ipc_version = new_version
+        if width != prev_format.width or height != prev_format.height:
+            self._retry.needs_resolution_update = True
+
+        self._log(
+            f"Format refreshed in-place: {width}x{height}x{num_comps}, "
+            f"kind={format_kind} bits={bits_per_comp} v{new_version}"
+            + (" (handles reopened)" if handles_changed else ""),
+            force=True,
+        )
+        return True
