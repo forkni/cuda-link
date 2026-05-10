@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import os
 import struct
-import threading as _threading
 import time
 import traceback
 from ctypes import c_void_p
@@ -36,45 +35,30 @@ from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
+from SHMProtocol import (  # noqa: E402
+    _ST_U32,
+    FORMAT_KIND_FLOAT,
+    FORMAT_KIND_UNSIGNED,
+    MAGIC_OFFSET,
+    METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    TIMESTAMP_SIZE,
+    WRITE_IDX_OFFSET,
+    Metadata,
+    SHMLayout,
+    bump_version,
+    publish_frame,
+)
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
-
-# Protocol layout constants (mirrors CUDAIPCExtension.py - both must stay in sync)
-PROTOCOL_MAGIC = 0x43495044
-MAGIC_OFFSET = 0
-MAGIC_SIZE = 4
-VERSION_OFFSET = 4
-VERSION_SIZE = 8
-NUM_SLOTS_OFFSET = 12
-NUM_SLOTS_SIZE = 4
-WRITE_IDX_OFFSET = 16
-WRITE_IDX_SIZE = 4
-SHM_HEADER_SIZE = 20
-SLOT_SIZE = 128
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20
-TIMESTAMP_SIZE = 8
-
-FORMAT_KIND_SIGNED = 0
-FORMAT_KIND_UNSIGNED = 1
-FORMAT_KIND_FLOAT = 2
-FLAGS_BFLOAT16 = 0x0001
-
-_ST_U32 = struct.Struct("<I")
-_ST_U64 = struct.Struct("<Q")
-_ST_F64 = struct.Struct("<d")
-_ST_BBH = struct.Struct("<BBH")
 
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
 _FMT_TRANSFORM_NAME = "dtype_converter"
 _EXPORT_BUFFER_NAME = "ExportBuffer"
-
-_fence_lock = _threading.Lock()
-
-
-def _release_fence() -> None:
-    with _fence_lock:
-        pass
 
 
 class TDSenderEngine:
@@ -123,6 +107,7 @@ class TDSenderEngine:
 
         self.write_idx = 0
         self.shm_handle = None
+        self._layout: SHMLayout | None = None
         self._shutdown_offset = 0
         self._ts_offset = 0
         self.frame_count = 0
@@ -350,8 +335,9 @@ class TDSenderEngine:
                 self._log("[INIT_PACE] checkpoint 2/3 (post-SHM-write)", force=True)
 
             # Cache SHM offsets: avoid recomputing these on every export_frame() call
-            self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-            self._ts_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+            self._layout = SHMLayout(self.num_slots)
+            self._shutdown_offset = self._layout.shutdown_offset
+            self._ts_offset = self._layout.timestamp_offset
 
             # Cache dtype_converter and ExportBuffer as TOPHandle — eliminates per-frame lookups
             self._fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
@@ -519,29 +505,17 @@ class TDSenderEngine:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
 
-        # Write protocol magic number (new in this version)
-        self.shm_handle.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE] = struct.pack("<I", PROTOCOL_MAGIC)
+        self._layout = SHMLayout(self.num_slots)
 
-        # Read current version (if exists) and increment
-        try:
-            current_version = struct.unpack(
-                "<Q",
-                bytes(self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]),
-            )[0]
-        except (struct.error, ValueError, IndexError):
-            current_version = 0
-        new_version = current_version + 1
-
-        # Write header
-        self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE] = struct.pack("<Q", new_version)
-        self.shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE] = struct.pack("<I", self.num_slots)
-        self.shm_handle.buf[WRITE_IDX_OFFSET : WRITE_IDX_OFFSET + WRITE_IDX_SIZE] = struct.pack(
-            "<I", 0
-        )  # write_idx=0 initially
+        # Write protocol header: magic, bump version, num_slots, reset write_idx
+        _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+        new_version = bump_version(self.shm_handle.buf)
+        _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)  # write_idx=0 initially
 
         # Write handles for each slot
         for slot in range(self.num_slots):
-            base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+            base_offset = self._layout.slot_offset(slot)
 
             # Write memory handle (64 bytes)
             mem_handle_bytes = bytes(self.ipc_handles[slot].internal)
@@ -558,8 +532,7 @@ class TDSenderEngine:
         # Clear shutdown flag — matches CUDAIPCExporter._write_handles_to_shm() on the Python side.
         # Without this, a stale shutdown_flag=1 from a previous session (or a race where another
         # sender initialised after this one) would block the receiver indefinitely.
-        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        self.shm_handle.buf[shutdown_offset] = 0
+        self.shm_handle.buf[self._layout.shutdown_offset] = 0
 
         self._log(
             f"Wrote all IPC handles v{new_version} to SharedMemory ({SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE} bytes total)",
@@ -580,10 +553,6 @@ class TDSenderEngine:
         """
         if self.shm_handle is None or self.data_size == 0:
             return
-
-        # Calculate metadata offset (immediately after shutdown flag)
-        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
 
         # Encode format as CUDA-aligned (kind, bits, flags) — self-describing, no enum lookup.
         # bits_per_component is authoritative (derived from data_size, which TD allocated).
@@ -610,12 +579,15 @@ class TDSenderEngine:
         else:
             kind = FORMAT_KIND_FLOAT  # float32 / float64
 
-        # Write metadata fields
-        self.shm_handle.buf[metadata_offset : metadata_offset + 4] = struct.pack("<I", self.width)
-        self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8] = struct.pack("<I", self.height)
-        self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12] = struct.pack("<I", self.channels)
-        self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16] = _ST_BBH.pack(kind, bits, flags)
-        self.shm_handle.buf[metadata_offset + 16 : metadata_offset + 20] = struct.pack("<I", self.data_size)
+        Metadata(
+            width=self.width,
+            height=self.height,
+            num_comps=self.channels,
+            format_kind=kind,
+            bits_per_comp=bits,
+            flags=flags,
+            data_size=self.data_size,
+        ).pack_into(self.shm_handle.buf, self._layout)
 
         # Track last written dtype for change detection
         self._last_numpy_dtype = self._detected_numpy_dtype
@@ -640,12 +612,7 @@ class TDSenderEngine:
         """Increment SharedMemory version counter to signal consumers to re-read metadata."""
         if self.shm_handle is None:
             return
-        try:
-            current_version = struct.unpack_from("<Q", self.shm_handle.buf, VERSION_OFFSET)[0]
-        except (struct.error, ValueError, IndexError):
-            current_version = 0
-        new_version = current_version + 1
-        self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE] = struct.pack("<Q", new_version)
+        new_version = bump_version(self.shm_handle.buf)
         self._log(f"Version bumped to {new_version} (metadata-only change)")
 
     def export_frame(self, top_op: TOP | None = None) -> bool:
@@ -947,22 +914,17 @@ class TDSenderEngine:
                         _this_fp = (time.perf_counter() - _t_fp) * 1_000_000
                         self.total_flush_probe_us += _this_fp
 
-                # Always write producer timestamp (enables consumer latency measurement)
-                _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
             else:
                 # FALLBACK: Conditional CPU synchronization
                 if self.frame_count % self.sync_interval == 0:
                     self.cuda.synchronize()
 
-            # Publish write_idx LAST: clear shutdown_flag first so the consumer
-            # (which reads shutdown_flag before write_idx) always sees flag=0
-            # when it detects a new frame (atomicity improvement).
+            # Publish: timestamp + clear shutdown_flag + fence + write_idx — in that order.
+            # publish_frame() encodes the C3 ordering guarantee; do not replicate inline.
             if self.verbose_performance and self._export_profile:
                 _t_shm = time.perf_counter()
             self.write_idx += 1
-            self.shm_handle.buf[self._shutdown_offset] = 0
-            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
-            _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, self.write_idx)  # publish last
+            publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
             if self.verbose_performance and self._export_profile:
                 _this_shm = (time.perf_counter() - _t_shm) * 1_000_000
                 self.total_shm_publish_us += _this_shm

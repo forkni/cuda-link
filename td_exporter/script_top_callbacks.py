@@ -28,14 +28,15 @@ def onCook(scriptTop: object) -> None:
 
     # Handle resolution update (one-time, after initialize_receiver)
     # With modoutsidecook, this may already be handled by Execute DAT
-    if ext._rx_needs_resolution_update:
+    pending = ext.consume_pending_resolution()
+    if pending is not None:
+        width, height = pending
         try:
             scriptTop.par.outputresolution = 9  # Custom Resolution
-            scriptTop.par.resolutionw = ext._rx_width
-            scriptTop.par.resolutionh = ext._rx_height
-            ext._rx_needs_resolution_update = False
+            scriptTop.par.resolutionw = width
+            scriptTop.par.resolutionh = height
             ext._log(
-                f"Set ImportBuffer resolution to {ext._rx_width}x{ext._rx_height}",
+                f"Set ImportBuffer resolution to {width}x{height}",
                 force=True,
             )
         except (AttributeError, RuntimeError) as e:

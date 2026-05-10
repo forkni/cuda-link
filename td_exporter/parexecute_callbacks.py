@@ -107,8 +107,8 @@ def handle_ipcmemname_change(ext: object, new_value: object, prev: object) -> No
     if ext.mode == "Sender":
         ext._log("Sender will reinitialize on next frame export", force=False)
     elif ext.mode == "Receiver":
-        # Reset retry counter to trigger immediate reconnection
-        ext._rx_frames_since_last_retry = ext._rx_retry_interval_frames
+        # Force immediate reconnection on next frame
+        ext.request_immediate_reconnect()
         ext._log("Receiver will attempt reconnection on next frame", force=False)
 
 
@@ -136,12 +136,9 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
 
     # Skip if component is active — Numslots should be disabled in UI, but guard
     # against script-based changes which bypass the UI parameter enable state.
-    try:
-        if bool(ext.ownerComp.par.Active.eval()):
-            ext._log("Numslots change ignored while Active (deactivate first)", force=True)
-            return
-    except AttributeError:
-        pass
+    if ext.is_active():
+        ext._log("Numslots change ignored while Active (deactivate first)", force=True)
+        return
 
     # Validate slot count (2-5 slots supported)
     if new_value < 2 or new_value > 5:
@@ -159,8 +156,8 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
     if ext.mode == "Sender":
         ext._log("Sender will recreate ring buffer on next frame export", force=False)
     elif ext.mode == "Receiver":
-        # Reset retry counter to trigger immediate reconnection
-        ext._rx_frames_since_last_retry = ext._rx_retry_interval_frames
+        # Force immediate reconnection on next frame
+        ext.request_immediate_reconnect()
         ext._log("Receiver will reconnect with new slot count on next frame", force=False)
 
 
