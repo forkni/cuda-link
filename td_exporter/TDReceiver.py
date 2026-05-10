@@ -23,11 +23,8 @@ try:
 except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
-from CUDAIPCWrapper import (  # noqa: E402
-    cudaIpcEventHandle_t,
-    cudaIpcMemHandle_t,
-    get_cuda_runtime,
-)
+from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
+from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose

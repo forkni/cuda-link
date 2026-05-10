@@ -121,7 +121,7 @@ def test_synchronize(cuda_runtime: object) -> None:
 @pytest.mark.requires_cuda
 def test_error_checking() -> None:
     """Verify CUDAError.get_name for known error codes."""
-    from cuda_link.cuda_ipc_wrapper import CUDAError
+    from cuda_link.cuda_runtime_types import CUDAError
 
     assert CUDAError.get_name(0) == "SUCCESS"
     assert CUDAError.get_name(1) == "INVALID_VALUE"
@@ -132,7 +132,7 @@ def test_error_checking() -> None:
 @pytest.mark.requires_cuda
 def test_ipc_handle_structure() -> None:
     """Test cudaIpcMemHandle_t structure size."""
-    from cuda_link.cuda_ipc_wrapper import cudaIpcMemHandle_t
+    from cuda_link.cuda_runtime_types import cudaIpcMemHandle_t
 
     handle = cudaIpcMemHandle_t()
     # Should have 64-byte internal array (CUDA_IPC_HANDLE_SIZE)
@@ -142,7 +142,7 @@ def test_ipc_handle_structure() -> None:
 @pytest.mark.requires_cuda
 def test_ipc_event_handle_structure() -> None:
     """Test cudaIpcEventHandle_t structure size."""
-    from cuda_link.cuda_ipc_wrapper import cudaIpcEventHandle_t
+    from cuda_link.cuda_runtime_types import cudaIpcEventHandle_t
 
     handle = cudaIpcEventHandle_t()
     # Should have 64-byte reserved array

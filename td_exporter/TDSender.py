@@ -28,10 +28,8 @@ from ActivationBarrier import (
 from ActivationBarrier import (
     open_or_create as _ab_open_or_create,
 )
-from CUDAIPCWrapper import (  # noqa: E402
-    CUDART_GRAPHS_MIN_VERSION,
-    get_cuda_runtime,
-)
+from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
+from CUDARuntimeTypes import CUDART_GRAPHS_MIN_VERSION  # noqa: E402
 from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push

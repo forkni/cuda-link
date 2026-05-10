@@ -58,15 +58,13 @@ from . import _nvtx
 from .activation_barrier import bump_skip as _ab_bump
 from .activation_barrier import open_or_create as _ab_open
 from .activation_barrier import read_state as _ab_read
-from .cuda_ipc_wrapper import (  # noqa: F401
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
+from .cuda_runtime_types import (
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
-    CUDARuntimeAPI,
     CUDAStream_t,
-    cudaIpcMemHandle_t,
-    get_cuda_runtime,
 )
 
 if TYPE_CHECKING:
