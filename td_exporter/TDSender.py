@@ -55,8 +55,18 @@ from SHMProtocol import (  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
-_CUDA_UNSUPPORTED_PIXEL_FORMATS = {"16-bit float", "16float"}
-_FMT_TRANSFORM_NAME = "dtype_converter"
+_CUDA_UNSUPPORTED_PIXEL_FORMATS = {
+    # Rejected outright by cudaMemory(): "Texture is invalid pixel format to be shared with CUDA."
+    "16-bit float",
+    "16float",
+    # Bug A: rejected outright with "Source TOP has unsupported pixel format." (no fallback)
+    "10-bit",
+    "10bit",
+    # Bug B: cudaMemory() "succeeds" but returns dataType=uint8/numComps=4 — raw byte layout,
+    # NOT the 11:11:10 packed float semantic. Silent receiver corruption without conversion.
+    "11-bit",
+    "11bit",
+}
 _EXPORT_BUFFER_NAME = "ExportBuffer"
 
 
@@ -227,8 +237,7 @@ class TDSenderEngine:
         self.total_shm_publish_us: float = 0.0
         self.total_unaccounted_us: float = 0.0
 
-        self._fmt_conv_active = False
-        self._fmt_transform: object = None
+        self._warned_format = False
         self._export_buffer: object = None
         self._last_pixel_fmt: str = ""
         self._last_fmt_needs_conv: bool = False
@@ -260,11 +269,15 @@ class TDSenderEngine:
             "dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self.dev_ptrs],
         }
 
-    def _needs_format_conversion(self, top_op: object) -> bool:
+    def _is_unsupported_format(self, top_op: object) -> bool:
         """Return True if the TOP's pixel format is unsupported by cudaMemory() in TD 2025.
 
-        TD 2025 (CUDA 12.8) rejects float16 formats from cudaMemory().
-        uint8, uint16 (fixed), and float32 are supported.
+        Empirical probe (verification/results/cuda_memory_probe_20260510_090919.json,
+        TD 2025.32820): cudaMemory() rejects all 4 float16 variants and 10:10:10:2 fixed
+        outright; 11:11:10 float "succeeds" but returns dataType=uint8/numComps=4 (raw
+        byte layout, NOT semantic) — silent corruption. On True: sender skips the frame
+        and emits a component warning (addScriptError); on False: warning is cleared.
+
         top_op may be a RealTOPHandle, FakeTOPHandle, or raw TD TOP (backward compat).
         """
         if hasattr(top_op, "pixel_format"):
@@ -411,8 +424,7 @@ class TDSenderEngine:
             self._shutdown_offset = self._layout.shutdown_offset
             self._ts_offset = self._layout.timestamp_offset
 
-            # Cache dtype_converter and ExportBuffer as TOPHandle — eliminates per-frame lookups
-            self._fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
+            # Cache ExportBuffer as TOPHandle — eliminates per-frame ownerComp.op() lookup
             self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
             # Create GPU timing events (only when Debug is ON for benchmarking)
@@ -472,6 +484,7 @@ class TDSenderEngine:
 
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
+            self._host.set_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
             return False
 
@@ -759,47 +772,33 @@ class TDSenderEngine:
                         force=True,
                     )
 
-            # TD 2025 rejects float16 pixel formats from cudaMemory().
-            # dtype_converter Transform TOP sits before ExportBuffer — toggle its format param.
-            # Check source TOP (upstream of converter), not ExportBuffer (downstream).
-            # Use cached reference (set in initialize()) to avoid per-frame ownerComp.op() lookup.
-            fmt_transform = self._fmt_transform
-            if fmt_transform is not None and not fmt_transform.is_valid():
-                self._fmt_transform = None
-                fmt_transform = None
-            if fmt_transform is None:
-                # Lazy lookup: initialize() may not have run yet (pre-init export_frame() path).
-                # Without this, float16 sources are permanently stuck — cudaMemory() fails before
-                # auto-init at line 719 is reached. Same pattern as _export_buffer lazy fallback.
-                fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
-                if fmt_transform is not None:
-                    self._fmt_transform = fmt_transform
-            if fmt_transform is not None:
-                source_top = fmt_transform.inputs[0] if fmt_transform.inputs else top_op
-                if self._needs_format_conversion(source_top):
-                    if not self._fmt_conv_active:
-                        fmt_transform.set_format("rgba32float")
-                        self._fmt_conv_active = True
-                        src_fmt = (
-                            source_top.pixel_format
-                            if hasattr(source_top, "pixel_format")
-                            else getattr(source_top, "pixelFormat", "?")
-                        )
-                        self._log(
-                            f"Pixel format '{src_fmt}' unsupported "
-                            f"by cudaMemory() — dtype_converter set to rgba32float, skipping frame",
-                            force=True,
-                        )
-                        return False  # dtype_converter cooks next frame
-                else:
-                    if self._fmt_conv_active:
-                        fmt_transform.set_format("useinput")
-                        self._fmt_conv_active = False
-                        self._log(
-                            "Source format CUDA-compatible — dtype_converter set to useinput",
-                            force=True,
-                        )
-                        return False  # format reverts next cook
+            # Block transfer when the source pixel format is unsupported by cudaMemory().
+            # Probe (verification/results/cuda_memory_probe_20260510_090919.json) confirmed
+            # 6 formats fail: all 4 float16 variants (hard exception), 10:10:10:2 (hard
+            # exception), 11:11:10 (succeeds but returns raw uint8/4ch — silent corruption).
+            # Tint the COMP yellow every bad frame (idempotent; keeps tint alive); log once.
+            if self._is_unsupported_format(top_op):
+                src_fmt = (
+                    top_op.pixel_format if hasattr(top_op, "pixel_format") else getattr(top_op, "pixelFormat", "?")
+                )
+                warn_msg = (
+                    f"Source TOP pixel format {src_fmt!r} is not supported by cudaMemory(). "
+                    "Change the upstream TOP to 8/16-bit fixed or 32-bit float "
+                    "(R/RG/RGBA/A). Transfer suspended until format is corrected."
+                )
+                self._host.set_warning_status(warn_msg)
+                if not self._warned_format:
+                    self._log(
+                        f"Pixel format {src_fmt!r} unsupported by cudaMemory() — "
+                        "transfer suspended; component tinted yellow + badge",
+                        force=True,
+                    )
+                    self._warned_format = True
+                return False
+            if self._warned_format:
+                self._host.clear_status()
+                self._log("Source pixel format now supported — transfer resumed", force=True)
+                self._warned_format = False
 
             # Time cudaMemory() call (OpenGL→CUDA interop)
             if self.verbose_performance:
@@ -1298,11 +1297,9 @@ class TDSenderEngine:
         if cuda_valid and hasattr(self, "_pending_free_ptrs"):
             self._deferred_free()
 
-        # Reset dtype_converter Transform TOP to pass-through on cleanup
-        fmt_transform = self._host.find_top(_FMT_TRANSFORM_NAME)
-        if fmt_transform is not None:
-            fmt_transform.set_format("useinput")
-        self._fmt_conv_active = False
+        if self._warned_format:
+            self._host.clear_status()
+            self._warned_format = False
 
         # Unlink SharedMemory (sender is owner and should clean up)
         if hasattr(self, "shm_name"):
@@ -1326,9 +1323,8 @@ class TDSenderEngine:
         if not self._persist_stream:
             self.ipc_stream = None
         self.shm_handle = None
-        self._fmt_conv_active = False
+        self._warned_format = False
         self._export_buffer = None
-        self._fmt_transform = None
 
         # Reset per-session counters so averages are accurate after reinit
         # and slot selection starts from 0 (matching SharedMemory write_idx=0 written on init).

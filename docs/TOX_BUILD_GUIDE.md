@@ -21,8 +21,7 @@ CUDAIPCExporter (Base COMP)
 ├── callbacks         (Execute DAT)  ← Copy from td_exporter/callbacks_template.py
 ├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
-├── dtype_converter   (Transform TOP) ← Pixel format auto-conversion (see Step 6c)
-├── ExportBuffer      (Null TOP)     ← Receives dtype_converter output; cudaMemory() reads from here
+├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
 └── info              (Text DAT)     ← Optional version/author info
 ```
@@ -146,29 +145,27 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
    - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
-**Important**: The `onFrameEnd` callback calls `ext.export_frame()` with no arguments. The extension resolves `ExportBuffer` internally, ensuring `cudaMemory()` always reads from the post-conversion node. The data flow through the component is: `input → dtype_converter → ExportBuffer → export_frame()`.
+**Important**: The `onFrameEnd` callback calls `ext.export_frame()` with no arguments. The extension resolves `ExportBuffer` internally. The data flow through the component is: `input → ExportBuffer → export_frame()`.
 
 ### Step 6: Create In TOP
 
 1. Inside the `CUDAIPCExporter` COMP, create an **In TOP**, rename to `input`
 2. This is a pass-through input that users will wire their source TOP to
+3. Wire output: `input` → `ExportBuffer` (Null TOP that feeds `cudaMemory()`)
 
 **Note**: The In TOP has no parameters to configure - it's purely a connection point.
 
-### Step 6b: Add dtype_converter Transform TOP (Sender mode)
+**Status indicators**: The component gives three visual signals when something is wrong:
 
-Inside the `CUDAIPCExporter` COMP, add a **Transform TOP** named `dtype_converter`:
+| State | Visual | Cause |
+|---|---|---|
+| **Warning** | COMP node body tints **yellow** | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Error** | COMP node body tints **red** + red `addScriptError` badge | Engine-fatal error (IPC/GPU init failure) |
+| **Healthy** | Original node color restored | Condition cleared automatically |
 
-1. Create a **Transform TOP**, rename to `dtype_converter`
-2. Set the **Pixel Format** parameter to `"Use Input"` (default — pass-through, zero overhead)
-3. Wire input: `input` In TOP → `dtype_converter`
-4. Wire output: `dtype_converter` → `ExportBuffer` (Null TOP or the node that feeds `cudaMemory()`)
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. There is no yellow badge on the COMP boundary — `addWarning` requires an active cook context and `onFrameEnd` runs post-cook; the COMP body tint is the only available warning surface (see ARCHITECTURE.md for the full probe trail).
 
-**Purpose**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The extension automatically detects unsupported source formats (float16) and sets `dtype_converter.par.format = "rgba32float"` on the first affected frame — skipping that one frame while the conversion takes effect. For all other formats (uint8, uint16 fixed, float32) the node stays at `"Use Input"` with zero overhead.
-
-**This node is managed automatically** — no manual format changes are needed.
-
-### Step 6c: Configure ImportBuffer for TD 2025+ (Optional Optimization)
+### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
 If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
 

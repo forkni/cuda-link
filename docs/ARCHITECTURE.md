@@ -337,7 +337,20 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
 
-**Note on pixel format compatibility**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The Sender extension automatically detects this and sets a permanent `dtype_converter` Transform TOP (wired before ExportBuffer) to `rgba32float`, skipping one transition frame. Supported formats without conversion: `uint8`, `uint16` (fixed), `float32`.
+**Note on pixel format compatibility** (empirically probed, TD 2025.32820 — see `verification/results/cuda_memory_probe_20260510_090919.json`):
+
+| Category | Formats | `cudaMemory()` behaviour |
+|---|---|---|
+| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in R/RG/RGBA/A variants | Returns correct `uint8` / `uint16` / `float32` buffer |
+| **Rejected outright** | All 4 float16 variants (R/RG/RGBA/A); 10-bit RGB / 2-bit Alpha fixed | Raises exception; Sender skips frame + tints component **yellow** via `parent().color`; resumes when upstream format is corrected |
+| **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
+
+The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
+1. Calls `set_warning_status(msg)` (sets `parent().color` to amber-yellow — visible on the COMP node body, idempotent).
+
+The frame is skipped, and `clear_status()` is called as soon as the upstream format is corrected (restoring the original COMP color). Engine-fatal errors (init failure, IPC handle failure, GPU alloc failure) instead call `set_error_status(msg)`, which tints the COMP red and emits a red `addScriptError` badge. No auto-conversion is performed; fix the upstream source TOP instead. Supported formats: `uint8`, `uint16` (fixed), `float32` in R/RG/RGBA/A channel configurations.
+
+> **Why tint-only (empirically confirmed):** TD has no anytime-yellow-badge API — `addScriptWarning` does not exist; `addWarning` raises `tdError: Cannot set warning outside of cook` when called from `onFrameEnd` (a post-cook lifecycle callback, confirmed via `verification/results/probe_addwarning_*`); `addScriptError` is always red. A child Script TOP's `onCook` IS a valid cook context where `addWarning` succeeds, but TD does not propagate the child warning to the parent COMP boundary tile — neither via `comp.warnings()` nor as a visual badge (confirmed via `verification/results/probe_cook_context_*`). The COMP body tint is therefore the only COMP-local warning surface available.
 
 ### Phase 2: Steady State (Per-Frame)
 

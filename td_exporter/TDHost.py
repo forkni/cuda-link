@@ -117,6 +117,18 @@ class TDHost:
         """Return ownerComp.op(name) wrapped as a TOPHandle, or None."""
         raise NotImplementedError
 
+    def set_warning_status(self, msg: str) -> None:
+        """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
+        raise NotImplementedError
+
+    def set_error_status(self, msg: str) -> None:
+        """Tint ownerComp red and emit a persistent script-error badge for fatal failures."""
+        raise NotImplementedError
+
+    def clear_status(self) -> None:
+        """Restore ownerComp to its original color and clear any script-error badges."""
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Production adapters
@@ -175,6 +187,12 @@ class RealTOPHandle(TOPHandle):
             return False
 
 
+_WARNING_COLOR: tuple[float, float, float] = (0.9137, 1.0, 0.0)
+_ERROR_COLOR: tuple[float, float, float] = (0.7, 0.0, 0.0)
+_DEFAULT_NODE_COLOR: tuple[float, float, float] = (0.55, 0.55, 0.55)
+_MANAGED_COLORS = (_WARNING_COLOR, _ERROR_COLOR)
+
+
 class RealTDHost(TDHost):
     """Wraps a real TD ownerComp.
 
@@ -188,6 +206,10 @@ class RealTDHost(TDHost):
             self._active_par = owner_comp.par.Active
         except AttributeError:
             self._active_par = None
+        # Deliberately NOT cached here: the COMP may be tinted from a prior session
+        # (.tox saved while yellow/red) which would poison the cache.  Captured lazily
+        # on the first set_warning_status / set_error_status call instead.
+        self._default_color: tuple[float, float, float] | None = None
 
     def param_value(self, name: str) -> Any:
         try:
@@ -221,3 +243,38 @@ class RealTDHost(TDHost):
             return RealTOPHandle(top) if top is not None else None
         except (AttributeError, RuntimeError):
             return None
+
+    def _capture_default_color(self) -> None:
+        if self._default_color is not None:
+            return
+        with contextlib.suppress(AttributeError, RuntimeError):
+            c = self._comp.color
+            current = (float(c[0]), float(c[1]), float(c[2]))
+            if current not in _MANAGED_COLORS:
+                self._default_color = current
+                return
+        # Fallback: current color is managed (stale tint from prior session) or
+        # unreadable — use TD's default node grey so clear_status always restores
+        # to a neutral colour rather than staying stuck at warning/error tint.
+        if self._default_color is None:
+            self._default_color = _DEFAULT_NODE_COLOR
+
+    def set_warning_status(self, msg: str) -> None:
+        self._capture_default_color()
+        with contextlib.suppress(AttributeError, RuntimeError):
+            self._comp.color = _WARNING_COLOR
+            self._comp.store("cuda_link_status_msg", f"WARNING: {msg}")
+
+    def set_error_status(self, msg: str) -> None:
+        self._capture_default_color()
+        with contextlib.suppress(AttributeError, RuntimeError):
+            self._comp.color = _ERROR_COLOR
+            self._comp.addScriptError(msg)
+            self._comp.store("cuda_link_status_msg", f"ERROR: {msg}")
+
+    def clear_status(self) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            if self._default_color is not None:
+                self._comp.color = self._default_color
+            self._comp.clearScriptErrors(error="*")
+            self._comp.unstore("cuda_link_status_msg")

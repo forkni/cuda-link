@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuda-link"
-version = "1.2.1"
+version = "1.3.0"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -85,6 +85,7 @@ ignore = ["E501"]  # Line length handled by formatter
 "src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, etc.)
 "src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
+"verification/*" = ["F821", "SIM105", "SIM210"]  # TD textport scripts: op/baseCOMP/scriptTOP etc. are TD built-in globals; probe patterns intentionally use try/except/pass
 
 [tool.ruff.format]
 quote-style = "double"
