@@ -72,6 +72,7 @@ def handle_active_change(ext: object, new_value: object, prev: object) -> None:
         ext._log("Component deactivated - cleaning up", force=True)
         # Clean up current mode resources
         ext.cleanup()
+        ext._host.clear_status()
 
     # Disable Numslots while active to prevent runtime array size mismatch.
     # Receiver mode always keeps Numslots disabled (sender controls slot count).
