@@ -65,6 +65,9 @@ def _make_engine(shm_name: str):
         def clear_status(self):
             pass
 
+        def set_info_status(self, msg):
+            pass
+
     config = TDSenderConfig()
     return TDSenderEngine(
         host=_NullHost(),

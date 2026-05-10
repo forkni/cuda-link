@@ -61,6 +61,9 @@ def _make_receiver(shm_name: str):
         def clear_status(self):
             pass
 
+        def set_info_status(self, msg):
+            pass
+
     config = TDSenderConfig()
     return TDReceiverEngine(
         host=_NullHost(),

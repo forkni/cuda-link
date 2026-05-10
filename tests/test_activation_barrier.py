@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
@@ -36,6 +37,16 @@ def _cleanup(name: str) -> None:
 @pytest.fixture(autouse=True)
 def cleanup_barrier():
     _cleanup(SHM_NAME)
+    # On Windows a live TD session can keep the named SHM alive past unlink()
+    # because SHM lifetime is handle-bound (not name-bound like POSIX).
+    # If the segment persists, re-zero its contents so each test starts from
+    # a deterministic zero state regardless of accumulated production counters.
+    with contextlib.suppress(FileNotFoundError):
+        shm = SharedMemory(name=SHM_NAME)
+        try:
+            _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
+        finally:
+            shm.close()
     yield
     _cleanup(SHM_NAME)
 
@@ -84,6 +95,18 @@ def test_open_or_create_opens_existing() -> None:
 
 
 def test_open_or_create_raises_when_missing_and_no_create() -> None:
+    # If an external process (e.g. live TD session) holds the SHM open, the
+    # cleanup fixture cannot actually remove it on Windows; the
+    # missing-create-no-raise premise is unachievable in that environment.
+    try:
+        _probe = SharedMemory(name=SHM_NAME)
+        _probe.close()
+        pytest.skip(
+            f"activation_barrier SHM {SHM_NAME!r} is held by an external process "
+            "— cannot exercise the FileNotFoundError path on Windows"
+        )
+    except FileNotFoundError:
+        pass
     with pytest.raises(FileNotFoundError):
         open_or_create(create=False)
 
