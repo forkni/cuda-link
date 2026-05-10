@@ -650,6 +650,12 @@ class TDSenderEngine:
         else:
             kind = FORMAT_KIND_FLOAT  # float32 / float64
 
+        # Use active-region size (W*H*C*(bits/8)) as the metadata data_size so
+        # the receiver invariant W*H*C*(bits/8)==data_size is always satisfied.
+        # self.data_size is the GPU allocation (may be padded/stale when dims change
+        # with a constant allocation), so it must not flow directly into the metadata
+        # field that the receiver validates. Python-side exporter does the same.
+        meta_data_size = pixel_count * (bits // 8)
         Metadata(
             width=self.width,
             height=self.height,
@@ -657,7 +663,7 @@ class TDSenderEngine:
             format_kind=kind,
             bits_per_comp=bits,
             flags=flags,
-            data_size=self.data_size,
+            data_size=meta_data_size,
         ).pack_into(self.shm_handle.buf, self._layout)
 
         # Track last written dtype for change detection
@@ -665,7 +671,7 @@ class TDSenderEngine:
 
         self._log(
             f"Wrote metadata: {self.width}x{self.height}x{self.channels}, "
-            f"kind={kind} bits={bits} flags=0x{flags:04x}, size={self.data_size}B"
+            f"kind={kind} bits={bits} flags=0x{flags:04x}, size={meta_data_size}B"
         )
 
     def _has_dtype_changed(self) -> bool:
