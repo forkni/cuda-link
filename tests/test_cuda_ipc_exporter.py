@@ -25,7 +25,7 @@ def test_init_default_params() -> None:
     assert exporter._host is host
     assert exporter.shm_name == "test_ipc"
     assert exporter.num_slots == 3
-    assert not exporter._initialized
+    assert not exporter._engine._initialized
 
 
 def test_init_custom_memname() -> None:
@@ -58,8 +58,8 @@ def test_init_custom_numslots() -> None:
     exporter = CUDAIPCExtension(None, host=host)
 
     assert exporter.num_slots == 4
-    assert len(exporter.dev_ptrs) == 4
-    assert len(exporter.ipc_handles) == 4
+    assert len(exporter._engine.dev_ptrs) == 4
+    assert len(exporter._engine.ipc_handles) == 4
 
 
 @pytest.mark.requires_cuda
@@ -71,14 +71,14 @@ def test_initialize_allocates_buffers(cuda_runtime: object, temp_shm_name: str, 
     shared_memory_cleanup.append(temp_shm_name)
 
     exporter = CUDAIPCExtension(None, host=host)
-    exporter.cuda = cuda_runtime  # Inject real CUDA runtime
+    exporter._engine.cuda = cuda_runtime  # Inject real CUDA runtime
 
     # Initialize
     success = exporter.initialize(width=64, height=64, channels=4)
 
     assert success
-    assert exporter._initialized
-    assert all(ptr is not None for ptr in exporter.dev_ptrs)
+    assert exporter._engine._initialized
+    assert all(ptr is not None for ptr in exporter._engine.dev_ptrs)
 
     # Cleanup
     exporter.cleanup()
@@ -93,19 +93,19 @@ def test_initialize_creates_shm(cuda_runtime: object, temp_shm_name: str, shared
     shared_memory_cleanup.append(temp_shm_name)
 
     exporter = CUDAIPCExtension(None, host=host)
-    exporter.cuda = cuda_runtime
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     success = exporter.initialize(width=64, height=64, channels=4)
 
     assert success
-    assert exporter.shm_handle is not None
+    assert exporter._engine.shm_handle is not None
 
     # Verify SharedMemory size
     # 20 (header: 4B magic + 8B version + 4B num_slots + 4B write_idx)
     # + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
     expected_size = 20 + 3 * 128 + 1 + 20 + 8
-    assert len(exporter.shm_handle.buf) >= expected_size
+    assert len(exporter._engine.shm_handle.buf) >= expected_size
 
     # Cleanup
     exporter.cleanup()
@@ -122,16 +122,16 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
     shared_memory_cleanup.append(temp_shm_name)
 
     exporter = CUDAIPCExtension(None, host=host)
-    exporter.cuda = cuda_runtime
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=64, height=64, channels=4)
 
     # Read header (offsets: magic=0-3, version=4-11, num_slots=12-15, write_idx=16-19)
-    magic = struct.unpack("<I", bytes(exporter.shm_handle.buf[0:4]))[0]
-    version = struct.unpack("<Q", bytes(exporter.shm_handle.buf[4:12]))[0]
-    num_slots = struct.unpack("<I", bytes(exporter.shm_handle.buf[12:16]))[0]
-    write_idx = struct.unpack("<I", bytes(exporter.shm_handle.buf[16:20]))[0]
+    magic = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[0:4]))[0]
+    version = struct.unpack("<Q", bytes(exporter._engine.shm_handle.buf[4:12]))[0]
+    num_slots = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[12:16]))[0]
+    write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
 
     assert magic == 0x43495044  # "CIPD" magic number
     assert version >= 1  # Should be at least 1 after initialization
@@ -153,7 +153,7 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
     shared_memory_cleanup.append(temp_shm_name)
 
     exporter = CUDAIPCExtension(None, host=host)
-    exporter.cuda = cuda_runtime
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=8, height=8, channels=4)
@@ -174,7 +174,7 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
 
         for expected_write_idx, expected_slot in expected_sequence:
             # Verify slot calculation
-            slot_before = exporter.write_idx % exporter.num_slots
+            slot_before = exporter._engine.write_idx % exporter.num_slots
             assert slot_before == expected_slot
 
             # Export frame
@@ -182,7 +182,7 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
             assert success
 
             # Verify write_idx incremented in SharedMemory (offset 16-19)
-            write_idx = struct.unpack("<I", bytes(exporter.shm_handle.buf[16:20]))[0]
+            write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
             assert write_idx == expected_write_idx + 1
 
     finally:
@@ -200,17 +200,17 @@ def test_cleanup_frees_resources(cuda_runtime: object, temp_shm_name: str, share
     shared_memory_cleanup.append(temp_shm_name)
 
     exporter = CUDAIPCExtension(None, host=host)
-    exporter.cuda = cuda_runtime
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=64, height=64, channels=4)
-    assert exporter._initialized
+    assert exporter._engine._initialized
 
     # Cleanup
     exporter.cleanup()
 
     # Verify state
-    assert not exporter._initialized
+    assert not exporter._engine._initialized
 
     # Verify shutdown flag set (byte 592 for 3 slots)
     # Note: SharedMemory might be closed, so we can't always read this

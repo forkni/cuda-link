@@ -82,10 +82,10 @@ def test_sender_initialize_sets_correct_shm_layout(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     assert ext.initialize(width=16, height=16, channels=4)
 
-    buf = ext.shm_handle.buf
+    buf = ext._engine.shm_handle.buf
     magic, version, num_slots, write_idx = _shm_header(buf)
 
     assert magic == PROTOCOL_MAGIC, f"SHM magic mismatch: {magic:#x}"
@@ -111,12 +111,12 @@ def test_sender_shm_size_matches_protocol(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
     # 20 header + 3*128 slots + 1 shutdown + 20 metadata + 8 timestamp = 433
     expected = SHMLayout(NUM_SLOTS).total_size
-    assert len(ext.shm_handle.buf) >= expected, f"SHM too small: {len(ext.shm_handle.buf)} < {expected}"
+    assert len(ext._engine.shm_handle.buf) >= expected, f"SHM too small: {len(ext._engine.shm_handle.buf)} < {expected}"
 
     ext.cleanup()
 
@@ -141,7 +141,7 @@ def test_sender_export_loop_write_idx_monotone(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=W, height=H, channels=4)
 
     # Provide a real GPU pointer so memcpy succeeds
@@ -155,11 +155,11 @@ def test_sender_export_loop_write_idx_monotone(
             ok = ext.export_frame()
             assert ok, f"export_frame() returned False on frame {frame}"
 
-            raw_wi = struct.unpack_from("<I", ext.shm_handle.buf, 16)[0]
+            raw_wi = struct.unpack_from("<I", ext._engine.shm_handle.buf, 16)[0]
             assert raw_wi == prev_write_idx + 1, (
                 f"SHM write_idx expected {prev_write_idx + 1}, got {raw_wi} on frame {frame}"
             )
-            assert ext.write_idx == raw_wi, "in-memory write_idx must match SHM value"
+            assert ext._engine.write_idx == raw_wi, "in-memory write_idx must match SHM value"
             prev_write_idx = raw_wi
     finally:
         cuda_runtime.free(gpu_ptr)
@@ -181,7 +181,7 @@ def test_sender_slot_wraps_at_num_slots(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=W, height=H, channels=4)
 
     gpu_ptr = cuda_runtime.malloc(W * H * 4 * 4)
@@ -191,7 +191,7 @@ def test_sender_slot_wraps_at_num_slots(
     expected_slots = [i % NUM_SLOTS for i in range(6)]
     try:
         for i, expected_slot in enumerate(expected_slots):
-            slot_before = ext.write_idx % NUM_SLOTS
+            slot_before = ext._engine.write_idx % NUM_SLOTS
             assert slot_before == expected_slot, f"Frame {i}: expected slot {expected_slot}, got {slot_before}"
             ext.export_frame()
     finally:
@@ -217,19 +217,19 @@ def test_sender_cleanup_resets_all_state(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
-    assert ext._initialized
-    assert ext.shm_handle is not None
+    assert ext._engine._initialized
+    assert ext._engine.shm_handle is not None
 
     ext.cleanup()
 
-    assert not ext._initialized, "_initialized must be False after cleanup"
-    assert ext.dev_ptrs == [], "dev_ptrs must be empty list after cleanup"
-    assert ext.shm_handle is None, "shm_handle must be None after cleanup"
-    assert ext.write_idx == 0, "write_idx must reset to 0 after cleanup"
-    assert ext.frame_count == 0, "frame_count must reset to 0 after cleanup"
+    assert not ext._engine._initialized, "_initialized must be False after cleanup"
+    assert ext._engine.dev_ptrs == [], "dev_ptrs must be empty list after cleanup"
+    assert ext._engine.shm_handle is None, "shm_handle must be None after cleanup"
+    assert ext._engine.write_idx == 0, "write_idx must reset to 0 after cleanup"
+    assert ext._engine.frame_count == 0, "frame_count must reset to 0 after cleanup"
     assert not ext.is_ready(), "is_ready() must return False after cleanup"
 
 
@@ -249,7 +249,7 @@ def test_sender_cleanup_sets_shutdown_flag(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
     # Capture the SHM name before cleanup (needed to re-open after close)
@@ -284,13 +284,13 @@ def test_sender_double_cleanup_is_idempotent(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
     ext.cleanup()
     ext.cleanup()  # Must not raise
 
-    assert not ext._initialized
+    assert not ext._engine._initialized
     assert not ext.is_ready()
 
 
@@ -312,18 +312,18 @@ def test_switch_mode_sender_to_receiver_no_shm_leak(
     shared_memory_cleanup.append(temp_shm_name)
 
     ext = CUDAIPCExtension(None, host=host)
-    ext.cuda = cuda_runtime
+    ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
-    assert ext._initialized
+    assert ext._engine._initialized
     assert ext.mode == "Sender"
 
     ext.switch_mode("Receiver")
 
     assert ext.mode == "Receiver"
-    assert not ext._initialized, "_initialized must be False after mode switch"
-    assert ext.shm_handle is None, "shm_handle must be None after mode switch"
-    assert ext.dev_ptrs == [], "dev_ptrs must be empty after Sender cleanup"
+    assert not ext._engine._initialized, "_initialized must be False after mode switch"
+    assert ext._engine.shm_handle is None, "shm_handle must be None after mode switch"
+    assert ext._engine.dev_ptrs == [], "dev_ptrs must be empty after Sender cleanup"
     # After mode switch the old sender engine is discarded; engine is now TDReceiverEngine
     from TDReceiver import TDReceiverEngine
 
@@ -353,9 +353,9 @@ def test_switch_mode_receiver_to_sender_resets_rx_state() -> None:
     from TDSender import TDSenderEngine
 
     assert isinstance(ext._engine, TDSenderEngine), "engine must be sender after mode switch"
-    assert len(ext.dev_ptrs) == 3
-    assert all(p is None for p in ext.dev_ptrs)
-    assert len(ext.ipc_handles) == 3
+    assert len(ext._engine.dev_ptrs) == 3
+    assert all(p is None for p in ext._engine.dev_ptrs)
+    assert len(ext._engine.ipc_handles) == 3
 
 
 def test_switch_mode_noop_same_mode() -> None:
@@ -385,7 +385,7 @@ def test_receiver_init_fails_gracefully_when_no_shm() -> None:
     result = ext.initialize_receiver()
 
     assert result is False, "initialize_receiver() must return False when SHM absent"
-    assert not ext._initialized, "_initialized must remain False"
+    assert not ext._engine._initialized, "_initialized must remain False"
     assert not ext.is_ready(), "is_ready() must return False"
 
 
