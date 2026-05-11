@@ -16,6 +16,13 @@ Architecture:
                                 ↓
     Python Process → Open Handle → torch.as_tensor() or numpy D2H copy
                      (once)         (zero-copy)        (GPU→CPU)
+
+Value objects:
+    IPCConnection — CUDA runtime, SHM handle, per-slot dev_ptrs/ipc_events, layout.
+    Format        — Parsed metadata (shape, dtype, frame_nbytes, numpy_dtype).
+    TorchBuffers  — Per-slot zero-copy tensor views (built eagerly).
+    CupyBuffers   — Per-slot zero-copy CuPy array views (built eagerly).
+    NumpyBuffers  — Pinned host buffer + D2H streams (built lazily on first get_frame_numpy).
 """
 
 from __future__ import annotations
@@ -28,8 +35,11 @@ import struct
 import sys
 import time
 import traceback
+from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
+
+from . import _nvtx
 
 logger = logging.getLogger(__name__)
 
@@ -94,50 +104,375 @@ except ImportError:
     cp = None
     CUPY_AVAILABLE = False
 
-from .cuda_ipc_wrapper import CUDARuntimeAPI, cudaIpcEventHandle_t, cudaIpcMemHandle_t, get_cuda_runtime  # noqa: E402
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime  # noqa: E402
+from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 
 # Byte size per dtype — module-level constant avoids dict construction on every _dtype_itemsize() call
-_DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "uint8": 1, "uint16": 2}
+_DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "bfloat16": 2, "uint8": 1, "uint16": 2, "int8": 1, "int16": 2}
 
-# Protocol layout constants (must match td_exporter/CUDAIPCExtension.py)
-PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
-MAGIC_OFFSET = 0
-MAGIC_SIZE = 4
-VERSION_OFFSET = 4
-VERSION_SIZE = 8
-NUM_SLOTS_OFFSET = 12
-NUM_SLOTS_SIZE = 4
-WRITE_IDX_OFFSET = 16
-WRITE_IDX_SIZE = 4
-SHM_HEADER_SIZE = 20  # Total header: 4+8+4+4 (was 16, now 20 with magic)
-SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp (for latency measurement)
-# TIMESTAMP_OFFSET calculated at runtime: SHM_HEADER_SIZE + (num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-
-# Pre-compiled struct objects for hot-path SHM reads (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
-
-# CUDA-aligned dtype decoding constants (must match sender constants)
-_FORMAT_KIND_FLOAT = 2
-_FLAGS_BFLOAT16 = 0x0001
+from .shm_protocol import (  # noqa: E402
+    _ST_BBH,
+    MAGIC_OFFSET,
+    MAGIC_SIZE,
+    NUM_SLOTS_OFFSET,
+    NUM_SLOTS_SIZE,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SLOT_SIZE,
+    VERSION_OFFSET,
+    VERSION_SIZE,
+    AcquireResult,
+    DtypeCodec,
+    SHMLayout,
+    SlotState,
+    acquire_slot,
+)
 
 
 def _decode_dtype_str(kind: int, bits: int, flags: int) -> str:
-    """Decode (format_kind, bits_per_comp, flags) → dtype string."""
-    if kind == _FORMAT_KIND_FLOAT and bits == 16 and not (flags & _FLAGS_BFLOAT16):
-        return "float16"
-    if kind == _FORMAT_KIND_FLOAT:
-        return "float32"
-    if bits == 8:
-        return "uint8"
-    if bits == 16:
-        return "uint16"
-    return "float32"  # safe fallback for future extensions
+    return DtypeCodec.decode(kind, bits, flags)
+
+
+# ============================================================
+# Value objects
+# ============================================================
+
+
+@dataclass(frozen=True)
+class Format:
+    """Parsed frame format — shape, dtype, and precomputed derivations.
+
+    Immutable after construction. Two constructors:
+    - from_shm(): parse the extended metadata block in SharedMemory.
+    - from_overrides(): build from caller-supplied shape/dtype (no SHM read).
+    """
+
+    width: int
+    height: int
+    num_comps: int
+    kind: int
+    bits: int
+    flags: int
+    dtype_str: str
+    shape: tuple
+    numpy_dtype: object  # np.dtype or None when numpy not available
+    frame_nbytes: int
+
+    @classmethod
+    def from_shm(cls, shm_buf: object, num_slots: int) -> Format | None:
+        """Parse extended metadata block from shared memory.
+
+        Returns None when the block is absent or contains zeros (sender not yet
+        written metadata).
+        """
+        layout = SHMLayout(num_slots)
+        metadata_offset = layout.metadata_offset
+        try:
+            width = struct.unpack("<I", bytes(shm_buf[metadata_offset : metadata_offset + 4]))[0]
+            height = struct.unpack("<I", bytes(shm_buf[metadata_offset + 4 : metadata_offset + 8]))[0]
+            num_comps = struct.unpack("<I", bytes(shm_buf[metadata_offset + 8 : metadata_offset + 12]))[0]
+            kind, bits, flags = _ST_BBH.unpack(bytes(shm_buf[metadata_offset + 12 : metadata_offset + 16]))
+            if width > 0 and height > 0 and num_comps > 0:
+                dtype_str = _decode_dtype_str(kind, bits, flags)
+                shape = (height, width, num_comps)
+                itemsize = _DTYPE_SIZES.get(dtype_str, bits // 8 or 4)
+                frame_nbytes = height * width * num_comps * itemsize
+                numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+                return cls(
+                    width=width,
+                    height=height,
+                    num_comps=num_comps,
+                    kind=kind,
+                    bits=bits,
+                    flags=flags,
+                    dtype_str=dtype_str,
+                    shape=shape,
+                    numpy_dtype=numpy_dtype,
+                    frame_nbytes=frame_nbytes,
+                )
+        except (struct.error, ValueError, IndexError):
+            pass
+        return None
+
+    @classmethod
+    def from_overrides(cls, shape: tuple, dtype_str: str) -> Format:
+        """Build from caller-supplied shape/dtype (no SHM read).
+
+        kind/bits/flags are left as 0 sentinels — they are diagnostic fields only
+        and are not used by frame consumers.
+        """
+        height, width, num_comps = shape
+        itemsize = _DTYPE_SIZES.get(dtype_str, 4)
+        frame_nbytes = height * width * num_comps * itemsize
+        numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+        return cls(
+            width=width,
+            height=height,
+            num_comps=num_comps,
+            kind=0,
+            bits=0,
+            flags=0,
+            dtype_str=dtype_str,
+            shape=shape,
+            numpy_dtype=numpy_dtype,
+            frame_nbytes=frame_nbytes,
+        )
+
+
+@dataclass
+class IPCConnection:
+    """Live CUDA IPC connection — runtime, SHM handle, per-slot GPU resources, layout.
+
+    Mutable: dev_ptrs/ipc_events/ipc_handles are populated slot-by-slot during
+    _open_ipc_slots(), then nulled in-place by close_ipc_handles() / close().
+    """
+
+    cuda: object  # CUDARuntimeAPI
+    shm_handle: object  # SharedMemory or None after close()
+    ipc_version: int
+    num_slots: int
+    ipc_handles: list  # [cudaIpcMemHandle_t | None]
+    dev_ptrs: list  # [c_void_p | None]
+    ipc_events: list  # [event_t | None]
+    layout: object  # SHMLayout
+    shutdown_offset: int
+    timestamp_offset: int
+
+    def close_ipc_handles(self) -> None:
+        """Close IPC mem handles and events. SharedMemory stays open (used by _reinitialize)."""
+        for slot, dev_ptr in enumerate(self.dev_ptrs):
+            if dev_ptr is not None:
+                try:
+                    self.cuda.ipc_close_mem_handle(dev_ptr)
+                    logger.info("Closed IPC handle for slot %d", slot)
+                except (RuntimeError, OSError) as e:
+                    logger.error("Error closing IPC handle for slot %d: %s", slot, e)
+                self.dev_ptrs[slot] = None
+
+        for slot, event in enumerate(self.ipc_events):
+            if event is not None:
+                try:
+                    self.cuda.destroy_event(event)
+                    logger.info("Destroyed IPC event for slot %d", slot)
+                except (RuntimeError, OSError) as e:
+                    logger.error("Error destroying event for slot %d: %s", slot, e)
+                self.ipc_events[slot] = None
+
+    def close(self) -> None:
+        """Close IPC handles and SharedMemory. Idempotent."""
+        self.close_ipc_handles()
+        if self.shm_handle is not None:
+            try:
+                self.shm_handle.close()
+                logger.info("Closed SharedMemory")
+            except (OSError, BufferError) as e:
+                logger.error("Error closing SharedMemory: %s", e)
+            self.shm_handle = None
+
+
+@dataclass
+class TorchBuffers:
+    """Per-slot zero-copy torch.Tensor views of GPU memory (built eagerly at init)."""
+
+    tensors: list  # [torch.Tensor]
+    wrappers: list  # GC keep-alive refs for __cuda_array_interface__ wrappers
+
+    @classmethod
+    def build(cls, conn: IPCConnection, fmt: Format) -> TorchBuffers:
+        """Create one zero-copy tensor view per slot via __cuda_array_interface__."""
+        typestr_map = {"float32": "<f4", "float16": "<f2", "uint8": "|u1", "uint16": "<u2"}
+        typestr = typestr_map.get(fmt.dtype_str)
+        if typestr is None:
+            raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}")
+
+        tensors = []
+        wrappers = []
+        for slot in range(conn.num_slots):
+            if conn.dev_ptrs[slot] is None:
+                raise RuntimeError(f"Device pointer for slot {slot} not initialized")
+
+            ptr_value = int(conn.dev_ptrs[slot].value) if conn.dev_ptrs[slot].value is not None else 0
+            cuda_array_interface = {
+                "shape": fmt.shape,
+                "typestr": typestr,
+                "data": (ptr_value, False),  # (ptr, read_only)
+                "version": 3,
+                "strides": None,  # Contiguous C-order
+            }
+
+            class CUDAArrayWrapper:
+                """Minimal wrapper exposing __cuda_array_interface__ for zero-copy tensor creation."""
+
+                def __init__(self, interface: dict) -> None:
+                    self.__cuda_array_interface__ = interface
+
+            wrapper = CUDAArrayWrapper(cuda_array_interface)
+            tensor = torch.as_tensor(wrapper, device="cuda")
+            wrappers.append(wrapper)
+            tensors.append(tensor)
+
+        return cls(tensors=tensors, wrappers=wrappers)
+
+
+@dataclass
+class CupyBuffers:
+    """Per-slot zero-copy CuPy array views of GPU memory (built eagerly at init)."""
+
+    arrays: list  # [cp.ndarray]
+
+    @classmethod
+    def build(cls, conn: IPCConnection, fmt: Format) -> CupyBuffers:
+        """Create one zero-copy CuPy array view per slot via UnownedMemory."""
+        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
+        cp_dtype = dtype_map.get(fmt.dtype_str)
+        if cp_dtype is None:
+            raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}")
+
+        arrays = []
+        for slot in range(conn.num_slots):
+            if conn.dev_ptrs[slot] is None:
+                raise RuntimeError(f"Device pointer for slot {slot} not initialized")
+            ptr_value = int(conn.dev_ptrs[slot].value)
+            mem = cp.cuda.UnownedMemory(ptr_value, fmt.frame_nbytes, owner=conn)
+            memptr = cp.cuda.MemoryPointer(mem, 0)
+            arrays.append(cp.ndarray(fmt.shape, dtype=cp_dtype, memptr=memptr))
+
+        return cls(arrays=arrays)
+
+
+@dataclass
+class NumpyBuffers:
+    """Pinned host buffer + D2H streams for numpy frame consumption (built lazily).
+
+    NumpyBuffers owns the CUDA streams and pinned host allocation. close() tears
+    them down idempotently.
+    """
+
+    cuda: object  # CUDARuntimeAPI (same instance as IPCConnection.cuda)
+    fmt: Format
+    buffer: object  # np.ndarray — reusable D2H destination
+    pinned_ptr: object  # cudaMallocHost result or None
+    host_registered_arr: object  # cudaHostRegister fallback array or None
+    pinned_memory_available: bool
+    primary_stream: object  # primary D2H CUDA stream (also d2h_streams[0])
+    d2h_streams: list  # one per CUDALINK_D2H_STREAMS value; slot 0 == primary_stream
+    d2h_events: list  # join-barrier sync events, one per stream
+    num_streams: int
+
+    @classmethod
+    def build(cls, conn: IPCConnection, fmt: Format, num_streams: int) -> NumpyBuffers:
+        """Allocate pinned host buffer + D2H streams.
+
+        Allocation ladder: cudaMallocHost (portable pinned) → cudaHostRegister
+        (page-locked) → pageable fallback. Matches current _setup_numpy_buffer logic.
+        """
+        cuda = conn.cuda
+        nbytes = fmt.frame_nbytes
+
+        # Create streams
+        primary_stream = cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+        logger.debug("Created numpy stream: 0x%016x", int(primary_stream.value))
+        d2h_streams = [primary_stream] + [cuda.create_stream(flags=0x01) for _ in range(num_streams - 1)]
+        d2h_events = [cuda.create_sync_event() for _ in range(num_streams)]
+        if num_streams > 1:
+            logger.info("Multi-stream D2H enabled: %d streams (CUDALINK_D2H_STREAMS=%d)", num_streams, num_streams)
+
+        pinned_ptr = None
+        host_registered_arr = None
+        buffer = None
+        pinned_memory_available = False
+
+        try:
+            # cudaHostAllocPortable (0x01) makes the allocation accessible from any
+            # CUDA context in the process — needed when PyTorch and CuPy coexist.
+            pinned_ptr = cuda.malloc_host_alloc(nbytes, flags=0x01)
+            buf = (ctypes.c_ubyte * nbytes).from_address(pinned_ptr.value)
+            buffer = np.frombuffer(buf, dtype=fmt.numpy_dtype).reshape(fmt.shape)
+            pinned_memory_available = True
+            logger.debug("Allocated portable pinned numpy buffer: %s, %s", fmt.shape, fmt.dtype_str)
+        except (RuntimeError, OSError) as e:
+            logger.warning(
+                "cudaMallocHost failed for %d bytes (%.1f MB) — trying cudaHostRegister: %s",
+                nbytes,
+                nbytes / 1_048_576,
+                e,
+            )
+            try:
+                fallback_arr = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+                cuda.host_register(fallback_arr.ctypes.data, fallback_arr.nbytes)
+                host_registered_arr = fallback_arr
+                buffer = fallback_arr
+                pinned_memory_available = True
+                logger.info("cudaHostRegister succeeded — using registered pinned memory")
+            except (RuntimeError, OSError) as e2:
+                logger.warning(
+                    "cudaHostRegister also failed — falling back to pageable memory "
+                    "(expect ~2x slower D2H bandwidth): %s",
+                    e2,
+                )
+                buffer = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+                pinned_memory_available = False
+
+        return cls(
+            cuda=cuda,
+            fmt=fmt,
+            buffer=buffer,
+            pinned_ptr=pinned_ptr,
+            host_registered_arr=host_registered_arr,
+            pinned_memory_available=pinned_memory_available,
+            primary_stream=primary_stream,
+            d2h_streams=d2h_streams,
+            d2h_events=d2h_events,
+            num_streams=num_streams,
+        )
+
+    def needs_rebuild(self, fmt: Format) -> bool:
+        """True when the pre-allocated buffer doesn't match the new format."""
+        return self.buffer.shape != fmt.shape or self.buffer.dtype != fmt.numpy_dtype
+
+    def close(self) -> None:
+        """Idempotent teardown: free pinned allocation, destroy streams and events."""
+        if self.pinned_ptr is not None:
+            try:
+                self.cuda.free_host(self.pinned_ptr)
+                logger.debug("Freed pinned numpy buffer")
+            except (RuntimeError, OSError) as e:
+                logger.debug("free_host skipped (context gone): %s", e)
+            self.pinned_ptr = None
+
+        if self.host_registered_arr is not None:
+            try:
+                self.cuda.host_unregister(self.host_registered_arr.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                logger.debug("host_unregister failed: %s", e)
+            self.host_registered_arr = None
+
+        for evt in self.d2h_events:
+            if evt is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.destroy_event(evt)
+        self.d2h_events.clear()
+
+        for i, stream in enumerate(self.d2h_streams):
+            if i == 0:
+                continue  # primary_stream destroyed below
+            if stream is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.destroy_stream(stream)
+        self.d2h_streams.clear()
+
+        if self.primary_stream is not None:
+            try:
+                self.cuda.destroy_stream(self.primary_stream)
+                logger.debug("Destroyed numpy stream")
+            except (RuntimeError, OSError) as e:
+                logger.debug("numpy stream destroy skipped (context gone): %s", e)
+            self.primary_stream = None
+
+
+# ============================================================
+# Importer
+# ============================================================
 
 
 class CUDAIPCImporter:
@@ -176,6 +511,7 @@ class CUDAIPCImporter:
                     IPC handles are device-scoped; opening a handle on the wrong device
                     causes error 400 (cudaErrorInvalidValue).
         """
+        # Construction config (kept in sync with _format after init)
         self.shm_name = shm_name
         self.shape = shape  # May be None initially (will be auto-detected)
         self.dtype = dtype  # May be None initially (will be auto-detected)
@@ -189,81 +525,54 @@ class CUDAIPCImporter:
         # CUDALINK_WAIT_SPIN_US=0 disables Phase 1, restoring pre-batch-2 behaviour.
         self._spin_us: int = int(os.getenv("CUDALINK_WAIT_SPIN_US", "200"))
 
-        # CUDA runtime API
-        self.cuda: CUDARuntimeAPI | None = None
+        # Multi-stream D2H config (NumpyBuffers reads this at build time)
+        self._d2h_num_streams: int = max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1")))
+
+        # Initialization gate
         self._initialized = False
 
-        # IPC state
-        self.shm_handle = None
-        self.ipc_version = 0
-
-        # Ring buffer state (initialized after reading SharedMemory)
-        self.num_slots = 0  # Number of buffer slots (read from SharedMemory)
-        self.ipc_handles = []  # List of IPC mem handles
-        self.dev_ptrs = []  # List of GPU buffer pointers
-        self.ipc_events = []  # List of IPC events for GPU-side sync
-
-        # Tensor state (arrays for ring buffer) - only if torch available
-        self.tensors = []  # List of zero-copy tensor views (one per slot)
-        self._wrappers = []  # Keep wrappers alive to prevent GC
-
-        # CuPy state (arrays for ring buffer) - only if cupy available
-        self.cupy_arrays = []  # List of zero-copy CuPy arrays (one per slot)
-
-        # Numpy state (pre-allocated buffer for D2H copy)
-        self._numpy_buffer = None  # Reused numpy array (avoids per-frame allocation)
-        self._pinned_ptr = None  # Pinned host memory pointer (cudaMallocHost)
-        self._host_registered_arr = None  # numpy array page-locked via cudaHostRegister (fallback)
-        self.pinned_memory_available: bool = False  # True when D2H buffer is pinned
+        # Value-object references (all None until _initialize() succeeds)
+        self._conn: IPCConnection | None = None
+        self._format: Format | None = None
+        self._torch: TorchBuffers | None = None
+        self._cupy: CupyBuffers | None = None
+        self._numpy: NumpyBuffers | None = None
 
         # Frame tracking
         self.frame_count = 0
-        self._last_write_idx = 0  # Track last read write_idx for new-frame detection
+        self._last_write_idx = 0
 
         # Performance metrics
         self.total_wait_event_time = 0.0
         self.total_get_frame_time = 0.0
         self.total_shm_read_us: float = 0.0
-        self.last_latency = 0.0  # End-to-end latency from producer timestamp (ms)
+        self.last_latency = 0.0
         # N1: spin-phase vs sleep-phase breakdown counters
-        self.total_wait_spin_us: float = 0.0  # time spent in Phase 1 (tight spin)
-        self.total_wait_sleep_us: float = 0.0  # time spent in Phase 2 (sleep poll)
-        self.wait_spin_hits: int = 0  # frames resolved in Phase 1
-        self.wait_sleep_hits: int = 0  # frames resolved in Phase 2
+        self.total_wait_spin_us: float = 0.0
+        self.total_wait_sleep_us: float = 0.0
+        self.wait_spin_hits: int = 0
+        self.wait_sleep_hits: int = 0
 
-        # Cached SharedMemory offsets (computed once in _initialize(), constant thereafter)
-        self._shutdown_offset: int = 0
-        self._timestamp_offset: int = 0
-
-        # Cached dtype-derived values — avoids np.dtype() construction per frame
+        # _numpy_dtype() cache (for pre-init or post-cleanup calls)
         self._cached_dtype_str: str = ""
         self._cached_numpy_dtype: object = None
 
-        # CUDA stream for async D2H copies (created in _initialize())
-        self._numpy_stream: object = None
-
-        # Multi-stream D2H (Phase 3, CUDALINK_D2H_STREAMS > 1):
-        # Split the D2H copy into N concurrent streams to better saturate PCIe bandwidth.
-        # Each chunk is copied on an independent non-blocking stream; all are joined via
-        # per-stream wait_event() calls before returning to the caller.
-        # Set to 1 for single-stream behaviour (default, backward-compatible).
-        # Recommended: 2 for single-DMA-engine GPUs; 4 for dual-DMA-engine (RTX 30/40).
-        self._d2h_num_streams: int = max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1")))
-        self._d2h_streams: list = []  # extra streams for N>1; slot 0 reuses _numpy_stream
-        self._d2h_events: list = []  # one sync event per D2H stream (for join barrier)
-
         # Auto-initialize
         self._initialize()
+
+    # ------------------------------------------------------------------
+    # Convenience dtype methods (read self.dtype; kept for backward compat)
+    # ------------------------------------------------------------------
 
     def _dtype_itemsize(self) -> int:
         """Get byte size per element for the configured dtype."""
         return _DTYPE_SIZES[self.dtype]
 
     def _numpy_dtype(self) -> np.dtype:
-        """Get numpy dtype from string dtype."""
+        """Get numpy dtype from string dtype (cached)."""
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required but not installed")
-        if self.dtype != getattr(self, "_cached_dtype_str", ""):
+        if self.dtype != self._cached_dtype_str:
             self._cached_numpy_dtype = np.dtype(self.dtype)
             self._cached_dtype_str = self.dtype
         return self._cached_numpy_dtype
@@ -284,236 +593,212 @@ class CUDAIPCImporter:
         return dtype
 
     def _resolve_stream(self, stream: object) -> int | None:
-        """Extract raw CUDA stream pointer from torch/cupy stream or int.
-
-        Args:
-            stream: torch.cuda.Stream, cupy.cuda.Stream, or raw int pointer
-
-        Returns:
-            int: Raw CUDA stream pointer value
-
-        Raises:
-            TypeError: If stream type is unsupported
-        """
+        """Extract raw CUDA stream pointer from torch/cupy stream or int."""
         if stream is None:
             return None
         if isinstance(stream, int):
             return stream
-        # Try torch.cuda.Stream
         if TORCH_AVAILABLE and hasattr(stream, "cuda_stream"):
             return stream.cuda_stream
-        # Try cupy.cuda.Stream (via CUPY_AVAILABLE check if added later)
         if hasattr(stream, "ptr"):
             return stream.ptr
         raise TypeError(
             f"Unsupported stream type: {type(stream)}. Expected torch.cuda.Stream, cupy.cuda.Stream, or int."
         )
 
-    def _clear_host_registered(self) -> None:
-        """Unregister page-locked memory registered via cudaHostRegister and clear the reference."""
-        if self._host_registered_arr is not None:
-            try:
-                self.cuda.host_unregister(self._host_registered_arr.ctypes.data)
-            except (RuntimeError, OSError) as e:
-                logger.debug("host_unregister failed: %s", e)
-            self._host_registered_arr = None
+    # ------------------------------------------------------------------
+    # Phase methods (each returns its piece; orchestrator assembles them)
+    # ------------------------------------------------------------------
+
+    def _setup_runtime(self) -> CUDARuntimeAPI:
+        """Load CUDA runtime on self.device; raise on device mismatch."""
+        cuda = get_cuda_runtime(device=self.device)
+        actual_device = cuda.get_device()
+        if actual_device != self.device:
+            raise RuntimeError(
+                f"Device mismatch: requested device {self.device} but CUDA context "
+                f"is bound to device {actual_device}. Sender and receiver must use "
+                "the same device index."
+            )
+        logger.info("Loaded CUDA runtime on device %d", actual_device)
+        return cuda
+
+    def _open_and_validate_shm(self) -> tuple:
+        """Open SharedMemory and validate protocol magic, version, num_slots, shutdown flag.
+
+        Returns:
+            (shm, num_slots, ipc_version) on success. Raises on any failure.
+        """
+        try:
+            shm = SharedMemory(name=self.shm_name)
+        except FileNotFoundError:
+            logger.error("SharedMemory '%s' not found", self.shm_name)
+            logger.error("Make sure TouchDesigner CUDAIPCExporter is initialized first")
+            raise
+
+        logger.info("Opened SharedMemory: %s", self.shm_name)
+
+        # Validate protocol magic
+        try:
+            magic = struct.unpack("<I", bytes(shm.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]))[0]
+        except (struct.error, ValueError, IndexError):
+            logger.error("Cannot read protocol magic.")
+            logger.error("  Sender may be using old protocol version (pre-magic).")
+            shm.close()
+            raise
+
+        if magic != PROTOCOL_MAGIC:
+            logger.error("Protocol magic mismatch!")
+            logger.error("  Expected: 0x%08X ('CIPD')", PROTOCOL_MAGIC)
+            logger.error("  Got:      0x%08X", magic)
+            logger.error("  Sender using incompatible protocol version. Please update both TD and Python sides.")
+            shm.close()
+            raise RuntimeError(f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}")
+
+        ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
+        num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
+
+        if num_slots == 0 or num_slots > 10:
+            logger.error(
+                "Invalid num_slots=%d read from SharedMemory. Protocol error or corrupted SHM (expected 1-10).",
+                num_slots,
+            )
+            shm.close()
+            raise ValueError(f"Invalid num_slots={num_slots}")
+
+        shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
+        try:
+            shutdown_flag = shm.buf[shutdown_offset]
+        except (OSError, BufferError, IndexError) as e:
+            logger.error("Could not read shutdown flag: %s", e)
+            shm.close()
+            raise
+
+        if shutdown_flag == 1:
+            logger.warning("Sender shutdown flag detected - SharedMemory is stale")
+            shm.close()
+            raise RuntimeError("Sender shutdown flag set — SharedMemory is stale")
+
+        logger.info("Ring buffer with %d slots (v%d)", num_slots, ipc_version)
+        return shm, num_slots, ipc_version
+
+    def _parse_format(self, shm: object, num_slots: int) -> Format:
+        """Read extended metadata block and return a Format.
+
+        Uses caller-supplied shape/dtype overrides when provided; falls back to
+        SHM metadata, then to (512,512,4)/'float32' on parse failure.
+        Updates self.shape and self.dtype to stay in sync with the returned Format.
+        """
+        if self.shape is None or self.dtype is None:
+            fmt_from_shm = Format.from_shm(shm.buf, num_slots)
+            if fmt_from_shm is not None:
+                shape = self.shape if self.shape is not None else fmt_from_shm.shape
+                dtype_str = self.dtype if self.dtype is not None else fmt_from_shm.dtype_str
+                if shape != fmt_from_shm.shape or dtype_str != fmt_from_shm.dtype_str:
+                    # Override one dimension but parsed the other — rebuild from overrides
+                    fmt = Format.from_overrides(shape, dtype_str)
+                else:
+                    fmt = fmt_from_shm
+                if self.shape is None:
+                    logger.info("Auto-detected shape: %s", fmt.shape)
+                if self.dtype is None:
+                    logger.info("Auto-detected dtype: %s", fmt.dtype_str)
+            else:
+                logger.warning("Could not auto-detect metadata; using fallback: shape=(512,512,4), dtype='float32'")
+                shape = self.shape or (512, 512, 4)
+                dtype_str = self.dtype or "float32"
+                fmt = Format.from_overrides(shape, dtype_str)
+        else:
+            # Both provided by caller — no SHM metadata read needed
+            fmt = Format.from_overrides(self.shape, self.dtype)
+
+        # Keep construction hints in sync with the resolved format
+        self.shape = fmt.shape
+        self.dtype = fmt.dtype_str
+        return fmt
+
+    def _open_ipc_slots(
+        self,
+        cuda: CUDARuntimeAPI,
+        shm: object,
+        num_slots: int,
+        ipc_version: int,
+        fmt: Format,
+    ) -> IPCConnection:
+        """Open all IPC mem + event handles; return a live IPCConnection."""
+        ipc_handles: list = [None] * num_slots
+        dev_ptrs: list = [None] * num_slots
+        ipc_events: list = [None] * num_slots
+
+        for slot in range(num_slots):
+            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+
+            # Read + open memory handle (64 bytes)
+            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+            ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+            # Flag 1 = cudaIpcMemLazyEnablePeerAccess
+            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+
+            # Read + open event handle (64 bytes) if present
+            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
+            if any(event_handle_bytes):
+                try:
+                    ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
+                    ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
+                except (RuntimeError, OSError) as e:
+                    logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
+                    ipc_events[slot] = None
+
+            tensor_info = f"tensor shape={fmt.shape}" if TORCH_AVAILABLE else "torch N/A"
+            logger.info(
+                "Slot %d: GPU at 0x%016x, %s, event=%s",
+                slot,
+                dev_ptrs[slot].value,
+                tensor_info,
+                "YES" if ipc_events[slot] else "NO",
+            )
+
+        logger.info("Opened %d IPC buffer slots with GPU-side sync", num_slots)
+
+        layout = SHMLayout(num_slots)
+        return IPCConnection(
+            cuda=cuda,
+            shm_handle=shm,
+            ipc_version=ipc_version,
+            num_slots=num_slots,
+            ipc_handles=ipc_handles,
+            dev_ptrs=dev_ptrs,
+            ipc_events=ipc_events,
+            layout=layout,
+            shutdown_offset=layout.shutdown_offset,
+            timestamp_offset=layout.timestamp_offset,
+        )
+
+    # ------------------------------------------------------------------
+    # Orchestrator
+    # ------------------------------------------------------------------
 
     def _initialize(self) -> bool:
         """Initialize CUDA IPC resources.
 
-        Returns:
-            True if initialization successful, False otherwise
+        Returns True on success; False on any failure (already logged).
         """
         if self._initialized:
             logger.debug("Already initialized")
             return True
 
         try:
-            # Load CUDA runtime bound to the requested device
-            self.cuda = get_cuda_runtime(device=self.device)
-            actual_device = self.cuda.get_device()
-            if actual_device != self.device:
-                raise RuntimeError(
-                    f"Device mismatch: requested device {self.device} but CUDA context "
-                    f"is bound to device {actual_device}. Sender and receiver must use "
-                    "the same device index."
-                )
-            logger.info("Loaded CUDA runtime on device %d", actual_device)
+            cuda = self._setup_runtime()
+            shm, num_slots, ipc_version = self._open_and_validate_shm()
+            fmt = self._parse_format(shm, num_slots)
+            conn = self._open_ipc_slots(cuda, shm, num_slots, ipc_version, fmt)
 
-            # Create internal stream for numpy async D2H operations
-            self._numpy_stream = self.cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
-            logger.debug("Created numpy stream: 0x%016x", int(self._numpy_stream.value))
-
-            # Multi-stream D2H: allocate n_streams-1 additional streams + n_streams events.
-            # Stream slot 0 reuses _numpy_stream; slots 1..n_streams-1 are new streams.
-            # Each stream gets a sync event for the join barrier.
-            n_streams = self._d2h_num_streams
-            self._d2h_streams = [self._numpy_stream] + [
-                self.cuda.create_stream(flags=0x01) for _ in range(n_streams - 1)
-            ]
-            self._d2h_events = [self.cuda.create_sync_event() for _ in range(n_streams)]
-            if n_streams > 1:
-                logger.info(
-                    "Multi-stream D2H enabled: %d streams (CUDALINK_D2H_STREAMS=%d)",
-                    n_streams,
-                    n_streams,
-                )
-
-            # Open SharedMemory to read IPC handle
-            try:
-                self.shm_handle = SharedMemory(name=self.shm_name)
-                logger.info("Opened SharedMemory: %s", self.shm_name)
-            except FileNotFoundError:
-                logger.error("SharedMemory '%s' not found", self.shm_name)
-                logger.error("Make sure TouchDesigner CUDAIPCExporter is initialized first")
-                return False
-
-            # Read header from SharedMemory (magic + version + num_slots + write_idx)
-
-            # Validate protocol magic number (new in this version)
-            try:
-                magic = struct.unpack("<I", bytes(self.shm_handle.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]))[0]
-                if magic != PROTOCOL_MAGIC:
-                    logger.error("Protocol magic mismatch!")
-                    logger.error("  Expected: 0x%08X ('CIPD')", PROTOCOL_MAGIC)
-                    logger.error("  Got:      0x%08X", magic)
-                    logger.error(
-                        "  Sender using incompatible protocol version. Please update both TD and Python sides."
-                    )
-                    self.shm_handle.close()
-                    self.shm_handle = None
-                    return False
-            except (struct.error, ValueError, IndexError):
-                logger.error("Cannot read protocol magic.")
-                logger.error("  Sender may be using old protocol version (pre-magic).")
-                self.shm_handle.close()
-                self.shm_handle = None
-                return False
-
-            self.ipc_version = struct.unpack(
-                "<Q", bytes(self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE])
-            )[0]
-            self.num_slots = struct.unpack(
-                "<I", bytes(self.shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE])
-            )[0]
-            logger.info("Ring buffer with %d slots (v%d)", self.num_slots, self.ipc_version)
-
-            # Validate num_slots bounds (matches Receiver validation in CUDAIPCExtension)
-            if self.num_slots == 0 or self.num_slots > 10:
-                logger.error(
-                    "Invalid num_slots=%d read from SharedMemory. Protocol error or corrupted SHM (expected 1-10).",
-                    self.num_slots,
-                )
-                self.shm_handle.close()
-                self.shm_handle = None
-                return False
-
-            # Check if sender has shut down (stale SharedMemory with invalid IPC handles)
-            shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-            try:
-                shutdown_flag = self.shm_handle.buf[shutdown_offset]
-                if shutdown_flag == 1:
-                    logger.warning("Sender shutdown flag detected - SharedMemory is stale")
-                    self.shm_handle.close()
-                    self.shm_handle = None
-                    return False
-            except (OSError, BufferError, IndexError) as e:
-                logger.error("Could not read shutdown flag: %s", e)
-                self.shm_handle.close()
-                self.shm_handle = None
-                return False
-
-            # Auto-detect shape and dtype from extended metadata if not provided
-            if self.shape is None or self.dtype is None:
-                shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-                metadata_offset = shutdown_offset + 1  # After shutdown flag
-
-                # Try to read extended metadata
-                try:
-                    width = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset : metadata_offset + 4]))[0]
-                    height = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]))[
-                        0
-                    ]
-                    num_comps = struct.unpack(
-                        "<I", bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12])
-                    )[0]
-                    kind, bits, flags = _ST_BBH.unpack(
-                        bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16])
-                    )
-
-                    if width > 0 and height > 0 and num_comps > 0:
-                        if self.shape is None:
-                            self.shape = (height, width, num_comps)
-                            logger.info("Auto-detected shape: %s", self.shape)
-                        if self.dtype is None:
-                            self.dtype = _decode_dtype_str(kind, bits, flags)
-                            logger.info("Auto-detected dtype: %s", self.dtype)
-                    else:
-                        raise ValueError("Metadata contains zeros")
-                except (struct.error, ValueError, IndexError) as e:
-                    if self.shape is None or self.dtype is None:
-                        logger.warning("Could not auto-detect metadata: %s", e)
-                        logger.warning("Using fallback: shape=(512,512,4), dtype='float32'")
-                        self.shape = self.shape or (512, 512, 4)
-                        self.dtype = self.dtype or "float32"
-
-            # Initialize arrays for ring buffer
-            self.ipc_handles = [None] * self.num_slots
-            self.dev_ptrs = [None] * self.num_slots
-            self.ipc_events = [None] * self.num_slots
-            self.tensors = [None] * self.num_slots
-            self._wrappers = [None] * self.num_slots
-            self.cupy_arrays = [None] * self.num_slots
-            self._last_write_idx = 0  # Reset frame tracking on re-init
-
-            # Open all IPC handles
-            for slot in range(self.num_slots):
-                base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
-
-                # Read memory handle (64 bytes)
-                mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 64])
-                self.ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-
-                # Open IPC memory handle (ONCE - expensive operation)
-                # Flag 1 = cudaIpcMemLazyEnablePeerAccess
-                self.dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self.ipc_handles[slot], flags=1)
-
-                # Read event handle (64 bytes)
-                event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 64 : base_offset + 128])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        self.ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
-                        self.ipc_events[slot] = None
-
-                # Create tensor view for this slot if torch available
-                if TORCH_AVAILABLE:
-                    self.tensors[slot] = self._create_tensor_view(slot)
-                    tensor_info = f"tensor shape={self.tensors[slot].shape}"
-                else:
-                    tensor_info = "torch N/A"
-
-                # Create CuPy array view for this slot if cupy available
-                if CUPY_AVAILABLE:
-                    self.cupy_arrays[slot] = self._create_cupy_view(slot)
-                    logger.debug("Slot %d: Created CuPy array shape=%s", slot, self.cupy_arrays[slot].shape)
-
-                logger.info(
-                    "Slot %d: GPU at 0x%016x, %s, event=%s",
-                    slot,
-                    self.dev_ptrs[slot].value,
-                    tensor_info,
-                    "YES" if self.ipc_events[slot] else "NO",
-                )
-
-            logger.info("Opened %d IPC buffer slots with GPU-side sync", self.num_slots)
-
-            # Cache constant SharedMemory offsets so hot paths avoid per-frame arithmetic
-            self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-            self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-
+            self._conn = conn
+            self._format = fmt
+            self._torch = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
+            self._cupy = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
+            self._numpy = None  # lazy — built on first get_frame_numpy()
+            self._last_write_idx = 0
             self._initialized = True
             logger.info("Initialization complete - ready for zero-copy GPU access")
             return True
@@ -523,152 +808,64 @@ class CUDAIPCImporter:
             traceback.print_exc()
             return False
 
-    def _create_tensor_view(self, slot: int) -> torch.Tensor:
-        """Create zero-copy torch.Tensor view of GPU memory for a specific slot.
+    # ------------------------------------------------------------------
+    # Slot acquisition + wait
+    # ------------------------------------------------------------------
 
-        Uses __cuda_array_interface__ for zero-copy tensor creation.
-
-        Args:
-            slot: Buffer slot index (0 to num_slots-1)
-
-        Returns:
-            Torch tensor backed by IPC GPU memory for this slot
-        """
-        if not TORCH_AVAILABLE:
-            raise RuntimeError("torch is required for tensor views")
-
-        if self.dev_ptrs[slot] is None:
-            raise RuntimeError(f"Device pointer for slot {slot} not initialized")
-
-        # Calculate total elements
-        height, width, channels = self.shape
-
-        # Determine typestr based on dtype
-        if self.dtype == "float32":
-            typestr = "<f4"  # Little-endian float32
-        elif self.dtype == "float16":
-            typestr = "<f2"  # Little-endian float16
-        elif self.dtype == "uint8":
-            typestr = "|u1"  # Unsigned 8-bit integer
-        elif self.dtype == "uint16":
-            typestr = "<u2"  # Little-endian unsigned 16-bit integer
-        else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
-
-        # Create __cuda_array_interface__ descriptor
-        ptr_value = int(self.dev_ptrs[slot].value) if self.dev_ptrs[slot].value is not None else 0
-
-        cuda_array_interface = {
-            "shape": self.shape,
-            "typestr": typestr,
-            "data": (ptr_value, False),  # (ptr, read_only)
-            "version": 3,
-            "strides": None,  # Contiguous C-order
-        }
-
-        # Create wrapper with __cuda_array_interface__
-        class CUDAArrayWrapper:
-            """Minimal wrapper exposing __cuda_array_interface__ for zero-copy tensor creation."""
-
-            def __init__(self, interface: dict) -> None:
-                self.__cuda_array_interface__ = interface
-
-        wrapper = CUDAArrayWrapper(cuda_array_interface)
-        self._wrappers[slot] = wrapper  # Keep alive to prevent GC
-
-        # Create torch tensor from CUDA array interface (zero-copy)
-        tensor = torch.as_tensor(wrapper, device="cuda")
-
-        # Validate shape and dtype
-        if tensor.shape != self.shape:
-            raise ValueError(f"Shape mismatch: {tensor.shape} != {self.shape}")
-        torch_dtype = self._torch_dtype()
-        if tensor.dtype != torch_dtype:
-            raise ValueError(f"Dtype mismatch: {tensor.dtype} != {torch_dtype}")
-
-        return tensor
-
-    def _create_cupy_view(self, slot: int) -> cp.ndarray:
-        """Create zero-copy CuPy array view of GPU memory for a specific slot.
-
-        Uses cp.cuda.UnownedMemory for zero-copy array creation from external pointer.
-
-        Args:
-            slot: Buffer slot index (0 to num_slots-1)
+    def _try_acquire(self) -> AcquireResult | None:
+        """Acquire next frame via acquire_slot(); dispatch on state.
 
         Returns:
-            CuPy array backed by IPC GPU memory for this slot
+            AcquireResult on NEW_FRAME (slot/timestamp/write_idx populated), else None.
+        Side-effects:
+            cleanup() on SHUTDOWN; _reinitialize() on VERSION_CHANGED (single-tick stall).
         """
-        if not CUPY_AVAILABLE:
-            raise RuntimeError("cupy is required for CuPy views")
-
-        if self.dev_ptrs[slot] is None:
-            raise RuntimeError(f"Device pointer for slot {slot} not initialized")
-
-        # Calculate buffer size
-        height, width, channels = self.shape
-        itemsize = self._dtype_itemsize()
-        nbytes = height * width * channels * itemsize
-
-        # Determine CuPy dtype
-        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
-        cp_dtype = dtype_map.get(self.dtype)
-        if cp_dtype is None:
-            raise ValueError(f"Unsupported dtype for CuPy: {self.dtype}")
-
-        # Create UnownedMemory (zero-copy, no ownership transfer)
-        ptr_value = int(self.dev_ptrs[slot].value)
-        mem = cp.cuda.UnownedMemory(ptr_value, nbytes, owner=self)
-        memptr = cp.cuda.MemoryPointer(mem, 0)
-
-        # Create CuPy array from memory pointer
-        cupy_array = cp.ndarray(self.shape, dtype=cp_dtype, memptr=memptr)
-
-        return cupy_array
-
-    def _get_read_slot(self) -> int | None:
-        """Read write_idx from SharedMemory and compute read slot.
-
-        Returns:
-            Slot index to read from, or None if no new frame available
-        """
-        write_idx = _ST_U32.unpack_from(self.shm_handle.buf, WRITE_IDX_OFFSET)[0]
-
-        if write_idx == 0:
-            return None  # No frames written yet
-
-        if write_idx == self._last_write_idx:
-            return None  # Same frame as last read
-
-        self._last_write_idx = write_idx
-        return (write_idx - 1) % self.num_slots
+        try:
+            result = acquire_slot(
+                self._conn.shm_handle.buf,
+                self._conn.layout,
+                self._last_write_idx,
+                self._conn.ipc_version,
+            )
+        except (OSError, BufferError) as e:
+            logger.debug("SHM buffer inaccessible: %s", e)
+            return None
+        if result.state is SlotState.SHUTDOWN:
+            logger.info("Producer shutdown detected - cleaning up gracefully")
+            self.cleanup()
+            return None
+        if result.state is SlotState.VERSION_CHANGED:
+            logger.debug(
+                "TD re-initialized (v%d -> v%d), reopening IPC handle...",
+                self._conn.ipc_version,
+                result.new_version,
+            )
+            self._reinitialize()
+            return None  # pick up frame next call
+        if result.state is SlotState.NO_FRAME:
+            return None
+        self._last_write_idx = result.write_idx
+        return result
 
     def _wait_for_slot(self, slot: int) -> float:
         """Wait for producer to finish writing slot, with timeout.
 
-        Args:
-            slot: Slot index to wait for
-
         Returns:
-            Wait time in microseconds
+            Wait time in microseconds.
 
         Raises:
-            TimeoutError: If wait exceeds timeout_ms
+            TimeoutError: If wait exceeds timeout_ms.
         """
+        conn = self._conn
         wait_start = time.perf_counter()
 
-        # GPU-side synchronization if event available
-        if self.ipc_events[slot]:
+        if conn.ipc_events[slot]:
             deadline = wait_start + self.timeout_ms / 1000
 
-            # Phase 1 — tight spin (no sleep): the producer records the IPC event
-            # BEFORE publishing write_idx, so the event is typically pre-signaled
-            # and query_event() returns True on the first iteration.
-            # Budget: CUDALINK_WAIT_SPIN_US (default 200µs).
             if self._spin_us > 0:
                 spin_deadline = wait_start + self._spin_us / 1_000_000
                 while time.perf_counter() < spin_deadline:
-                    if self.cuda.query_event(self.ipc_events[slot]):
+                    if conn.cuda.query_event(conn.ipc_events[slot]):
                         spin_us = (time.perf_counter() - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
@@ -678,28 +875,28 @@ class CUDAIPCImporter:
                             f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
                         )
 
-            # Phase 2 — sleep poll (existing behaviour, unchanged).
-            # On Windows _HighResTimer drops sleep floor from ~15ms to ~1ms.
             phase2_start = time.perf_counter()
             with _HighResTimer():
                 while True:
-                    if self.cuda.query_event(self.ipc_events[slot]):
+                    if conn.cuda.query_event(conn.ipc_events[slot]):
                         break
                     if time.perf_counter() >= deadline:
                         raise TimeoutError(
                             f"IPC event wait timed out after {self.timeout_ms}ms (slot={slot}) — producer may have crashed"
                         )
-                    time.sleep(0.0001)  # 100µs nominal; ~1ms actual on Windows with high-res timer
+                    time.sleep(0.0001)
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
             self.wait_sleep_hits += 1
         elif TORCH_AVAILABLE:
-            # Fallback: CPU synchronization with torch
             torch.cuda.synchronize()
         else:
-            # Fallback: CPU synchronization with CUDA runtime
-            self.cuda.synchronize()
+            conn.cuda.synchronize()
 
-        return (time.perf_counter() - wait_start) * 1_000_000  # microseconds
+        return (time.perf_counter() - wait_start) * 1_000_000
+
+    # ------------------------------------------------------------------
+    # Frame consumers
+    # ------------------------------------------------------------------
 
     def get_frame(self, stream: object | None = None) -> torch.Tensor | None:
         """Get current frame as torch.Tensor (GPU, zero-copy).
@@ -725,57 +922,42 @@ class CUDAIPCImporter:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        # Check for producer shutdown + version change + read slot (all SharedMemory reads)
         if debug:
             _shm_t = time.perf_counter()
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
         if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
-        if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
+        if producer_timestamp > 0:
             self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
         else:
             self.last_latency = 0.0
 
-        # Wait for slot to be ready (stream-ordered if stream provided, else CPU-blocking)
+        conn = self._conn
         if debug:
             wait_start = time.perf_counter()
 
-        if stream is not None:
-            # Stream-ordered wait (non-blocking to CPU)
-            cuda_stream = self._resolve_stream(stream)
-            if self.ipc_events[read_slot]:
-                self.cuda.stream_wait_event(cuda_stream, self.ipc_events[read_slot], 0)
-            # Note: No fallback sync needed - downstream GPU work will naturally wait on stream
-        else:
-            # Backward-compatible blocking wait
-            try:
-                self._wait_for_slot(read_slot)
-            except TimeoutError:
-                logger.error("Producer timeout — returning None")
-                return None
+        _nvtx.push_range(f"cudalink.importer.get_frame.slot{read_slot}", "purple")
+        with _nvtx.verbose_range("cudalink.importer.event_wait", "purple"):
+            if stream is not None:
+                cuda_stream = self._resolve_stream(stream)
+                if conn.ipc_events[read_slot]:
+                    conn.cuda.stream_wait_event(cuda_stream, conn.ipc_events[read_slot], 0)
+            else:
+                try:
+                    self._wait_for_slot(read_slot)
+                except TimeoutError:
+                    logger.error("Producer timeout — returning None")
+                    _nvtx.pop_range()
+                    return None
 
         if debug:
             self.total_wait_event_time += (time.perf_counter() - wait_start) * 1_000_000
 
-        # Frame tracking
         self.frame_count += 1
 
         if debug:
@@ -784,7 +966,7 @@ class CUDAIPCImporter:
 
             if self.frame_count % 97 == 0:
                 n = self.frame_count
-                sync_mode = "GPU-Events" if all(self.ipc_events) else "CPU-Sync"
+                sync_mode = "GPU-Events" if all(conn.ipc_events) else "CPU-Sync"
                 spin_hit_pct = 100.0 * self.wait_spin_hits / n if n > 0 else 0.0
                 logger.debug(
                     "Frame %d [%s]: shm_read=%.1fus stream_wait=%.1fus total=%.1fus "
@@ -800,8 +982,8 @@ class CUDAIPCImporter:
                     self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
                 )
 
-        # Return tensor for this slot (zero-copy, no allocation)
-        return self.tensors[read_slot]
+        _nvtx.pop_range()
+        return self._torch.tensors[read_slot]
 
     def get_frame_numpy(self) -> np.ndarray | None:
         """Get current frame as numpy array (CPU, involves D2H copy).
@@ -823,24 +1005,11 @@ class CUDAIPCImporter:
 
         if debug:
             _shm_t = time.perf_counter()
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
         if debug:
             self.total_shm_read_us += (time.perf_counter() - _shm_t) * 1_000_000
 
@@ -849,57 +1018,17 @@ class CUDAIPCImporter:
         else:
             self.last_latency = 0.0
 
-        if self.shape is None:
-            raise RuntimeError("Importer not initialized: shape is None")
-        height, width, channels = self.shape
-        itemsize = self._dtype_itemsize()
-        nbytes = height * width * channels * itemsize
+        conn = self._conn
+        fmt = self._format
+        nbytes = fmt.frame_nbytes
 
-        # Pre-allocate numpy buffer (reuse across frames to avoid allocation overhead)
-        if (
-            self._numpy_buffer is None
-            or self._numpy_buffer.shape != self.shape
-            or self._numpy_buffer.dtype != self._numpy_dtype()
-        ):
-            # Free previous pinned allocation if shape or dtype changed
-            if self._pinned_ptr is not None:
-                try:
-                    self.cuda.free_host(self._pinned_ptr)
-                except (RuntimeError, OSError) as e:
-                    logger.debug("free_host failed during reshape: %s", e)
-                self._pinned_ptr = None
-            self._clear_host_registered()
+        # Lazily build (or rebuild) NumpyBuffers when format changes
+        if self._numpy is None or self._numpy.needs_rebuild(fmt):
+            if self._numpy is not None:
+                self._numpy.close()
+            self._numpy = NumpyBuffers.build(conn, fmt, self._d2h_num_streams)
 
-            try:
-                # cudaHostAllocPortable (0x01) makes the allocation accessible from any
-                # CUDA context in the process — needed when PyTorch and CuPy coexist.
-                self._pinned_ptr = self.cuda.malloc_host_alloc(nbytes, flags=0x01)
-                buf = (ctypes.c_ubyte * nbytes).from_address(self._pinned_ptr.value)
-                self._numpy_buffer = np.frombuffer(buf, dtype=self._numpy_dtype()).reshape(self.shape)
-                self.pinned_memory_available = True
-                logger.debug("Allocated portable pinned numpy buffer: %s, %s", self.shape, self.dtype)
-            except (RuntimeError, OSError) as e:
-                logger.warning(
-                    "cudaMallocHost failed for %d bytes (%.1f MB) — trying cudaHostRegister: %s",
-                    nbytes,
-                    nbytes / 1_048_576,
-                    e,
-                )
-                try:
-                    fallback_arr = np.empty(self.shape, dtype=self._numpy_dtype())
-                    self.cuda.host_register(fallback_arr.ctypes.data, fallback_arr.nbytes)
-                    self._host_registered_arr = fallback_arr
-                    self._numpy_buffer = fallback_arr
-                    self.pinned_memory_available = True
-                    logger.info("cudaHostRegister succeeded — using registered pinned memory")
-                except (RuntimeError, OSError) as e2:
-                    logger.warning(
-                        "cudaHostRegister also failed — falling back to pageable memory "
-                        "(expect ~2x slower D2H bandwidth): %s",
-                        e2,
-                    )
-                    self._numpy_buffer = np.empty(self.shape, dtype=self._numpy_dtype())
-                    self.pinned_memory_available = False
+        nb = self._numpy
 
         # CPU-side event poll + async D2H + synchronize.
         # Uses _wait_for_slot (query_event CPU poll) rather than stream_wait_event because
@@ -908,62 +1037,58 @@ class CUDAIPCImporter:
         # the IPC event BEFORE publishing write_idx (improvement #2), so the event is always
         # pre-signaled when the consumer reads write_idx — query_event returns True on the
         # first call with no polling delay.
+        _nvtx.push_range(f"cudalink.importer.get_frame_numpy.slot{read_slot}", "orange")
         if debug:
             _wait_t = time.perf_counter()
-        try:
-            self._wait_for_slot(read_slot)
-        except TimeoutError:
-            logger.error("Producer timeout — returning None")
-            return None
+        with _nvtx.verbose_range("cudalink.importer.event_wait", "orange"):
+            try:
+                self._wait_for_slot(read_slot)
+            except TimeoutError:
+                logger.error("Producer timeout — returning None")
+                _nvtx.pop_range()
+                return None
         if debug:
             self.total_wait_event_time += (time.perf_counter() - _wait_t) * 1_000_000
 
-        # Async D2H copy: multi-stream or single-stream depending on CUDALINK_D2H_STREAMS.
-        #
-        # Multi-stream (N>1): splits the buffer into N equal chunks issued on N independent
-        # non-blocking streams, then joins via per-stream event waits.  This better saturates
-        # PCIe bandwidth by keeping the DMA engine pipeline fuller.
-        # Single-stream (N=1): original behaviour — one cudaMemcpyAsync + stream_synchronize.
         if debug:
             _d2h_t = time.perf_counter()
-        n_streams = self._d2h_num_streams
-        if n_streams <= 1:
-            self.cuda.memcpy_async(
-                dst=ctypes.c_void_p(self._numpy_buffer.ctypes.data),
-                src=self.dev_ptrs[read_slot],
-                count=nbytes,
-                kind=2,  # cudaMemcpyDeviceToHost
-                stream=self._numpy_stream,
-            )
-            self.cuda.stream_synchronize(self._numpy_stream)
-        else:
-            # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
-            chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
-            dst_base = self._numpy_buffer.ctypes.data
-            src_base = self.dev_ptrs[read_slot].value
-            issued = 0
-            for i in range(n_streams):
-                offset = i * chunk
-                size = min(chunk, nbytes - offset)
-                if size <= 0:
-                    break
-                self.cuda.memcpy_async(
-                    dst=ctypes.c_void_p(dst_base + offset),
-                    src=ctypes.c_void_p(src_base + offset),
-                    count=size,
-                    kind=2,
-                    stream=self._d2h_streams[i],
+        with _nvtx.verbose_range("cudalink.importer.d2h_copy", "orange"):
+            n_streams = nb.num_streams
+            if n_streams <= 1:
+                conn.cuda.memcpy_async(
+                    dst=ctypes.c_void_p(nb.buffer.ctypes.data),
+                    src=conn.dev_ptrs[read_slot],
+                    count=nbytes,
+                    kind=2,  # cudaMemcpyDeviceToHost
+                    stream=nb.primary_stream,
                 )
-                self.cuda.record_event(self._d2h_events[i], stream=self._d2h_streams[i])
-                issued = i + 1
-            # Join: wait on each issued stream's event (CPU-blocking per event)
-            for i in range(issued):
-                self.cuda.wait_event(self._d2h_events[i])
-        self.cuda.check_sticky_error("get_frame_numpy")
+                conn.cuda.stream_synchronize(nb.primary_stream)
+            else:
+                # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
+                chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
+                dst_base = nb.buffer.ctypes.data
+                src_base = conn.dev_ptrs[read_slot].value
+                issued = 0
+                for i in range(n_streams):
+                    offset = i * chunk
+                    size = min(chunk, nbytes - offset)
+                    if size <= 0:
+                        break
+                    conn.cuda.memcpy_async(
+                        dst=ctypes.c_void_p(dst_base + offset),
+                        src=ctypes.c_void_p(src_base + offset),
+                        count=size,
+                        kind=2,
+                        stream=nb.d2h_streams[i],
+                    )
+                    conn.cuda.record_event(nb.d2h_events[i], stream=nb.d2h_streams[i])
+                    issued = i + 1
+                for i in range(issued):
+                    conn.cuda.wait_event(nb.d2h_events[i])
+        conn.cuda.check_sticky_error("get_frame_numpy")
         if debug:
             d2h_time = (time.perf_counter() - _d2h_t) * 1_000_000
 
-        # Frame tracking
         self.frame_count += 1
 
         if debug:
@@ -977,13 +1102,13 @@ class CUDAIPCImporter:
                     n,
                     self.total_shm_read_us / n,
                     self.total_wait_event_time / n,
-                    d2h_time,  # last frame only (not accumulated)
+                    d2h_time,
                     self.total_get_frame_time / n,
                     self.last_latency,
                 )
 
-        # Return pre-allocated buffer (NOTE: caller must not hold reference across frames)
-        return self._numpy_buffer
+        _nvtx.pop_range()
+        return nb.buffer
 
     def get_frame_cupy(self, stream: object | None = None) -> cp.ndarray | None:
         """Get current frame as CuPy GPU array (zero-copy).
@@ -1006,235 +1131,127 @@ class CUDAIPCImporter:
             logger.warning("Not initialized - call _initialize() first")
             return None
 
-        # Check for producer shutdown + version change + read slot (all SharedMemory reads)
-        try:
-            if self.shm_handle.buf[self._shutdown_offset] == 1:
-                logger.info("Producer shutdown detected - cleaning up gracefully")
-                self.cleanup()
-                return None
-        except (OSError, BufferError) as e:
-            logger.debug("Could not read shutdown flag: %s", e)
-
-        current_version = _ST_U64.unpack_from(self.shm_handle.buf, VERSION_OFFSET)[0]
-        if current_version != self.ipc_version:
-            logger.debug("TD re-initialized (v%d -> v%d), reopening IPC handle...", self.ipc_version, current_version)
-            self._reinitialize()
-
-        read_slot = self._get_read_slot()
-        if read_slot is None:
-            return None  # No new frame available
-
-        producer_timestamp = _ST_F64.unpack_from(self.shm_handle.buf, self._timestamp_offset)[0]
-        if producer_timestamp > 0:  # Will be 0.0 on first frame before sender writes
+        result = self._try_acquire()
+        if result is None:
+            return None
+        read_slot = result.slot
+        producer_timestamp = result.timestamp
+        if producer_timestamp > 0:
             self.last_latency = (time.perf_counter() - producer_timestamp) * 1000
         else:
             self.last_latency = 0.0
 
-        # Stream-ordered wait using CuPy's stream system
+        conn = self._conn
+
         if stream is None:
             stream = cp.cuda.get_current_stream()
         else:
-            # Resolve stream pointer if torch.cuda.Stream or raw int
             if not isinstance(stream, cp.cuda.Stream):
                 cuda_stream_ptr = self._resolve_stream(stream)
-                # Wrap raw pointer as CuPy stream for consistency
                 stream = cp.cuda.ExternalStream(cuda_stream_ptr)
 
-        # Issue stream wait event (GPU-side, non-blocking to CPU)
-        if self.ipc_events[read_slot]:
-            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(self.ipc_events[read_slot]), 0)
-        # Note: No fallback needed - CuPy operations will naturally wait on stream
+        if conn.ipc_events[read_slot]:
+            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
 
-        # Return pre-created zero-copy CuPy array for this slot
-        return self.cupy_arrays[read_slot]
+        return self._cupy.arrays[read_slot]
+
+    # ------------------------------------------------------------------
+    # Re-initialization (TD sender restarted with new IPC handles)
+    # ------------------------------------------------------------------
 
     def _reinitialize(self) -> None:
         """Re-open all IPC handles after TD re-initialization."""
+        old_conn = self._conn
+        shm = old_conn.shm_handle  # keep SHM alive across handle close
 
-        # Close old handles
-        for slot, dev_ptr in enumerate(self.dev_ptrs):
-            if dev_ptr is not None:
-                try:
-                    self.cuda.ipc_close_mem_handle(dev_ptr)
-                    logger.debug("Closed old IPC handle for slot %d", slot)
-                except (RuntimeError, OSError) as e:
-                    logger.warning("Error closing slot %d: %s", slot, e)
+        # Close old IPC handles only (SHM stays open)
+        old_conn.close_ipc_handles()
 
-        # Destroy old events before re-opening (fix per NVIDIA simpleIPC)
-        for slot, event in enumerate(self.ipc_events):
-            if event is not None:
-                try:
-                    self.cuda.destroy_event(event)
-                    logger.debug("Destroyed old IPC event for slot %d", slot)
-                except (RuntimeError, OSError) as e:
-                    logger.warning("Error destroying event for slot %d: %s", slot, e)
+        # Re-read version and num_slots
+        new_ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
+        new_num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
 
-        # Read new version and num_slots
-        self.ipc_version = struct.unpack(
-            "<Q", bytes(self.shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE])
-        )[0]
-        self.num_slots = struct.unpack(
-            "<I", bytes(self.shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE])
-        )[0]
-
-        # Recompute cached offsets (num_slots may have changed)
-        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        self._timestamp_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
-
-        # Re-read metadata (shape/dtype may have changed since last init)
-        metadata_offset = self._shutdown_offset + SHUTDOWN_FLAG_SIZE
+        # Re-parse format metadata (shape/dtype may have changed)
+        new_layout = SHMLayout(new_num_slots)
+        metadata_offset = new_layout.metadata_offset
+        new_fmt = self._format  # fallback: keep existing
         try:
-            width = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(self.shm_handle.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            kind, bits, flags = _ST_BBH.unpack(bytes(self.shm_handle.buf[metadata_offset + 12 : metadata_offset + 16]))
+            width = struct.unpack("<I", bytes(shm.buf[metadata_offset : metadata_offset + 4]))[0]
+            height = struct.unpack("<I", bytes(shm.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
+            num_comps = struct.unpack("<I", bytes(shm.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
+            kind, bits, flags = _ST_BBH.unpack(bytes(shm.buf[metadata_offset + 12 : metadata_offset + 16]))
             if width > 0 and height > 0 and num_comps > 0:
+                new_dtype_str = _decode_dtype_str(kind, bits, flags)
                 new_shape = (height, width, num_comps)
-                new_dtype = _decode_dtype_str(kind, bits, flags)
-                if new_shape != self.shape or new_dtype != self.dtype:
-                    logger.info(
-                        "Metadata changed on reinit: %s %s -> %s %s",
-                        self.shape,
-                        self.dtype,
-                        new_shape,
-                        new_dtype,
-                    )
-                    self.shape = new_shape
-                    self.dtype = new_dtype
-                    # Free pinned allocation before invalidating pointer (avoids memory leak)
-                    if self._pinned_ptr is not None:
-                        try:
-                            self.cuda.free_host(self._pinned_ptr)
-                        except (RuntimeError, OSError) as e:
-                            logger.debug("free_host failed during reinit: %s", e)
-                    self._pinned_ptr = None
-                    self._clear_host_registered()
-                    self._numpy_buffer = None  # Force reallocation on next get_frame_numpy()
+                itemsize = _DTYPE_SIZES.get(new_dtype_str, bits // 8 or 4)
+                new_fmt = Format(
+                    width=width,
+                    height=height,
+                    num_comps=num_comps,
+                    kind=kind,
+                    bits=bits,
+                    flags=flags,
+                    dtype_str=new_dtype_str,
+                    shape=new_shape,
+                    numpy_dtype=np.dtype(new_dtype_str) if NUMPY_AVAILABLE else None,
+                    frame_nbytes=height * width * num_comps * itemsize,
+                )
         except (struct.error, ValueError, IndexError) as e:
             logger.debug("Could not re-read metadata during reinit: %s", e)
 
-        # Reinitialize arrays
-        self.ipc_handles = [None] * self.num_slots
-        self.dev_ptrs = [None] * self.num_slots
-        self.ipc_events = [None] * self.num_slots
-        self.tensors = [None] * self.num_slots
-        self._wrappers = [None] * self.num_slots
+        if new_fmt != self._format:
+            logger.info(
+                "Metadata changed on reinit: %s %s -> %s %s",
+                self._format.shape,
+                self._format.dtype_str,
+                new_fmt.shape,
+                new_fmt.dtype_str,
+            )
+            # Tear down numpy buffers — will be rebuilt lazily on next get_frame_numpy()
+            if self._numpy is not None:
+                self._numpy.close()
+                self._numpy = None
+            self.shape = new_fmt.shape
+            self.dtype = new_fmt.dtype_str
 
-        # Reopen all handles
-        for slot in range(self.num_slots):
-            base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+        self._format = new_fmt
 
-            # Read memory handle (64 bytes)
-            mem_handle_bytes = bytes(self.shm_handle.buf[base_offset : base_offset + 64])
-            self.ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+        # Rebuild IPC connection (reusing the still-open SHM handle)
+        new_conn = self._open_ipc_slots(old_conn.cuda, shm, new_num_slots, new_ipc_version, new_fmt)
+        self._conn = new_conn
 
-            # Open IPC memory handle
-            self.dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(self.ipc_handles[slot], flags=1)
+        # Rebuild torch buffers (cupy not rebuilt — matches pre-refactor behavior)
+        if TORCH_AVAILABLE:
+            self._torch = TorchBuffers.build(new_conn, new_fmt)
 
-            # Read event handle (64 bytes)
-            event_handle_bytes = bytes(self.shm_handle.buf[base_offset + 64 : base_offset + 128])
-            if any(event_handle_bytes):
-                try:
-                    ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                    self.ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
-                except (RuntimeError, OSError) as e:
-                    logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
-                    self.ipc_events[slot] = None
+        logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
+        for slot in range(new_num_slots):
+            logger.debug("Slot %d: GPU at 0x%016x", slot, new_conn.dev_ptrs[slot].value)
 
-            # Create tensor view for this slot if torch available
-            if TORCH_AVAILABLE:
-                self.tensors[slot] = self._create_tensor_view(slot)
-
-        logger.debug("Reopened %d IPC handles v%d", self.num_slots, self.ipc_version)
-        for slot in range(self.num_slots):
-            logger.debug("Slot %d: GPU at 0x%016x", slot, self.dev_ptrs[slot].value)
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
         """Cleanup CUDA IPC resources."""
-        # Close all IPC handles
-        if self.dev_ptrs and self.cuda is not None:
-            for slot, dev_ptr in enumerate(self.dev_ptrs):
-                if dev_ptr is not None:
-                    try:
-                        self.cuda.ipc_close_mem_handle(dev_ptr)
-                        logger.info("Closed IPC handle for slot %d", slot)
-                    except (RuntimeError, OSError) as e:
-                        logger.error("Error closing IPC handle for slot %d: %s", slot, e)
-
-        # Destroy all IPC events (fix per NVIDIA simpleIPC: even opened handles consume resources)
-        if self.ipc_events and self.cuda is not None:
-            for slot, event in enumerate(self.ipc_events):
-                if event is not None:
-                    try:
-                        self.cuda.destroy_event(event)
-                        logger.info("Destroyed IPC event for slot %d", slot)
-                    except (RuntimeError, OSError) as e:
-                        logger.error("Error destroying event for slot %d: %s", slot, e)
-
-        if self._pinned_ptr is not None and self.cuda:
-            try:
-                self.cuda.free_host(self._pinned_ptr)
-                logger.debug("Freed pinned numpy buffer")
-            except (RuntimeError, OSError) as e:
-                logger.debug("free_host skipped (context gone): %s", e)
-            self._pinned_ptr = None
-            self._numpy_buffer = None
-
-        if getattr(self, "_host_registered_arr", None) is not None and self.cuda is not None:
-            self._clear_host_registered()
-            self._numpy_buffer = None
-
-        # Destroy multi-stream D2H events and extra streams (slots 1..n_streams-1)
-        if self.cuda is not None:
-            for evt in getattr(self, "_d2h_events", []):
-                if evt is not None:
-                    with contextlib.suppress(RuntimeError, OSError):
-                        self.cuda.destroy_event(evt)
-            self._d2h_events = []
-            for i, stream in enumerate(getattr(self, "_d2h_streams", [])):
-                if i == 0:
-                    continue  # slot 0 is _numpy_stream, destroyed below
-                if stream is not None:
-                    with contextlib.suppress(RuntimeError, OSError):
-                        self.cuda.destroy_stream(stream)
-            self._d2h_streams = []
-
-        # Destroy numpy stream
-        if self._numpy_stream is not None and self.cuda is not None:
-            try:
-                self.cuda.destroy_stream(self._numpy_stream)
-                logger.debug("Destroyed numpy stream")
-            except (RuntimeError, OSError) as e:
-                # Expected when producer has already cleaned up its CUDA context
-                # (e.g. error 400: invalid resource handle in cross-process IPC teardown)
-                logger.debug("numpy stream destroy skipped (context gone): %s", e)
-
-        # Close SharedMemory
-        if self.shm_handle is not None:
-            try:
-                self.shm_handle.close()
-                # Note: Don't unlink - TouchDesigner owns it
-                logger.info("Closed SharedMemory")
-            except (OSError, BufferError) as e:
-                logger.error("Error closing SharedMemory: %s", e)
-
-        # Clear all state arrays (fix stale reference accumulation)
-        self.tensors = []
-        self._wrappers = []
-        self.dev_ptrs = []
-        self.ipc_handles = []
-        self.ipc_events = []
-
+        if getattr(self, "_numpy", None) is not None:
+            self._numpy.close()
+            self._numpy = None
+        if getattr(self, "_conn", None) is not None:
+            self._conn.close()
+            self._conn = None
+        # TorchBuffers and CupyBuffers hold zero-copy views; GC reclaims on deref
+        self._torch = None
+        self._cupy = None
+        self._format = None
         self._initialized = False
         logger.info("Cleanup complete")
 
     def __del__(self) -> None:
-        """Destructor - cleanup on garbage collection."""
-        if self._initialized:
+        if getattr(self, "_initialized", False):
             self.cleanup()
 
     def __enter__(self) -> CUDAIPCImporter:
-        """Enter context manager."""
         return self
 
     def __exit__(
@@ -1243,50 +1260,42 @@ class CUDAIPCImporter:
         exc_val: BaseException | None,
         exc_tb: object,
     ) -> None:
-        """Exit context manager — cleanup resources."""
         self.cleanup()
-        return None  # Don't suppress exceptions
+        return None
+
+    # ------------------------------------------------------------------
+    # Status / stats
+    # ------------------------------------------------------------------
 
     def is_ready(self) -> bool:
-        """Check if importer is ready for frame access.
-
-        Returns:
-            True if initialized and ready, False otherwise
-        """
-        return self._initialized and len(self.dev_ptrs) > 0 and all(ptr is not None for ptr in self.dev_ptrs)
+        """Check if importer is ready for frame access."""
+        if not self._initialized or self._conn is None:
+            return False
+        return len(self._conn.dev_ptrs) > 0 and all(ptr is not None for ptr in self._conn.dev_ptrs)
 
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
-        """Attach an NVMLObserver for GPU telemetry in get_stats().
-
-        Args:
-            observer: NVMLObserver instance (must already be started).
-        """
+        """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
 
     def get_stats(self) -> dict[str, object]:
-        """Get importer statistics.
+        """Get importer statistics."""
+        conn = self._conn
+        dev_ptrs = conn.dev_ptrs if conn is not None else []
+        num_slots = conn.num_slots if conn is not None else 0
+        tensors = self._torch.tensors if self._torch is not None else []
 
-        Returns:
-            Dictionary with importer stats.
-            Includes 'nvml' sub-dict when an NVMLObserver is attached.
-            Includes N1 spin/sleep hit counters when spin budget > 0.
-        """
         stats: dict[str, object] = {
             "initialized": self._initialized,
             "shape": self.shape,
             "dtype": self.dtype,
             "frame_count": self.frame_count,
             "shm_name": self.shm_name,
-            "num_slots": self.num_slots,
+            "num_slots": num_slots,
             "torch_available": TORCH_AVAILABLE,
             "numpy_available": NUMPY_AVAILABLE,
-            "dev_ptrs": (
-                [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self.dev_ptrs] if hasattr(self, "dev_ptrs") else []
-            ),
+            "dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in dev_ptrs],
             "tensor_device": (
-                str(self.tensors[0].device)
-                if TORCH_AVAILABLE and self.tensors and self.tensors[0] is not None
-                else "N/A"
+                str(tensors[0].device) if TORCH_AVAILABLE and tensors and tensors[0] is not None else "N/A"
             ),
             "wait_spin_hits": self.wait_spin_hits,
             "wait_sleep_hits": self.wait_sleep_hits,

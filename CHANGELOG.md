@@ -5,7 +5,241 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.1] — 2026-05-10
+
+### Added
+
+- **Read-only `Status` custom parameter** on the CUDAIPCLink COMP surfaces engine state at a glance. Displays `"WARNING: <msg>"` / `"ERROR: <msg>"` during fault conditions; `"<W>x<H> <dtype> <ch>ch"` (e.g. `"1920x1080 float32 4ch"`) on each successful frame; `"Idle"` when the component is inactive or clear. Wired via the new `TDHost.set_info_status()` protocol method and `_write_status_par()` dedup helper (`td_exporter/TDHost.py`); call sites in `TDSenderEngine` (after a successful `cuda_memory()` fetch) and `TDReceiverEngine` (after `copyCUDAMemory`). Per-frame dedup avoids hammering the par on steady-state transfers. Regression test: `tests/test_tdhost_status_par.py` (12 cases).
+- **`warning_emitter` Script TOP child** driven by COMP storage emits a local `addWarning` badge INSIDE the COMP alongside the COMP-body tint. Provides a second visible warning surface when the user opens the COMP network. New file `td_exporter/warning_emitter_callbacks.py`. State-transition-gated to avoid redundant force-cooks every bad frame. Regression test: `tests/test_tdhost_warning_emitter.py`.
+
+### Fixed
+
+- **Stale COMP tint at extension boot** — `RealTDHost.__init__` now invokes `_reset_stale_tint()`, which detects a COMP saved in a warning/error-tinted state, restores the default grey colour, clears script errors, and unstores the `"cuda_link_status_msg"` key. Previously the `.tox` booted yellow if it had been saved mid-warning (e.g. during development). Regression test: `tests/test_tdhost_init_reset.py`.
+- **Active toggle off now resets COMP to grey and writes `"Idle"` to Status par** — `parexecute_callbacks.py:handle_active_change` deactivation branch calls `ext._host.clear_status()` after `ext.cleanup()`. Previously the COMP stayed tinted and the Status par retained the last frame's resolution/dtype or warning string after deactivation.
+- **Status-par dtype label showed `"<class 'numpy.uint8'>"` instead of `"uint8"`** — TD's `shape.dataType` is the numpy TYPE class, not a dtype instance (no `.name` attribute). Fixed by chaining `getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt))` in both `TDSender.py` and `TDReceiver.py`.
+- **Unsupported-pixel-format warning message shortened** — `TDSender.py:783` now emits `f"unsupported pixel format {src_fmt!r}"` instead of a verbose 3-line instructional string. The full instructional text remains in the per-episode `_log()` call (textport output). Status par now displays `"WARNING: unsupported pixel format '11:11:10'"` — readable at a glance in the Custom Pars panel.
+- **`clear_status()` sentinel renamed `"OK"` → `"Idle"`** — better semantic match for "no transfer in progress, no warning"; used in Status par and `warning_emitter` state.
+- **`test_activation_barrier` failures on Windows when a live TD session holds the named SHM segment** — Windows SHM lifetime is handle-bound; `SharedMemory.unlink()` is a no-op while another process holds an open handle, so the test fixture's cleanup silently failed and subsequent counter assertions read production-accumulated values (e.g. `assert 73 == 3`). Fixed in `tests/test_activation_barrier.py`: `cleanup_barrier` fixture now re-zeros the SHM header in-place if external cleanup fails, giving each test a deterministic zero state; `test_open_or_create_raises_when_missing_and_no_create` conditionally skips with a descriptive reason when an external holder is detected.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.4.0` → `1.4.1`.
+- **`docs/BENCHMARKS.md` added** — consolidates every benchmark table previously embedded in `README.md` §Performance / §Benchmarks (RTX 4090 / PCIe 4.0 / driver 596.36 numbers). `README.md` §Benchmarks is now a concise summary linking here.
+- **`benchmarks/` moved to local-only** — gitignored and removed from the git index (`git rm --cached -r`). Scripts remain on contributor disks; numbers are preserved in `docs/BENCHMARKS.md`.
+- **`CONTEXT.md` moved to local-only** — gitignored and removed from the git index. Architecture vocabulary is covered by `docs/ARCHITECTURE.md`.
+- **Test gate**: `272 passed, 3 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts; `test_activation_barrier` SHM-external-holder test skips when a live TD session is running).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.4.1.tox` to be built by the user separately. `v1.4.0` retained per versioned-binary tracking policy.
+
+---
+
+## [1.4.0] — 2026-05-10
+
+### Changed
+
+- **Unsupported pixel formats now tint the component yellow instead of auto-converting** (**breaking**) — `TDSenderEngine` no longer routes float16, 10:10:10:2, and 11:11:10 pixel formats through a `dtype_converter` Transform TOP. Instead, when `cudaMemory()` would reject or silently corrupt the source format, the sender skips frames and tints the component node body **yellow** (`parent().color`) every bad frame; the first bad frame per episode also logs once. The tint clears automatically as soon as the upstream source TOP format is corrected and transfer resumes. Engine-fatal errors (IPC/GPU init failure) tint the component **red** and emit a red `addScriptError` badge. Users who previously relied on silent auto-conversion must fix the upstream source TOP's Pixel Format parameter. The `dtype_converter` Transform TOP inside the `.tox` is now dead weight; rebuild without it as `CUDAIPCLink_v1.4.0.tox` (wire `input → ExportBuffer` directly). API rename: `_needs_format_conversion` → `_is_unsupported_format`; `TDHost.add_warning`/`clear_warning` → `set_warning_status`/`set_error_status`/`clear_status`. Regression test: `tests/test_tdsender_format_warning.py`.
+
+### Fixed
+
+- **Yellow tint no longer sticks after a bad-format episode is resolved** (Bug 1 — H1 confirmed) — `RealTDHost` previously cached `parent().color` at construction time; if the `.tox` was saved while tinted, or the extension re-initialised after a bad frame had already run, `_default_color` was stored as the warning colour and `clear_status()` faithfully restored it to yellow. `_default_color` is now captured lazily on the first `set_warning_status` / `set_error_status` call and excluded from the cache when it equals a managed colour, falling back to TD's default node grey. Regression test: `tests/test_tdhost_default_color_cache.py`.
+- **Dead `cooking_op=me` plumbing removed** (Bug 2 — H5 confirmed; H1–H4 and cook-context-propagation theory disproved) — Phase E shipped `callbacks_template.py:onFrameEnd` passing `cooking_op=me` to `export_frame()`, which called `me.addWarning(msg)` to emit a yellow badge on the Execute DAT. Live TD probes (`verification/results/probe_addwarning_*`, `verification/results/probe_cook_context_*`) disproved every plausible path: H5 (`tdError: Cannot set warning outside of cook` — `addWarning` is illegal in `onFrameEnd`) blocked the Execute DAT path; the child-Script-TOP-cook path (`addWarning` succeeds in `onCook` per H5a, confirmed) was blocked by H5b (TD does not propagate the child warning to the parent COMP boundary tile — neither `comp.warnings()` aggregates it, nor does a visual badge appear). The COMP body tint is the only COMP-local warning surface. All `cooking_op` plumbing removed: `TDSender.export_frame` signature, `CUDAIPCExtension.export_frame` wrapper, `callbacks_template.py:onFrameEnd`. The `_FakeCookingOp` helper and the three `test_cooking_op_*` tests locked in the wrong contract and are dropped; replaced by two host-boundary regression tests (`test_export_frame_bad_format_returns_false_and_warns_host`, `test_export_frame_good_format_after_bad_calls_clear_status`) in `tests/test_tdsender_format_warning.py`.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.3.0` → `1.4.0`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.4.0.tox` to be built from the updated component tree (no `dtype_converter` Transform TOP — wire `input → ExportBuffer` directly per `docs/TOX_BUILD_GUIDE.md`). Prior `.tox` versions (`v1.2.1`, `v1.3.0`) retained per versioned-binary tracking policy.
+- **Test gate**: `247 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
+
+## [1.3.0] — 2026-05-09
+
+### Changed — Internal Architecture (Deepening pass)
+
+- **SHM protocol extracted to standalone module** — `SHMProtocol.py` now owns the v0.5.0 binary layout (20-byte header, 128-byte slots, shutdown flag, metadata, timestamp). Mirror pair `src/cuda_link/shm_protocol.py` ↔ `td_exporter/SHMProtocol.py` is byte-identical (commit `0ee8cbf`, Deepening A).
+- **TDReceiverEngine deepened with value objects** — `ReceiverConnection`, `FormatDescriptor`, and `RetryState` replace ad-hoc state attributes; retry logic concentrated in one place (commit `3ceab97`, Deepening B).
+- **TDHost seam activated in engines** — `TDSenderEngine` and `TDReceiverEngine` now talk to TouchDesigner exclusively through the `TDHost` / `TOPHandle` adapter protocol; `RealTDHost` and `FakeTDHost` are interchangeable for tests (commit `1c9aa98`, Deepening C).
+- **CUDAIPCImporter deepened** — split into `IPCConnection` + `Format` + per-backend value objects, replacing shallow attribute access with an explicit lifecycle (commit `e2cdb45`, Deepening D, retires deferred item #6).
+- **Activation barrier extracted into dataclasses** — `ProducerActivationBarrier` (`src/cuda_link/cuda_ipc_exporter.py:107`) and `SenderActivationBarrier` (`td_exporter/TDSender.py:65`) replace 5 scattered `_barrier_*` attrs per consumer. Lifecycle now flows through `from_env` / `from_config` / `acquire` / `arm_settle_countdown` / `tick_and_maybe_release` / `force_release` / `should_skip_publish` / `close`. Behavior preserved; log line origins shift but shape unchanged. `CUDALINK_ACTIVATION_BARRIER` default remains `"1"` (commit `d67c143`, Deferred #7).
+- **CUDA wrapper split into types + graphs** — `cuda_runtime_types.py` (ctypes structs, type aliases, `CUDAError`, `CUDART_GRAPHS_MIN_VERSION`) and `cuda_graphs.py` (`CUDAGraphsMixin`, 13 graph-lifecycle methods) extracted from the 1455-LOC `cuda_ipc_wrapper.py`. `CUDARuntimeAPI(CUDAGraphsMixin)` keeps the public API byte-stable; callers (`cuda_ipc_exporter`, `cuda_ipc_importer`, `TDSender`, `TDReceiver`, tests) migrated off the wrapper shim to import types from the canonical location. Mirror invariant extended: `cuda_runtime_types.py` ↔ `td_exporter/CUDARuntimeTypes.py` and `cuda_graphs.py` ↔ `td_exporter/CUDAGraphs.py`. Wrapper shrinks from 1455 → ~660 LOC (commits `415f7b2`, `7a4b5cb`, `67f20a2`; merge `43fd4b9`; Deferred #3).
+
+### Removed — Internal
+
+- **7 test-only `@property` bridges deleted from `CUDAIPCExtension` facade** — approximately 50 test sites in `tests/test_extension_characterization.py` and `tests/test_cuda_ipc_exporter.py` rewritten to access `ext._engine.X` / `exporter._engine.X` directly. Three production bridges (`shm_name`, `num_slots`, `verbose_performance` at `td_exporter/CUDAIPCExtension.py:226-244`) are retained intentionally for parexecute-DAT callbacks. Out-of-tree consumers that touched the deleted bridges will need to migrate to `_engine` access (commit `4ad2a5c`, Deferred #5).
+
+### Fixed
+
+- **TDSender writes correct dtype metadata when format changes mid-stream** — `TDSenderEngine._write_metadata_to_shm()` now uses `cuda_mem.data_type` (`_detected_numpy_dtype`) as the authoritative source for `format_kind` and `bits_per_comp`, falling back to the allocation-size ratio only when the dtype is unavailable. Previously, when the source TOP's pixel format changed from RGBA32F to RGBA8 while TD's reported `cuda_mem.size` remained at the float32-sized allocation (padded/atlas buffer), the ratio `data_size / pixel_count = 4 bytes/pixel` produced `bits=32, kind=Float` even though the actual data was uint8. The receiver then correctly read this wrong metadata and decoded every uint8 byte as float32, producing `-3.4028e+38` (FLT_MIN) garbage in normalized views and the visual output appearing frozen. Regression tests: `tests/test_tdsender_dtype_metadata.py`.
+- **TDReceiver refreshes dtype in-place on SHM version bump** — The `VERSION_CHANGED` handler in `TDReceiverEngine.import_frame()` now calls the new `_refresh_on_version_change()` method before falling back to `cleanup()`. The refresh re-reads the 20-byte metadata block from SHM, rebuilds `self._format` and `self._cached_shape` (including `dataType`), and advances `ipc_version` — all without closing the SHM handle, IPC events, or stream. For genuine sender re-inits (new IPC handle bytes in SHM), the refresh also closes stale IPC imports and opens the new ones, preserving the SHM connection. This mirrors `CUDAIPCImporter._reinitialize`. The previous heavy `cleanup()`-and-reinit path remains as the fallback when the refresh returns False (corrupt metadata or failed handle re-import). Regression tests: `tests/test_tdreceiver_dtype_refresh.py`.
+- **TDSender metadata invariant with padded GPU allocations** — `TDSenderEngine._write_metadata_to_shm()` now writes `data_size = W*H*C*(bits/8)` (active-region size) instead of `self.data_size` (GPU allocation size). Previously, when TD reported the same `cuda_mem.size` across frames with different dimensions (padded or atlas allocations), the metadata-only-update branch updated `width`/`height`/`channels` but left `data_size` at the old allocation value. The new pixel count no longer divided evenly into the old allocation, `bits` fell back to 32, and the receiver invariant `W*H*C*(bits/8) == data_size` failed — causing the receiver to log `"Metadata size invariant failed … Sender/receiver protocol mismatch."` and loop indefinitely in `"Waiting for sender"`. In normal TD operation (no padding) the active-region size equals the allocation size, so there is no regression for existing users. Matches `CUDAIPCExporter` behaviour and the v1.0.0 protocol spec. Latent since `ddd8f0f`; surfaced by the v1.0.0 strict receiver invariant (`6afc49d`). Regression test: `tests/test_tdsender_metadata_only_update.py` (commit `a23b768`).
+- **Progress columns suppressed when `EXPORT_PROFILE` is off** — `avg_total` and `avg_memcpy` no longer print misleading `0.0 µs` when profiling is disabled (commit `8658dbe`).
+- **Protocol constants now route directly from `SHMProtocol`** in `CUDAIPCExtension` (commit `eb8b443`).
+- **10-bit and 11-bit pixel formats routed through `dtype_converter`** — Empirical probe (`verification/results/cuda_memory_probe_20260510_090919.json`, TD 2025.32820) found two production bugs in `_CUDA_UNSUPPORTED_PIXEL_FORMATS` (`td_exporter/TDSender.py:58`): (Bug A) 10-bit RGB / 2-bit Alpha fixed was rejected outright by `cudaMemory()` with "Source TOP has unsupported pixel format." — frames skipped forever, no auto-conversion fallback; (Bug B) 11-bit float (RGB) "succeeded" but returned `dataType=uint8, numComps=4` (raw 32-bit packed word byte layout, not the 11:11:10 float semantic) — receiver decoded garbage with no error log. Widened rejection substring set with `"10-bit"`, `"10bit"`, `"11-bit"`, `"11bit"`; all six problematic formats now route through `dtype_converter → rgba32float`. Regression test: `tests/test_tdsender_format_rejection.py`.
+
+### Docs
+
+- **Refreshed v1.2.1 benchmark numbers and aligned cross-doc citations** (commit `9f98a72`).
+
+### Internal
+
+- **`pyproject.toml` version**: `1.2.1` → `1.3.0`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.3.0.tox` rebuilt to include `CUDARuntimeTypes` and `CUDAGraphs` textDATs from the wrapper split. `TOXES/CUDAIPCLink_v1.2.1.tox` retained per versioned-binary tracking policy.
+- **Example `.toe` snapshots**: `CUDA_Link_Example.50.toe` (pre-wrapper-split, initial v1.3.0) retained as historical; `CUDA_Link_Example.51.toe` captures the post-wrapper-split COMP state. `Test_TD_Receiver1*.toe` and `SESSION_LOG.md` gitignored (commit `e0a5f49`).
+- **Mirror invariant** preserved across five module pairs: `shm_protocol.py`, `cuda_ipc_wrapper.py`, `activation_barrier.py`, `cuda_runtime_types.py`, `cuda_graphs.py` ↔ their `td_exporter/` twins.
+- **Test gate**: `212 passed, 2 skipped` (pure-Python suite; CUDA-marked tests auto-skip on CUDA-less hosts via `tests/conftest.py:34-50`).
+
+---
+
+## [1.2.1] — 2026-05-09
+
+### Fixed
+
+- **TDReceiver.import_frame() reconnect crash** — corrected two remaining calls to
+  `self.cleanup_receiver()` (left over from the v1.2.0 engine-split refactor) to call
+  `self.cleanup()`. Without this, the receiver crashed with `AttributeError:
+  'TDReceiverEngine' object has no attribute 'cleanup_receiver'` when the sender shut
+  down or restarted mid-session. Note: this fix was already mentioned in the v1.2.0
+  entry's `### Fixed` section but landed in commit `05cda3a` after the logical v1.2.0
+  release. v1.2.1 is the first tagged release where it ships.
+  (`td_exporter/TDReceiver.py`)
+- **`example_sender_python.py` Unicode banner** — replaced Unicode box-drawing
+  characters with ASCII to prevent encoding errors on Windows console code pages other
+  than UTF-8. (commit `30f7f2a`)
+- **`example_sender_python.py` progress-line cosmetics** — `avg_total` and
+  `avg_memcpy` columns are now suppressed when `CUDALINK_EXPORT_PROFILE=0`
+  (the default). Previously the two columns always printed as `0.0 µs`, which was
+  misleading. The leading `export=` wall-clock figure (always meaningful) is unaffected.
+  (commit `8658dbe`)
+
+### Added — Diagnostics & Profiling Infrastructure
+
+- **`scripts/profiling/v4_*` and `v5_*` capture runners** — cmd.exe scripts that
+  launch Nsight Systems against the TD pipeline with pinned consumer/producer process
+  pairs. v4 baseline (EXPORT_SYNC=1) and v5 (async-flush-probe: `EXPORT_SYNC=0` +
+  `EXPORT_FLUSH_PROBE=1` + HWS=2) recipes validated end-to-end. Each runner emits
+  standard Nsight summary CSVs via `nsys stats`. Includes `v4_analyze.cmd`
+  post-capture decomposition. (commits `c41fda0`, `2e6a20f`, `18420de`, `c3f4e19`,
+  plus reliability fixes `df0ec67`, `727634c`, `7862916`, `63f6036`, `112b620`)
+- **`scripts/profiling/v5b_slot0_outlier_mine.py`** — sqlite3-only Python script that
+  mines the v5 consumer nsys SQLite to classify every `import_frame.slot0` outlier
+  (>2 ms) into one of four hypotheses: H5 (D2A WDDM stall), H4 (event_wait blocking),
+  H2 (SHM poll wait / preemption), H1 (producer write-bias). Used to attribute the
+  residual 30 ms slot0 outlier to a single `cudaMemcpy2DToArrayAsync` CPU-side WDDM
+  fence. (commit `8cadef1`, documented in
+  `benchmarks/results/nsys/td_pipeline_v5_findings_extended.md §G`)
+- **WDDM queue capture flags** in nsys runners (`--trace=cuda,nvtx,wddm`,
+  WDDM_QUEUE_PACKET / DMA_PACKET event capture) — adds GPU command-buffer queue-depth
+  visibility for diagnosing WDDM scheduling-epoch gaps. (commit `c41fda0`)
+- **HWS state probe** — Python helper that reads
+  `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode` and reports
+  whether hardware-accelerated GPU scheduling is active. Used to verify the HWS=2
+  prerequisite before v5 captures. (commit `c3f4e19`)
+
+### Added — Documentation
+
+- **`docs/PROFILING.md` §5: "Parallel IPC consumers under nsys profiling"** — triage
+  note for the `cudaIpcOpenMemHandle err 400` failure mode when a second TD receiver
+  attaches while a first is profiled under `nsys --trace=cuda`. Documented as a known
+  nsys CUDA-driver-hook interaction (not a cuda-link bug) with workaround.
+  (commit `89546e8`)
+- **`docs/PROFILING.md` §8: "Async Export Path for Python-Sender Topologies"** —
+  flag-set documentation for `CUDALINK_EXPORT_SYNC=0` + `CUDALINK_EXPORT_FLUSH_PROBE=1`
+  in standalone Python-sender deployments. Includes measured trade-off table (producer
+  slot p50: 693.7 µs → 90.6 µs, −87 %; consumer event_wait +19 µs redistributed),
+  rationale for not flipping the global default, and HWS=2 prerequisite.
+  (commit `89546e8`)
+- **`docs/PROFILING.md` napkin math + SOL classification table + two-pass workflow +
+  CUDA Graph note** — restructured to lead with quick-decision tooling (when to use
+  nsys vs ncu) before diving into recipes. (commit `b40c943`)
+- **`docs/PROFILING.md` silent-redirect trap note** — documents that cmd.exe `>`
+  silently swallows `nsys export` errors; `--force-overwrite=true` and exit-code
+  checks added to all runners. (commit `5cebac6`)
+- **`benchmarks/results/nsys/td_pipeline_v5_findings_extended.md`** — v5 capture
+  analysis, async-flush-probe + HWS=2 validation (six acceptance criteria passed),
+  and §G slot0 outlier root-cause attribution table. (commit `41d9a14`, F1 closure
+  `8cadef1`)
+
+### Changed
+
+- **nsys / ncu runners hardened** — `--force-overwrite=true` on nsys;
+  `--cache-control all`, `--import-source yes`, and `--set` flag on ncu. Eliminates
+  silent-redirect failures and stale-cache misattributions. (commits `5cebac6`,
+  `404917e`, `2e6a20f`)
+- **`analyze_td_pipeline.py`** — gained CLI path arguments so the same script
+  analyses v4 and v5 captures without env-var hardcoding. (commit `2e6a20f`)
+- **TD installation path** bumped to `32820` in capture runners. (commit `18420de`)
+- **`pyproject.toml` dev-dep**: `nvtx>=0.2` added so contributors can run profiling
+  scripts without a separate `pip install nvtx`. (commit `77af0b7`)
+- **Benchmark refresh (v1.2.1, 2026-05-09)** — re-ran `bench_sweep.py` (full 16-cell),
+  `bench_graphs.py` (4 resolutions), and `bench_d2h_streams.py` (4 resolutions) on
+  RTX 4090 / driver 596.36 / PCIe 4.0 x16 / Windows 11 under v1.2.1 defaults
+  (EXPORT_SYNC=1, CUDALINK_USE_GRAPHS=1). Updated README, ARCHITECTURE, and
+  INTEGRATION_EXAMPLES citations. Notable changes vs v1.2.0 sweep: isolated
+  `export_frame()` p50 improved (512×512: 42→22 µs, 1080p: 138→117 µs, 4K: 400→367 µs);
+  IPC notify p50 tightened (~250→~136–286 µs range); D2H bench_d2h_streams largely
+  unchanged. Fresh `sweep_latest.csv` / `sweep_latest.json` committed (16-cell,
+  2026-05-09 03:23).
+
+### Internal
+
+- **CGW PreToolUse guardrail** — `cgw-pre-bash.sh` intercepts `git reset --hard` /
+  `git push --force` to non-PR branches before they execute. Local-only; not shipped
+  in the package. (commit `0a14945`)
+- **Example .toe project** bumped to `CUDA_Link_Example.45.toe`; new
+  `Test_TD_Receiver1.toe` added for parallel-receiver topology testing.
+  (commits `1fbbb61`, `fec21ca`, `72e1354`)
+- **`TOXES/CUDAIPCLink_v1.2.0.tox`** added; `v1.1.0.tox` retired per `.gitignore`
+  "only latest binary on main" policy. (commit `89a2b91`)
+- **`TOXES/CUDAIPCLink_v1.2.1.tox`** added (58 630 B, built 2026-05-09);
+  `v1.2.0.tox` retired from git index per the same policy. Updated
+  `docs/TOX_BUILD_GUIDE.md` filename and build-date references.
+
+---
+
+## [1.2.0] — 2026-05-07
+
+### Added
+
+- NVTX annotations on Sender/Receiver/Exporter/Importer phase boundaries
+  (env-gated via `CUDALINK_NVTX=1` / `CUDALINK_NVTX_VERBOSE=1`; zero cost when off).
+- `scripts/profiling/` — runner scripts for compute-sanitizer, nsys, and ncu
+  (Windows `.cmd`/`.ps1` + POSIX `.sh` parity).
+- `docs/PROFILING.md` — operational guide for Nsight workflow,
+  WDDM caveats, and `EXPORT_PROFILE` ↔ NVTX bridging.
+
+### Changed
+
+- **TD extension refactored into facade + engine split** (`CUDAIPCExtension.py` → ~300 LOC facade;
+  new `TDSender.py` / `TDReceiver.py` engine classes). `TDSenderEngine` owns all Sender-mode GPU
+  resources; `TDReceiverEngine` owns all Receiver-mode resources. Mode switches tear down the old
+  engine and construct a fresh one — zero cross-mode state leak. Public API (`export_frame`,
+  `import_frame`, `switch_mode`, etc.) is unchanged; existing `.tox` callback templates work
+  without modification.
+- **`TDHost` adapter seam** (`TDHost.py`) isolates all `ownerComp.par.*`, `op(...)`,
+  `top.cudaMemory()`, and `copyCUDAMemory()` calls from engine logic. Tests inject `FakeTDHost`
+  / `FakeTOPHandle` — no TD runtime required.
+- **`TDSenderConfig` frozen dataclass** (`TDConfig.py`) centralises all 11 `CUDALINK_*`
+  environment-variable reads. Constructed once at extension init; engines read only
+  `self._config.<field>`.
+- **`docs/TOX_BUILD_GUIDE.md`** updated: Component Structure diagram now shows all eight Text DATs
+  (`CUDAIPCWrapper`, `ActivationBarrier`, `NVMLObserver`, `TDHost`, `TDConfig`, `TDSender`,
+  `TDReceiver`, `CUDAIPCExporter`); Step 3 expanded with per-DAT assembly instructions.
+- **`docs/ARCHITECTURE.md`** and **`README.md`** Architecture section updated to document the
+  facade-with-delegation layout and TDHost seam.
+- **`CONTEXT.md`** created at repo root with canonical vocabulary for the new architecture.
+
+### Fixed
+
+- **Facade mode-gating** — `CUDAIPCExtension.import_frame()` / `export_frame()` now
+  return `False` when called in the wrong mode instead of dispatching to an engine that
+  lacks the method. Added `_check_deferred_cleanup()` and `update_receiver_resolution()`
+  delegations so `callbacks_template.py` / `script_top_callbacks.py` continue to work
+  without modification after the engine split. (`td_exporter/CUDAIPCExtension.py`)
+
+- **`TDReceiver.import_frame()` reconnect crash** — two internal calls to the removed
+  `self.cleanup_receiver()` (left over from the engine-split refactor) now correctly
+  call `self.cleanup()`. Without this, the receiver crashed with `AttributeError:
+  'TDReceiverEngine' object has no attribute 'cleanup_receiver'` the moment the sender
+  shut down or restarted mid-session. (`td_exporter/TDReceiver.py`)
 
 ## [1.1.0] — 2026-05-06
 
@@ -154,6 +388,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
 

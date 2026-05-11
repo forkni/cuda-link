@@ -1,80 +1,14 @@
 """
 Tests for CUDAIPCExporter (producer side, TouchDesigner).
 
-These tests use mocked TouchDesigner objects to test without TD runtime.
+These tests use FakeTDHost / FakeTOPHandle from conftest to drive the extension
+without a real TD runtime.
 """
 
 from __future__ import annotations
 
 import pytest
-
-# =============================================================================
-# Mock TouchDesigner Objects
-# =============================================================================
-
-
-class MockShape:
-    """Mock for TOP's cuda_mem.shape."""
-
-    def __init__(self, width: int, height: int, channels: int) -> None:
-        self.width = width
-        self.height = height
-        self.numComps = channels
-
-
-class MockCUDAMemory:
-    """Mock for top_op.cudaMemory()."""
-
-    def __init__(self, width: int = 512, height: int = 512, channels: int = 4, dtype_size: int = 4) -> None:
-        self.ptr = 0xDEADBEEF0000  # Simulated GPU pointer
-        self.shape = MockShape(width, height, channels)
-        self.size = width * height * channels * dtype_size
-
-
-class MockTOP:
-    """Mock for TouchDesigner TOP operator."""
-
-    def __init__(self, width: int = 512, height: int = 512, channels: int = 4) -> None:
-        self._cuda_mem = MockCUDAMemory(width, height, channels)
-
-    def cudaMemory(self, **kwargs: object) -> MockCUDAMemory:
-        """Mock cudaMemory() that accepts optional stream parameter."""
-        return self._cuda_mem
-
-
-class MockParValue:
-    """Mock for TD parameter value."""
-
-    def __init__(self, value: object) -> None:
-        self._value = value
-
-    def eval(self) -> object:
-        return self._value
-
-
-class MockPar:
-    """Mock for TD parameter container."""
-
-    def __init__(self, **kwargs: object) -> None:
-        for key, value in kwargs.items():
-            setattr(self, key, MockParValue(value))
-
-
-class MockCOMP:
-    """Mock for TD COMP operator."""
-
-    def __init__(self, name: str = "test_comp", **params: object) -> None:
-        self.name = name
-        self.par = MockPar(**params)
-        self._ops: dict = {}
-
-    def op(self, name: str) -> object:
-        """Return registered mock op or None (no TD network in tests)."""
-        return self._ops.get(name, None)
-
-    def parent(self) -> MockCOMP:
-        return self
-
+from conftest import FakeTDHost, FakeTOPHandle
 
 # =============================================================================
 # Tests
@@ -85,14 +19,13 @@ def test_init_default_params() -> None:
     """Test constructor with default mocked parameters."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname="test_ipc", Debug=False, Active=True, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": "test_ipc", "Debug": False, "Active": True, "Numslots": 3})
+    exporter = CUDAIPCExtension(None, host=host)
 
-    exporter = CUDAIPCExtension(owner)
-
-    assert exporter.ownerComp is owner
+    assert exporter._host is host
     assert exporter.shm_name == "test_ipc"
     assert exporter.num_slots == 3
-    assert not exporter._initialized
+    assert not exporter._engine._initialized
 
 
 def test_init_custom_memname() -> None:
@@ -100,9 +33,8 @@ def test_init_custom_memname() -> None:
     from CUDAIPCExtension import CUDAIPCExtension
 
     custom_name = "my_custom_ipc_name"
-    owner = MockCOMP(name="test_exporter", Ipcmemname=custom_name, Numslots=3)
-
-    exporter = CUDAIPCExtension(owner)
+    host = FakeTDHost(params={"Ipcmemname": custom_name, "Numslots": 3})
+    exporter = CUDAIPCExtension(None, host=host)
 
     assert exporter.shm_name == custom_name
 
@@ -111,12 +43,10 @@ def test_init_fallback_memname() -> None:
     """Test constructor uses fallback name if parameter missing."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    # Create owner without Ipcmemname parameter
-    owner = MockCOMP(name="test_exporter")
+    # No Ipcmemname parameter → should fall back to default
+    host = FakeTDHost(params={})
+    exporter = CUDAIPCExtension(None, host=host)
 
-    exporter = CUDAIPCExtension(owner)
-
-    # Should fall back to default name
     assert exporter.shm_name == "cudalink_output_ipc"
 
 
@@ -124,13 +54,12 @@ def test_init_custom_numslots() -> None:
     """Test constructor reads Numslots parameter."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Numslots=4)
-
-    exporter = CUDAIPCExtension(owner)
+    host = FakeTDHost(params={"Numslots": 4})
+    exporter = CUDAIPCExtension(None, host=host)
 
     assert exporter.num_slots == 4
-    assert len(exporter.dev_ptrs) == 4
-    assert len(exporter.ipc_handles) == 4
+    assert len(exporter._engine.dev_ptrs) == 4
+    assert len(exporter._engine.ipc_handles) == 4
 
 
 @pytest.mark.requires_cuda
@@ -138,18 +67,18 @@ def test_initialize_allocates_buffers(cuda_runtime: object, temp_shm_name: str, 
     """Test initialize() creates GPU buffers."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname=temp_shm_name, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
 
-    exporter = CUDAIPCExtension(owner)
-    exporter.cuda = cuda_runtime  # Inject real CUDA runtime
+    exporter = CUDAIPCExtension(None, host=host)
+    exporter._engine.cuda = cuda_runtime  # Inject real CUDA runtime
 
     # Initialize
     success = exporter.initialize(width=64, height=64, channels=4)
 
     assert success
-    assert exporter._initialized
-    assert all(ptr is not None for ptr in exporter.dev_ptrs)
+    assert exporter._engine._initialized
+    assert all(ptr is not None for ptr in exporter._engine.dev_ptrs)
 
     # Cleanup
     exporter.cleanup()
@@ -160,23 +89,23 @@ def test_initialize_creates_shm(cuda_runtime: object, temp_shm_name: str, shared
     """Test initialize() creates SharedMemory with correct size."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname=temp_shm_name, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
 
-    exporter = CUDAIPCExtension(owner)
-    exporter.cuda = cuda_runtime
+    exporter = CUDAIPCExtension(None, host=host)
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     success = exporter.initialize(width=64, height=64, channels=4)
 
     assert success
-    assert exporter.shm_handle is not None
+    assert exporter._engine.shm_handle is not None
 
     # Verify SharedMemory size
     # 20 (header: 4B magic + 8B version + 4B num_slots + 4B write_idx)
     # + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
     expected_size = 20 + 3 * 128 + 1 + 20 + 8
-    assert len(exporter.shm_handle.buf) >= expected_size
+    assert len(exporter._engine.shm_handle.buf) >= expected_size
 
     # Cleanup
     exporter.cleanup()
@@ -189,20 +118,20 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
 
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname=temp_shm_name, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
 
-    exporter = CUDAIPCExtension(owner)
-    exporter.cuda = cuda_runtime
+    exporter = CUDAIPCExtension(None, host=host)
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=64, height=64, channels=4)
 
     # Read header (offsets: magic=0-3, version=4-11, num_slots=12-15, write_idx=16-19)
-    magic = struct.unpack("<I", bytes(exporter.shm_handle.buf[0:4]))[0]
-    version = struct.unpack("<Q", bytes(exporter.shm_handle.buf[4:12]))[0]
-    num_slots = struct.unpack("<I", bytes(exporter.shm_handle.buf[12:16]))[0]
-    write_idx = struct.unpack("<I", bytes(exporter.shm_handle.buf[16:20]))[0]
+    magic = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[0:4]))[0]
+    version = struct.unpack("<Q", bytes(exporter._engine.shm_handle.buf[4:12]))[0]
+    num_slots = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[12:16]))[0]
+    write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
 
     assert magic == 0x43495044  # "CIPD" magic number
     assert version >= 1  # Should be at least 1 after initialization
@@ -220,22 +149,18 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
 
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname=temp_shm_name, Active=True, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Active": True, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
 
-    exporter = CUDAIPCExtension(owner)
-    exporter.cuda = cuda_runtime
+    exporter = CUDAIPCExtension(None, host=host)
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=8, height=8, channels=4)
 
-    # Allocate a real GPU buffer for mock TOP (can't use fake pointer for memcpy)
+    # Allocate a real GPU buffer and register as ExportBuffer
     real_gpu_ptr = cuda_runtime.malloc(8 * 8 * 4 * 4)  # 8x8x4 channels, float32
-
-    # Create mock TOP with real GPU pointer and register as ExportBuffer
-    mock_top = MockTOP(width=8, height=8, channels=4)
-    mock_top._cuda_mem.ptr = real_gpu_ptr.value  # Use real GPU pointer
-    owner._ops["ExportBuffer"] = mock_top  # export_frame() resolves this internally
+    host._tops["ExportBuffer"] = FakeTOPHandle(width=8, height=8, channels=4, gpu_ptr=real_gpu_ptr.value)
 
     try:
         # Export 5 frames and verify slot rotation
@@ -249,15 +174,15 @@ def test_ring_buffer_rotation(cuda_runtime: object, temp_shm_name: str, shared_m
 
         for expected_write_idx, expected_slot in expected_sequence:
             # Verify slot calculation
-            slot_before = exporter.write_idx % exporter.num_slots
+            slot_before = exporter._engine.write_idx % exporter.num_slots
             assert slot_before == expected_slot
 
             # Export frame
-            success = exporter.export_frame(mock_top)
+            success = exporter.export_frame()
             assert success
 
             # Verify write_idx incremented in SharedMemory (offset 16-19)
-            write_idx = struct.unpack("<I", bytes(exporter.shm_handle.buf[16:20]))[0]
+            write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
             assert write_idx == expected_write_idx + 1
 
     finally:
@@ -271,21 +196,21 @@ def test_cleanup_frees_resources(cuda_runtime: object, temp_shm_name: str, share
     """Test cleanup() frees GPU buffers and sets shutdown flag."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname=temp_shm_name, Numslots=3)
+    host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
 
-    exporter = CUDAIPCExtension(owner)
-    exporter.cuda = cuda_runtime
+    exporter = CUDAIPCExtension(None, host=host)
+    exporter._engine.cuda = cuda_runtime
 
     # Initialize
     exporter.initialize(width=64, height=64, channels=4)
-    assert exporter._initialized
+    assert exporter._engine._initialized
 
     # Cleanup
     exporter.cleanup()
 
     # Verify state
-    assert not exporter._initialized
+    assert not exporter._engine._initialized
 
     # Verify shutdown flag set (byte 592 for 3 slots)
     # Note: SharedMemory might be closed, so we can't always read this
@@ -296,9 +221,8 @@ def test_get_stats_format() -> None:
     """Test get_stats() returns correct dictionary structure."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname="test_ipc", Numslots=3)
-
-    exporter = CUDAIPCExtension(owner)
+    host = FakeTDHost(params={"Ipcmemname": "test_ipc", "Numslots": 3})
+    exporter = CUDAIPCExtension(None, host=host)
 
     stats = exporter.get_stats()
 
@@ -317,9 +241,8 @@ def test_is_ready_false_before_init() -> None:
     """Test is_ready() returns False before initialization."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Ipcmemname="test_ipc")
-
-    exporter = CUDAIPCExtension(owner)
+    host = FakeTDHost(params={"Ipcmemname": "test_ipc"})
+    exporter = CUDAIPCExtension(None, host=host)
 
     assert not exporter.is_ready()
 
@@ -328,9 +251,8 @@ def test_log_helper() -> None:
     """Test _log() helper method with verbosity control."""
     from CUDAIPCExtension import CUDAIPCExtension
 
-    owner = MockCOMP(name="test_exporter", Debug=False)
-
-    exporter = CUDAIPCExtension(owner)
+    host = FakeTDHost(params={"Debug": False})
+    exporter = CUDAIPCExtension(None, host=host)
 
     # Should not crash with verbosity off
     exporter._log("Test message")
@@ -344,23 +266,26 @@ def test_log_helper() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Improvement 4: GPU-side float16→float32 conversion in TD receiver
+# GPU-side float16→float32 conversion in TD receiver
 # ---------------------------------------------------------------------------
 
 
 def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
-    """Build a CUDAIPCExtension (Receiver) with manually-injected float16 state.
+    """Build a TDReceiverEngine with manually-injected float16 state.
 
     Bypasses real CUDA/CuPy initialization to test routing logic only.
+    Returns a TDReceiverEngine directly (no facade needed for unit tests).
     """
     import struct
     from unittest.mock import MagicMock, patch
 
     import numpy as np
+    from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE
 
-    # Patch Mode parameter before construction so __init__ thinks it's Receiver
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", use_cupy):
-        from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE, CUDAIPCExtension
+    from cuda_link.shm_protocol import SHMLayout
+
+    with patch("TDReceiver.CUPY_AVAILABLE", use_cupy):
+        from TDReceiver import FormatDescriptor, ReceiverConnection, RetryState, TDReceiverEngine
 
     HEIGHT, WIDTH, COMPS = 4, 4, 4
     NUM_SLOTS = 2
@@ -374,103 +299,115 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     struct.pack_into("<I", buf, 12, NUM_SLOTS)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1
 
-    ext = object.__new__(CUDAIPCExtension)
-    ext.ownerComp = MagicMock()
-    ext.ownerComp.par.Active.eval.return_value = True
-    ext._active_par = ext.ownerComp.par.Active  # cached par ref (set in __init__)
-    ext.verbose_performance = False
-    ext._initialized = True
-    ext._mode = "Receiver"
-    ext.frame_count = 0
-    ext._rx_last_write_idx = 0
-    ext._rx_ipc_version = 1
-    ext._rx_num_slots = NUM_SLOTS
-    ext._rx_shutdown_offset = SHM_HEADER_SIZE + (NUM_SLOTS * SLOT_SIZE)
-    ext._rx_width = WIDTH
-    ext._rx_height = HEIGHT
-    ext._rx_num_comps = COMPS
-    ext._rx_format_kind = FORMAT_KIND_FLOAT
-    ext._rx_bits_per_comp = 16
-    ext._rx_flags = 0
-    ext._rx_buffer_size = F16_SIZE
-    ext._rx_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
-    ext._rx_dev_ptrs[0].value = 0xDEAD0000  # fake GPU ptr for slot 0
-    ext._rx_ipc_events = [MagicMock(), MagicMock()]
-    ext._rx_stream = MagicMock()
-    ext._rx_stream.value = 0x1234
+    fake_host = MagicMock()
+    fake_host.is_active.return_value = True
+    from TDConfig import TDSenderConfig
 
-    # CPU fallback buffers (always allocated even in CuPy path — used as fallback)
-    ext._rx_f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
-    ext._rx_f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-    ext._rx_f16_pinned_ptr = None
+    engine = TDReceiverEngine(
+        host=fake_host,
+        config=TDSenderConfig(),
+        cuda=MagicMock(),
+        log_fn=lambda msg, force=False: None,
+        num_slots=NUM_SLOTS,
+        device=0,
+        shm_name="test_shm",
+        verbose=False,
+    )
 
-    # CUDAMemoryShape mock (shape for copyCUDAMemory)
-    mock_shape = MagicMock()
-    ext._rx_cached_shape = mock_shape
+    # Inject typed value objects (bypasses real CUDA initialization)
+    engine._initialized = True
+    engine.frame_count = 0
+    engine._diag_frames_since_reinit = 999
 
-    ext.cuda = MagicMock()
-    ext.shm_handle = MagicMock()
-    ext.shm_handle.buf = buf
+    mock_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
+    mock_dev_ptrs[0].value = 0xDEAD0000
+    mock_stream = MagicMock()
+    mock_stream.value = 0x1234
+    mock_shm = MagicMock()
+    mock_shm.buf = buf
 
-    # CuPy GPU buffer (only if CuPy path is being tested)
-    from unittest.mock import MagicMock as _MagicMock
+    layout = SHMLayout(NUM_SLOTS)
+    engine._connection = ReceiverConnection(
+        shm_handle=mock_shm,
+        dev_ptrs=mock_dev_ptrs,
+        ipc_handles=[None] * NUM_SLOTS,
+        ipc_events=[MagicMock(), MagicMock()],
+        stream=mock_stream,
+        layout=layout,
+        num_slots=NUM_SLOTS,
+        ipc_version=1,
+        shutdown_offset=layout.shutdown_offset,
+        last_write_idx=0,
+    )
+    engine._format = FormatDescriptor(
+        width=WIDTH,
+        height=HEIGHT,
+        num_comps=COMPS,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=16,
+        flags=0,
+        buffer_size=F16_SIZE,
+    )
+    engine._retry = RetryState(connect_attempts=0, frames_since_last_retry=0)
+
+    # Engine-private F16 scratch (mutable working buffers, not value objects)
+    engine._f16_cpu_buf = np.zeros(HEIGHT * WIDTH * COMPS, dtype=np.float16)
+    engine._f32_cpu_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+    engine._f16_pinned_ptr = None
+    engine._cached_shape = MagicMock()
 
     if use_cupy:
-        ext._rx_cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
-        ext._rx_cupy_f16_views = [_MagicMock() for _ in range(NUM_SLOTS)]
+        engine._cupy_f32_buf = np.zeros((HEIGHT, WIDTH, COMPS), dtype=np.float32)
+        engine._cupy_f16_views = [MagicMock() for _ in range(NUM_SLOTS)]
     else:
-        ext._rx_cupy_f32_buf = None
-        ext._rx_cupy_f16_views = []
+        engine._cupy_f32_buf = None
+        engine._cupy_f16_views = []
 
-    ext._rx_frames_since_last_retry = 0
-    ext._rx_connect_attempts = 0
-    ext._diag_frames_since_reinit = 999  # > 5 → suppress DIAG branch (init seeds 0; reset at CUDAIPCExtension.py:1933)
-
-    return ext
+    return engine
 
 
 def test_float16_receiver_uses_cpu_fallback_when_cupy_unavailable() -> None:
-    """import_frame() uses copyNumpyArray (CPU path) when CuPy is not available."""
-    from unittest.mock import MagicMock, patch
+    """import_frame() uses copy_numpy_array (CPU path) when CuPy is not available."""
+    from unittest.mock import patch
 
     ext = _make_receiver_with_float16_state(use_cupy=False)
 
-    import_buffer = MagicMock()
+    handle = FakeTOPHandle()
 
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", False):
-        result = ext.import_frame(import_buffer)
+    with patch("TDReceiver.CUPY_AVAILABLE", False):
+        result = ext.import_frame(handle)
 
     assert result is True
-    import_buffer.copyNumpyArray.assert_called_once()
-    import_buffer.copyCUDAMemory.assert_not_called()
+    assert len(handle.copy_numpy_calls) == 1, "CPU path must call copy_numpy_array once"
+    assert len(handle.copy_cuda_calls) == 0, "CPU path must not call copy_cuda_memory"
 
 
 def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
-    """import_frame() uses copyCUDAMemory (GPU path) when CuPy is available.
+    """import_frame() uses copy_cuda_memory (GPU path) when CuPy is available.
 
     The GPU path eliminates both PCIe roundtrips: instead of GPU→CPU→GPU it
     performs f16→f32 conversion entirely on-device via CuPy's copyto, then
-    calls copyCUDAMemory with the resulting float32 GPU pointer.
+    calls copy_cuda_memory with the resulting float32 GPU pointer.
     """
     from unittest.mock import MagicMock, patch
 
     ext = _make_receiver_with_float16_state(use_cupy=True)
 
-    import_buffer = MagicMock()
+    handle = FakeTOPHandle()
 
     # Build a minimal CuPy mock: UnownedMemory, MemoryPointer, ndarray, ExternalStream, copyto
     mock_cp = MagicMock()
     mock_cp.float16 = "float16"
     mock_cp.float32 = "float32"
     # .data.ptr on the f32 buf must return an integer (GPU pointer)
-    ext._rx_cupy_f32_buf = MagicMock()
-    ext._rx_cupy_f32_buf.data.ptr = 0xF3200000
+    ext._cupy_f32_buf = MagicMock()
+    ext._cupy_f32_buf.data.ptr = 0xF3200000
 
-    with patch("CUDAIPCExtension.CUPY_AVAILABLE", True), patch("CUDAIPCExtension.cp", mock_cp):
-        result = ext.import_frame(import_buffer)
+    with patch("TDReceiver.CUPY_AVAILABLE", True), patch("TDReceiver.cp", mock_cp):
+        result = ext.import_frame(handle)
 
     assert result is True
-    import_buffer.copyCUDAMemory.assert_called_once()
-    import_buffer.copyNumpyArray.assert_not_called()
+    assert len(handle.copy_cuda_calls) == 1, "GPU path must call copy_cuda_memory once"
+    assert len(handle.copy_numpy_calls) == 0, "GPU path must not call copy_numpy_array"
     # ExternalStream context manager must be used
     mock_cp.cuda.ExternalStream.assert_called_once()

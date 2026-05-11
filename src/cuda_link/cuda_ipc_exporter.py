@@ -50,21 +50,21 @@ import threading
 import time
 import traceback
 from ctypes import c_void_p
+from dataclasses import dataclass, field
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
+from . import _nvtx
 from .activation_barrier import bump_skip as _ab_bump
 from .activation_barrier import open_or_create as _ab_open
 from .activation_barrier import read_state as _ab_read
-from .cuda_ipc_wrapper import (  # noqa: F401
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
+from .cuda_runtime_types import (
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
-    CUDARuntimeAPI,
     CUDAStream_t,
-    cudaIpcMemHandle_t,
-    get_cuda_runtime,
 )
 
 if TYPE_CHECKING:
@@ -72,33 +72,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Protocol layout constants (must match CUDAIPCExtension and CUDAIPCImporter)
-PROTOCOL_MAGIC = 0x43495044  # "CIPD" - protocol validation magic number (v1.0.0)
-SHM_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
-SHUTDOWN_FLAG_SIZE = 1
-METADATA_SIZE = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE = 8  # 8B float64 producer timestamp
-
-# Pre-compiled struct objects for hot-path SHM reads/writes (~50-100ns saved per call vs format-string lookup)
-_ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
-_ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
-_ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
-
-# CUDA-aligned dtype encoding (cudaChannelFormatKind values):
-FORMAT_KIND_SIGNED = 0  # cudaChannelFormatKindSigned
-FORMAT_KIND_UNSIGNED = 1  # cudaChannelFormatKindUnsigned
-FORMAT_KIND_FLOAT = 2  # cudaChannelFormatKindFloat
-FLAGS_BFLOAT16 = 0x0001  # flag bit: bfloat16 (kind=Float, bits=16)
-
-# Map dtype string → (format_kind, bits_per_component, flags)
-_DTYPE_TO_KIND_BITS: dict[str, tuple[int, int, int]] = {
-    "float32": (FORMAT_KIND_FLOAT, 32, 0),
-    "float16": (FORMAT_KIND_FLOAT, 16, 0),
-    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0),
-    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0),
-}
+from .shm_protocol import (  # noqa: E402
+    _ST_U32,
+    MAGIC_OFFSET,
+    METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    TIMESTAMP_SIZE,
+    WRITE_IDX_OFFSET,
+    DtypeCodec,
+    Metadata,
+    SHMLayout,
+    bump_version,
+    publish_frame,
+)
 
 _DTYPE_ITEMSIZE_MAP = {
     "float32": 4,
@@ -107,17 +97,94 @@ _DTYPE_ITEMSIZE_MAP = {
     "uint16": 2,
 }
 
-# C3: CPU release-fence between shutdown_flag write and write_idx publish.
-# On x86/x64 the hardware guarantees TSO (total-store-order) for plain stores,
-# but CPython makes no compiler-level ordering guarantee between two separate
-# bytearray writes. threading.Lock acquire/release issues OS-level memory barriers
-# on all supported platforms, providing the needed release semantics. Cost: ~80ns.
-_fence_lock = threading.Lock()
+# _DTYPE_TO_KIND_BITS is now in shm_protocol.DtypeCodec.encode(); kept as alias for call sites below
+_DTYPE_TO_KIND_BITS = {k: DtypeCodec.encode(k) for k in ("float32", "float16", "uint8", "uint16")}
 
 
-def _release_fence() -> None:
-    with _fence_lock:
-        pass
+@dataclass
+class ProducerActivationBarrier:
+    """Producer-side activation-barrier state.
+
+    Replaces five scattered attributes on CUDAIPCExporter (_barrier_enabled,
+    _barrier_stale_ns, _barrier_shm, _barrier_skip_log_last_ns,
+    _barrier_stale_log_last_ns) with a single cohesive value object.
+    """
+
+    enabled: bool
+    stale_ns: int
+    shm: SharedMemory | None = None
+    _skip_log_last_ns: int = field(init=False, default=0, repr=False)
+    _stale_log_last_ns: int = field(init=False, default=0, repr=False)
+
+    @classmethod
+    def from_env(cls) -> ProducerActivationBarrier:
+        return cls(
+            enabled=os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0",
+            stale_ns=int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000))),
+        )
+
+    def should_skip_publish(self) -> bool:
+        """Hot path: True ⇒ caller skips this frame.
+
+        Lazily opens the SHM segment on first call. Applies a stale-timeout so a
+        Sender that crashes mid-init cannot block the producer indefinitely.
+        """
+        if self.shm is None:
+            try:
+                self.shm = _ab_open(create=False)
+            except FileNotFoundError:
+                return False
+        try:
+            active_count, last_change_ns, _ = _ab_read(self.shm)
+        except (OSError, RuntimeError, struct.error):
+            return False
+        if active_count <= 0:
+            return False
+        now_ns = time.monotonic_ns()
+        if now_ns - last_change_ns > self.stale_ns:
+            if now_ns - self._stale_log_last_ns > 1_000_000_000:
+                logger.warning(
+                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
+                    active_count,
+                    (now_ns - last_change_ns) / 1e9,
+                )
+                self._stale_log_last_ns = now_ns
+            return False
+        with contextlib.suppress(OSError, RuntimeError, struct.error):
+            _ab_bump(self.shm)
+        if now_ns - self._skip_log_last_ns > 1_000_000_000:
+            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
+            self._skip_log_last_ns = now_ns
+        return True
+
+    def close(self) -> None:
+        """Idempotent: close SHM handle if held."""
+        if self.shm is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                self.shm.close()
+            self.shm = None
+
+
+def _read_hws_mode() -> str:
+    """Read WDDM Hardware-Accelerated GPU Scheduling registry key (Windows only).
+
+    Returns "0" (software scheduling), "2" (hardware scheduling enabled),
+    or "unknown" on any error (non-Windows, key absent, permission denied).
+    Emitted as cudalink.startup.hws_mode=<value> NVTX range at exporter init
+    so every nsys capture is self-documenting about the WDDM scheduling mode.
+    """
+    try:
+        import winreg  # noqa: PLC0415
+
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
+        )
+        value, _ = winreg.QueryValueEx(key, "HwSchMode")
+        winreg.CloseKey(key)
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 class CUDAIPCExporter:
@@ -216,11 +283,7 @@ class CUDAIPCExporter:
         # Cross-process backpressure mechanism — no CUDA stream coupling.
         # Default on (Phase 3.6 — no-op when no TD-side Sender exists since the SHM
         # counter stays at 0; gracefully skipped if SHM is missing). Set to "0" to opt out.
-        self._barrier_enabled: bool = os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0"
-        self._barrier_stale_ns: int = int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000)))
-        self._barrier_shm: SharedMemory | None = None
-        self._barrier_skip_log_last_ns: int = 0
-        self._barrier_stale_log_last_ns: int = 0
+        self._barrier = ProducerActivationBarrier.from_env()
         if self._export_profile:
             self.debug = True  # profile mode requires timing path (mirrors TD L248-249)
 
@@ -256,9 +319,10 @@ class CUDAIPCExporter:
         self.total_sticky_check_us: float = 0.0
         self.total_flush_probe_us: float = 0.0
 
-        # Cached SharedMemory offsets (computed once in initialize(), constant thereafter)
-        self._ts_offset: int = 0
-        self._shutdown_offset: int = 0
+        # Cached layout + offsets (set by _write_handles_to_shm, constant thereafter)
+        self._layout: SHMLayout = SHMLayout(num_slots)
+        self._ts_offset: int = self._layout.timestamp_offset
+        self._shutdown_offset: int = self._layout.shutdown_offset
 
         # C2: device-affinity validation
         # CUDALINK_STRICT_DEVICE=1 raises ValueError on mismatch; default warns+continues.
@@ -295,6 +359,11 @@ class CUDAIPCExporter:
                     "cudaSetDevice() with a different index before initialize()."
                 )
             logger.info("Loaded CUDA runtime on device %d", actual_device)
+
+            hws_mode = _read_hws_mode()
+            logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
+            with _nvtx.annotate(f"cudalink.startup.hws_mode={hws_mode}", "cyan"):
+                pass
 
             # Create or reuse dedicated non-blocking IPC stream.
             # cudaStreamNonBlocking (0x01) prevents the default stream from
@@ -368,8 +437,8 @@ class CUDAIPCExporter:
             self._write_handles_to_shm()
             self._write_metadata_to_shm()
 
-            # Cache constant SharedMemory offsets so export_frame() avoids per-frame arithmetic
-            self._ts_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+            # Cache timestamp offset from the pre-computed layout (set by _write_handles_to_shm)
+            self._ts_offset = self._layout.timestamp_offset
 
             self._initialized = True
 
@@ -427,18 +496,11 @@ class CUDAIPCExporter:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
 
-        # Increment version (detect re-initialization from consumer side)
-        try:
-            current_version = struct.unpack_from("<Q", self.shm_handle.buf, 4)[0]
-        except (struct.error, ValueError, IndexError):
-            current_version = 0
-        new_version = current_version + 1
-
-        # Write header
-        struct.pack_into("<I", self.shm_handle.buf, 0, PROTOCOL_MAGIC)
-        struct.pack_into("<Q", self.shm_handle.buf, 4, new_version)
-        struct.pack_into("<I", self.shm_handle.buf, 12, self.num_slots)
-        struct.pack_into("<I", self.shm_handle.buf, 16, 0)  # write_idx = 0 initially
+        # Write protocol header: magic, bump version, reset num_slots and write_idx
+        _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+        new_version = bump_version(self.shm_handle.buf)
+        _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)  # write_idx = 0 initially
 
         # Write per-slot handles
         for slot in range(self.num_slots):
@@ -451,9 +513,10 @@ class CUDAIPCExporter:
                 event_handle_bytes = bytes(self.ipc_event_handles[slot].reserved)
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = event_handle_bytes
 
-        # Initialize shutdown flag to 0 and cache its offset for export_frame() reassertion
-        self._shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        struct.pack_into("<B", self.shm_handle.buf, self._shutdown_offset, 0)
+        # Pre-compute layout once; cache derived offsets for export_frame() hot-path
+        self._layout = SHMLayout(self.num_slots)
+        self._shutdown_offset = self._layout.shutdown_offset
+        self.shm_handle.buf[self._shutdown_offset] = 0
 
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
@@ -472,16 +535,16 @@ class CUDAIPCExporter:
         if self.shm_handle is None or self.data_size == 0:
             return
 
-        shutdown_offset = SHM_HEADER_SIZE + (self.num_slots * SLOT_SIZE)
-        metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
-
-        kind, bits, flags = _DTYPE_TO_KIND_BITS[self.dtype]
-
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset, self.width)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 4, self.height)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 8, self.channels)
-        _ST_BBH.pack_into(self.shm_handle.buf, metadata_offset + 12, kind, bits, flags)
-        struct.pack_into("<I", self.shm_handle.buf, metadata_offset + 16, self.data_size)
+        kind, bits, flags = DtypeCodec.encode(self.dtype)
+        Metadata(
+            width=self.width,
+            height=self.height,
+            num_comps=self.channels,
+            format_kind=kind,
+            bits_per_comp=bits,
+            flags=flags,
+            data_size=self.data_size,
+        ).pack_into(self.shm_handle.buf, self._layout)
 
         logger.debug(
             "Wrote metadata: %dx%dx%d, dtype=%s (kind=%d bits=%d flags=0x%04x), data_size=%dB",
@@ -656,7 +719,7 @@ class CUDAIPCExporter:
             logger.error("Size mismatch: expected %d, got %d", self.data_size, size)
             return False
         # Activation-barrier check: skip publish if a TD-side Sender is in its activation window.
-        if self._barrier_enabled and self._check_activation_barrier():
+        if self._barrier.enabled and self._barrier.should_skip_publish():
             # Reassert the per-frame heartbeat even on the skip path.
             # The consumer reads shutdown_flag == 1 as "producer gone"; bypassing the
             # success-path heartbeat write on skip frames would leave any stale 1-byte
@@ -668,6 +731,7 @@ class CUDAIPCExporter:
         debug = self.debug
         if debug:
             frame_start = time.perf_counter()
+        _nvtx.push_range(f"cudalink.exporter.slot{self.write_idx % self.num_slots}", "green")
         try:
             slot = self.write_idx % self.num_slots
 
@@ -750,20 +814,22 @@ class CUDAIPCExporter:
 
                 if debug:
                     memcpy_start = time.perf_counter()
-                self.cuda.memcpy_async(
-                    dst=self.dev_ptrs[slot],
-                    src=c_void_p(gpu_ptr),
-                    count=self.data_size,
-                    kind=3,  # cudaMemcpyDeviceToDevice
-                    stream=self.ipc_stream,
-                )
+                with _nvtx.verbose_range("cudalink.exporter.memcpy", "green"):
+                    self.cuda.memcpy_async(
+                        dst=self.dev_ptrs[slot],
+                        src=c_void_p(gpu_ptr),
+                        count=self.data_size,
+                        kind=3,  # cudaMemcpyDeviceToDevice
+                        stream=self.ipc_stream,
+                    )
                 if debug:
                     self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
 
                 if debug:
                     _t = time.perf_counter()
-                if self.ipc_events[slot]:
-                    self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                with _nvtx.verbose_range("cudalink.exporter.record_event", "green"):
+                    if self.ipc_events[slot]:
+                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 if debug:
                     self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -798,7 +864,8 @@ class CUDAIPCExporter:
             if self._export_flush_probe and not self._export_sync:
                 if debug and self._export_profile:
                     _t_fp = time.perf_counter()
-                self.cuda.stream_query(self.ipc_stream)
+                with _nvtx.verbose_range("cudalink.exporter.flush_probe", "green"):
+                    self.cuda.stream_query(self.ipc_stream)
                 if debug and self._export_profile:
                     self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
 
@@ -808,11 +875,9 @@ class CUDAIPCExporter:
             # shutdown_flag=0 when it detects a new frame (atomicity improvement).
             if debug:
                 _t = time.perf_counter()
-            self.write_idx += 1
-            _ST_F64.pack_into(self.shm_handle.buf, self._ts_offset, time.perf_counter())
-            self.shm_handle.buf[self._shutdown_offset] = 0
-            _release_fence()  # C3: release barrier — shutdown_flag visible before write_idx
-            _ST_U32.pack_into(self.shm_handle.buf, 16, self.write_idx)  # publish last
+            with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
+                self.write_idx += 1
+                publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
             if debug:
                 self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -867,6 +932,8 @@ class CUDAIPCExporter:
             logger.error("Export failed: %s", e)
             traceback.print_exc()
             return False
+        finally:
+            _nvtx.pop_range()
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -886,41 +953,6 @@ class CUDAIPCExporter:
             return True
         except (OSError, RuntimeError):
             return False
-
-    def _check_activation_barrier(self) -> bool:
-        """Return True if the activation barrier is held and this frame should be skipped.
-
-        Lazily opens the segment on first call. Applies a stale-timeout so a Sender
-        that crashes mid-init cannot block the producer indefinitely.
-        """
-        if self._barrier_shm is None:
-            try:
-                self._barrier_shm = _ab_open(create=False)
-            except FileNotFoundError:
-                return False  # no Sender has ever activated — fast path
-        try:
-            active_count, last_change_ns, _ = _ab_read(self._barrier_shm)
-        except (OSError, RuntimeError, struct.error):
-            return False
-        if active_count <= 0:
-            return False
-        now_ns = time.monotonic_ns()
-        if now_ns - last_change_ns > self._barrier_stale_ns:
-            # Sender crashed mid-init and never decremented — stale, ignore.
-            if now_ns - self._barrier_stale_log_last_ns > 1_000_000_000:
-                logger.warning(
-                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
-                    active_count,
-                    (now_ns - last_change_ns) / 1e9,
-                )
-                self._barrier_stale_log_last_ns = now_ns
-            return False
-        with contextlib.suppress(OSError, RuntimeError, struct.error):
-            _ab_bump(self._barrier_shm)
-        if now_ns - self._barrier_skip_log_last_ns > 1_000_000_000:
-            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
-            self._barrier_skip_log_last_ns = now_ns
-        return True
 
     def cleanup(self) -> None:
         """Cleanup all CUDA IPC resources.
@@ -1047,12 +1079,7 @@ class CUDAIPCExporter:
         except (OSError, RuntimeError) as e:
             logger.warning("Could not unlink SharedMemory: %s", e)
 
-        # Close activation-barrier SHM handle (producer never decrements, just closes).
-        _bshm = getattr(self, "_barrier_shm", None)
-        if _bshm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                _bshm.close()
-            self._barrier_shm = None
+        self._barrier.close()
 
         # Reset all state to prevent double-free on re-entry
         self.dev_ptrs = [None] * self.num_slots

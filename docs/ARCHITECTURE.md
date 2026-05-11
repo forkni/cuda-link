@@ -95,6 +95,27 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 ---
 
+## TD-Side Extension Architecture
+
+The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
+
+```
+CUDAIPCExtension  (~300 LOC facade)
+├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
+├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
+└── _engine: TDSenderEngine | TDReceiverEngine
+      ├── TDSenderEngine (~1300 LOC)   ← owns GPU alloc, IPC export, SHM write, CUDA graphs
+      └── TDReceiverEngine (~800 LOC) ← owns SHM attach, IPC open, copyCUDAMemory calls
+```
+
+**Mode switching** tears down the current engine and constructs a fresh one — guaranteeing zero cross-mode state leak. The old engine's `cleanup()` is called first, which frees all CUDA resources before the new engine is constructed.
+
+**TDHost seam**: all `ownerComp.par.*`, `ownerComp.op("ExportBuffer")`, `top.cudaMemory()`, and `scriptTOP.copyCUDAMemory()` calls go through `TDHost`/`TOPHandle` protocols. Tests inject `FakeTDHost`/`FakeTOPHandle` — no TD runtime required.
+
+**textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCExporter` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
+
+---
+
 ## SharedMemory Protocol
 
 ### Binary Layout (433 bytes for 3 slots)
@@ -316,7 +337,20 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
 
-**Note on pixel format compatibility**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The Sender extension automatically detects this and sets a permanent `dtype_converter` Transform TOP (wired before ExportBuffer) to `rgba32float`, skipping one transition frame. Supported formats without conversion: `uint8`, `uint16` (fixed), `float32`.
+**Note on pixel format compatibility** (empirically probed, TD 2025.32820 — see `verification/results/cuda_memory_probe_20260510_090919.json`):
+
+| Category | Formats | `cudaMemory()` behaviour |
+|---|---|---|
+| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in R/RG/RGBA/A variants | Returns correct `uint8` / `uint16` / `float32` buffer |
+| **Rejected outright** | All 4 float16 variants (R/RG/RGBA/A); 10-bit RGB / 2-bit Alpha fixed | Raises exception; Sender skips frame + tints component **yellow** via `parent().color`; resumes when upstream format is corrected |
+| **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
+
+The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
+1. Calls `set_warning_status(msg)` (sets `parent().color` to amber-yellow — visible on the COMP node body, idempotent).
+
+The frame is skipped, and `clear_status()` is called as soon as the upstream format is corrected (restoring the original COMP color). Engine-fatal errors (init failure, IPC handle failure, GPU alloc failure) instead call `set_error_status(msg)`, which tints the COMP red and emits a red `addScriptError` badge. No auto-conversion is performed; fix the upstream source TOP instead. Supported formats: `uint8`, `uint16` (fixed), `float32` in R/RG/RGBA/A channel configurations.
+
+> **Why tint-only (empirically confirmed):** TD has no anytime-yellow-badge API — `addScriptWarning` does not exist; `addWarning` raises `tdError: Cannot set warning outside of cook` when called from `onFrameEnd` (a post-cook lifecycle callback, confirmed via `verification/results/probe_addwarning_*`); `addScriptError` is always red. A child Script TOP's `onCook` IS a valid cook context where `addWarning` succeeds, but TD does not propagate the child warning to the parent COMP boundary tile — neither via `comp.warnings()` nor as a visual badge (confirmed via `verification/results/probe_cook_context_*`). The COMP body tint is therefore the only COMP-local warning surface available.
 
 ### Phase 2: Steady State (Per-Frame)
 
@@ -338,7 +372,7 @@ cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
 return tensors[read_slot]                        ← Zero-copy, 0µs
 ```
 
-**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (default) includes GPU D2D completion: p50 42 µs (512×512) → 400 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. See `bench_graphs.py` for resolution breakdown.
+**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (default) includes GPU D2D completion: p50 22 µs (512×512) → 367 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. See `bench_graphs.py` for resolution breakdown.
 
 ### Phase 3: Re-initialization
 
@@ -437,37 +471,11 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 ### Measured Benchmarks
 
-Produced by `benchmarks/bench_graphs.py` and `benchmarks/bench_sweep.py` (2000 frames, EXPORT_SYNC=1, RTX 4090, driver 596.36, Windows 11, PCIe 4.0 x16).
+RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36 / EXPORT_SYNC=1. Full tables and per-resolution breakdowns: **[docs/BENCHMARKS.md](BENCHMARKS.md)**.
 
-**`export_frame()` wall-clock (bench_graphs, isolated -- no consumer process):**
+**`export_frame()` standalone p50 (isolated — no consumer process):** 22 µs (512×512) → 117 µs (1080p) → 367 µs (4K). CUDA Graphs saves <5% wall-clock when GPU D2D copy dominates.
 
-| Resolution | Graphs off p50 | Graphs on p50 |
-|---|---|---|
-| 512x512 f32 | 42 us | 45 us |
-| 1280x720 f32 | 59 us | 60 us |
-| 1920x1080 f32 | 138 us | 133 us |
-| 3840x2160 f32 | 400 us | 404 us |
-
-With EXPORT_SYNC=1, GPU D2D copy time dominates both paths; CUDA Graphs provides <5% wall-clock difference at 1080p. In async mode (no EXPORT_SYNC), graphs reduce submission overhead from ~15.7 us to ~4.7 us at 1080p (WDDM transitions: 3 -> 2), but production default is EXPORT_SYNC=1.
-
-**IPC roundtrip (bench_sweep, spawn-process producer + consumer, graphs=off):**
-
-| Resolution | dtype | export p50 | get_numpy p50 | IPC notify p50 |
-|---|---|---|---|---|
-| 512x512 | f32 | 1316 us | 1435 us | 259 us |
-| 512x512 | u8 | 970 us | 448 us | 255 us |
-| 1280x720 | f32 | 1743 us | 4599 us | 297 us |
-| 1280x720 | u8 | 1042 us | 1263 us | 254 us |
-| 1920x1080 | f32 | 585 us | 1995 us | 240 us |
-| 1920x1080 | u8 | 1234 us | 2650 us | 264 us |
-| 3840x2160 | f32 | 566 us | 5848 us | 300 us |
-| 3840x2160 | u8 | 566 us | 2585 us | 227 us |
-
-- **export p50**: producer `export_frame()` wall-clock with concurrent consumer process (higher than isolated bench_graphs numbers due to cross-process WDDM contention).
-- **get_numpy p50**: consumer `get_frame_numpy()` D2H copy wall-clock.
-- **IPC notify p50**: producer write_idx update -> consumer SHM detection; ~250 us resolution-independent (ring-buffer notification latency, not GPU copy time).
-
-Full results in `benchmarks/results/sweep_latest.csv`.
+**IPC roundtrip p50 (two separate processes, graphs=off):** export 662–1483 µs; `get_frame_numpy()` 0.38–5.03 ms; IPC notify ~136–286 µs (resolution-independent signaling latency).
 
 ### Throughput Limits
 
@@ -475,8 +483,8 @@ Full results in `benchmarks/results/sweep_latest.csv`.
 
 ```
 FPS_max = 1 / export_frame_p50
-        = 1 / 138 us   (1080p f32)  ~= 7,200 FPS
-        = 1 / 400 us   (4K f32)     ~= 2,500 FPS
+        = 1 / 117 us   (1080p f32)  ~= 8,500 FPS
+        = 1 / 367 us   (4K f32)     ~= 2,700 FPS
 ```
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
@@ -491,8 +499,8 @@ FPS_actual = min(TD_FPS, 1 / inference_time)
 
 ```
 Latency ~= IPC_notify + D2H_copy
-        ~= 240 us + 1,350 us
-        ~= 1.6 ms
+        ~= 136 us + 1,320 us
+        ~= 1.5 ms
 ```
 
 This latency is **imperceptible** for real-time applications.
@@ -507,17 +515,17 @@ CUDA IPC zero-copies GPU memory across processes; CPU SharedMemory adds two memc
 
 | Metric | CPU SharedMemory | CUDA-Link | Speed-up |
 |--------|------------------|-----------|----------|
-| Producer write | 2.60 ms | 138 us (bench_graphs) / 585 us (bench_sweep) | 4.4x – 18.8x |
-| Consumer read (D2H) | 2.48 ms | 1.35 ms (bench_d2h_streams) / ~2.0 ms (bench_sweep) | 1.2x – 1.8x |
-| End-to-end | 5.37 ms | ~1.6 ms (IPC notify 240 us + D2H 1.35 ms) | ~3.4x |
+| Producer write | 2.60 ms | 117 us (bench_graphs) / 1483 us (bench_sweep) | 1.8x – 22.2x |
+| Consumer read (D2H) | 2.48 ms | 1.32 ms (bench_d2h_streams) / ~5.0 ms (bench_sweep) | 0.5x – 1.9x |
+| End-to-end | 5.37 ms | ~1.5 ms (IPC notify 136 us + D2H 1.32 ms) | ~3.6x |
 
 **512x512 float32 RGBA (4 MB/frame):**
 
 | Metric | CPU SharedMemory | CUDA-Link | Speed-up |
 |--------|------------------|-----------|----------|
-| Producer write | 361 us | 42 us (bench_graphs) | 8.6x |
-| Consumer read (D2H) | 350 us | 0.23 ms (bench_d2h_streams) | 1.5x |
-| End-to-end | 1.02 ms | ~0.49 ms (IPC notify 259 us + D2H 0.23 ms) | ~2.1x |
+| Producer write | 361 us | 22 us (bench_graphs) | 16.4x |
+| Consumer read (D2H) | 350 us | 0.18 ms (bench_d2h_streams) | 1.9x |
+| End-to-end | 1.02 ms | ~0.35 ms (IPC notify 172 us + D2H 0.18 ms) | ~2.9x |
 
 **Methodology notes:**
 
@@ -563,8 +571,7 @@ manipulation — solve problems this project does not have.
 | Performance | ~3-8μs IPC overhead | Same for linear D2D |
 | TD compatibility | Proven | Unvalidated |
 
-**Validation**: `benchmarks/bench_sweep.py` confirms legacy IPC works on
-Windows WDDM with CUDA 12.x. CuPy and dora-rs also use this approach.
+**Validation**: The IPC roundtrip sweep confirms legacy IPC works on Windows WDDM with CUDA 12.x. CuPy and dora-rs also use this approach.
 
 **When VMM would be needed**: If sharing `cudaArray` objects directly (opaque
 texture memory with swizzled layout) without linearization.
@@ -581,5 +588,5 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 ---
 
-**Last Updated**: 2026-02-26
-**Version**: 1.4.0
+**Last Updated**: 2026-05-09
+**Version**: 1.2.1

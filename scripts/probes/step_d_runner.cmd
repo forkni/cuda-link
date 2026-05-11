@@ -18,7 +18,7 @@
 :: Defaults (override as positional args):
 ::   sender_toe   = <repo_root>\CUDA_Link_Example.toe
 ::   receiver_toe = <repo_root>\Test_TD.toe
-::   td_exe       = C:\Program Files\Derivative\TouchDesigner.2025.32460\bin\TouchDesigner.exe
+::   td_exe       = C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe
 ::
 :: After both TD windows open, perform the probe protocol:
 ::   1. Confirm Pair A (Python -> Receiver-A) is streaming at 60 fps inside
@@ -37,7 +37,7 @@ SETLOCAL ENABLEDELAYEDEXPANSION
 :: --- default paths ----------------------------------------------------------
 SET "DEFAULT_SENDER_TOE=%~dp0..\..\CUDA_Link_Example.toe"
 SET "DEFAULT_RECEIVER_TOE=%~dp0..\..\Test_TD.toe"
-SET "DEFAULT_TD=C:\Program Files\Derivative\TouchDesigner.2025.32460\bin\TouchDesigner.exe"
+SET "DEFAULT_TD=C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe"
 
 IF NOT "%~1"=="" (SET "SENDER_TOE=%~1")    ELSE (SET "SENDER_TOE=%DEFAULT_SENDER_TOE%")
 IF NOT "%~2"=="" (SET "RECEIVER_TOE=%~2")  ELSE (SET "RECEIVER_TOE=%DEFAULT_RECEIVER_TOE%")

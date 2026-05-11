@@ -44,7 +44,7 @@ def test_constructor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exp.debug is False
     assert not exp.is_ready()
     assert exp._export_sync is True  # Phase 4: default flipped to ON
-    assert exp._barrier_enabled is True  # Phase 4: default flipped to ON
+    assert exp._barrier.enabled is True  # Phase 4: default flipped to ON
 
 
 def test_constructor_custom_params() -> None:
@@ -70,12 +70,8 @@ def test_constructor_custom_params() -> None:
 
 def test_kind_bits_mapping() -> None:
     """dtype strings map to correct (format_kind, bits, flags) wire encoding."""
-    from cuda_link.cuda_ipc_exporter import (
-        _DTYPE_TO_KIND_BITS,
-        FLAGS_BFLOAT16,
-        FORMAT_KIND_FLOAT,
-        FORMAT_KIND_UNSIGNED,
-    )
+    from cuda_link.cuda_ipc_exporter import _DTYPE_TO_KIND_BITS
+    from cuda_link.shm_protocol import FLAGS_BFLOAT16, FORMAT_KIND_FLOAT, FORMAT_KIND_UNSIGNED
 
     assert _DTYPE_TO_KIND_BITS["float32"] == (FORMAT_KIND_FLOAT, 32, 0)
     assert _DTYPE_TO_KIND_BITS["float16"] == (FORMAT_KIND_FLOAT, 16, 0)
@@ -392,6 +388,8 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
         SLOT_SIZE,
         TIMESTAMP_SIZE,
         CUDAIPCExporter,
+        ProducerActivationBarrier,
+        SHMLayout,
     )
 
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
@@ -413,8 +411,9 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp.cuda = MagicMock()
     exp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
     exp.ipc_events = [None] * num_slots
-    exp._shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
-    exp._ts_offset = exp._shutdown_offset + SHUTDOWN_FLAG_SIZE + METADATA_SIZE
+    exp._layout = SHMLayout(num_slots)
+    exp._shutdown_offset = exp._layout.shutdown_offset
+    exp._ts_offset = exp._layout.timestamp_offset
     exp._initialized = True
     exp._export_sync = False
 
@@ -437,11 +436,7 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     exp.total_flush_probe_us = 0.0
 
     # F9 activation barrier (disabled in mock)
-    exp._barrier_enabled = False
-    exp._barrier_stale_ns = 5_000_000_000
-    exp._barrier_shm = None
-    exp._barrier_skip_log_last_ns = 0
-    exp._barrier_stale_log_last_ns = 0
+    exp._barrier = ProducerActivationBarrier(enabled=False, stale_ns=5_000_000_000)
 
     # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
     mock_attrs = MagicMock()
@@ -519,8 +514,8 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
     exp.shm_handle.buf = spy_buf
 
     with (
-        patch("cuda_link.cuda_ipc_exporter._ST_U32", mock_st_u32),
-        patch("cuda_link.cuda_ipc_exporter._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
+        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
     ):
         result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
 
@@ -587,9 +582,9 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
     exp.shm_handle.buf = spy_buf
 
     with (
-        patch("cuda_link.cuda_ipc_exporter._ST_U32", mock_st_u32),
-        patch("cuda_link.cuda_ipc_exporter._ST_F64", mock_st_f64),
-        patch("cuda_link.cuda_ipc_exporter._release_fence", spy_fence),
+        patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
+        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._release_fence", spy_fence),
     ):
         result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
 

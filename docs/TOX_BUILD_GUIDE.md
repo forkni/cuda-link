@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v0.7.3.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.4.1.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -11,13 +11,19 @@ Step-by-step instructions for building the `CUDAIPCLink_v0.7.3.tox` component in
 ```
 CUDAIPCExporter (Base COMP)
 ├── CUDAIPCWrapper    (Text DAT)     ← Copy from td_exporter/CUDAIPCWrapper.py
-├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py
+├── ActivationBarrier (Text DAT)     ← Copy from td_exporter/ActivationBarrier.py
+├── NVMLObserver      (Text DAT)     ← Copy from td_exporter/NVMLObserver.py
+├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
+├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
+├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
+├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
 ├── callbacks         (Execute DAT)  ← Copy from td_exporter/callbacks_template.py
 ├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
-├── dtype_converter   (Transform TOP) ← Pixel format auto-conversion (see Step 6c)
-├── ExportBuffer      (Null TOP)     ← Receives dtype_converter output; cudaMemory() reads from here
+├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
+├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -63,23 +69,58 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 
 ### Step 3: Create Text DATs
 
-Inside the `CUDAIPCExporter` COMP, create two Text DATs:
+Inside the `CUDAIPCExporter` COMP, create eight Text DATs in the order shown below. Imports between them resolve automatically because all Text DATs in the same COMP share a module namespace — `from TDHost import RealTDHost` works because `TDHost` is a sibling Text DAT.
+
+**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing. Alternatively, set **File** on the DAT page to the source path and enable **Load on Start**.
 
 #### 3a. CUDAIPCWrapper Text DAT
 
 1. Create a **Text DAT**, rename to `CUDAIPCWrapper`
-2. On the **DAT** page:
-   - **File** → Browse to `td_exporter/CUDAIPCWrapper.py`
-   - Click **Load on Start** toggle (optional, for loading from disk)
-3. **OR** paste the entire contents of `td_exporter/CUDAIPCWrapper.py` into the DAT
+2. Paste the entire contents of `td_exporter/CUDAIPCWrapper.py`
 
-**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing.
+#### 3b. ActivationBarrier Text DAT
 
-#### 3b. CUDAIPCExporter Text DAT
+1. Create a **Text DAT**, rename to `ActivationBarrier`
+2. Paste the entire contents of `td_exporter/ActivationBarrier.py`
+
+#### 3c. NVMLObserver Text DAT
+
+1. Create a **Text DAT**, rename to `NVMLObserver`
+2. Paste the entire contents of `td_exporter/NVMLObserver.py`
+
+#### 3d. TDHost Text DAT
+
+1. Create a **Text DAT**, rename to `TDHost`
+2. Paste the entire contents of `td_exporter/TDHost.py`
+
+This module provides the `RealTDHost` and `RealTOPHandle` adapters that isolate all `ownerComp.par.*` and `top.cudaMemory()` calls from the engine logic.
+
+#### 3e. TDConfig Text DAT
+
+1. Create a **Text DAT**, rename to `TDConfig`
+2. Paste the entire contents of `td_exporter/TDConfig.py`
+
+This module provides the `TDSenderConfig` frozen dataclass that centralises all `CUDALINK_*` environment-variable reads.
+
+#### 3f. TDSender Text DAT
+
+1. Create a **Text DAT**, rename to `TDSender`
+2. Paste the entire contents of `td_exporter/TDSender.py`
+
+This module provides `TDSenderEngine` — the Sender-mode engine that owns GPU ring-buffer allocation, IPC handle export, SHM write-back, and CUDA graph capture.
+
+#### 3g. TDReceiver Text DAT
+
+1. Create a **Text DAT**, rename to `TDReceiver`
+2. Paste the entire contents of `td_exporter/TDReceiver.py`
+
+This module provides `TDReceiverEngine` — the Receiver-mode engine that owns SHM attachment, IPC handle opening, and Script TOP copyCUDAMemory calls.
+
+#### 3h. CUDAIPCExporter Text DAT
 
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
-3. Verify the import line reads: `from CUDAIPCWrapper import get_cuda_runtime`
+3. Verify the import line reads: `from TDSender import TDSenderEngine`
    - This works because both Text DATs are in the same COMP namespace
 
 ### Step 4: Register Extension
@@ -105,29 +146,27 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
    - **Frame End**: ON (REQUIRED for sender optimization)
    - **On Exit**: ON
 
-**Important**: The `onFrameEnd` callback calls `ext.export_frame()` with no arguments. The extension resolves `ExportBuffer` internally, ensuring `cudaMemory()` always reads from the post-conversion node. The data flow through the component is: `input → dtype_converter → ExportBuffer → export_frame()`.
+**Important**: The `onFrameEnd` callback calls `ext.export_frame()` with no arguments. The extension resolves `ExportBuffer` internally. The data flow through the component is: `input → ExportBuffer → export_frame()`.
 
 ### Step 6: Create In TOP
 
 1. Inside the `CUDAIPCExporter` COMP, create an **In TOP**, rename to `input`
 2. This is a pass-through input that users will wire their source TOP to
+3. Wire output: `input` → `ExportBuffer` (Null TOP that feeds `cudaMemory()`)
 
 **Note**: The In TOP has no parameters to configure - it's purely a connection point.
 
-### Step 6b: Add dtype_converter Transform TOP (Sender mode)
+**Status indicators**: The component gives three visual signals when something is wrong:
 
-Inside the `CUDAIPCExporter` COMP, add a **Transform TOP** named `dtype_converter`:
+| State | Visual | Cause |
+|---|---|---|
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
+| **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-1. Create a **Transform TOP**, rename to `dtype_converter`
-2. Set the **Pixel Format** parameter to `"Use Input"` (default — pass-through, zero overhead)
-3. Wire input: `input` In TOP → `dtype_converter`
-4. Wire output: `dtype_converter` → `ExportBuffer` (Null TOP or the node that feeds `cudaMemory()`)
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
-**Purpose**: TouchDesigner 2025 (CUDA 12.8) rejects `rgba16float` formats from `cudaMemory()`. The extension automatically detects unsupported source formats (float16) and sets `dtype_converter.par.format = "rgba32float"` on the first affected frame — skipping that one frame while the conversion takes effect. For all other formats (uint8, uint16 fixed, float32) the node stays at `"Use Input"` with zero overhead.
-
-**This node is managed automatically** — no manual format changes are needed.
-
-### Step 6c: Configure ImportBuffer for TD 2025+ (Optional Optimization)
+### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
 If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
 
@@ -141,6 +180,22 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 - Simplifies data flow (Execute DAT drives import directly)
 
 **Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
+
+### Step 6c: Create warning_emitter Script TOP
+
+1. Inside the `CUDAIPCExporter` COMP, create a **Script TOP**, rename to `warning_emitter`.
+2. Paste the contents of `td_exporter/warning_emitter_callbacks.py` into the auto-generated
+   callbacks DAT (accessible via the Script TOP's **Callbacks DAT** parameter).
+3. Open the Script TOP parameter page and set **Cook Type** → **Off (Pulse to Cook)**.
+   The operator cooks only when `RealTDHost` force-cooks it on status transitions — there
+   is no need for continuous cooking.
+4. Leave it unwired: `warning_emitter` has no inputs and no outputs connected to the
+   rendering chain. It exists solely as a status badge host.
+
+**What it does**: `onCook` reads `ownerComp.fetch("cuda_link_status_msg", None)` and calls
+`scriptOp.addWarning(msg)` when a status message is present. The badge clears automatically
+when the next cook finds no message (after `clear_status` unstores the key and
+force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-body tint.
 
 ### Step 7: Optional Info DAT
 
@@ -161,9 +216,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v0.7.3.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.4.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v0.7.3.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.4.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -171,7 +226,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v0.7.3.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.4.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -320,12 +375,18 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | File | Location | Purpose |
 |------|----------|---------|
 | `CUDAIPCWrapper.py` | `td_exporter/` | CUDA runtime ctypes wrapper |
-| `CUDAIPCExtension.py` | `td_exporter/` | TD extension class (main logic) |
+| `ActivationBarrier.py` | `td_exporter/` | Cross-process activation barrier |
+| `NVMLObserver.py` | `td_exporter/` | NVML GPU telemetry observer |
+| `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
+| `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
+| `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
+| `TDReceiver.py` | `td_exporter/` | `TDReceiverEngine` — Receiver-mode engine (SHM attach, IPC open, copyCUDAMemory) |
+| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v0.7.3.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.4.1.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
@@ -333,10 +394,10 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 - Read **[Architecture](ARCHITECTURE.md)** to understand the SharedMemory protocol
 - See **[Integration Examples](INTEGRATION_EXAMPLES.md)** for complete workflows
-- Run benchmarks to verify performance on your hardware
+- See **[Benchmarks](BENCHMARKS.md)** for measured performance numbers
 
 ---
 
-**Build Date**: 2026-02-09
-**Component Version**: 1.0.0
+**Build Date**: 2026-05-10
+**Component Version**: 1.4.1
 **TouchDesigner Version**: 2022.x or later

@@ -75,7 +75,7 @@ while True:
 importer.cleanup()
 ```
 
-**Performance**: 60 FPS achievable at 512x512; throughput is limited by model inference, not IPC overhead. See `benchmarks/results/sweep_latest.csv` for IPC timings.
+**Performance**: 60 FPS achievable at 512x512; throughput is limited by model inference, not IPC overhead. See [docs/BENCHMARKS.md](BENCHMARKS.md) for IPC timings.
 
 ---
 
@@ -130,7 +130,7 @@ cv2.destroyAllWindows()
 importer.cleanup()
 ```
 
-**Performance**: 60 FPS achievable at 720p; IPC is not the bottleneck. See `benchmarks/results/sweep_latest.csv` for IPC timings.
+**Performance**: 60 FPS achievable at 720p; IPC is not the bottleneck. See [docs/BENCHMARKS.md](BENCHMARKS.md) for IPC timings.
 
 ---
 
@@ -312,12 +312,7 @@ print("Clean shutdown complete")
 ### Use Case
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99, CSV + JSON export), use:
-> ```bash
-> python benchmarks/bench_sweep.py          # full 4x2x2 sweep (~70 min)
-> python benchmarks/bench_sweep.py --quick  # smoke test (1 cell, ~5 min)
-> ```
-> See [README Benchmarks section](../README.md#benchmarks) and `benchmarks/results/sweep_latest.csv` for results.
+> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99, CSV + JSON export), contributors with a local clone may run `python benchmarks/bench_sweep.py` (full 16-cell, ~12 min) or `python benchmarks/bench_sweep.py --quick` (1 cell, ~1 min). See [docs/BENCHMARKS.md](BENCHMARKS.md) for pre-measured results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a live TD sender.
 
@@ -359,11 +354,11 @@ importer.cleanup()
 
 **Expected output** (PyTorch zero-copy mode, `get_frame()`, 1080p):
 
-The call returns a pre-mapped GPU tensor; overhead is the ring-buffer poll and `cudaStreamWaitEvent` enqueue. Reference timings at `benchmarks/results/sweep_latest.csv` (IPC notify p50 ~240 us at 1080p f32, bench_sweep).
+The call returns a pre-mapped GPU tensor; overhead is the ring-buffer poll and `cudaStreamWaitEvent` enqueue. Reference timings: IPC notify p50 ~136 µs at 1080p f32 (see [docs/BENCHMARKS.md](BENCHMARKS.md)).
 
 **Expected output** (numpy D2H copy mode, `get_frame_numpy()`, 1080p float32):
 
-Dominated by GPU-to-CPU D2H transfer. Reference: bench_sweep get_numpy p50 ~2000 us at 1080p f32 (spawn-process context); bench_d2h_streams p50 ~1350 us isolated. Full results at `benchmarks/results/sweep_latest.csv`.
+Dominated by GPU-to-CPU D2H transfer. `get_frame_numpy()` p50 ~5000 µs at 1080p f32 (two-process context); ~1320 µs isolated. See [docs/BENCHMARKS.md](BENCHMARKS.md) for full tables.
 
 ---
 
@@ -401,7 +396,7 @@ while running:
     with torch.no_grad():
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
-    # Export to TD (see benchmarks/results/sweep_latest.csv for timing)
+    # Export to TD (see docs/BENCHMARKS.md for timing)
     exporter.export_frame(
         gpu_ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
@@ -444,12 +439,12 @@ Script TOP (receives AI frames via IPC)
 
 | Metric | Value |
 |--------|-------|
-| export_frame() p50, 512x512 f32 (bench_graphs isolated) | 42 us |
-| export_frame() p50, 1080p f32 (bench_graphs isolated) | 138 us |
-| Max theoretical FPS (1080p, bench_graphs) | ~7,200 FPS |
+| export_frame() p50, 512x512 f32 (bench_graphs isolated) | 22 us |
+| export_frame() p50, 1080p f32 (bench_graphs isolated) | 117 us |
+| Max theoretical FPS (1080p, bench_graphs) | ~8,500 FPS |
 | Practical FPS | Limited by AI model inference |
 
-Full IPC roundtrip timings (with concurrent consumer): `benchmarks/results/sweep_latest.csv`.
+Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENCHMARKS.md).
 
 **Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
 - AI inference: ~32ms/frame (31 FPS)
@@ -561,5 +556,5 @@ for i in range(max_retries):
 
 ---
 
-**Last Updated**: 2026-02-26
-**Version**: 1.1.0
+**Last Updated**: 2026-05-09
+**Version**: 1.2.1

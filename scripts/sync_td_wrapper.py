@@ -30,6 +30,14 @@ PAIRS: list[tuple[Path, Path]] = [
         REPO_ROOT / "td_exporter" / "CUDAIPCWrapper.py",
     ),
     (
+        REPO_ROOT / "src" / "cuda_link" / "cuda_runtime_types.py",
+        REPO_ROOT / "td_exporter" / "CUDARuntimeTypes.py",
+    ),
+    (
+        REPO_ROOT / "src" / "cuda_link" / "cuda_graphs.py",
+        REPO_ROOT / "td_exporter" / "CUDAGraphs.py",
+    ),
+    (
         REPO_ROOT / "src" / "cuda_link" / "nvml_observer.py",
         REPO_ROOT / "td_exporter" / "NVMLObserver.py",
     ),

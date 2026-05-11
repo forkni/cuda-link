@@ -160,6 +160,9 @@ stat_sender.txt
 stat_receiver.txt
 nul
 
+# Verification probe outputs (timestamped JSON from probe_cook_context runs)
+verification/results/probe_cook_context_*.json
+
 # Test artifacts
 test_timeout_manual.py
 
@@ -185,6 +188,13 @@ Receiver_benchmark.*.toe
 Sender_benchmark.toe
 Sender_benchmark.*.toe
 
+# Test receiver .toe files (local-only)
+Test_TD_Receiver1.toe
+Test_TD_Receiver1.*.toe
+
+# Session log (local-only; also listed in CGW_LOCAL_FILES)
+SESSION_LOG.md
+
 # Audit reports (local-only)
 audit_reports/
 
@@ -195,8 +205,11 @@ init_heatmap.png
 # Reference materials (local-only)
 References/
 
-# Benchmarks (local development only)
+# Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
 benchmarks/
+
+# Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
+CONTEXT.md
 
 # Claude Code commands, skills, and local docs (local-only)
 .claude/commands/
