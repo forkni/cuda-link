@@ -215,3 +215,15 @@ class FakeTDHost(TDHost):
 
     def find_top(self, name: str) -> FakeTOPHandle | None:
         return self._tops.get(name)
+
+    def set_warning_status(self, msg: str) -> None:
+        pass
+
+    def set_error_status(self, msg: str) -> None:
+        pass
+
+    def clear_status(self) -> None:
+        pass
+
+    def set_info_status(self, msg: str) -> None:
+        pass

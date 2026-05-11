@@ -467,6 +467,14 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
+            _dt = self._cached_shape.dataType
+            _dtype_str = (
+                getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
+            )
+            self._host.set_info_status(
+                f"{self._format.width}x{self._format.height} {_dtype_str} {self._format.num_comps}ch"
+            )
+
             # Debug logging (97 = prime, avoids aliasing with slot counts 2,4,5)
             if self.verbose_performance and self.frame_count % 97 == 0:
                 self._log(f"Frame {self.frame_count}: read_slot={read_slot}, write_idx={write_idx}")

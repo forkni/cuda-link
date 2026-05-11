@@ -36,12 +36,14 @@ def _make_engine_with_spy(shm_name: str):
             self.warning_calls: list[str] = []
             self.error_calls: list[str] = []
             self.clear_count: int = 0
+            self.status_par_writes: list[tuple[str, str]] = []
+            self.info_status_calls: list[str] = []
 
         def param_value(self, name):
             return {"Active": True, "Debug": False}.get(name)
 
         def set_param_value(self, name, value):
-            pass
+            self.status_par_writes.append((name, value))
 
         def set_param_enabled(self, name, enabled):
             pass
@@ -63,6 +65,9 @@ def _make_engine_with_spy(shm_name: str):
 
         def clear_status(self):
             self.clear_count += 1
+
+        def set_info_status(self, msg):
+            self.info_status_calls.append(msg)
 
     host = _SpyHost()
     config = TDSenderConfig()

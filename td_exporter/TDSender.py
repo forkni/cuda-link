@@ -716,9 +716,8 @@ class TDSenderEngine:
     def export_frame(self, top_op: TOP | None = None) -> bool:
         """Export the ExportBuffer TOP texture via CUDA IPC.
 
-        Resolves ExportBuffer internally (downstream of dtype_converter) so the
-        correct post-conversion frame is always exported regardless of what the
-        caller previously passed.
+        Resolves ExportBuffer internally from ownerComp so the correct frame
+        is always exported regardless of what the caller previously passed.
 
         Args:
             top_op: Deprecated. Accepted for backwards compatibility but ignored.
@@ -781,16 +780,12 @@ class TDSenderEngine:
                 src_fmt = (
                     top_op.pixel_format if hasattr(top_op, "pixel_format") else getattr(top_op, "pixelFormat", "?")
                 )
-                warn_msg = (
-                    f"Source TOP pixel format {src_fmt!r} is not supported by cudaMemory(). "
-                    "Change the upstream TOP to 8/16-bit fixed or 32-bit float "
-                    "(R/RG/RGBA/A). Transfer suspended until format is corrected."
-                )
+                warn_msg = f"unsupported pixel format {src_fmt!r}"
                 self._host.set_warning_status(warn_msg)
                 if not self._warned_format:
                     self._log(
                         f"Pixel format {src_fmt!r} unsupported by cudaMemory() — "
-                        "transfer suspended; component tinted yellow + badge",
+                        "transfer suspended; component tinted yellow",
                         force=True,
                     )
                     self._warned_format = True
@@ -846,6 +841,11 @@ class TDSenderEngine:
             actual_channels = cuda_mem.channels
             actual_size = cuda_mem.size
             self._detected_numpy_dtype = cuda_mem.data_type  # numpy.dtype or None
+            _dt = self._detected_numpy_dtype
+            _dtype_str = (
+                getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
+            )
+            self._host.set_info_status(f"{actual_width}x{actual_height} {_dtype_str} {actual_channels}ch")
 
             # Check if we need to (re)initialize
             if not self._initialized or actual_size != self.data_size:

@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.2.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.4.1.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -23,6 +23,7 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
+├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -159,11 +160,11 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 | State | Visual | Cause |
 |---|---|---|
-| **Warning** | COMP node body tints **yellow** | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
-| **Error** | COMP node body tints **red** + red `addScriptError` badge | Engine-fatal error (IPC/GPU init failure) |
-| **Healthy** | Original node color restored | Condition cleared automatically |
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
+| **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. There is no yellow badge on the COMP boundary — `addWarning` requires an active cook context and `onFrameEnd` runs post-cook; the COMP body tint is the only available warning surface (see ARCHITECTURE.md for the full probe trail).
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
@@ -179,6 +180,22 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 - Simplifies data flow (Execute DAT drives import directly)
 
 **Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
+
+### Step 6c: Create warning_emitter Script TOP
+
+1. Inside the `CUDAIPCExporter` COMP, create a **Script TOP**, rename to `warning_emitter`.
+2. Paste the contents of `td_exporter/warning_emitter_callbacks.py` into the auto-generated
+   callbacks DAT (accessible via the Script TOP's **Callbacks DAT** parameter).
+3. Open the Script TOP parameter page and set **Cook Type** → **Off (Pulse to Cook)**.
+   The operator cooks only when `RealTDHost` force-cooks it on status transitions — there
+   is no need for continuous cooking.
+4. Leave it unwired: `warning_emitter` has no inputs and no outputs connected to the
+   rendering chain. It exists solely as a status badge host.
+
+**What it does**: `onCook` reads `ownerComp.fetch("cuda_link_status_msg", None)` and calls
+`scriptOp.addWarning(msg)` when a status message is present. The badge clears automatically
+when the next cook finds no message (after `clear_status` unstores the key and
+force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-body tint.
 
 ### Step 7: Optional Info DAT
 
@@ -199,9 +216,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.2.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.4.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.2.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.4.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -209,7 +226,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.2.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.4.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -369,7 +386,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v1.2.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.4.1.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
@@ -377,10 +394,10 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 - Read **[Architecture](ARCHITECTURE.md)** to understand the SharedMemory protocol
 - See **[Integration Examples](INTEGRATION_EXAMPLES.md)** for complete workflows
-- Run benchmarks to verify performance on your hardware
+- See **[Benchmarks](BENCHMARKS.md)** for measured performance numbers
 
 ---
 
-**Build Date**: 2026-05-09
-**Component Version**: 1.2.1
+**Build Date**: 2026-05-10
+**Component Version**: 1.4.1
 **TouchDesigner Version**: 2022.x or later

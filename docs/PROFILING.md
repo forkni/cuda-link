@@ -97,7 +97,7 @@ masks the issue.
 ```powershell
 ./scripts/profiling/run_compute_sanitizer.ps1
 # expect: exit 0, no memcheck violations
-# output: benchmarks/results/sanitizer/_latest/memcheck.log
+# output: memcheck.log in your working directory
 ```
 
 Fix any violations before proceeding. CUDA IPC uses cross-process device pointers; a single
@@ -109,21 +109,21 @@ out-of-bounds write can corrupt another process's GPU allocation without trigger
 $env:CUDALINK_NVTX = "1"
 $env:CUDALINK_NVTX_VERBOSE = "1"
 ./scripts/profiling/run_nsys.ps1
-# output: benchmarks/results/nsys/_latest/run.nsys-rep
-#         benchmarks/results/nsys/_latest/analyze.txt (anti-pattern report)
+# output: run.nsys-rep in your local results directory
+#         analyze.txt (anti-pattern report)
 ```
 
 Run the automatic diagnostic report before opening the GUI:
 
 ```powershell
-nsys analyze benchmarks/results/nsys/_latest/run.nsys-rep
-# writes benchmarks/results/nsys/_latest/analyze.txt — scan for anti-patterns first
+nsys analyze run.nsys-rep
+# writes analyze.txt — scan for anti-patterns first
 ```
 
 Open the report:
 
 ```powershell
-nsys-ui benchmarks/results/nsys/_latest/run.nsys-rep
+nsys-ui run.nsys-rep
 ```
 
 **What to look for:**
@@ -137,14 +137,13 @@ nsys-ui benchmarks/results/nsys/_latest/run.nsys-rep
 ```powershell
 ./scripts/profiling/run_ncu.ps1          # Sender export path
 ./scripts/profiling/run_ncu_receiver.ps1 # Receiver import path
-# output: benchmarks/results/ncu/_latest/sender.ncu-rep
-#         benchmarks/results/ncu/_latest/receiver.ncu-rep
+# output: sender.ncu-rep, receiver.ncu-rep in your local results directory
 ```
 
 Open in the Nsight Compute GUI:
 
 ```powershell
-ncu-ui benchmarks/results/ncu/_latest/sender.ncu-rep
+ncu-ui sender.ncu-rep
 ```
 
 **SOL classification — use this table before drawing conclusions:**
@@ -321,7 +320,7 @@ capture (where nsys attaches to a process you don't control via a wrapper script
 explicitly on the command line, e.g.:
 
 ```
-nsys profile --force-overwrite=true --output benchmarks/results/nsys/td_pipeline_v4_producer/producer ...
+nsys profile --force-overwrite=true --output td_pipeline_producer/producer ...
 ```
 
 ### Parallel IPC consumers under nsys profiling
@@ -457,8 +456,7 @@ the WDDM scheduling mode in effect during that capture.
 ### When this applies
 
 Standalone Python-sender deployments where no TD-Sender process shares the CUDA
-context. Validated in the v5 capture (`benchmarks/results/nsys/td_pipeline_v5_*`);
-findings documented in `td_pipeline_v5_findings_extended.md`.
+context. Validated in the v5 nsys capture (findings documented in `td_pipeline_v5_findings_extended.md` in contributor archives).
 
 ### Flags
 

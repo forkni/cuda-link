@@ -129,6 +129,10 @@ class TDHost:
         """Restore ownerComp to its original color and clear any script-error badges."""
         raise NotImplementedError
 
+    def set_info_status(self, msg: str) -> None:
+        """Write an informational status message to the Status par (no tint/cook side effects)."""
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Production adapters
@@ -206,10 +210,15 @@ class RealTDHost(TDHost):
             self._active_par = owner_comp.par.Active
         except AttributeError:
             self._active_par = None
-        # Deliberately NOT cached here: the COMP may be tinted from a prior session
-        # (.tox saved while yellow/red) which would poison the cache.  Captured lazily
-        # on the first set_warning_status / set_error_status call instead.
+        # _default_color is captured lazily on the first set_warning_status /
+        # set_error_status call so a tinted .tox save doesn't poison the cache.
+        # _reset_stale_tint() clears any visible managed-colour tint immediately
+        # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
+        self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
+        self._status_msg: str | None = None  # current stored status; drives cook-on-transition
+        self._status_par_value: str | None = None  # last value written to Status par; drives dedup
+        self._reset_stale_tint()
 
     def param_value(self, name: str) -> Any:
         try:
@@ -244,6 +253,29 @@ class RealTDHost(TDHost):
         except (AttributeError, RuntimeError):
             return None
 
+    def _cook_warning_emitter(self) -> None:
+        if self._warning_emitter is None:
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self._warning_emitter = self._comp.op("warning_emitter") or False
+        if self._warning_emitter:
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self._warning_emitter.cook(force=True)
+
+    def _write_status_par(self, value: str) -> None:
+        if self._status_par_value == value:
+            return
+        self._status_par_value = value
+        self.set_param_value("Status", value)
+
+    def _reset_stale_tint(self) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            c = self._comp.color
+            current = (float(c[0]), float(c[1]), float(c[2]))
+            if current in _MANAGED_COLORS:
+                self._comp.color = _DEFAULT_NODE_COLOR
+                self._comp.clearScriptErrors(error="*")
+                self._comp.unstore("cuda_link_status_msg")
+
     def _capture_default_color(self) -> None:
         if self._default_color is not None:
             return
@@ -261,20 +293,40 @@ class RealTDHost(TDHost):
 
     def set_warning_status(self, msg: str) -> None:
         self._capture_default_color()
+        full_msg = f"WARNING: {msg}"
+        needs_cook = self._status_msg != full_msg
+        self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _WARNING_COLOR
-            self._comp.store("cuda_link_status_msg", f"WARNING: {msg}")
+            self._comp.store("cuda_link_status_msg", full_msg)
+        self._write_status_par(full_msg)
+        if needs_cook:
+            self._cook_warning_emitter()
 
     def set_error_status(self, msg: str) -> None:
         self._capture_default_color()
+        full_msg = f"ERROR: {msg}"
+        needs_cook = self._status_msg != full_msg
+        self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _ERROR_COLOR
             self._comp.addScriptError(msg)
-            self._comp.store("cuda_link_status_msg", f"ERROR: {msg}")
+            self._comp.store("cuda_link_status_msg", full_msg)
+        self._write_status_par(full_msg)
+        if needs_cook:
+            self._cook_warning_emitter()
 
     def clear_status(self) -> None:
+        needs_cook = self._status_msg is not None
+        self._status_msg = None
         with contextlib.suppress(AttributeError, RuntimeError):
             if self._default_color is not None:
                 self._comp.color = self._default_color
             self._comp.clearScriptErrors(error="*")
             self._comp.unstore("cuda_link_status_msg")
+        self._write_status_par("Idle")
+        if needs_cook:
+            self._cook_warning_emitter()
+
+    def set_info_status(self, msg: str) -> None:
+        self._write_status_par(msg)

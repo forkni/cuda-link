@@ -471,37 +471,11 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 ### Measured Benchmarks
 
-Produced by `benchmarks/bench_graphs.py` and `benchmarks/bench_sweep.py` (2000 frames, EXPORT_SYNC=1, RTX 4090, driver 596.36, Windows 11, PCIe 4.0 x16).
+RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36 / EXPORT_SYNC=1. Full tables and per-resolution breakdowns: **[docs/BENCHMARKS.md](BENCHMARKS.md)**.
 
-**`export_frame()` wall-clock (bench_graphs, isolated -- no consumer process):**
+**`export_frame()` standalone p50 (isolated — no consumer process):** 22 µs (512×512) → 117 µs (1080p) → 367 µs (4K). CUDA Graphs saves <5% wall-clock when GPU D2D copy dominates.
 
-| Resolution | Graphs off p50 | Graphs on p50 |
-|---|---|---|
-| 512x512 f32 | 22 us | 19 us |
-| 1280x720 f32 | 43 us | 42 us |
-| 1920x1080 f32 | 117 us | 116 us |
-| 3840x2160 f32 | 367 us | 367 us |
-
-With EXPORT_SYNC=1, GPU D2D copy time dominates both paths; CUDA Graphs provides <5% wall-clock difference at 1080p. In async mode (no EXPORT_SYNC), graphs reduce submission overhead from ~15.7 us to ~4.7 us at 1080p (WDDM transitions: 3 -> 2), but production default is EXPORT_SYNC=1.
-
-**IPC roundtrip (bench_sweep, spawn-process producer + consumer, graphs=off):**
-
-| Resolution | dtype | export p50 | get_numpy p50 | IPC notify p50 |
-|---|---|---|---|---|
-| 512x512 | f32 | 898 us | 1333 us | 172 us |
-| 512x512 | u8 | 871 us | 381 us | 203 us |
-| 1280x720 | f32 | 907 us | 4479 us | 160 us |
-| 1280x720 | u8 | 887 us | 1178 us | 179 us |
-| 1920x1080 | f32 | 1483 us | 5024 us | 136 us |
-| 1920x1080 | u8 | 873 us | 2537 us | 179 us |
-| 3840x2160 | f32 | 662 us | 5014 us | 286 us |
-| 3840x2160 | u8 | 1471 us | 5033 us | 196 us |
-
-- **export p50**: producer `export_frame()` wall-clock with concurrent consumer process (higher than isolated bench_graphs numbers due to cross-process WDDM contention).
-- **get_numpy p50**: consumer `get_frame_numpy()` D2H copy wall-clock.
-- **IPC notify p50**: producer write_idx update -> consumer SHM detection; ~250 us resolution-independent (ring-buffer notification latency, not GPU copy time).
-
-Full results in `benchmarks/results/sweep_latest.csv`.
+**IPC roundtrip p50 (two separate processes, graphs=off):** export 662–1483 µs; `get_frame_numpy()` 0.38–5.03 ms; IPC notify ~136–286 µs (resolution-independent signaling latency).
 
 ### Throughput Limits
 
@@ -597,8 +571,7 @@ manipulation — solve problems this project does not have.
 | Performance | ~3-8μs IPC overhead | Same for linear D2D |
 | TD compatibility | Proven | Unvalidated |
 
-**Validation**: `benchmarks/bench_sweep.py` confirms legacy IPC works on
-Windows WDDM with CUDA 12.x. CuPy and dora-rs also use this approach.
+**Validation**: The IPC roundtrip sweep confirms legacy IPC works on Windows WDDM with CUDA 12.x. CuPy and dora-rs also use this approach.
 
 **When VMM would be needed**: If sharing `cudaArray` objects directly (opaque
 texture memory with swizzled layout) without linearization.
