@@ -160,6 +160,9 @@ stat_sender.txt
 stat_receiver.txt
 nul
 
+# Verification probe outputs (timestamped JSON from probe_cook_context runs)
+verification/results/probe_cook_context_*.json
+
 # Test artifacts
 test_timeout_manual.py
 
