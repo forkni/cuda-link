@@ -19,9 +19,10 @@ $out = "benchmarks/results/ncu/$ts"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $env:CUDALINK_NVTX = "1"
+$env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"  # suppress forrtl error 200 on WM_CLOSE
 
 $sectionFlag = if ($Set) { "--set" }     else { "--section" }
-$sectionVal  = if ($Set) { $Set }        else { "SpeedOfLight,MemoryWorkloadAnalysis" }
+$sectionVal  = if ($Set) { $Set }        else { "SpeedOfLight --section MemoryWorkloadAnalysis" }
 
 Write-Host "==> ncu (receiver path) → $out/receiver.ncu-rep  [$sectionFlag $sectionVal]"
 
@@ -33,6 +34,7 @@ ncu `
     --launch-skip 5 --launch-count 5 `
     --replay-mode kernel `
     --target-processes all `
+    --nvtx `
     --nvtx-include "cudalink.receiver.import_frame@*" `
     -o "$out/receiver" `
     python benchmarks/bench_sweep.py --quick

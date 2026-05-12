@@ -25,6 +25,7 @@ import logging
 import os
 import struct
 import sys
+import threading
 import time
 
 # When CUDALINK_EXPORT_PROFILE=1 the lib promotes self.debug=True and emits
@@ -69,8 +70,14 @@ _cleaned_up = False
 # Track which event triggered shutdown — controls end-of-main "Press Enter" pause:
 #   "ctrl_c" → user pressed Ctrl+C in console → pause (let user read messages).
 #   "ctrl_break" → launcher sent CTRL_BREAK_EVENT (graceful .toe close) → no pause.
+#   "ctrl_close" → console close / logoff / shutdown (incl. orchestrator-driven
+#                  taskkill, ncu/nsys captures) → no pause; OS is already exiting.
 #   None → main loop exited some other way → pause as a safety net.
 _shutdown_via: str | None = None
+# Set by CTRL_CLOSE_EVENT handler to request the main loop to break and run
+# finally: cleanup from the main thread instead of the handler thread.
+# Avoids the race where the handler freed staging_ptr while main was mid-cudaMemcpy.
+_stop_requested: bool = False
 
 
 def _do_cleanup() -> None:
@@ -79,16 +86,45 @@ def _do_cleanup() -> None:
     if _cleaned_up:
         return
     _cleaned_up = True
-    try:
-        if _staging_ptr_ref is not None and _cuda_ref is not None:
-            _cuda_ref.free(_staging_ptr_ref)
-    except Exception as exc:
-        print(f"[sender] cleanup: cuda.free error: {exc}")
-    try:
-        if _exporter_ref is not None:
-            _exporter_ref.cleanup()
-    except Exception as exc:
-        print(f"[sender] cleanup: exporter.cleanup error: {exc}")
+
+    # Under ncu kernel-replay the GPU command queue is paused inside ncu's replay
+    # state. cudaFree on the staging buffer implicitly synchronises the device and
+    # blocks until the queue drains — which never happens in that state, causing a
+    # 30+ s hang. Wrap in a daemon thread with a 0.5 s watchdog; same pattern as
+    # cuda_ipc_exporter.cleanup() Step 6. The 1 MB staging buffer is reclaimed by
+    # the OS on process exit, so leaking it here is harmless.
+    if _staging_ptr_ref is not None and _cuda_ref is not None:
+
+        def _free_staging() -> None:
+            try:
+                _cuda_ref.free(_staging_ptr_ref)
+            except Exception as exc:
+                print(f"[sender] cleanup: cuda.free(staging) error: {exc}", flush=True)
+
+        t = threading.Thread(target=_free_staging, daemon=True)
+        t.start()
+        t.join(timeout=0.5)
+        if t.is_alive():
+            print("[sender] cudaFree(staging) timed out — OS will reclaim on process exit", flush=True)
+
+    # Under ncu kernel-replay, Steps 1c/2/3 of exporter.cleanup()
+    # (graph_exec_destroy, destroy_event, destroy_stream) can block on a
+    # paused command queue. Bound total cleanup time so main returns and
+    # ncu finalizes. Same pattern as staging watchdog above and
+    # cuda_ipc_exporter.cleanup() Step 6.
+    if _exporter_ref is not None:
+
+        def _do_exporter_cleanup() -> None:
+            try:
+                _exporter_ref.cleanup()
+            except Exception as exc:
+                print(f"[sender] cleanup: exporter.cleanup error: {exc}", flush=True)
+
+        t = threading.Thread(target=_do_exporter_cleanup, daemon=True)
+        t.start()
+        t.join(timeout=3.0)
+        if t.is_alive():
+            print("[sender] exporter.cleanup() timed out — OS will reclaim resources on process exit", flush=True)
 
 
 if sys.platform == "win32":
@@ -106,14 +142,17 @@ if sys.platform == "win32":
         if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
             # Console X-button, user logoff, or system shutdown.
             # OS allows ~5 s (CLOSE) or ~20 s (LOGOFF/SHUTDOWN) before forced termination.
-            # The main loop's finally: won't run for these — we MUST clean up here.
+            # Signal main to break out of the loop; main's finally: runs _do_cleanup()
+            # from the main thread. Calling _do_cleanup() here (handler thread) races
+            # with an in-flight cudaMemcpy in _fill_ctypes → INVALID_VALUE crash.
+            global _stop_requested
+            _shutdown_via = "ctrl_close"
+            _stop_requested = True
             print(
-                f"\n[sender] Console control event {ctrl_type} (close/logoff/shutdown) — running cleanup ...",
+                f"\n[sender] Console control event {ctrl_type} (close/logoff/shutdown) — signaling main loop to stop ...",
                 flush=True,
             )
-            _do_cleanup()
-            print("[sender] Cleanup complete.", flush=True)
-            return True  # Handled — OS still terminates after return.
+            return True  # Handled — OS grace period covers main's exit + cleanup.
         return False
 
     # The launcher uses CREATE_NEW_PROCESS_GROUP, which DISABLES Ctrl+C delivery to the
@@ -258,7 +297,7 @@ def main() -> None:
     last_report = start_time
 
     try:
-        while True:
+        while not _stop_requested:
             t0 = time.perf_counter()
             color_idx = (frame_count // FRAMES_PER_COLOR) % len(_COLORS)
             color = _COLORS[color_idx]
@@ -321,7 +360,7 @@ def main() -> None:
         # Hold the console window open so the user can read the cleanup output —
         # but ONLY for user-initiated shutdowns. CTRL_BREAK_EVENT is also how the
         # launcher signals graceful .toe-close, so we skip the pause in that case.
-        if _shutdown_via != "ctrl_break":
+        if _shutdown_via not in ("ctrl_break", "ctrl_close"):
             with contextlib.suppress(EOFError, KeyboardInterrupt):
                 input("\n[sender] Press Enter to close this window ...")
 
