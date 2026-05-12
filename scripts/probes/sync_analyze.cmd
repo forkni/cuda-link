@@ -1,22 +1,22 @@
 @ECHO OFF
-:: v5_analyze.cmd -- Post-capture analysis for v5 async-flush-probe captures
+:: sync_analyze.cmd -- Post-capture analysis for production-sync comparison captures
 ::
 :: Standalone script: safe to re-run against existing .nsys-rep files without
-:: re-capturing.  Called automatically by run_v5_regression_capture.cmd after
-:: PAUSE, or run directly to re-analyse.
+:: re-capturing.  Called automatically by run_sync_capture.cmd after PAUSE, or
+:: run directly to re-analyse.
 ::
-:: Expected inputs (produced by v5_capture_producer.cmd / v5_capture_consumer.cmd):
-::   benchmarks\results\nsys\td_pipeline_v5_producer\producer.nsys-rep
-::   benchmarks\results\nsys\td_pipeline_v5_consumer\td_consumer.nsys-rep
+:: Expected inputs (produced by sync_capture_producer.cmd / sync_capture_consumer.cmd):
+::   benchmarks\results\nsys\td_pipeline_sync_producer\producer.nsys-rep
+::   benchmarks\results\nsys\td_pipeline_sync_consumer\td_consumer.nsys-rep
 ::
 :: Outputs:
-::   benchmarks\results\nsys\td_pipeline_v5_findings.md
-::   benchmarks\results\nsys\td_pipeline_v5_e2e.csv
-::   benchmarks\results\nsys\td_pipeline_v5_producer\producer_<report>.csv  (x6)
-::   benchmarks\results\nsys\td_pipeline_v5_consumer\td_consumer_<report>.csv  (x6)
+::   benchmarks\results\nsys\td_pipeline_sync_findings.md
+::   benchmarks\results\nsys\td_pipeline_sync_e2e.csv
+::   benchmarks\results\nsys\td_pipeline_sync_producer\producer_<report>.csv  (x6)
+::   benchmarks\results\nsys\td_pipeline_sync_consumer\td_consumer_<report>.csv  (x6)
 ::
 :: Usage (from repo root or any cmd.exe window):
-::   scripts\probes\v5_analyze.cmd
+::   scripts\probes\sync_analyze.cmd
 
 SETLOCAL ENABLEDELAYEDEXPANSION
 
@@ -25,14 +25,14 @@ PUSHD "%~dp0..\.."
 SET "REPO_ROOT=%CD%"
 POPD
 
-SET "PROD_OUT=%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_v5_producer"
-SET "CONS_OUT=%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_v5_consumer"
+SET "PROD_OUT=%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_sync_producer"
+SET "CONS_OUT=%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_sync_consumer"
 
 :: --- validate inputs ----------------------------------------------------------
 IF NOT EXIST "%PROD_OUT%\producer.nsys-rep" (
     ECHO.
     ECHO [WARN] %PROD_OUT%\producer.nsys-rep not found.
-    ECHO        Was the V5-Producer window closed cleanly with Ctrl+C?
+    ECHO        Was the Sync-Producer window closed cleanly with Ctrl+C?
     EXIT /B 1
 )
 IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
@@ -42,10 +42,7 @@ IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
     EXIT /B 1
 )
 
-:: --- export SQLite (nsys 2026+ syntax) ----------------------------------------
-:: Skip only if SQLite is NEWER than (or same age as) the .nsys-rep.
-:: If the .sqlite predates the .nsys-rep (fresh capture over old artefacts),
-:: delete and re-export — otherwise nsys stats refuses to use the stale file.
+:: --- export SQLite (stale-check: re-export if .sqlite older than .nsys-rep) ---
 ECHO.
 IF EXIST "%PROD_OUT%\producer.sqlite" (
     powershell -NoProfile -Command ^
@@ -93,8 +90,8 @@ ECHO [INFO] Running analysis...
 python "%REPO_ROOT%\scripts\profiling\analyze_td_pipeline.py" ^
     --prod-db "%PROD_OUT%\producer.sqlite" ^
     --cons-db "%CONS_OUT%\td_consumer.sqlite" ^
-    --e2e-csv "%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_v5_e2e.csv" ^
-    --findings-md "%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_v5_findings.md"
+    --e2e-csv "%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_sync_e2e.csv" ^
+    --findings-md "%REPO_ROOT%\benchmarks\results\nsys\td_pipeline_sync_findings.md"
 
 IF %ERRORLEVEL% NEQ 0 (
     ECHO [FAIL] Analysis script exited with error %ERRORLEVEL%.
@@ -111,19 +108,18 @@ nsys stats --force-export=true --format csv --report %STAT_REPORTS% --output "%C
 ECHO.
 ECHO ============================================================
 ECHO  Analysis complete.
-ECHO  Findings : benchmarks\results\nsys\td_pipeline_v5_findings.md
-ECHO  E2E CSV  : benchmarks\results\nsys\td_pipeline_v5_e2e.csv
+ECHO  Findings : benchmarks\results\nsys\td_pipeline_sync_findings.md
+ECHO  E2E CSV  : benchmarks\results\nsys\td_pipeline_sync_e2e.csv
 ECHO ============================================================
 ECHO.
 ECHO  Open the .nsys-rep files in nsys-ui to inspect the GPU timeline:
 ECHO    nsys-ui "%PROD_OUT%\producer.nsys-rep" "%CONS_OUT%\td_consumer.nsys-rep"
 ECHO.
-ECHO  Acceptance criteria (compare against v4 baseline):
-ECHO    - cudaStreamSynchronize absent from top-3 producer CUDA API OR avg below 30 us
-ECHO    - Consumer import_frame p50 within 10%% of v4 baseline (183 us)
-ECHO    - Producer effective FPS >= 59.5 (v4 baseline: 58.7 FPS)
+ECHO  A/B verification (compare sync vs async):
+ECHO    cudaStreamSynchronize MUST be present (inverse of v5 criterion):
+ECHO      nsys stats --force-export=true --report cuda_api_sum "%PROD_OUT%\producer.nsys-rep" ^| findstr cudaStreamSynchronize
 ECHO.
-ECHO  V4 baseline for comparison:
-ECHO    benchmarks\results\nsys\td_pipeline_v4_findings.md
+ECHO  V5 async baseline for comparison:
+ECHO    benchmarks\results\nsys\td_pipeline_v5_findings.md
 
 ENDLOCAL

@@ -127,10 +127,16 @@ def load_runtime_events(db: Path, name: str) -> list[tuple[int, int]]:
 def load_session_start_ns(db: Path) -> int:
     """Return the absolute session start timestamp in nanoseconds (Unix epoch)."""
     conn = sqlite3.connect(str(db))
-    # First column of TARGET_INFO_SESSION_START_TIME is a Unix timestamp in ns
-    row = conn.execute("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME LIMIT 1").fetchone()
+    rows = conn.execute("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME ORDER BY rowid").fetchall()
     conn.close()
-    return int(row[0]) if row else 0
+    if not rows:
+        return 0
+    if len(rows) > 1:
+        print(
+            f"  WARNING: TARGET_INFO_SESSION_START_TIME has {len(rows)} rows in {db.name}; "
+            f"using first by rowid. Values: {[r[0] for r in rows]}"
+        )
+    return int(rows[0][0])
 
 
 def load_nvtx_consumer(db: Path) -> tuple[list[tuple[int, int, int]], list[tuple[int, int]]]:
@@ -491,18 +497,43 @@ def main() -> None:
         w.writerows(pairs)
     print(f"\nWrote {len(pairs)} rows -> {E2E_CSV}")
 
-    # Compute per-process FPS from full capture span (not overlap window)
-    if len(prod_slots) > 1:
-        prod_span_s = (prod_slots[-1][2] - prod_slots[0][1]) / 1e9
-        prod_fps = len(prod_slots) / prod_span_s
+    # Compute per-process FPS from steady-state overlap window (excludes warmup + stray NVTX
+    # timestamps that would distort the full-capture span, e.g. pushed-but-not-popped ranges).
+    _prod_fps_slots = [
+        (slot, s, e)
+        for i, (slot, s, e) in enumerate(prod_slots)
+        if i >= WARMUP_FRAMES and overlap_start <= s <= overlap_end
+    ]
+    if len(_prod_fps_slots) > 1:
+        prod_span_s = (_prod_fps_slots[-1][2] - _prod_fps_slots[0][1]) / 1e9
+        prod_fps = len(_prod_fps_slots) / prod_span_s if prod_span_s > 0 else 0.0
+        if prod_span_s > 1.5 * overlap_s:
+            print(
+                f"  WARNING: producer FPS span ({prod_span_s:.1f}s) exceeds 1.5× overlap window "
+                f"({overlap_s:.1f}s) — possible outlier NVTX timestamp at slot boundary; "
+                f"first={_prod_fps_slots[0][0]}, last={_prod_fps_slots[-1][0]}"
+            )
     else:
         prod_fps = 0.0
-    if cons_nvtx_slots_adj and len(cons_nvtx_slots_adj) > 1:
-        cons_span_s = (cons_nvtx_slots_adj[-1][2] - cons_nvtx_slots_adj[0][1]) / 1e9
-        cons_fps = len(cons_nvtx_slots_adj) / cons_span_s
+    _cons_fps_slots = (
+        [
+            (sl, s, e)
+            for i, (sl, s, e) in enumerate(cons_nvtx_slots_adj)
+            if i >= WARMUP_FRAMES and overlap_start <= s <= overlap_end
+        ]
+        if cons_nvtx_slots_adj
+        else []
+    )
+    if len(_cons_fps_slots) > 1:
+        cons_span_s = (_cons_fps_slots[-1][2] - _cons_fps_slots[0][1]) / 1e9
+        cons_fps = len(_cons_fps_slots) / cons_span_s if cons_span_s > 0 else 0.0
     elif len(cons_waits) > 1:
-        cons_span_s = (cons_waits[-1][1] - cons_waits[0][0]) / 1e9
-        cons_fps = len(cons_waits) / cons_span_s
+        _cons_waits_win = [(s, e) for s, e in cons_waits if overlap_start <= s <= overlap_end]
+        if len(_cons_waits_win) > 1:
+            cons_span_s = (_cons_waits_win[-1][1] - _cons_waits_win[0][0]) / 1e9
+            cons_fps = len(_cons_waits_win) / cons_span_s if cons_span_s > 0 else 0.0
+        else:
+            cons_fps = 0.0
     else:
         cons_fps = 0.0
 
@@ -530,6 +561,14 @@ def main() -> None:
     print("\n=== CROSS-PROCESS E2E ===")
     print(stats_str(handoff_us, "Handoff latency (producer.slot_end -> consumer.wait_start)"))
     print(stats_str(e2e_us, "E2E latency (producer.slot_start -> consumer.wait_start)"))
+    if handoff_us:
+        _hq = quantiles(handoff_us, n=4)
+        print(f"  Handoff IQR: Q1={_hq[0]:.1f} µs  Q3={_hq[2]:.1f} µs  IQR={_hq[2] - _hq[0]:.1f} µs")
+    if overlap_s < 60:
+        print(
+            f"  WARNING: overlap window is narrow ({overlap_s:.1f}s < 60s) — "
+            "handoff p50/p99 may reflect phase bias, not steady-state distribution."
+        )
 
     # Write findings doc
     _write_findings(
@@ -644,6 +683,16 @@ def _write_findings(
     _shm_avg = _fmt(prod_subrange.get("shm_avg"))
     _shm_med = _fmt(prod_subrange.get("shm_med"))
     # E2E section varies based on whether the clock alignment is reliable
+    _handoff_iqr_str = ""
+    if handoff:
+        _hq = quantiles(handoff, n=4)
+        _handoff_iqr_str = f"\nHandoff IQR: Q1={_hq[0]:.0f} µs  Q3={_hq[2]:.0f} µs  IQR={_hq[2] - _hq[0]:.0f} µs"
+    _narrow_win_warn = (
+        f"\n⚠ Narrow overlap window ({overlap_s:.1f}s < 60s) — handoff p50/p99 may reflect "
+        "phase bias rather than steady-state distribution."
+        if overlap_s < 60
+        else ""
+    )
     if clock_offset_reliable:
         _e2e_table_rows = (
             f"| Handoff latency (slot_end -> consumer wait_start)"
@@ -659,6 +708,8 @@ def _write_findings(
             f"Note: pairing method = nearest prior producer slot completion before each consumer IPC wait.\n"
             f"At {cons_fps:.0f} FPS consumer / {prod_fps:.0f} FPS producer, the consumer always reads a slot that is\n"
             f"{ratio_str}-3 frames behind the producer's current write head -- expected."
+            + _handoff_iqr_str
+            + _narrow_win_warn
         )
     else:
         _e2e_table_rows = (
