@@ -160,6 +160,10 @@ stat_sender.txt
 stat_receiver.txt
 nul
 
+# Scalene profiling output (local-only; only .profiling/baseline.json is committed)
+.profiling/scalene_*.json
+.profiling/current.json
+
 # Verification probe outputs (timestamped JSON from probe_cook_context runs)
 verification/results/probe_cook_context_*.json
 
