@@ -57,12 +57,13 @@ repos:
             td_exporter/SHMProtocol\.py|
             td_exporter/ActivationBarrier\.py)$
 
-  # Mypy - Type checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.1
+  # Pyrefly - Type checking
+  - repo: local
     hooks:
-      - id: mypy
-        name: mypy (type checking)
-        args: [--config-file=pyproject.toml]
+      - id: pyrefly
+        name: pyrefly (type checking)
+        language: system
+        entry: pyrefly check src/cuda_link/
         pass_filenames: false
-        additional_dependencies: []
+        always_run: false
+        files: ^src/cuda_link/.*\.py$

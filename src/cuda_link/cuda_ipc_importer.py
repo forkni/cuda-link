@@ -935,6 +935,9 @@ class CUDAIPCImporter:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
         debug = self.debug
+        frame_start = 0.0
+        _shm_t = 0.0
+        wait_start = 0.0
         if debug:
             frame_start = time.perf_counter()
         if not self._initialized:
@@ -1016,6 +1019,11 @@ class CUDAIPCImporter:
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
         debug = self.debug
+        frame_start = 0.0
+        _shm_t = 0.0
+        _wait_t = 0.0
+        _d2h_t = 0.0
+        d2h_time = 0.0
         if debug:
             frame_start = time.perf_counter()
         if not self._initialized:

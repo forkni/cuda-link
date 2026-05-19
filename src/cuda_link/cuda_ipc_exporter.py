@@ -744,6 +744,12 @@ class CUDAIPCExporter:
             return False
         debug = self.debug
         _cuda = self.cuda
+        _t = 0.0
+        frame_start = 0.0
+        memcpy_start = 0.0
+        _t_sync = 0.0
+        _t_sticky = 0.0
+        _t_fp = 0.0
         if debug:
             frame_start = time.perf_counter()
         _nvtx.push_range(_NVTX_EXPORTER_SLOT_NAMES[self.write_idx % self.num_slots], "green")

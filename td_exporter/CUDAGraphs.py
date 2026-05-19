@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import byref, c_int, c_size_t, c_void_p
+from typing import Any
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
@@ -45,6 +46,9 @@ class CUDAGraphsMixin:
 
     Requires self.cudart (cudart DLL handle) and self.check_error from the host class.
     """
+
+    cudart: Any
+    check_error: Any
 
     # --- Phase 2: CUDA Graph API wrappers ---
 

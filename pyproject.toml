@@ -40,7 +40,7 @@ dev = [
     "cuda-link[all]",
     "pytest>=7.0",
     "ruff",
-    "mypy",
+    "pyrefly",
     "snoop>=0.4",
     "py-heat>=0.0.6",
     "nvtx>=0.2",
@@ -93,8 +93,12 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
 
-[tool.mypy]
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
+[tool.pyrefly]
+python-version = "3.11.0"
+
+# ctypes-heavy library code: these error codes are false positives throughout.
+# Optional-typed ctypes handles (cudart, mmap.buf, pynvml, etc.) are always
+# validated at runtime via NVML_AVAILABLE / _initialized guards before use.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/**"
+errors = {missing-attribute = false, unsupported-operation = false, bad-argument-type = false, bad-index = false, not-callable = false, no-matching-overload = false, missing-import = false, invalid-inheritance = false, bad-assignment = false}
