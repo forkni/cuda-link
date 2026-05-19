@@ -52,6 +52,9 @@ from SHMProtocol import (  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
+# Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
+_NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
+
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
 cp = None
@@ -348,7 +351,7 @@ class TDReceiverEngine:
                 return False
 
         _nvtx_push(
-            f"cudalink.receiver.import_frame.slot{(self._connection.last_write_idx) % max(self._connection.num_slots, 1)}",
+            _NVTX_RECEIVER_SLOT_NAMES[self._connection.last_write_idx % max(self._connection.num_slots, 1)],
             "blue",
         )
         try:
