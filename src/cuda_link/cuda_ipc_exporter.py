@@ -55,6 +55,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 from . import _nvtx
+from ._profile import FrameProfile
 from .activation_barrier import bump_skip as _ab_bump
 from .activation_barrier import open_or_create as _ab_open
 from .activation_barrier import read_state as _ab_read
@@ -75,6 +76,20 @@ logger = logging.getLogger(__name__)
 # Pre-built NVTX range name strings — eliminates f-string allocation on every export_frame call.
 # num_slots is capped at 10 (enforced in __init__), so 10 entries cover all valid slot indices.
 _NVTX_EXPORTER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.exporter.slot{i}" for i in range(10))
+
+# FrameProfile region names — defines column order for report() / avg().
+# "ptr_cache_miss" stores a dimensionless count (1.0 per miss); avg() gives misses/frame.
+_EXPORTER_PROFILE_REGIONS: tuple[str, ...] = (
+    "stream_wait",
+    "memcpy",
+    "record_event",
+    "shm_write",
+    "export",
+    "sync",
+    "sticky_check",
+    "flush_probe",
+    "ptr_cache_miss",
+)
 
 from .shm_protocol import (  # noqa: E402
     _ST_U32,
@@ -314,14 +329,7 @@ class CUDAIPCExporter:
 
         # Performance tracking
         self.frame_count: int = 0
-        self.total_memcpy_us: float = 0.0
-        self.total_export_us: float = 0.0
-        self.total_stream_wait_us: float = 0.0
-        self.total_record_event_us: float = 0.0
-        self.total_shm_write_us: float = 0.0
-        self.total_sync_us: float = 0.0
-        self.total_sticky_check_us: float = 0.0
-        self.total_flush_probe_us: float = 0.0
+        self._profile: FrameProfile = FrameProfile(_EXPORTER_PROFILE_REGIONS)
 
         # Cached layout + offsets (set by _write_handles_to_shm, constant thereafter)
         self._layout: SHMLayout = SHMLayout(num_slots)
@@ -746,6 +754,7 @@ class CUDAIPCExporter:
             # Cache keyed by pointer integer (cap at 8 to cover typical buffer-rotation).
             gpu_ptr_int = gpu_ptr if isinstance(gpu_ptr, int) else int(gpu_ptr)
             if gpu_ptr_int not in self._ptr_device_cache:
+                self._profile.record("ptr_cache_miss", 1.0)
                 attrs = _cuda.pointer_get_attributes(gpu_ptr_int)
                 if attrs.type not in (2, 3):  # 2=device, 3=managed (both valid for D2D)
                     msg = (
@@ -804,7 +813,7 @@ class CUDAIPCExporter:
                 else:
                     goto_legacy = False
                 if debug:
-                    self.total_memcpy_us += (time.perf_counter() - _t) * 1_000_000
+                    self._profile.record("memcpy", (time.perf_counter() - _t) * 1_000_000)
             else:
                 goto_legacy = True
 
@@ -817,7 +826,7 @@ class CUDAIPCExporter:
                 if self.source_sync_event is not None:
                     _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                 if debug:
-                    self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
+                    self._profile.record("stream_wait", (time.perf_counter() - _t) * 1_000_000)
 
                 if debug:
                     memcpy_start = time.perf_counter()
@@ -830,7 +839,7 @@ class CUDAIPCExporter:
                         stream=self.ipc_stream,
                     )
                 if debug:
-                    self.total_memcpy_us += (time.perf_counter() - memcpy_start) * 1_000_000
+                    self._profile.record("memcpy", (time.perf_counter() - memcpy_start) * 1_000_000)
 
                 if debug:
                     _t = time.perf_counter()
@@ -838,7 +847,7 @@ class CUDAIPCExporter:
                     if self.ipc_events[slot]:
                         _cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 if debug:
-                    self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
+                    self._profile.record("record_event", (time.perf_counter() - _t) * 1_000_000)
 
             # Optional CPU-blocking sync after record_event. Disabled by default.
             #
@@ -856,13 +865,13 @@ class CUDAIPCExporter:
                     _t_sync = time.perf_counter()
                 _cuda.stream_synchronize(self.ipc_stream)
                 if debug and self._export_profile:
-                    self.total_sync_us += (time.perf_counter() - _t_sync) * 1_000_000
+                    self._profile.record("sync", (time.perf_counter() - _t_sync) * 1_000_000)
 
             if debug and self._export_profile:
                 _t_sticky = time.perf_counter()
             _cuda.check_sticky_error("export_frame")
             if debug and self._export_profile:
-                self.total_sticky_check_us += (time.perf_counter() - _t_sticky) * 1_000_000
+                self._profile.record("sticky_check", (time.perf_counter() - _t_sticky) * 1_000_000)
 
             # WDDM deferred-submission probe: forces pending GPU work to submit without
             # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
@@ -874,7 +883,7 @@ class CUDAIPCExporter:
                 with _nvtx.verbose_range("cudalink.exporter.flush_probe", "green"):
                     _cuda.stream_query(self.ipc_stream)
                 if debug and self._export_profile:
-                    self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
+                    self._profile.record("flush_probe", (time.perf_counter() - _t_fp) * 1_000_000)
 
             # Write timestamp, clear shutdown_flag, then publish write_idx LAST.
             # Ordering matters: the consumer reads shutdown_flag BEFORE write_idx, so
@@ -886,13 +895,13 @@ class CUDAIPCExporter:
                 self.write_idx += 1
                 publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
             if debug:
-                self.total_shm_write_us += (time.perf_counter() - _t) * 1_000_000
+                self._profile.record("shm_write", (time.perf_counter() - _t) * 1_000_000)
 
             self.frame_count += 1
 
             if debug:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
-                self.total_export_us += frame_time
+                self._profile.record("export", frame_time)
 
                 if self.frame_count % 97 == 0:
                     n = self.frame_count
@@ -901,21 +910,21 @@ class CUDAIPCExporter:
                         "record_event=%.1fus shm_write=%.1fus | total=%.1fus",
                         n,
                         slot,
-                        self.total_stream_wait_us / n,
-                        self.total_memcpy_us / n,
-                        self.total_record_event_us / n,
-                        self.total_shm_write_us / n,
-                        self.total_export_us / n,
+                        self._profile.avg("stream_wait", n),
+                        self._profile.avg("memcpy", n),
+                        self._profile.avg("record_event", n),
+                        self._profile.avg("shm_write", n),
+                        self._profile.avg("export", n),
                     )
                     if self._export_profile:
-                        avg_wait = self.total_stream_wait_us / n
-                        avg_memcpy = self.total_memcpy_us / n
-                        avg_record = self.total_record_event_us / n
-                        avg_sync = self.total_sync_us / n
-                        avg_sticky = self.total_sticky_check_us / n
-                        avg_fp = self.total_flush_probe_us / n
-                        avg_shm = self.total_shm_write_us / n
-                        avg_total = self.total_export_us / n
+                        avg_wait = self._profile.avg("stream_wait", n)
+                        avg_memcpy = self._profile.avg("memcpy", n)
+                        avg_record = self._profile.avg("record_event", n)
+                        avg_sync = self._profile.avg("sync", n)
+                        avg_sticky = self._profile.avg("sticky_check", n)
+                        avg_fp = self._profile.avg("flush_probe", n)
+                        avg_shm = self._profile.avg("shm_write", n)
+                        avg_total = self._profile.avg("export", n)
                         avg_unacc = avg_total - (
                             avg_wait + avg_memcpy + avg_record + avg_sync + avg_sticky + avg_fp + avg_shm
                         )
@@ -1147,8 +1156,8 @@ class CUDAIPCExporter:
             Dictionary with current exporter state and performance metrics.
             Includes an 'nvml' sub-dict when an NVMLObserver is attached.
         """
-        avg_memcpy = self.total_memcpy_us / self.frame_count if self.frame_count > 0 else 0.0
-        avg_total = self.total_export_us / self.frame_count if self.frame_count > 0 else 0.0
+        avg_memcpy = self._profile.avg("memcpy", self.frame_count)
+        avg_total = self._profile.avg("export", self.frame_count)
         stats: dict = {
             "initialized": self._initialized,
             "shm_name": self.shm_name,

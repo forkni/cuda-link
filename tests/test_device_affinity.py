@@ -66,9 +66,12 @@ def _make_exporter(device: int = 0, strict: bool = False) -> object:
     # Phase 3 diagnostic knobs (off in mock — no instrumentation desired)
     exp._export_profile = False
     exp._export_flush_probe = False
-    exp.total_sync_us = 0.0
-    exp.total_sticky_check_us = 0.0
-    exp.total_flush_probe_us = 0.0
+    exp._source_sync_recorded = False
+
+    from cuda_link._profile import FrameProfile
+    from cuda_link.cuda_ipc_exporter import _EXPORTER_PROFILE_REGIONS
+
+    exp._profile = FrameProfile(_EXPORTER_PROFILE_REGIONS)
 
     # F9 activation barrier (disabled in mock)
     exp._barrier = ProducerActivationBarrier(enabled=False, stale_ns=5_000_000_000)
@@ -226,17 +229,15 @@ def test_export_frame_ptr_check_cached_after_first_call() -> None:
     assert exp.cuda.pointer_get_attributes.call_count == 1
 
 
-def test_export_frame_ptr_cache_bounded_at_eight() -> None:
-    """Pointer cache never exceeds 8 entries."""
+def test_export_frame_ptr_cache_bounded_at_sixty_four() -> None:
+    """Pointer cache never exceeds 64 entries (cap bumped from 8 in P9)."""
     exp = _make_exporter(device=0)
 
-    for i in range(12):
-        exp._ptr_device_cache.discard(i)  # simulate 12 distinct pointers
+    for i in range(70):
         new_ptr = 0x1000 + i
-        exp.cuda.pointer_get_attributes.reset_mock()
         exp.export_frame(gpu_ptr=new_ptr, size=exp.data_size)
 
-    assert len(exp._ptr_device_cache) <= 8
+    assert len(exp._ptr_device_cache) <= 64
 
 
 def test_export_frame_env_gate_strict_device(monkeypatch: pytest.MonkeyPatch) -> None:

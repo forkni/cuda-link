@@ -281,6 +281,7 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
         d2h_streams=[mock_stream],
         d2h_events=[],
         num_streams=1,
+        chunk_plan=[],
     )
 
     # Bypass __init__ and inject value objects directly

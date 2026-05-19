@@ -431,9 +431,12 @@ def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> 
     # Phase 3 diagnostic knobs (off in mock)
     exp._export_profile = False
     exp._export_flush_probe = False
-    exp.total_sync_us = 0.0
-    exp.total_sticky_check_us = 0.0
-    exp.total_flush_probe_us = 0.0
+    exp._source_sync_recorded = False
+
+    from cuda_link._profile import FrameProfile
+    from cuda_link.cuda_ipc_exporter import _EXPORTER_PROFILE_REGIONS
+
+    exp._profile = FrameProfile(_EXPORTER_PROFILE_REGIONS)
 
     # F9 activation barrier (disabled in mock)
     exp._barrier = ProducerActivationBarrier(enabled=False, stale_ns=5_000_000_000)
