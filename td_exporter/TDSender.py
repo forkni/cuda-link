@@ -504,7 +504,9 @@ class TDSenderEngine:
         for slot in range(self.num_slots):
             capture_started = False
             try:
-                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)
+                # Relaxed: required to coexist with TensorRT's per-engine
+                # cudaStreamBeginCapture (PyTorch, CuPy, TRT may all be in the same process).
+                self.cuda.stream_begin_capture(self.ipc_stream, mode=2)
                 capture_started = True
                 self.cuda.memcpy_async(
                     dst=self.dev_ptrs[slot],

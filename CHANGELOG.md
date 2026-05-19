@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-05-18
+
+### Fixed
+
+- **C2 — CUDA stream-capture mode coexistence with TensorRT / CuPy / PyTorch CUDA Graphs**
+  (`src/cuda_link/cuda_ipc_exporter.py:591`, `td_exporter/TDSender.py:507`):
+  Both CUDA Graph build sites previously used `cudaStreamCaptureModeGlobal` (mode=0),
+  which marks any concurrent `cudaStreamBeginCapture` in the **entire process** as
+  invalid. When cuda-link is co-resident with TensorRT (e.g. StreamDiffusion ControlNet),
+  TRT's own `cudaStreamEndCapture` returned `cudaErrorStreamCaptureInvalidated (901)`.
+  Changed to `cudaStreamCaptureModeRelaxed` (mode=2): independent captures no longer
+  invalidate each other; cuda-link's graph build is synchronous at init so there is no
+  concurrent enqueue on the captured stream during build.
+
+  Docstring in `cuda_graphs.py` / `CUDAGraphs.py` `stream_begin_capture` updated to
+  explain all three modes and when each is appropriate.
+
+  Regression test: `tests/test_graph_coexistence_capture.py`
+  (`@pytest.mark.requires_cuda`).
+
+### Internal
+
+- **`pyproject.toml` version**: `1.4.1` → `1.4.2`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.4.2.tox` to be built separately.
+  `v1.4.1` retained per versioned-binary tracking policy.
+
+---
+
 ## [1.4.1] — 2026-05-10
 
 ### Added

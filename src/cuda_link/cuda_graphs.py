@@ -56,8 +56,17 @@ class CUDAGraphsMixin:
 
         Args:
             stream: Stream to capture.
-            mode:   cudaStreamCaptureMode — 0=global (safest), 1=thread_local,
-                    2=relaxed. Use 0 unless you know what you're doing.
+            mode:   cudaStreamCaptureMode integer value:
+                      0 = Global  — any CUDA op from any thread in the process
+                                    invalidates all ongoing captures. Only safe
+                                    when this is the sole library performing capture.
+                      1 = ThreadLocal — only ops from the calling thread can
+                                    invalidate; other threads see normal execution.
+                      2 = Relaxed — no automatic cross-stream invalidation.
+                                    Required when co-resident with TensorRT, CuPy
+                                    graphs, or PyTorch CUDA Graphs. Caller is
+                                    responsible for not enqueuing ops on the
+                                    captured stream from other threads during build.
 
         Raises:
             RuntimeError: If capture start fails (e.g., stream already capturing).
