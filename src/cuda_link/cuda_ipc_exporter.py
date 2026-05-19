@@ -1059,10 +1059,12 @@ class CUDAIPCExporter:
         # STEP 6: Free GPU buffers (safe now that consumer has closed handles).
         # cudaFree on an IPC-exported pointer blocks until all receivers call
         # cudaIpcCloseMemHandle. On Windows WDDM, a crashed receiver that never
-        # closed its handle will cause cudaFree to hang indefinitely. We run each
-        # free in a daemon thread with a 0.5 s watchdog; on timeout we log and
-        # continue — the OS reclaims VRAM when the process exits regardless.
+        # closed its handle will cause cudaFree to hang indefinitely. We launch
+        # all daemon free-threads in parallel, then wait up to 500ms total for
+        # all of them — O(0.5s) regardless of slot count. The OS reclaims VRAM
+        # on process exit for any thread that doesn't finish in time.
         if cuda_valid and self.cuda and self.dev_ptrs:
+            free_threads: list[tuple[threading.Thread, int, c_void_p]] = []
             for slot, dev_ptr in enumerate(self.dev_ptrs):
                 if dev_ptr:
 
@@ -1075,14 +1077,19 @@ class CUDAIPCExporter:
 
                     t = threading.Thread(target=_free, args=(dev_ptr,), daemon=True)
                     t.start()
-                    t.join(timeout=0.5)
-                    if t.is_alive():
-                        logger.warning(
-                            "cudaFree slot %d timed out (0x%016x) — receiver may not have closed "
-                            "the IPC handle. Leaking GPU memory; OS will reclaim on process exit.",
-                            slot,
-                            dev_ptr.value,
-                        )
+                    free_threads.append((t, slot, dev_ptr))
+
+            deadline = time.perf_counter() + 0.5
+            for t, slot, dev_ptr in free_threads:
+                remaining = deadline - time.perf_counter()
+                t.join(timeout=max(remaining, 0.0))
+                if t.is_alive():
+                    logger.warning(
+                        "cudaFree slot %d timed out (0x%016x) — receiver may not have closed "
+                        "the IPC handle. Leaking GPU memory; OS will reclaim on process exit.",
+                        slot,
+                        dev_ptr.value,
+                    )
 
         # STEP 7: Unlink SharedMemory (producer is owner and responsible for cleanup)
         try:
