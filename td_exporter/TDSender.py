@@ -255,6 +255,7 @@ class TDSenderEngine:
         self._last_cuda_mem_err = ""
         self._detected_numpy_dtype: object = None
         self._last_numpy_dtype: object = None
+        self._last_status_tuple: tuple | None = None
 
         # Profiling events (created lazily in initialize when _export_profile=True)
         self._timing_start = None
@@ -857,7 +858,10 @@ class TDSenderEngine:
             _dtype_str = (
                 getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
             )
-            self._host.set_info_status(f"{actual_width}x{actual_height} {_dtype_str} {actual_channels}ch")
+            _status_key = (actual_width, actual_height, actual_channels, _dtype_str)
+            if _status_key != self._last_status_tuple:
+                self._host.set_info_status(f"{actual_width}x{actual_height} {_dtype_str} {actual_channels}ch")
+                self._last_status_tuple = _status_key
 
             # Check if we need to (re)initialize
             if not self._initialized or actual_size != self.data_size:
@@ -1344,6 +1348,7 @@ class TDSenderEngine:
         self.write_idx = 0
         self.frame_count = 0
         self._profile = FrameProfile(_SENDER_PROFILE_REGIONS)
+        self._last_status_tuple = None
 
         self._initialized = False
         self._log("Sender cleanup complete", force=True)
