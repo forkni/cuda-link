@@ -1,18 +1,26 @@
 """
 sync_td_wrapper.py — Keep td_exporter copies in sync with canonical sources.
 
-Canonical → Derived pairs:
-  src/cuda_link/cuda_ipc_wrapper.py → td_exporter/CUDAIPCWrapper.py
-  src/cuda_link/nvml_observer.py    → td_exporter/NVMLObserver.py
+THIS IS THE ONLY LEGITIMATE WAY TO UPDATE THE PAIRED td_exporter/ FILES.
+Do not edit td_exporter/ paired files by hand — edits will be overwritten the
+next time this script runs and the pre-commit sync-check hook will reject the
+commit.  Edit the canonical src/cuda_link/ file, then run this script.
 
-Both derived files must be byte-identical to their canonical source.
-This script is called by build_wheel.cmd step [1.5] and the test suite
-(tests/test_wrapper_sync.py) verifies identity at CI time.
+Canonical (src/cuda_link/)     → Derived (td_exporter/)
+  cuda_ipc_wrapper.py          → CUDAIPCWrapper.py
+  cuda_runtime_types.py        → CUDARuntimeTypes.py
+  cuda_graphs.py               → CUDAGraphs.py
+  nvml_observer.py             → NVMLObserver.py
+  shm_protocol.py              → SHMProtocol.py
+  activation_barrier.py        → ActivationBarrier.py
+
+All six derived files must be byte-identical to their canonical source.
+Verified by tests/test_wrapper_sync.py and by the pre-commit sync-check hook.
+This script is also called by build_wheel.cmd step [1.5].
 
 Usage:
-    python scripts/sync_td_wrapper.py [--check]
-
-    --check   Verify only; exit non-zero if any pair differs (used in CI).
+    python scripts/sync_td_wrapper.py           # copy src → td_exporter (update)
+    python scripts/sync_td_wrapper.py --check   # verify only; exit 1 if any pair differs
 """
 
 from __future__ import annotations
@@ -40,6 +48,14 @@ PAIRS: list[tuple[Path, Path]] = [
     (
         REPO_ROOT / "src" / "cuda_link" / "nvml_observer.py",
         REPO_ROOT / "td_exporter" / "NVMLObserver.py",
+    ),
+    (
+        REPO_ROOT / "src" / "cuda_link" / "shm_protocol.py",
+        REPO_ROOT / "td_exporter" / "SHMProtocol.py",
+    ),
+    (
+        REPO_ROOT / "src" / "cuda_link" / "activation_barrier.py",
+        REPO_ROOT / "td_exporter" / "ActivationBarrier.py",
     ),
 ]
 

@@ -1,12 +1,20 @@
 """Test to verify that TD-exporter copies stay in sync with canonical sources.
 
-Duplicated pairs (byte-identical):
+Six byte-identical pairs enforced here and by the pre-commit sync-check hook.
+To update a paired file: edit src/cuda_link/<file>.py, then run:
+
+    python scripts/sync_td_wrapper.py
+
+Never edit td_exporter/ paired files directly — this test and the hook will
+reject the commit.
+
+Pairs:
   src/cuda_link/cuda_ipc_wrapper.py   <-> td_exporter/CUDAIPCWrapper.py
   src/cuda_link/cuda_runtime_types.py <-> td_exporter/CUDARuntimeTypes.py
   src/cuda_link/cuda_graphs.py        <-> td_exporter/CUDAGraphs.py
   src/cuda_link/nvml_observer.py      <-> td_exporter/NVMLObserver.py
-
-Run scripts/sync_td_wrapper.py to regenerate the TD-exporter copies.
+  src/cuda_link/shm_protocol.py       <-> td_exporter/SHMProtocol.py
+  src/cuda_link/activation_barrier.py <-> td_exporter/ActivationBarrier.py
 """
 
 from __future__ import annotations
@@ -34,11 +42,21 @@ _SYNC_PAIRS = [
         _PROJECT_ROOT / "src" / "cuda_link" / "nvml_observer.py",
         _PROJECT_ROOT / "td_exporter" / "NVMLObserver.py",
     ),
+    (
+        _PROJECT_ROOT / "src" / "cuda_link" / "shm_protocol.py",
+        _PROJECT_ROOT / "td_exporter" / "SHMProtocol.py",
+    ),
+    (
+        _PROJECT_ROOT / "src" / "cuda_link" / "activation_barrier.py",
+        _PROJECT_ROOT / "td_exporter" / "ActivationBarrier.py",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "canonical,derived", _SYNC_PAIRS, ids=["CUDAIPCWrapper", "CUDARuntimeTypes", "CUDAGraphs", "NVMLObserver"]
+    "canonical,derived",
+    _SYNC_PAIRS,
+    ids=["CUDAIPCWrapper", "CUDARuntimeTypes", "CUDAGraphs", "NVMLObserver", "SHMProtocol", "ActivationBarrier"],
 )
 def test_td_exporter_file_is_identical(canonical: Path, derived: Path) -> None:
     """Verify each TD-exporter copy is byte-identical to its canonical source."""
