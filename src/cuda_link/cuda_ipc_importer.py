@@ -43,6 +43,10 @@ from . import _nvtx
 
 logger = logging.getLogger(__name__)
 
+# Pre-built NVTX range name strings per slot — eliminates f-string allocation on every get_frame call.
+_NVTX_IMPORTER_GET_NAMES: tuple[str, ...] = tuple(f"cudalink.importer.get_frame.slot{i}" for i in range(10))
+_NVTX_IMPORTER_NUMPY_NAMES: tuple[str, ...] = tuple(f"cudalink.importer.get_frame_numpy.slot{i}" for i in range(10))
+
 if TYPE_CHECKING:
     from .nvml_observer import NVMLObserver
 
@@ -358,6 +362,7 @@ class NumpyBuffers:
     d2h_streams: list  # one per CUDALINK_D2H_STREAMS value; slot 0 == primary_stream
     d2h_events: list  # join-barrier sync events, one per stream
     num_streams: int
+    chunk_plan: list  # pre-computed [(offset, size), ...] for multi-stream D2H; empty when num_streams <= 1
 
     @classmethod
     def build(cls, conn: IPCConnection, fmt: Format, num_streams: int) -> NumpyBuffers:
@@ -413,6 +418,17 @@ class NumpyBuffers:
                 buffer = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
                 pinned_memory_available = False
 
+        # Pre-compute (offset, size) pairs for multi-stream D2H; avoids per-frame math.
+        chunk_plan: list[tuple[int, int]] = []
+        if num_streams > 1:
+            chunk = ((nbytes + num_streams - 1) // num_streams + 15) & ~15
+            for i in range(num_streams):
+                offset = i * chunk
+                size = min(chunk, nbytes - offset)
+                if size <= 0:
+                    break
+                chunk_plan.append((offset, size))
+
         return cls(
             cuda=cuda,
             fmt=fmt,
@@ -424,6 +440,7 @@ class NumpyBuffers:
             d2h_streams=d2h_streams,
             d2h_events=d2h_events,
             num_streams=num_streams,
+            chunk_plan=chunk_plan,
         )
 
     def needs_rebuild(self, fmt: Format) -> bool:
@@ -860,12 +877,14 @@ class CUDAIPCImporter:
         wait_start = time.perf_counter()
 
         if conn.ipc_events[slot]:
+            evt = conn.ipc_events[slot]
+            query = conn.cuda.query_event
             deadline = wait_start + self.timeout_ms / 1000
 
             if self._spin_us > 0:
                 spin_deadline = wait_start + self._spin_us / 1_000_000
                 while time.perf_counter() < spin_deadline:
-                    if conn.cuda.query_event(conn.ipc_events[slot]):
+                    if query(evt):
                         spin_us = (time.perf_counter() - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
@@ -878,7 +897,7 @@ class CUDAIPCImporter:
             phase2_start = time.perf_counter()
             with _HighResTimer():
                 while True:
-                    if conn.cuda.query_event(conn.ipc_events[slot]):
+                    if query(evt):
                         break
                     if time.perf_counter() >= deadline:
                         raise TimeoutError(
@@ -941,7 +960,7 @@ class CUDAIPCImporter:
         if debug:
             wait_start = time.perf_counter()
 
-        _nvtx.push_range(f"cudalink.importer.get_frame.slot{read_slot}", "purple")
+        _nvtx.push_range(_NVTX_IMPORTER_GET_NAMES[read_slot], "purple")
         with _nvtx.verbose_range("cudalink.importer.event_wait", "purple"):
             if stream is not None:
                 cuda_stream = self._resolve_stream(stream)
@@ -1037,7 +1056,7 @@ class CUDAIPCImporter:
         # the IPC event BEFORE publishing write_idx (improvement #2), so the event is always
         # pre-signaled when the consumer reads write_idx — query_event returns True on the
         # first call with no polling delay.
-        _nvtx.push_range(f"cudalink.importer.get_frame_numpy.slot{read_slot}", "orange")
+        _nvtx.push_range(_NVTX_IMPORTER_NUMPY_NAMES[read_slot], "orange")
         if debug:
             _wait_t = time.perf_counter()
         with _nvtx.verbose_range("cudalink.importer.event_wait", "orange"):
@@ -1064,16 +1083,10 @@ class CUDAIPCImporter:
                 )
                 conn.cuda.stream_synchronize(nb.primary_stream)
             else:
-                # Chunk size: ceil-divided, rounded up to 16-byte alignment for DMA safety.
-                chunk = ((nbytes + n_streams - 1) // n_streams + 15) & ~15
                 dst_base = nb.buffer.ctypes.data
                 src_base = conn.dev_ptrs[read_slot].value
                 issued = 0
-                for i in range(n_streams):
-                    offset = i * chunk
-                    size = min(chunk, nbytes - offset)
-                    if size <= 0:
-                        break
+                for i, (offset, size) in enumerate(nb.chunk_plan):
                     conn.cuda.memcpy_async(
                         dst=ctypes.c_void_p(dst_base + offset),
                         src=ctypes.c_void_p(src_base + offset),

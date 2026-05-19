@@ -72,6 +72,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Pre-built NVTX range name strings — eliminates f-string allocation on every export_frame call.
+# num_slots is capped at 10 (enforced in __init__), so 10 entries cover all valid slot indices.
+_NVTX_EXPORTER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.exporter.slot{i}" for i in range(10))
+
 from .shm_protocol import (  # noqa: E402
     _ST_U32,
     MAGIC_OFFSET,
@@ -731,9 +735,10 @@ class CUDAIPCExporter:
                     self.shm_handle.buf[self._shutdown_offset] = 0
             return False
         debug = self.debug
+        _cuda = self.cuda
         if debug:
             frame_start = time.perf_counter()
-        _nvtx.push_range(f"cudalink.exporter.slot{self.write_idx % self.num_slots}", "green")
+        _nvtx.push_range(_NVTX_EXPORTER_SLOT_NAMES[self.write_idx % self.num_slots], "green")
         try:
             slot = self.write_idx % self.num_slots
 
@@ -741,7 +746,7 @@ class CUDAIPCExporter:
             # Cache keyed by pointer integer (cap at 8 to cover typical buffer-rotation).
             gpu_ptr_int = gpu_ptr if isinstance(gpu_ptr, int) else int(gpu_ptr)
             if gpu_ptr_int not in self._ptr_device_cache:
-                attrs = self.cuda.pointer_get_attributes(gpu_ptr_int)
+                attrs = _cuda.pointer_get_attributes(gpu_ptr_int)
                 if attrs.type not in (2, 3):  # 2=device, 3=managed (both valid for D2D)
                     msg = (
                         f"export_frame: gpu_ptr 0x{gpu_ptr_int:016x} is not device/managed "
@@ -760,7 +765,7 @@ class CUDAIPCExporter:
                     if self._strict_device:
                         raise ValueError(msg)
                     logger.error(msg)
-                if len(self._ptr_device_cache) < 8:
+                if len(self._ptr_device_cache) < 64:
                     self._ptr_device_cache.add(gpu_ptr_int)
 
             # --- GPU copy + sync: graph path or legacy path ---
@@ -776,7 +781,7 @@ class CUDAIPCExporter:
                 if debug:
                     _t = time.perf_counter()
                 try:
-                    self.cuda.graph_exec_memcpy_node_set_params_1d(
+                    _cuda.graph_exec_memcpy_node_set_params_1d(
                         self._graph_execs[slot],
                         self._graph_memcpy_nodes[slot],
                         dst=self.dev_ptrs[slot],
@@ -785,10 +790,10 @@ class CUDAIPCExporter:
                         kind=3,
                     )
                     if self._source_sync_recorded and self.source_sync_event is not None:
-                        self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
-                    self.cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
+                        _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                    _cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
                     if self.ipc_events[slot]:
-                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                        _cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 except (RuntimeError, OSError) as _graph_err:
                     logger.warning(
                         "Graph launch failed (%s) — disabling graphs, retrying via legacy path",
@@ -810,14 +815,14 @@ class CUDAIPCExporter:
                 if debug:
                     _t = time.perf_counter()
                 if self.source_sync_event is not None:
-                    self.cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                    _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                 if debug:
                     self.total_stream_wait_us += (time.perf_counter() - _t) * 1_000_000
 
                 if debug:
                     memcpy_start = time.perf_counter()
                 with _nvtx.verbose_range("cudalink.exporter.memcpy", "green"):
-                    self.cuda.memcpy_async(
+                    _cuda.memcpy_async(
                         dst=self.dev_ptrs[slot],
                         src=c_void_p(gpu_ptr),
                         count=self.data_size,
@@ -831,7 +836,7 @@ class CUDAIPCExporter:
                     _t = time.perf_counter()
                 with _nvtx.verbose_range("cudalink.exporter.record_event", "green"):
                     if self.ipc_events[slot]:
-                        self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                        _cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 if debug:
                     self.total_record_event_us += (time.perf_counter() - _t) * 1_000_000
 
@@ -849,13 +854,13 @@ class CUDAIPCExporter:
             if self._export_sync:
                 if debug and self._export_profile:
                     _t_sync = time.perf_counter()
-                self.cuda.stream_synchronize(self.ipc_stream)
+                _cuda.stream_synchronize(self.ipc_stream)
                 if debug and self._export_profile:
                     self.total_sync_us += (time.perf_counter() - _t_sync) * 1_000_000
 
             if debug and self._export_profile:
                 _t_sticky = time.perf_counter()
-            self.cuda.check_sticky_error("export_frame")
+            _cuda.check_sticky_error("export_frame")
             if debug and self._export_profile:
                 self.total_sticky_check_us += (time.perf_counter() - _t_sticky) * 1_000_000
 
@@ -867,7 +872,7 @@ class CUDAIPCExporter:
                 if debug and self._export_profile:
                     _t_fp = time.perf_counter()
                 with _nvtx.verbose_range("cudalink.exporter.flush_probe", "green"):
-                    self.cuda.stream_query(self.ipc_stream)
+                    _cuda.stream_query(self.ipc_stream)
                 if debug and self._export_profile:
                     self.total_flush_probe_us += (time.perf_counter() - _t_fp) * 1_000_000
 
