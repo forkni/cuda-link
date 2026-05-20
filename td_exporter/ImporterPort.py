@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from .cuda_runtime_types import (
+from CUDARuntimeTypes import (
     CUDAEvent_t,
     CUDAStream_t,
     cudaIpcEventHandle_t,

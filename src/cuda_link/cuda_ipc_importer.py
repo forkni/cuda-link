@@ -14,24 +14,24 @@ import logging
 import warnings
 from typing import TYPE_CHECKING
 
+from ._importer_port import ImportOutcome, ImportPolicy, ImportResult, ImportSpec  # noqa: F401
+from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime  # noqa: F401
+from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Re-exports required by existing callers
 # ---------------------------------------------------------------------------
-
 from .importer import (  # noqa: F401
     CUPY_AVAILABLE,
-    Format,
-    IPCConnection,
     NUMPY_AVAILABLE,
     TORCH_AVAILABLE,
-    TorchBuffers,
     CupyBuffers,
+    Format,
+    Importer,  # noqa: F401
+    IPCConnection,
     NumpyBuffers,
+    TorchBuffers,
 )
-from ._importer_port import ImportOutcome, ImportResult, ImportSpec, ImportPolicy  # noqa: F401
-from .importer import Importer  # noqa: F401
-from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime  # noqa: F401
-from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: F401
 
 if TYPE_CHECKING:
     pass
@@ -98,9 +98,7 @@ class CUDAIPCImporter:
         self._importer: Importer | None = None
 
     @classmethod
-    def from_connected(
-        cls, shm_name: str = "cudalink_output_ipc", **kwargs
-    ) -> CUDAIPCImporter:
+    def from_connected(cls, shm_name: str = "cudalink_output_ipc", **kwargs) -> CUDAIPCImporter:
         """Deprecated. Use Importer.open() instead."""
         _warn_once()
         imp = cls(shm_name=shm_name, **kwargs)
@@ -113,6 +111,7 @@ class CUDAIPCImporter:
         if self._importer is not None:
             return
         import os
+
         policy = ImportPolicy(
             wait_spin_us=int(os.getenv("CUDALINK_WAIT_SPIN_US", "200")),
             d2h_num_streams=max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1"))),

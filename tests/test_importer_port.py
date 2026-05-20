@@ -10,11 +10,11 @@ import pytest
 
 from cuda_link._cuda_adapters import CTypesCudaAdapter, FakeCudaAdapter
 from cuda_link._importer_port import (
+    ImporterCudaPort,
     ImportOutcome,
     ImportPolicy,
     ImportResult,
     ImportSpec,
-    ImporterCudaPort,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,8 +79,12 @@ def test_import_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_import_policy_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("CUDALINK_WAIT_SPIN_US", "CUDALINK_D2H_STREAMS",
-                "CUDALINK_D2H_STREAM_PRIO", "CUDALINK_ALLOW_PAGEABLE_FALLBACK"):
+    for var in (
+        "CUDALINK_WAIT_SPIN_US",
+        "CUDALINK_D2H_STREAMS",
+        "CUDALINK_D2H_STREAM_PRIO",
+        "CUDALINK_ALLOW_PAGEABLE_FALLBACK",
+    ):
         monkeypatch.delenv(var, raising=False)
 
     pol = ImportPolicy.from_env()
@@ -219,6 +223,7 @@ def test_fake_adapter_free_host_releases_allocation() -> None:
 
 def test_fake_adapter_malloc_host_alloc_backed_by_real_buffer() -> None:
     import ctypes
+
     import numpy as np
 
     fake = FakeCudaAdapter()

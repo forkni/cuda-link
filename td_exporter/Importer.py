@@ -25,14 +25,14 @@ from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
 
-from . import _nvtx
-from ._importer_port import (
+import NVTXShim as _nvtx
+from ImporterPort import (
     ImportOutcome,
     ImportPolicy,
     ImportResult,
     ImportSpec,
 )
-from .shm_protocol import (
+from SHMProtocol import (
     _ST_BBH,
     MAGIC_OFFSET,
     MAGIC_SIZE,

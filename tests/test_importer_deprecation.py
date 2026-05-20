@@ -4,6 +4,7 @@ Tests that CUDAIPCImporter emits DeprecationWarning exactly once per process.
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 
 
@@ -19,10 +20,8 @@ def test_connect_emits_deprecation_warning() -> None:
     imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError, RuntimeError):
             imp.connect()
-        except (FileNotFoundError, OSError, RuntimeError):
-            pass  # expected — SHM doesn't exist
 
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(dep_warnings) >= 1
@@ -48,16 +47,12 @@ def test_deprecation_warning_fires_only_once() -> None:
         warnings.simplefilter("always")
         # First call
         imp1 = CUDAIPCImporter(shm_name="xyzzy_a")
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError, RuntimeError):
             imp1.connect()
-        except (FileNotFoundError, OSError, RuntimeError):
-            pass
         # Second call — should not emit again
         imp2 = CUDAIPCImporter(shm_name="xyzzy_b")
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError, RuntimeError):
             imp2.connect()
-        except (FileNotFoundError, OSError, RuntimeError):
-            pass
 
     # Guard should be set after first connect
     assert shim_mod._deprecation_warned is True
@@ -73,10 +68,8 @@ def test_from_connected_emits_deprecation_warning() -> None:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError, RuntimeError):
             CUDAIPCImporter.from_connected(shm_name="definitely_does_not_exist_xyzzy")
-        except (FileNotFoundError, OSError, RuntimeError):
-            pass
 
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(dep_warnings) >= 1
@@ -93,10 +86,8 @@ def test_deprecation_message_mentions_migration_guide() -> None:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError, RuntimeError):
             CUDAIPCImporter(shm_name="xyzzy").connect()
-        except (FileNotFoundError, OSError, RuntimeError):
-            pass
 
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(dep_warnings) >= 1

@@ -80,7 +80,7 @@ ignore = ["E501"]  # Line length handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
-"td_exporter/*" = ["N801", "N802", "N803", "N814", "F821"]  # TD naming: __delTD__, ownerComp, COMP/TOP fallbacks; C-struct naming (cudaIpcMemHandle_t); TD built-in globals (op, parent, etc.)
+"td_exporter/*" = ["N801", "N802", "N803", "N813", "N814", "F821", "I001"]  # TD naming + generated-file exemptions: __delTD__, ownerComp, COMP/TOP fallbacks; C-struct naming; TD built-in globals; import sort irrelevant in generated files
 "benchmarks/*" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t)
 "tests/*" = ["N802", "N806"]  # Allow test method names like test_* and test constant naming
 "src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, etc.)

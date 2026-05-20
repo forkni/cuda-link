@@ -21,7 +21,7 @@ def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
 
     from cuda_link._cuda_adapters import FakeCudaAdapter
     from cuda_link._importer_port import ImportPolicy, ImportSpec
-    from cuda_link.importer import IPCConnection, Importer
+    from cuda_link.importer import Importer, IPCConnection
     from cuda_link.shm_protocol import SHMLayout
 
     spec = ImportSpec(shm_name="mock", device=0, timeout_ms=timeout_ms)

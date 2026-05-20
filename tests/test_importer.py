@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import struct
 from ctypes import c_void_p
-from multiprocessing.shared_memory import SharedMemory
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cuda_link._cuda_adapters import FakeCudaAdapter
-from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportResult, ImportSpec
-from cuda_link.importer import Format, IPCConnection, Importer, NumpyBuffers
+from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
+from cuda_link.importer import Format, Importer, IPCConnection, NumpyBuffers
 from cuda_link.shm_protocol import (
     METADATA_SIZE,
     SHM_HEADER_SIZE,
@@ -45,10 +44,10 @@ def _make_connected_importer(
 
     shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
     buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)      # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, ipc_version)     # ipc_version
-    struct.pack_into("<I", buf, 12, num_slots)       # num_slots
-    struct.pack_into("<I", buf, 16, write_idx)       # write_idx
+    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
+    struct.pack_into("<Q", buf, 4, ipc_version)  # ipc_version
+    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
+    struct.pack_into("<I", buf, 16, write_idx)  # write_idx
 
     fmt = Format.from_overrides(shape, dtype)
     layout = SHMLayout(num_slots)
@@ -209,9 +208,8 @@ def test_context_manager_calls_close() -> None:
 def test_context_manager_calls_close_on_exception() -> None:
     """close() is called even when the body raises."""
     imp = _make_connected_importer()
-    with pytest.raises(RuntimeError, match="test error"):
-        with imp:
-            raise RuntimeError("test error")
+    with pytest.raises(RuntimeError, match="test error"), imp:
+        raise RuntimeError("test error")
     assert not imp._initialized
 
 
@@ -261,10 +259,22 @@ def test_get_stats_structure() -> None:
     imp = _make_connected_importer(shape=(8, 8, 4), dtype="float32")
     stats = imp.get_stats()
 
-    for key in ("initialized", "shm_name", "shape", "dtype", "device",
-                "num_slots", "frame_count", "torch_available", "numpy_available",
-                "dev_ptrs", "wait_spin_hits", "wait_sleep_hits",
-                "avg_spin_us", "avg_sleep_us"):
+    for key in (
+        "initialized",
+        "shm_name",
+        "shape",
+        "dtype",
+        "device",
+        "num_slots",
+        "frame_count",
+        "torch_available",
+        "numpy_available",
+        "dev_ptrs",
+        "wait_spin_hits",
+        "wait_sleep_hits",
+        "avg_spin_us",
+        "avg_sleep_us",
+    ):
         assert key in stats, f"Missing key: {key}"
 
     assert stats["initialized"] is True

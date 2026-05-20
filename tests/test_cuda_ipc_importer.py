@@ -279,7 +279,7 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
 
     from cuda_link._cuda_adapters import FakeCudaAdapter
     from cuda_link._importer_port import ImportPolicy, ImportSpec
-    from cuda_link.importer import Format, IPCConnection, NumpyBuffers, Importer
+    from cuda_link.importer import Format, Importer, IPCConnection, NumpyBuffers
     from cuda_link.shm_protocol import (
         METADATA_SIZE,
         SHM_HEADER_SIZE,

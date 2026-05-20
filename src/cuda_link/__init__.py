@@ -7,7 +7,7 @@ CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 """
 
 from ._exporter_port import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
-from ._importer_port import ImportOutcome, ImportPolicy, ImportResult, ImportSpec, ImporterCudaPort
+from ._importer_port import ImporterCudaPort, ImportOutcome, ImportPolicy, ImportResult, ImportSpec
 from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
