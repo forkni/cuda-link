@@ -6,9 +6,11 @@ Communication for zero-copy GPU texture transfer. Supports PyTorch (GPU tensors)
 CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 """
 
+from ._exporter_port import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
+from .exporter import Exporter
 from .nvml_observer import NVML_AVAILABLE, NVMLObserver
 from .shm_protocol import (
     AcquireResult,
@@ -20,8 +22,15 @@ from .shm_protocol import (
     publish_frame,
 )
 
-__version__ = "1.4.1"
+__version__ = "1.6.0"
 __all__ = [
+    # v1.6.0 — new deep Exporter API
+    "Exporter",
+    "FrameSpec",
+    "ExportPolicy",
+    "GpuFrame",
+    "FrameOutcome",
+    # v1.6.0 deprecated (removed in v1.7.0)
     "CUDAIPCExporter",
     "CUDAIPCImporter",
     "CUDARuntimeAPI",
