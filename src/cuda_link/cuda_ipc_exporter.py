@@ -168,6 +168,7 @@ class CUDAIPCExporter:
 
         # Inner Exporter — created lazily on initialize()
         self._inner: Exporter | None = None
+        self._nvml_observer: object | None = None
 
     def initialize(self) -> bool:
         """Allocate GPU ring buffer, create IPC handles, write to SharedMemory.
@@ -189,6 +190,8 @@ class CUDAIPCExporter:
                 ),
                 policy=self._policy,
             )
+            if self._nvml_observer is not None:
+                self._inner.attach_nvml_observer(self._nvml_observer)  # type: ignore[arg-type]
             return self._inner.is_ready()
         except Exception as exc:
             logger.error("CUDAIPCExporter.initialize() failed: %s", exc)
@@ -217,13 +220,14 @@ class CUDAIPCExporter:
         return self._inner is not None and self._inner.is_ready()
 
     def attach_nvml_observer(self, observer: object) -> None:
+        self._nvml_observer = observer
         if self._inner is not None:
             self._inner.attach_nvml_observer(observer)  # type: ignore[arg-type]
 
     def get_stats(self) -> dict:
         if self._inner is not None:
             return self._inner.get_stats()
-        return {
+        stats: dict = {
             "initialized": False,
             "shm_name": self.shm_name,
             "resolution": f"{self.width}x{self.height}x{self.channels}",
@@ -237,6 +241,9 @@ class CUDAIPCExporter:
             "avg_total_us": 0.0,
             "dev_ptrs": [],
         }
+        if self._nvml_observer is not None:
+            stats["nvml"] = self._nvml_observer.snapshot()  # type: ignore[union-attr]
+        return stats
 
     def __enter__(self) -> CUDAIPCExporter:
         return self

@@ -190,6 +190,25 @@ class _FakeHandle:
         return f"<FakeHandle {self._tag}>"
 
 
+class _FakeIpcHandle:
+    """64-byte IPC handle sentinel (cudaIpcMemHandle_t / cudaIpcEventHandle_t shape).
+
+    Both IPC handle types are 64 bytes but use different field names:
+      cudaIpcMemHandle_t   → .internal  (c_byte * 64)
+      cudaIpcEventHandle_t → .reserved  (c_byte * 64)
+    This fake satisfies both so a single class covers both call sites.
+    """
+
+    internal: bytes = bytes(64)
+    reserved: bytes = bytes(64)
+
+    def __init__(self, tag: str) -> None:
+        self._tag = tag
+
+    def __repr__(self) -> str:
+        return f"<FakeIpcHandle {self._tag}>"
+
+
 class FakeCudaAdapter:
     """In-memory CudaPort for unit tests — no GPU, no ctypes DLL required.
 
@@ -298,7 +317,7 @@ class FakeCudaAdapter:
         return _FakeHandle("sync_event")
 
     def ipc_get_event_handle(self, event: Any) -> Any:
-        return _FakeHandle("ipc_event_handle")
+        return _FakeIpcHandle("ipc_event_handle")
 
     def record_event(self, event: Any, stream: Any = None) -> None:
         event_tag = getattr(event, "_tag", str(event))
@@ -311,7 +330,7 @@ class FakeCudaAdapter:
     # --- IPC memory --------------------------------------------------------
 
     def ipc_get_mem_handle(self, dev_ptr: Any) -> Any:
-        return _FakeHandle("ipc_mem_handle")
+        return _FakeIpcHandle("ipc_mem_handle")
 
     # --- Pointer attributes ------------------------------------------------
 

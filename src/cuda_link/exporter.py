@@ -288,12 +288,12 @@ class Exporter:
         if self.ipc_stream is None:
             if self._policy.high_priority_stream:
                 self.ipc_stream = self._cuda.create_stream_with_priority(flags=0x01)
-                logger.info("Created IPC stream (high-priority): 0x%016x", int(self.ipc_stream.value))
+                logger.info("Created IPC stream (high-priority): %s", self.ipc_stream)
             else:
                 self.ipc_stream = self._cuda.create_stream(flags=0x01)
-                logger.info("Created IPC stream (normal-priority): 0x%016x", int(self.ipc_stream.value))
+                logger.info("Created IPC stream (normal-priority): %s", self.ipc_stream)
         else:
-            logger.debug("Reusing IPC stream: 0x%016x", int(self.ipc_stream.value))
+            logger.debug("Reusing IPC stream: %s", self.ipc_stream)
 
         if self.source_sync_event is None:
             self.source_sync_event = self._cuda.create_sync_event()
@@ -677,7 +677,7 @@ class Exporter:
 
             return FrameOutcome.PUBLISHED
 
-        except (OSError, RuntimeError, ValueError) as e:
+        except (OSError, RuntimeError) as e:
             logger.error("Export failed: %s", e)
             traceback.print_exc()
             return FrameOutcome.FAILED

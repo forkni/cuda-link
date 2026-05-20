@@ -370,129 +370,72 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
 
 # ---------------------------------------------------------------------------
 # Improvement 2: SharedMemory write ordering (atomicity)
+# — rewritten in v1.6 to use Exporter.open() + FakeCudaAdapter instead of
+#   object.__new__(CUDAIPCExporter) with 25 hand-wired private attributes.
 # ---------------------------------------------------------------------------
 
 
-def _make_exporter_with_mock_state(num_slots: int = 2, dtype: str = "uint8") -> object:
-    """Build a CUDAIPCExporter with manually-injected state (no real CUDA required).
+def _make_write_order_exporter():
+    """Open a real Exporter backed by FakeCudaAdapter for write-ordering tests."""
+    import uuid
 
-    Tests that verify SharedMemory write ordering inject all state via MagicMock and a
-    bytearray buffer, bypassing real CUDA IPC initialization entirely.
-    """
-    from unittest.mock import MagicMock
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._exporter_adapters import FakeCudaAdapter
+    from cuda_link.exporter import Exporter
 
-    from cuda_link.cuda_ipc_exporter import (
-        METADATA_SIZE,
-        SHM_HEADER_SIZE,
-        SHUTDOWN_FLAG_SIZE,
-        SLOT_SIZE,
-        TIMESTAMP_SIZE,
-        CUDAIPCExporter,
-        ProducerActivationBarrier,
-        SHMLayout,
+    shm_name = f"test_shm_write_{uuid.uuid4().hex[:8]}"
+    fake = FakeCudaAdapter(device=0)
+    policy = ExportPolicy.for_testing()
+    return Exporter.open(
+        FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2, device=0),
+        policy=policy,
+        cuda=fake,
     )
 
-    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
 
-    exp = object.__new__(CUDAIPCExporter)
-    exp.shm_name = "mock_shm"
-    exp.height = 8
-    exp.width = 8
-    exp.channels = 4
-    exp.dtype = dtype
-    exp.num_slots = num_slots
-    exp.debug = False
-    exp.device = 0
-    exp.data_size = 8 * 8 * 4  # H * W * C * itemsize (uint8 = 1 byte)
-    exp.write_idx = 0
-    exp.frame_count = 0
-    exp.source_sync_event = None
-    exp.ipc_stream = MagicMock()
-    exp.cuda = MagicMock()
-    exp.dev_ptrs = [MagicMock() for _ in range(num_slots)]
-    exp.ipc_events = [None] * num_slots
-    exp._layout = SHMLayout(num_slots)
-    exp._shutdown_offset = exp._layout.shutdown_offset
-    exp._ts_offset = exp._layout.timestamp_offset
-    exp._initialized = True
-    exp._export_sync = False
+def test_shm_write_correctness_after_export() -> None:
+    """After export(), shutdown_flag=0 and write_idx is incremented by 1."""
+    from cuda_link import FrameOutcome, GpuFrame
 
-    # C2 fields (Batch 2A)
-    exp._strict_device = False
-    exp._source_sync_device_warned = False
-    exp._ptr_device_cache = set()
+    exp = _make_write_order_exporter()
+    try:
+        buf = exp.shm_handle.buf
+        buf[exp._shutdown_offset] = 1  # stale flag from a prior session
+        initial_write_idx = exp.write_idx
 
-    # Phase 2 CUDA Graphs state (disabled in mock — no real CUDA context)
-    exp._use_graphs = False
-    exp._graphs_disabled = False
-    exp._graph_execs = [None] * num_slots
-    exp._graph_memcpy_nodes = [None] * num_slots
+        outcome = exp.export(GpuFrame(ptr=0, size=exp.data_size))
 
-    # Phase 3 diagnostic knobs (off in mock)
-    exp._export_profile = False
-    exp._export_flush_probe = False
-    exp._source_sync_recorded = False
-
-    from cuda_link._profile import FrameProfile
-    from cuda_link.cuda_ipc_exporter import _EXPORTER_PROFILE_REGIONS
-
-    exp._profile = FrameProfile(_EXPORTER_PROFILE_REGIONS)
-
-    # F9 activation barrier (disabled in mock)
-    exp._barrier = ProducerActivationBarrier(enabled=False, stale_ns=5_000_000_000)
-
-    # Mock pointer_get_attributes to return device=0, type=2 (device memory) — valid
-    mock_attrs = MagicMock()
-    mock_attrs.type = 2  # cudaMemoryTypeDevice
-    mock_attrs.device = 0
-    exp.cuda.pointer_get_attributes.return_value = mock_attrs
-
-    exp.shm_handle = MagicMock()
-    exp.shm_handle.buf = bytearray(shm_size)
-
-    return exp
-
-
-def test_shm_write_correctness_after_export_frame() -> None:
-    """After export_frame(), shutdown_flag=0 and write_idx is incremented by 1."""
-    exp = _make_exporter_with_mock_state()
-    buf = exp.shm_handle.buf
-
-    # Simulate stale shutdown_flag=1 left by a prior producer session
-    buf[exp._shutdown_offset] = 1
-    initial_write_idx = exp.write_idx
-
-    result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
-
-    assert result is True
-    assert buf[exp._shutdown_offset] == 0, "shutdown_flag must be 0 after export_frame()"
-    actual_write_idx = struct.unpack_from("<I", buf, 16)[0]
-    assert actual_write_idx == initial_write_idx + 1, (
-        f"write_idx must increment from {initial_write_idx} to {initial_write_idx + 1}, got {actual_write_idx}"
-    )
+        assert outcome != FrameOutcome.FAILED
+        assert buf[exp._shutdown_offset] == 0, "shutdown_flag must be 0 after export()"
+        actual_write_idx = struct.unpack_from("<I", buf, 16)[0]
+        assert actual_write_idx == initial_write_idx + 1, (
+            f"write_idx must increment from {initial_write_idx} to {initial_write_idx + 1}, got {actual_write_idx}"
+        )
+    finally:
+        exp.close()
 
 
 def test_shm_write_ordering_shutdown_before_write_idx() -> None:
     """shutdown_flag is cleared BEFORE write_idx is published.
 
-    Atomicity invariant: the consumer reads shutdown_flag BEFORE write_idx.
-    Publishing write_idx last ensures the consumer always sees shutdown_flag=0
-    when it detects a new frame, even with a stale flag=1 from a prior session.
+    Tests the invariant directly against publish_frame() in shm_protocol —
+    the function that owns this ordering guarantee.
     """
     import struct as real_struct
     from unittest.mock import MagicMock, patch
 
+    from cuda_link.shm_protocol import SHMLayout, publish_frame
+
+    num_slots = 2
+    layout = SHMLayout(num_slots)
     write_log: list[tuple] = []
 
     class _SpyBuf(bytearray):
-        """bytearray subclass that records __setitem__ writes in write_log."""
-
         def __setitem__(self, key, val) -> None:
             if isinstance(key, int):
                 write_log.append(("setitem", key, val))
             super().__setitem__(key, val)
 
-    # Spy on _ST_U32.pack_into (write_idx publish uses this pre-compiled Struct)
     real_st_u32 = real_struct.Struct("<I")
     real_st_f64 = real_struct.Struct("<d")
 
@@ -508,25 +451,19 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
     mock_st_f64 = MagicMock()
     mock_st_f64.pack_into.side_effect = spy_f64_pack_into
 
-    exp = _make_exporter_with_mock_state()
-
-    # Replace the plain bytearray with our spy; set stale shutdown_flag=1
-    spy_buf = _SpyBuf(len(exp.shm_handle.buf))
-    spy_buf[exp._shutdown_offset] = 1
-    write_log.clear()  # discard the setup write above
-    exp.shm_handle.buf = spy_buf
+    spy_buf = _SpyBuf(layout.total_size)
+    spy_buf[layout.shutdown_offset] = 1  # stale flag
+    write_log.clear()
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
         patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
     ):
-        result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
-
-    assert result is True
+        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
 
     WRITE_IDX_OFFSET = 16
     shutdown_pos = next(
-        (i for i, e in enumerate(write_log) if e[0] == "setitem" and e[1] == exp._shutdown_offset),
+        (i for i, e in enumerate(write_log) if e[0] == "setitem" and e[1] == layout.shutdown_offset),
         None,
     )
     write_idx_pos = next(
@@ -534,8 +471,8 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
         None,
     )
 
-    assert shutdown_pos is not None, "shutdown_flag must be written during export_frame()"
-    assert write_idx_pos is not None, "write_idx must be published during export_frame()"
+    assert shutdown_pos is not None, "shutdown_flag must be written by publish_frame()"
+    assert write_idx_pos is not None, "write_idx must be published by publish_frame()"
     assert shutdown_pos < write_idx_pos, (
         f"shutdown_flag write (log[{shutdown_pos}]) must precede "
         f"write_idx publish (log[{write_idx_pos}]); full log: {write_log}"
@@ -545,13 +482,16 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
 def test_release_fence_called_between_flag_and_write_idx() -> None:
     """C3: _release_fence() is called after shutdown_flag clear and before write_idx publish.
 
-    The fence must sit between the two writes to form the mechanical release-barrier
-    guarantee. This test verifies the position using the _SpyBuf + _release_fence spy approach.
+    Tests the invariant directly against publish_frame() in shm_protocol.
     """
     import struct as real_struct
     from unittest.mock import MagicMock, patch
 
-    fence_calls: list[int] = []  # index in write_log at time of fence call
+    from cuda_link.shm_protocol import SHMLayout, publish_frame
+
+    num_slots = 2
+    layout = SHMLayout(num_slots)
+    fence_calls: list[int] = []
     write_log: list[tuple] = []
 
     class _SpyBuf(bytearray):
@@ -571,32 +511,29 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
         real_st_f64.pack_into(buf, offset, *args)
 
     def spy_fence() -> None:
-        fence_calls.append(len(write_log))  # record position in log
+        fence_calls.append(len(write_log))
 
     mock_st_u32 = MagicMock()
     mock_st_u32.pack_into.side_effect = spy_u32_pack_into
     mock_st_f64 = MagicMock()
     mock_st_f64.pack_into.side_effect = spy_f64_pack_into
 
-    exp = _make_exporter_with_mock_state()
-    spy_buf = _SpyBuf(len(exp.shm_handle.buf))
-    spy_buf[exp._shutdown_offset] = 1
+    spy_buf = _SpyBuf(layout.total_size)
+    spy_buf[layout.shutdown_offset] = 1
     write_log.clear()
-    exp.shm_handle.buf = spy_buf
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
         patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
         patch("cuda_link.shm_protocol._release_fence", spy_fence),
     ):
-        result = exp.export_frame(gpu_ptr=0, size=exp.data_size)
+        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
 
-    assert result is True
-    assert len(fence_calls) == 1, "exactly one fence call per export_frame"
+    assert len(fence_calls) == 1, "exactly one fence call per publish_frame()"
 
     WRITE_IDX_OFFSET = 16
     shutdown_pos = next(
-        (i for i, e in enumerate(write_log) if e[0] == "setitem" and e[1] == exp._shutdown_offset),
+        (i for i, e in enumerate(write_log) if e[0] == "setitem" and e[1] == layout.shutdown_offset),
         None,
     )
     write_idx_pos = next(
