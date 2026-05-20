@@ -22,7 +22,6 @@ import threading
 import time
 import traceback
 from ctypes import c_void_p
-from dataclasses import dataclass, field
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
@@ -36,9 +35,7 @@ from ._exporter_port import (
     GpuFrame,
 )
 from ._profile import FrameProfile
-from .activation_barrier import bump_skip as _ab_bump
-from .activation_barrier import open_or_create as _ab_open
-from .activation_barrier import read_state as _ab_read
+from .activation_barrier import CheckerBarrier
 from .cuda_runtime_types import (
     CUDART_GRAPHS_MIN_VERSION,
     CUDAGraph_t,
@@ -102,58 +99,6 @@ def _read_hws_mode() -> str:
         return str(value)
     except Exception:  # noqa: BLE001
         return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Internal activation-barrier state (mirrors ProducerActivationBarrier from
-# cuda_ipc_exporter.py but constructed from ExportPolicy, not from_env()).
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _BarrierState:
-    enabled: bool
-    stale_ns: int
-    shm: SharedMemory | None = None
-    _skip_log_last_ns: int = field(init=False, default=0, repr=False)
-    _stale_log_last_ns: int = field(init=False, default=0, repr=False)
-
-    def should_skip_publish(self) -> bool:
-        if not self.enabled:
-            return False
-        if self.shm is None:
-            try:
-                self.shm = _ab_open(create=False)
-            except FileNotFoundError:
-                return False
-        try:
-            active_count, last_change_ns, _ = _ab_read(self.shm)
-        except (OSError, RuntimeError, struct.error):
-            return False
-        if active_count <= 0:
-            return False
-        now_ns = time.monotonic_ns()
-        if now_ns - last_change_ns > self.stale_ns:
-            if now_ns - self._stale_log_last_ns > 1_000_000_000:
-                logger.warning(
-                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
-                    active_count,
-                    (now_ns - last_change_ns) / 1e9,
-                )
-                self._stale_log_last_ns = now_ns
-            return False
-        with contextlib.suppress(OSError, RuntimeError, struct.error):
-            _ab_bump(self.shm)
-        if now_ns - self._skip_log_last_ns > 1_000_000_000:
-            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
-            self._skip_log_last_ns = now_ns
-        return True
-
-    def close(self) -> None:
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +168,7 @@ class Exporter:
         self._ptr_device_cache: set[int] = set()
 
         # Activation barrier
-        self._barrier = _BarrierState(enabled=policy.barrier_enabled, stale_ns=policy.barrier_stale_ns)
+        self._barrier = CheckerBarrier(enabled=policy.barrier_enabled, stale_ns=policy.barrier_stale_ns)
 
     # ------------------------------------------------------------------
     # Factory

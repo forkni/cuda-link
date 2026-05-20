@@ -12,20 +12,12 @@ Re-exports for backwards-compatible ``from cuda_link.cuda_ipc_exporter import ..
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
-import struct
-import time
 import warnings
-from dataclasses import dataclass, field
-from multiprocessing.shared_memory import SharedMemory
 
 # New public API — re-exported for backwards-compat callers
 from ._exporter_port import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
-from .activation_barrier import bump_skip as _ab_bump
-from .activation_barrier import open_or_create as _ab_open
-from .activation_barrier import read_state as _ab_read
+from .activation_barrier import CheckerBarrier
 from .exporter import (
     _DTYPE_ITEMSIZE_MAP,
     _DTYPE_TO_KIND_BITS,
@@ -46,70 +38,6 @@ from .shm_protocol import (  # noqa: F401 — re-exported for backwards-compat i
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ProducerActivationBarrier:
-    """Producer-side activation-barrier state.
-
-    Kept here for backwards compatibility.  New code should use
-    ``ExportPolicy.barrier_enabled`` / ``ExportPolicy.barrier_stale_ns`` and
-    pass the policy to ``Exporter.open()``.
-    """
-
-    enabled: bool
-    stale_ns: int
-    shm: SharedMemory | None = None
-    _skip_log_last_ns: int = field(init=False, default=0, repr=False)
-    _stale_log_last_ns: int = field(init=False, default=0, repr=False)
-
-    @classmethod
-    def from_env(cls) -> ProducerActivationBarrier:
-        return cls(
-            enabled=os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0",
-            stale_ns=int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000))),
-        )
-
-    def should_skip_publish(self) -> bool:
-        """Hot path: True => caller skips this frame.
-
-        Lazily opens the SHM segment on first call. Applies a stale-timeout so a
-        Sender that crashes mid-init cannot block the producer indefinitely.
-        """
-        if self.shm is None:
-            try:
-                self.shm = _ab_open(create=False)
-            except FileNotFoundError:
-                return False
-        try:
-            active_count, last_change_ns, _ = _ab_read(self.shm)
-        except (OSError, RuntimeError, struct.error):
-            return False
-        if active_count <= 0:
-            return False
-        now_ns = time.monotonic_ns()
-        if now_ns - last_change_ns > self.stale_ns:
-            if now_ns - self._stale_log_last_ns > 1_000_000_000:
-                logger.warning(
-                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
-                    active_count,
-                    (now_ns - last_change_ns) / 1e9,
-                )
-                self._stale_log_last_ns = now_ns
-            return False
-        with contextlib.suppress(OSError, RuntimeError, struct.error):
-            _ab_bump(self.shm)
-        if now_ns - self._skip_log_last_ns > 1_000_000_000:
-            logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
-            self._skip_log_last_ns = now_ns
-        return True
-
-    def close(self) -> None:
-        """Idempotent: close SHM handle if held."""
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
 
 
 class CUDAIPCExporter:
@@ -161,7 +89,7 @@ class CUDAIPCExporter:
         self._export_sync: bool = self._policy.export_sync
         self._export_flush_probe: bool = self._policy.flush_probe
         self._strict_device: bool = self._policy.strict_device
-        self._barrier = ProducerActivationBarrier(
+        self._barrier = CheckerBarrier(
             enabled=self._policy.barrier_enabled,
             stale_ns=self._policy.barrier_stale_ns,
         )

@@ -11,23 +11,13 @@ from __future__ import annotations
 
 import contextlib
 import os
-import struct
 import time
 import traceback
 from ctypes import c_void_p
-from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Callable
 
-from ActivationBarrier import (  # noqa: E402, I001
-    decrement as _ab_decrement,
-)
-from ActivationBarrier import (
-    increment as _ab_increment,
-)
-from ActivationBarrier import (
-    open_or_create as _ab_open_or_create,
-)
+from ActivationBarrier import HolderBarrier  # noqa: E402, I001
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
 from CUDARuntimeTypes import CUDART_GRAPHS_MIN_VERSION  # noqa: E402
 from FrameProfile import FrameProfile  # noqa: E402
@@ -87,91 +77,6 @@ _SENDER_PROFILE_REGIONS: tuple[str, ...] = (
     "export",
     "unaccounted",
 )
-
-
-@dataclass
-class SenderActivationBarrier:
-    """TD-side Sender activation-barrier state.
-
-    Replaces five scattered attributes on TDSenderEngine (_activation_barrier,
-    _barrier_settle_frames, _barrier_settle_remaining, _barrier_held,
-    _barrier_shm) with a single cohesive value object.
-    """
-
-    enabled: bool
-    settle_frames: int
-    held: bool = False
-    settle_remaining: int = 0
-    shm: object = None
-
-    @classmethod
-    def from_config(cls, config: TDSenderConfig) -> SenderActivationBarrier:
-        return cls(
-            enabled=config.activation_barrier,
-            settle_frames=config.barrier_settle_frames,
-        )
-
-    def acquire(self, pid: int, *, log_fn: Callable) -> None:
-        """Open-or-create the segment, increment, set held=True. Log+swallow failures."""
-        if not self.enabled:
-            return
-        try:
-            if self.shm is None:
-                self.shm = _ab_open_or_create(create=True)
-            count = _ab_increment(self.shm, pid)
-            self.held = True
-            log_fn(f"[ACTIVATION_BARRIER] held +1 (count={count}) for Sender init", force=True)
-        except (OSError, RuntimeError, struct.error) as _exc:
-            log_fn(f"[ACTIVATION_BARRIER] init increment failed (ignored): {_exc}", force=True)
-
-    def arm_settle_countdown(self) -> None:
-        """Called from initialize() tail when init succeeds — settle_remaining = settle_frames."""
-        if self.held:
-            self.settle_remaining = self.settle_frames
-
-    def tick_and_maybe_release(self, pid: int, *, log_fn: Callable) -> bool:
-        """Per-frame: decrement settle_remaining. When it hits 0 and held, release barrier.
-
-        Returns True iff the release fired this frame.
-        """
-        if self.settle_remaining <= 0:
-            return False
-        self.settle_remaining -= 1
-        if self.settle_remaining == 0 and self.held and self.shm is not None:
-            try:
-                count = _ab_decrement(self.shm, pid)
-                log_fn(
-                    f"[ACTIVATION_BARRIER] released after {self.settle_frames}-frame settle (count now {count})",
-                    force=True,
-                )
-                return True
-            except (OSError, RuntimeError, struct.error) as _exc:
-                log_fn(f"[ACTIVATION_BARRIER] settle decrement failed (ignored): {_exc}", force=True)
-            finally:
-                self.held = False
-        return False
-
-    def force_release(self, pid: int, *, log_fn: Callable) -> None:
-        """Cleanup-time: if still held, decrement and clear. Idempotent."""
-        if not (self.held and self.shm is not None):
-            return
-        try:
-            count = _ab_decrement(self.shm, pid)
-            log_fn(
-                f"[ACTIVATION_BARRIER] released on cleanup (mid-settle, count now {count})",
-                force=True,
-            )
-        except (OSError, RuntimeError, struct.error) as _exc:
-            log_fn(f"[ACTIVATION_BARRIER] cleanup decrement failed (ignored): {_exc}", force=True)
-        finally:
-            self.held = False
-
-    def close(self) -> None:
-        """Idempotent: close SHM handle if held."""
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
 
 
 class TDSenderEngine:
@@ -240,7 +145,10 @@ class TDSenderEngine:
         self._graphs_pending: bool = False
         self._graphs_deferred: bool = self._config.graphs_deferred
         self._persist_stream: bool = self._config.persist_stream
-        self._barrier = SenderActivationBarrier.from_config(self._config)
+        self._barrier = HolderBarrier(
+            enabled=self._config.activation_barrier,
+            settle_frames=self._config.barrier_settle_frames,
+        )
 
         self._nvml_observer: NVMLObserver | None = None
 
