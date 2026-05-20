@@ -182,7 +182,7 @@ Use this when distributing the component to end-users who should not need to int
 6. In Python, install `cuda-link` and connect:
    ```python
    from cuda_link import CUDAIPCImporter
-   importer = CUDAIPCImporter(shm_name="my_pipeline")
+   importer = CUDAIPCImporter.from_connected(shm_name="my_pipeline")
    frame = importer.get_frame()          # torch.Tensor on GPU (zero-copy)
    frame_np = importer.get_frame_numpy() # numpy array (CPU copy)
    ```

@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-19
+
+### Breaking changes
+
+- **`CUDAIPCImporter.__init__` no longer auto-initializes.** (S3) Callers must explicitly
+  invoke `.connect()` after construction, or use the `CUDAIPCImporter.from_connected()`
+  classmethod for one-shot construction. The context manager (`with CUDAIPCImporter(...) as imp:`)
+  auto-connects on entry and is unaffected.
+
+  Migration:
+  ```python
+  # Before (v1.4.x)
+  imp = CUDAIPCImporter(shm_name="my_shm")
+
+  # After — one-shot (equivalent to old behaviour)
+  imp = CUDAIPCImporter.from_connected(shm_name="my_shm")
+
+  # After — two-step (when construction and connection happen at different times)
+  imp = CUDAIPCImporter(shm_name="my_shm")
+  ...
+  imp.connect()
+  ```
+
+- **Pinned-memory allocation failure now raises by default.** (C6) When `cudaMallocHost`
+  fails, the importer raises `RuntimeError` with a diagnostic message instead of silently
+  falling back to `cudaHostRegister` → pageable memory. To restore the prior silent fallback,
+  set `CUDALINK_ALLOW_PAGEABLE_FALLBACK=1`.
+
+### Added
+
+- `CUDALINK_D2H_STREAM_PRIO=high` opt-in env var allocates the importer's D2H streams at
+  high priority, mirroring `CUDALINK_LIB_STREAM_PRIO` on the exporter side. Default:
+  `"normal"`. (S9)
+
+### Hardening
+
+- Declared `argtypes`/`restype` on all Win32 helper calls: `kernel32.GetModuleFileNameW`,
+  `winmm.timeBeginPeriod`, `winmm.timeEndPeriod`. `kernel32` and `winmm` now loaded with
+  `use_last_error=True` via process-local `WinDLL` handles, eliminating global
+  `ctypes.windll` usage. (C7)
+- Full-path CUDA DLL fallback now passes `winmode=0` to prevent DLL hijacking via the
+  process search order. (C8)
+- DLL-loader `OSError` catches now log `e.winerror` at DEBUG to distinguish WinError 126
+  (DLL not found) from 193 (wrong bitness). (C9)
+
 ## [1.4.2] — 2026-05-18
 
 ### Fixed

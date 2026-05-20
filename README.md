@@ -98,8 +98,8 @@ pip install -e ".[all]"
 ```python
 from cuda_link import CUDAIPCImporter
 
-# Initialize (use same name as TD's Ipcmemname parameter)
-importer = CUDAIPCImporter(
+# One-shot construction + connect (equivalent to pre-v1.5.0 CUDAIPCImporter(...))
+importer = CUDAIPCImporter.from_connected(
     shm_name="my_texture_ipc",
     shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
     dtype="float32",         # "float32", "float16", or "uint8" — or None for auto-detect
@@ -124,7 +124,7 @@ if importer.is_ready():
     cupy_arr = importer.get_frame_cupy()  # cupy.ndarray on GPU
     # Use in CuPy/JAX workflows
 
-# Context manager (recommended — ensures cleanup on exit)
+# Context manager (recommended — auto-connects and ensures cleanup on exit)
 with CUDAIPCImporter(shm_name="my_texture_ipc") as importer:
     for _ in range(100):
         tensor = importer.get_frame()
@@ -284,7 +284,7 @@ For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer)
 **Solution**: Ensure TD's `CUDAIPCExporter` is active before starting Python process. If starting both together, use `timeout_ms` to give the producer time to initialize:
 
 ```python
-importer = CUDAIPCImporter(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
+importer = CUDAIPCImporter.from_connected(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
 ```
 
 ### "CUDA IPC overhead unexpectedly high"
@@ -361,7 +361,7 @@ pip install -e ".[all]"     # All output modes
 ```python
 from cuda_link import CUDAIPCImporter
 
-importer = CUDAIPCImporter(shm_name="my_project_ipc")
+importer = CUDAIPCImporter.from_connected(shm_name="my_project_ipc")
 tensor = importer.get_frame()  # torch.Tensor, GPU zero-copy
 ```
 

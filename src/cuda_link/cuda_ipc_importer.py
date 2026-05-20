@@ -1298,6 +1298,8 @@ class CUDAIPCImporter:
             self.cleanup()
 
     def __enter__(self) -> CUDAIPCImporter:
+        if not self._initialized:
+            self.connect()
         return self
 
     def __exit__(
