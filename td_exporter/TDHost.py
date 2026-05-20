@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # CUDAMemoryRef — TD-agnostic result of top.cudaMemory()
@@ -38,46 +38,47 @@ class CUDAMemoryRef:
 # ---------------------------------------------------------------------------
 
 
-class TOPHandle:
-    """Protocol-compatible base for wrapping a single TouchDesigner TOP operator.
+@runtime_checkable
+class TOPHandle(Protocol):
+    """Protocol for wrapping a single TouchDesigner TOP operator.
 
-    All concrete methods raise NotImplementedError; subclass RealTOPHandle provides
-    the TD-connected implementation and FakeTOPHandle provides the test double.
+    Satisfied structurally — no inheritance required. Concrete adapters:
+    RealTOPHandle (TD-connected) and FakeTOPHandle (in-process test double).
     """
 
     def cuda_memory(self, stream: Any = None) -> CUDAMemoryRef:
         """Call top.cudaMemory(stream=stream) and return a CUDAMemoryRef."""
-        raise NotImplementedError
+        ...
 
     @property
     def pixel_format(self) -> str:
         """top.pixelFormat as a string."""
-        raise NotImplementedError
+        ...
 
     @property
     def inputs(self) -> list[TOPHandle]:
         """Wrapped TOPHandle for each upstream input operator."""
-        raise NotImplementedError
+        ...
 
     def set_format(self, fmt: str) -> None:
         """Write top.par.format = fmt."""
-        raise NotImplementedError
+        ...
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         """Call script_top.copyCUDAMemory(ptr, size, shape, stream=stream)."""
-        raise NotImplementedError
+        ...
 
     def copy_numpy_array(self, arr: Any) -> None:
         """Call script_top.copyNumpyArray(arr)."""
-        raise NotImplementedError
+        ...
 
     def set_resolution(self, width: int, height: int) -> None:
         """Set Script TOP to custom resolution: outputresolution=9, resolutionw, resolutionh."""
-        raise NotImplementedError
+        ...
 
     def is_valid(self) -> bool:
         """Return True if the underlying TD operator is still present in the network."""
-        raise NotImplementedError
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -85,53 +86,65 @@ class TOPHandle:
 # ---------------------------------------------------------------------------
 
 
-class TDHost:
-    """Protocol-compatible base for wrapping ownerComp.
+@runtime_checkable
+class TDHost(Protocol):
+    """Protocol for wrapping ownerComp.
 
-    All parameter reads/writes and operator lookups go through this class.
-    Subclass RealTDHost is the TD-connected implementation;
-    FakeTDHost (in tests) is the in-process test double.
+    Satisfied structurally — no inheritance required. Concrete adapters:
+    RealTDHost (TD-connected) and FakeTDHost (in-process test double, see _td_fakes.py).
+
+    All TD runtime access (op(), parent(), me.par.*) goes through this Protocol.
+    Engine code holds a TDHost reference and never imports TD globals directly.
     """
 
     def param_value(self, name: str) -> Any:
         """Read ownerComp.par.<name>.eval()."""
-        raise NotImplementedError
+        ...
 
     def set_param_value(self, name: str, value: Any) -> None:
         """Write ownerComp.par.<name> = value."""
-        raise NotImplementedError
+        ...
 
     def set_param_enabled(self, name: str, enabled: bool) -> None:
         """Write ownerComp.par.<name>.enable = enabled."""
-        raise NotImplementedError
+        ...
 
     def show_custom_only(self, value: bool) -> None:
         """Write ownerComp.showCustomOnly = value."""
-        raise NotImplementedError
+        ...
 
     def is_active(self) -> bool:
         """Read ownerComp.par.Active.eval() via cached reference (hot-path safe)."""
-        raise NotImplementedError
+        ...
 
     def find_top(self, name: str) -> TOPHandle | None:
         """Return ownerComp.op(name) wrapped as a TOPHandle, or None."""
-        raise NotImplementedError
+        ...
+
+    def wrap_top(self, top: Any) -> TOPHandle:
+        """Wrap a raw TD TOP operator as a TOPHandle.
+
+        Use this factory instead of constructing RealTOPHandle directly —
+        it keeps TD-runtime instantiation behind the seam so engine code
+        and tests never import RealTOPHandle.
+        """
+        ...
 
     def set_warning_status(self, msg: str) -> None:
         """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
-        raise NotImplementedError
+        ...
 
     def set_error_status(self, msg: str) -> None:
         """Tint ownerComp red and emit a persistent script-error badge for fatal failures."""
-        raise NotImplementedError
+        ...
 
     def clear_status(self) -> None:
         """Restore ownerComp to its original color and clear any script-error badges."""
-        raise NotImplementedError
+        ...
 
     def set_info_status(self, msg: str) -> None:
         """Write an informational status message to the Status par (no tint/cook side effects)."""
-        raise NotImplementedError
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +265,10 @@ class RealTDHost(TDHost):
             return RealTOPHandle(top) if top is not None else None
         except (AttributeError, RuntimeError):
             return None
+
+    def wrap_top(self, top: Any) -> RealTOPHandle:
+        """Wrap a raw TD TOP operator as a RealTOPHandle."""
+        return RealTOPHandle(top)
 
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:

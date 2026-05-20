@@ -36,7 +36,7 @@ from SHMProtocol import (  # noqa: E402
     SLOT_SIZE,
 )
 from TDConfig import TDSenderConfig  # noqa: E402
-from TDHost import RealTDHost, RealTOPHandle, TDHost  # noqa: E402
+from TDHost import RealTDHost, TDHost  # noqa: E402
 from TDReceiver import TDReceiverEngine  # noqa: E402
 from TDSender import TDSenderEngine  # noqa: E402
 
@@ -169,7 +169,7 @@ class CUDAIPCExtension:
     def import_frame(self, import_buffer: TOP) -> bool:
         if self._mode != "Receiver":
             return False
-        handle = RealTOPHandle(import_buffer) if import_buffer is not None else None
+        handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
         return self._engine.import_frame(handle)
 
     def _check_deferred_cleanup(self) -> None:
@@ -178,7 +178,7 @@ class CUDAIPCExtension:
 
     def update_receiver_resolution(self, import_buffer: TOP) -> None:
         if self._mode == "Receiver":
-            handle = RealTOPHandle(import_buffer) if import_buffer is not None else None
+            handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
             self._engine.update_receiver_resolution(handle)
 
     def is_active(self) -> bool:
