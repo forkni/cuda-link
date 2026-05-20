@@ -54,7 +54,11 @@ if TYPE_CHECKING:
 # The winmm DLL handle is cached at module level so the load cost is paid once.
 if sys.platform == "win32":
     try:
-        _winmm = ctypes.WinDLL("winmm")
+        _winmm = ctypes.WinDLL("winmm", use_last_error=True)
+        _winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
+        _winmm.timeBeginPeriod.restype = ctypes.c_uint
+        _winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+        _winmm.timeEndPeriod.restype = ctypes.c_uint
     except OSError:
         _winmm = None
 else:

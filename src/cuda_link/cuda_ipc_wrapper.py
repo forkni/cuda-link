@@ -20,6 +20,13 @@ from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c
 
 _logger = logging.getLogger(__name__)
 
+if os.name == "nt":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+else:
+    _kernel32 = None
+
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
         CUDAError,
@@ -158,10 +165,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
     @staticmethod
     def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
         """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        if _kernel32 is None:
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
-            ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
+            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
             _logger.debug("Loaded CUDA runtime: %s", buf.value)
         except (OSError, AttributeError) as e:
             _logger.debug("Could not log DLL path: %s", e)
