@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-05-20
+
+### Breaking changes (deprecations)
+
+- **`CUDAIPCExporter` is deprecated** and will be **removed in v1.7.0**. Use
+  `Exporter.open(FrameSpec(...))` from `cuda_link.exporter` instead. Existing code
+  continues to work via a compatibility shim that emits `DeprecationWarning`. See
+  `docs/MIGRATION_v1.6.md` for a side-by-side migration guide.
+
+### Added
+
+- **`Exporter` module** (`src/cuda_link/exporter.py`) — deep, testable replacement for
+  the inlined CUDA IPC logic in `CUDAIPCExporter`. Three-method public surface:
+  `Exporter.open(spec, *, policy, cuda)` / `export(frame)` / `close()`. `open()` either
+  returns a fully-initialised exporter or raises — no half-states. `close()` is
+  idempotent. `export()` returns `FrameOutcome` instead of raising on backpressure.
+
+- **`FrameSpec` dataclass** — frozen value object capturing resolution, dtype, slot count,
+  and device. Replaces positional constructor arguments.
+
+- **`ExportPolicy` dataclass** — frozen value object for all export flags
+  (`export_sync`, `use_graphs`, `flush_probe`, `strict_device`, `barrier_enabled`,
+  `high_priority_stream`, `export_profile`). Replaces env-var-only configuration.
+  Env vars are still respected via `ExportPolicy.from_env()`. Named presets:
+  `ExportPolicy.for_testing()` and `ExportPolicy.low_latency()`.
+
+- **`GpuFrame` dataclass** — typed wrapper for `(ptr, size)` passed to `export()`.
+
+- **`FrameOutcome` enum** — `PUBLISHED` / `SKIPPED_BARRIER` / `SKIPPED_NOT_READY` /
+  `FAILED`. Replaces the `bool` return from `export_frame()`.
+
+- **`CudaPort` Protocol** (`_exporter_port.py`) — structural-typing seam between the
+  `Exporter` and the CUDA runtime. Enables injecting a test double at the
+  one-seam boundary without touching SHM, time, or logging.
+
+- **`CTypesCudaAdapter`** (`_exporter_adapters.py`) — production adapter that wraps
+  `CUDARuntimeAPI` and satisfies `CudaPort`.
+
+- **`FakeCudaAdapter`** (`_exporter_adapters.py`) — in-memory test adapter. No GPU, no
+  ctypes DLL required. Tracks allocations (`adapter.allocations`), supports failure
+  injection (`fail_on_malloc_count`, `fail_on_stream_create`, `fail_on_event_create`),
+  and simulates CUDA Graphs as no-ops. Used in all unit tests for device-affinity and
+  export-outcome coverage.
+
+- All five new symbols exported from `cuda_link.__init__`:
+  `Exporter`, `FrameSpec`, `ExportPolicy`, `GpuFrame`, `FrameOutcome`.
+
+### Fixed
+
+- `Exporter.export()` no longer catches `ValueError` in its broad exception handler.
+  Strict-mode violations (`strict_device=True`, wrong pointer type or wrong device)
+  now propagate to the caller as documented, instead of being silently converted to
+  `FrameOutcome.FAILED`.
+
+### Tests
+
+- Rewrote `tests/test_device_affinity.py` and the write-ordering section of
+  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCudaAdapter())`
+  instead of `object.__new__(CUDAIPCExporter)` followed by ~25 hand-populated private
+  attributes. Both test files now run without a GPU.
+
 ## [1.5.0] — 2026-05-19
 
 ### Breaking changes
@@ -15,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-connects on entry and is unaffected.
 
   Migration:
+
   ```python
   # Before (v1.4.x)
   imp = CUDAIPCImporter(shm_name="my_shm")
