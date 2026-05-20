@@ -29,7 +29,20 @@ from .activation_barrier import read_state as _ab_read
 from .exporter import (
     _DTYPE_ITEMSIZE_MAP,
     _DTYPE_TO_KIND_BITS,
+    _EXPORTER_PROFILE_REGIONS,  # noqa: F401 — re-exported for backwards-compat imports
+    _NVTX_EXPORTER_SLOT_NAMES,  # noqa: F401 — re-exported for backwards-compat imports
     Exporter,
+)
+from .shm_protocol import (  # noqa: F401 — re-exported for backwards-compat imports
+    METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    TIMESTAMP_SIZE,
+    WRITE_IDX_OFFSET,
+    SHMLayout,
 )
 
 logger = logging.getLogger(__name__)
