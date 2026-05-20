@@ -34,7 +34,6 @@ import os
 import struct
 import sys
 import time
-import traceback
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
@@ -595,8 +594,18 @@ class CUDAIPCImporter:
         self._cached_dtype_str: str = ""
         self._cached_numpy_dtype: object = None
 
-        # Auto-initialize
-        self._initialize()
+    @classmethod
+    def from_connected(cls, shm_name: str = "cudalink_output_ipc", **kwargs) -> CUDAIPCImporter:
+        """Construct and connect in one call (back-compat shim for pre-v1.5.0 API).
+
+        Equivalent to::
+            imp = CUDAIPCImporter(shm_name=shm_name, **kwargs)
+            imp.connect()
+            return imp
+        """
+        imp = cls(shm_name=shm_name, **kwargs)
+        imp.connect()
+        return imp
 
     # ------------------------------------------------------------------
     # Convenience dtype methods (read self.dtype; kept for backward compat)
@@ -816,35 +825,29 @@ class CUDAIPCImporter:
     # Orchestrator
     # ------------------------------------------------------------------
 
-    def _initialize(self) -> bool:
-        """Initialize CUDA IPC resources.
+    def connect(self) -> None:
+        """Open shared memory, IPC handles, and allocate buffers.
 
-        Returns True on success; False on any failure (already logged).
+        Safe to call more than once — subsequent calls are no-ops when already
+        connected. Raises on failure; callers must handle the exception.
         """
         if self._initialized:
             logger.debug("Already initialized")
-            return True
+            return
 
-        try:
-            cuda = self._setup_runtime()
-            shm, num_slots, ipc_version = self._open_and_validate_shm()
-            fmt = self._parse_format(shm, num_slots)
-            conn = self._open_ipc_slots(cuda, shm, num_slots, ipc_version, fmt)
+        cuda = self._setup_runtime()
+        shm, num_slots, ipc_version = self._open_and_validate_shm()
+        fmt = self._parse_format(shm, num_slots)
+        conn = self._open_ipc_slots(cuda, shm, num_slots, ipc_version, fmt)
 
-            self._conn = conn
-            self._format = fmt
-            self._torch = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
-            self._cupy = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
-            self._numpy = None  # lazy — built on first get_frame_numpy()
-            self._last_write_idx = 0
-            self._initialized = True
-            logger.info("Initialization complete - ready for zero-copy GPU access")
-            return True
-
-        except (OSError, RuntimeError, ValueError, struct.error, IndexError) as e:
-            logger.error("Initialization failed: %s", e)
-            traceback.print_exc()
-            return False
+        self._conn = conn
+        self._format = fmt
+        self._torch = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
+        self._cupy = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
+        self._numpy = None  # lazy — built on first get_frame_numpy()
+        self._last_write_idx = 0
+        self._initialized = True
+        logger.info("Initialization complete - ready for zero-copy GPU access")
 
     # ------------------------------------------------------------------
     # Slot acquisition + wait
