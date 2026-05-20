@@ -118,6 +118,9 @@ from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa
 # Byte size per dtype — module-level constant avoids dict construction on every _dtype_itemsize() call
 _DTYPE_SIZES: dict = {"float32": 4, "float16": 2, "bfloat16": 2, "uint8": 1, "uint16": 2, "int8": 1, "int16": 2}
 
+_ALLOW_PAGEABLE_FALLBACK: bool = os.environ.get("CUDALINK_ALLOW_PAGEABLE_FALLBACK", "0") == "1"
+_D2H_STREAM_HIGH_PRIO: bool = os.environ.get("CUDALINK_D2H_STREAM_PRIO", "normal") == "high"
+
 from .shm_protocol import (  # noqa: E402
     _ST_BBH,
     MAGIC_OFFSET,
@@ -379,9 +382,16 @@ class NumpyBuffers:
         nbytes = fmt.frame_nbytes
 
         # Create streams
-        primary_stream = cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+        if _D2H_STREAM_HIGH_PRIO:
+            primary_stream = cuda.create_stream_with_priority(flags=0x01)
+            d2h_streams = [primary_stream] + [
+                cuda.create_stream_with_priority(flags=0x01) for _ in range(num_streams - 1)
+            ]
+            logger.info("D2H streams created at HIGH priority (CUDALINK_D2H_STREAM_PRIO=high)")
+        else:
+            primary_stream = cuda.create_stream(flags=0x01)  # cudaStreamNonBlocking
+            d2h_streams = [primary_stream] + [cuda.create_stream(flags=0x01) for _ in range(num_streams - 1)]
         logger.debug("Created numpy stream: 0x%016x", int(primary_stream.value))
-        d2h_streams = [primary_stream] + [cuda.create_stream(flags=0x01) for _ in range(num_streams - 1)]
         d2h_events = [cuda.create_sync_event() for _ in range(num_streams)]
         if num_streams > 1:
             logger.info("Multi-stream D2H enabled: %d streams (CUDALINK_D2H_STREAMS=%d)", num_streams, num_streams)
