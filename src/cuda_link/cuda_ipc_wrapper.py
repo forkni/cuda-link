@@ -128,7 +128,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                 dll = ctypes.CDLL(name)
                 self._log_dll_path(dll, name)
                 return dll
-            except OSError:
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
                 continue
 
         # Fallback: try full toolkit paths when not already in PATH
@@ -144,7 +145,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     dll = ctypes.CDLL(dll_path)
                     self._log_dll_path(dll, dll_path)
                     return dll
-                except OSError:
+                except OSError as e:
+                    _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
                     continue
 
         raise RuntimeError(
