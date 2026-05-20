@@ -149,7 +149,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
-                    dll = ctypes.CDLL(dll_path)
+                    dll = ctypes.CDLL(dll_path, winmode=0)
                     self._log_dll_path(dll, dll_path)
                     return dll
                 except OSError as e:
