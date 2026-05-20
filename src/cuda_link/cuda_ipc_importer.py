@@ -3,12 +3,13 @@ CUDA IPC Importer for Python Process
 Imports GPU memory from TouchDesigner via CUDA IPC handles
 
 Usage:
-    # PyTorch tensor (GPU, zero-copy)
-    importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
+    # PyTorch tensor (GPU, zero-copy) — one-shot construction + connect
+    importer = CUDAIPCImporter.from_connected(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
     tensor = importer.get_frame()  # torch.Tensor on GPU
 
-    # Numpy array (CPU, D2H copy)
+    # Numpy array (CPU, D2H copy) — two-step when connection can be deferred
     importer = CUDAIPCImporter(shm_name="cudalink_output_ipc", shape=(512, 512, 4))
+    importer.connect()
     array = importer.get_frame_numpy()  # numpy array on CPU
 
 Architecture:
@@ -965,7 +966,7 @@ class CUDAIPCImporter:
         if debug:
             frame_start = time.perf_counter()
         if not self._initialized:
-            logger.warning("Not initialized - call _initialize() first")
+            logger.warning("Not initialized - call connect() first")
             return None
 
         if debug:
@@ -1051,7 +1052,7 @@ class CUDAIPCImporter:
         if debug:
             frame_start = time.perf_counter()
         if not self._initialized:
-            logger.warning("Not initialized - call _initialize() first")
+            logger.warning("Not initialized - call connect() first")
             return None
 
         if debug:
@@ -1173,7 +1174,7 @@ class CUDAIPCImporter:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
 
         if not self._initialized:
-            logger.warning("Not initialized - call _initialize() first")
+            logger.warning("Not initialized - call connect() first")
             return None
 
         result = self._try_acquire()

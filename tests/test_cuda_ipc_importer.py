@@ -14,12 +14,58 @@ import pytest
 
 @pytest.mark.requires_cuda
 def test_init_without_shm(temp_shm_name: str) -> None:
-    """Test constructor when SharedMemory doesn't exist."""
+    """Construction is cheap and infallible; connect() does the fallible work."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    # Should fail gracefully since SharedMemory not created
+    # v1.5.0: __init__ does NOT auto-connect — construction never raises
     importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(64, 64, 4))
     assert not importer.is_ready()
+
+
+def test_construct_does_not_raise_on_nonexistent_shm() -> None:
+    """CUDAIPCImporter(shm_name=...) must never raise — connect() does."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
+    assert not imp._initialized
+
+
+def test_connect_raises_on_nonexistent_shm() -> None:
+    """connect() must raise when SHM does not exist."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
+    with pytest.raises((OSError, RuntimeError, FileNotFoundError)):
+        imp.connect()
+
+
+def test_connect_idempotent(temp_shm_name: str) -> None:
+    """Calling connect() a second time on an already-connected importer is a no-op."""
+    from multiprocessing.shared_memory import SharedMemory
+
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    # Build minimal valid SHM (header only, write_idx=0 → no frame yet)
+    shm_size = 20 + 1 * 128 + 1 + 20 + 8  # 1-slot layout
+    shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
+    try:
+        shm.buf[0:4] = struct.pack("<I", 0x43495044)
+        shm.buf[4:12] = struct.pack("<Q", 1)
+        shm.buf[12:16] = struct.pack("<I", 1)
+        shm.buf[16:20] = struct.pack("<I", 0)
+
+        imp = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4))
+        try:
+            imp.connect()
+        except (OSError, RuntimeError):
+            pytest.skip("CUDA IPC unavailable in this environment")
+
+        connected_state = imp._initialized
+        imp.connect()  # second call — must be a no-op
+        assert imp._initialized == connected_state
+    finally:
+        shm.close()
+        shm.unlink()
 
 
 @pytest.mark.requires_cuda
@@ -148,8 +194,12 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
             base_offset = 20 + slot * 128
             shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
-        # Create importer (will open handles)
+        # Create importer and explicitly connect
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError):
+            pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():
             # Cleanup
@@ -191,8 +241,12 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
             base_offset = 20 + slot * 128
             shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
-        # Create importer
+        # Create importer and explicitly connect
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError):
+            pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():
             # Set shutdown flag (immediately after slots in v0.5.0 layout)

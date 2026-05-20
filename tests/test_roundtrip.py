@@ -125,8 +125,13 @@ def _worker_consumer_basic(
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready after SharedMemory appeared"))
+            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
             return
 
         frames_received = 0
@@ -166,8 +171,13 @@ def _worker_consumer_verify(
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready"))
+            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
             return
 
         frames_received = 0
@@ -233,8 +243,13 @@ def _worker_consumer_shutdown(shm_name: str, rq: object) -> None:
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(8, 8, 4), dtype="uint8")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "Importer not ready when connecting to live producer"))
+            rq.put(("ERROR", "Importer not ready after connect() — live producer present"))
             return
 
         # Poll for frames and watch for shutdown
@@ -296,8 +311,13 @@ def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=None, dtype=None)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "Importer with shape=None not ready"))
+            rq.put(("ERROR", "Importer with shape=None not ready after connect()"))
             return
 
         detected_shape = importer.shape

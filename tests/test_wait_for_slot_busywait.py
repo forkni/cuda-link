@@ -233,12 +233,10 @@ def test_spin_us_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("CUDALINK_WAIT_SPIN_US", "500")
 
-    # Need a real __init__ call — build a minimal mock that satisfies _initialize()
-    # by patching _initialize to be a no-op
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    with patch.object(CUDAIPCImporter, "_initialize", return_value=None):
-        imp = CUDAIPCImporter(shm_name="noop")
+    # v1.5.0: __init__ no longer auto-connects, so no patching needed
+    imp = CUDAIPCImporter(shm_name="noop")
 
     assert imp._spin_us == 500
 
@@ -249,7 +247,6 @@ def test_spin_us_env_var_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    with patch.object(CUDAIPCImporter, "_initialize", return_value=None):
-        imp = CUDAIPCImporter(shm_name="noop")
+    imp = CUDAIPCImporter(shm_name="noop")
 
     assert imp._spin_us == 0

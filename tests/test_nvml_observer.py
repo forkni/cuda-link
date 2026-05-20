@@ -227,19 +227,19 @@ def test_importer_get_stats_with_observer() -> None:
     obs = MagicMock(spec=NVMLObserver)
     obs.snapshot.return_value = {"nvml_available": True, "temp_c": 72}
 
-    with patch.object(CUDAIPCImporter, "_initialize", return_value=None):
-        imp = CUDAIPCImporter(shm_name="test")
-        # Manually set required attrs not set by _initialize (which was no-op)
-        imp.shape = (8, 8, 4)
-        imp.dtype = "uint8"
-        imp.num_slots = 0
-        imp.frame_count = 0
-        imp.dev_ptrs = []
-        imp.tensors = []
-        imp.wait_spin_hits = 0
-        imp.wait_sleep_hits = 0
-        imp.total_wait_spin_us = 0.0
-        imp.total_wait_sleep_us = 0.0
+    # v1.5.0: __init__ no longer auto-connects, so no patching needed
+    imp = CUDAIPCImporter(shm_name="test")
+    # Manually set attrs that would normally be set by connect()
+    imp.shape = (8, 8, 4)
+    imp.dtype = "uint8"
+    imp.num_slots = 0
+    imp.frame_count = 0
+    imp.dev_ptrs = []
+    imp.tensors = []
+    imp.wait_spin_hits = 0
+    imp.wait_sleep_hits = 0
+    imp.total_wait_spin_us = 0.0
+    imp.total_wait_sleep_us = 0.0
 
     imp.attach_nvml_observer(obs)
     stats = imp.get_stats()
