@@ -457,7 +457,7 @@ class Exporter:
             return FrameOutcome.FAILED
 
         # Activation-barrier check
-        if self._barrier.should_skip_publish():
+        if self._barrier.evaluate().should_skip:
             if self.shm_handle is not None and self._shutdown_offset:
                 with contextlib.suppress(OSError, BufferError):
                     self.shm_handle.buf[self._shutdown_offset] = 0

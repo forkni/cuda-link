@@ -103,3 +103,58 @@ def temp_shm_name() -> str:
 # They are re-exported here so existing tests that do
 #   ``from conftest import FakeTDHost, FakeTOPHandle``
 # continue to work without change.
+
+
+# ---------------------------------------------------------------------------
+# FakeShmAdapter — satisfies BarrierShmPort structurally; no real SHM needed
+# ---------------------------------------------------------------------------
+
+import time as _time
+from dataclasses import dataclass as _dataclass
+from dataclasses import field as _field
+
+
+@_dataclass
+class FakeShmAdapter:
+    """In-process fake satisfying BarrierShmPort (structural).
+
+    Tests construct the scenario they want and pass it as `shm=` to
+    CheckerBarrier.  No real SharedMemory is touched.
+
+    Use `raise_on_*` fields to simulate I/O failures at specific callpoints.
+    `last_change_ns` defaults to None; `attach()` sets it to time.monotonic_ns()
+    on first call, simulating a freshly-written segment.  Pass an explicit
+    value to simulate a stale segment (e.g. ``last_change_ns=0``).
+    """
+
+    active_count: int = 0
+    last_change_ns: int | None = None
+    barrier_skips: int = 0
+    attached: bool = False
+    raise_on_attach: type[Exception] | None = None
+    raise_on_read: type[Exception] | None = None
+    raise_on_bump: type[Exception] | None = None
+
+    @property
+    def is_attached(self) -> bool:
+        return self.attached
+
+    def attach(self, *, create: bool) -> None:
+        if self.raise_on_attach is not None:
+            raise self.raise_on_attach("simulated")
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+
+    def read_state(self) -> tuple[int, int, int]:
+        if self.raise_on_read is not None:
+            raise self.raise_on_read("simulated")
+        return (self.active_count, self.last_change_ns or 0, self.barrier_skips)
+
+    def bump_skip(self) -> None:
+        if self.raise_on_bump is not None:
+            raise self.raise_on_bump("simulated")
+        self.barrier_skips += 1
+
+    def close(self) -> None:
+        self.attached = False

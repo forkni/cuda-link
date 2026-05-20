@@ -25,8 +25,9 @@ import logging
 import struct
 import time
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from multiprocessing.shared_memory import SharedMemory
-from typing import Callable
+from typing import Callable, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,78 @@ def bump_skip(shm: SharedMemory) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Port + Adapter + Outcome (Checker-side seam)
+# ---------------------------------------------------------------------------
+
+
+class CheckerOutcome(Enum):
+    """Result of a single CheckerBarrier.evaluate() call."""
+
+    DISABLED = auto()    # barrier off via ExportPolicy.barrier_enabled=False
+    NO_SKIP = auto()     # active_count == 0; safe to publish
+    SKIP_ACTIVE = auto() # Sender mid-activation window
+    SKIP_STALE = auto()  # active_count > 0 but past stale_ns; treat as absent
+    SHM_ABSENT = auto()  # segment not yet created by any Sender
+
+    @property
+    def should_skip(self) -> bool:
+        return self is CheckerOutcome.SKIP_ACTIVE
+
+
+@runtime_checkable
+class BarrierShmPort(Protocol):
+    """Structural interface CheckerBarrier requires from a SHM backend.
+
+    Real:  RealShmAdapter (delegates to module-level SHM-IO functions).
+    Test:  FakeShmAdapter (in-process dict; in tests/conftest.py).
+
+    All methods are best-effort: implementations may raise OSError /
+    RuntimeError / struct.error; CheckerBarrier swallows them.
+    """
+
+    @property
+    def is_attached(self) -> bool: ...
+
+    def attach(self, *, create: bool) -> None: ...
+
+    def read_state(self) -> tuple[int, int, int]: ...  # (active_count, last_change_ns, barrier_skips)
+
+    def bump_skip(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass
+class RealShmAdapter:
+    """Production adapter — wraps SharedMemory via module-level SHM-IO functions."""
+
+    _shm: SharedMemory | None = field(default=None, repr=False)
+
+    @property
+    def is_attached(self) -> bool:
+        return self._shm is not None
+
+    def attach(self, *, create: bool) -> None:
+        if self._shm is None:
+            self._shm = open_or_create(create=create)  # may raise FileNotFoundError
+
+    def read_state(self) -> tuple[int, int, int]:
+        if self._shm is None:
+            raise RuntimeError("attach() not called")
+        return read_state(self._shm)
+
+    def bump_skip(self) -> None:
+        if self._shm is not None:
+            bump_skip(self._shm)
+
+    def close(self) -> None:
+        if self._shm is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                self._shm.close()
+            self._shm = None
+
+
+# ---------------------------------------------------------------------------
 # Role classes built on the SHM primitives above
 # ---------------------------------------------------------------------------
 
@@ -120,56 +193,64 @@ def bump_skip(shm: SharedMemory) -> None:
 class CheckerBarrier:
     """Producer/exporter-side checker for the activation-barrier SHM protocol.
 
-    Reads active_count from the shared segment and returns True from
-    should_skip_publish() while a Sender is inside its activation window.
-    Lazily opens the segment on first call; applies a stale-timeout so a
-    crashed Sender cannot block the producer indefinitely.
+    Reads active_count from the SHM segment via a BarrierShmPort and returns
+    a CheckerOutcome. Lazily attaches the segment on first call; applies a
+    stale-timeout so a crashed Sender cannot block the producer indefinitely.
     """
 
     enabled: bool
     stale_ns: int
-    shm: SharedMemory | None = None
+    shm: BarrierShmPort = field(default_factory=RealShmAdapter)
     _skip_log_last_ns: int = field(init=False, default=0, repr=False)
     _stale_log_last_ns: int = field(init=False, default=0, repr=False)
 
-    def should_skip_publish(self) -> bool:
-        """Hot path: True => caller skips this frame."""
+    def evaluate(self) -> CheckerOutcome:
+        """Return the current barrier state. Hot path."""
         if not self.enabled:
-            return False
-        if self.shm is None:
+            return CheckerOutcome.DISABLED
+        if not self.shm.is_attached:
             try:
-                self.shm = open_or_create(create=False)
+                self.shm.attach(create=False)
             except FileNotFoundError:
-                return False
+                return CheckerOutcome.SHM_ABSENT
+            except (OSError, RuntimeError, struct.error):
+                return CheckerOutcome.SHM_ABSENT
         try:
-            active_count, last_change_ns, _ = read_state(self.shm)
+            active_count, last_change_ns, _ = self.shm.read_state()
         except (OSError, RuntimeError, struct.error):
-            return False
+            return CheckerOutcome.SHM_ABSENT
         if active_count <= 0:
-            return False
+            return CheckerOutcome.NO_SKIP
         now_ns = time.monotonic_ns()
         if now_ns - last_change_ns > self.stale_ns:
-            if now_ns - self._stale_log_last_ns > 1_000_000_000:
-                logger.warning(
-                    "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
-                    active_count,
-                    (now_ns - last_change_ns) / 1e9,
-                )
-                self._stale_log_last_ns = now_ns
-            return False
+            self._log_stale(now_ns, active_count, last_change_ns)
+            return CheckerOutcome.SKIP_STALE
         with contextlib.suppress(OSError, RuntimeError, struct.error):
-            bump_skip(self.shm)
+            self.shm.bump_skip()
+        self._log_skip(now_ns, active_count)
+        return CheckerOutcome.SKIP_ACTIVE
+
+    def should_skip_publish(self) -> bool:
+        """Backwards-compatible bool wrapper — True means caller should skip this frame."""
+        return self.evaluate().should_skip
+
+    def _log_stale(self, now_ns: int, active_count: int, last_change_ns: int) -> None:
+        if now_ns - self._stale_log_last_ns > 1_000_000_000:
+            logger.warning(
+                "[ACTIVATION_BARRIER] stale barrier (count=%d, age=%.1fs) — ignoring",
+                active_count,
+                (now_ns - last_change_ns) / 1e9,
+            )
+            self._stale_log_last_ns = now_ns
+
+    def _log_skip(self, now_ns: int, active_count: int) -> None:
         if now_ns - self._skip_log_last_ns > 1_000_000_000:
             logger.info("[ACTIVATION_BARRIER] skipping publish (active_count=%d)", active_count)
             self._skip_log_last_ns = now_ns
-        return True
 
     def close(self) -> None:
         """Idempotent: close SHM handle if held."""
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
+        self.shm.close()
 
 
 @dataclass

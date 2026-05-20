@@ -15,6 +15,7 @@ import pytest
 
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame
 from cuda_link._exporter_adapters import FakeCudaAdapter
+from cuda_link.activation_barrier import CheckerOutcome
 from cuda_link.exporter import Exporter
 
 # ---------------------------------------------------------------------------
@@ -289,7 +290,7 @@ def test_f10_f9_skip_clears_shutdown_flag() -> None:
         exp._barrier.enabled = True
         exp.shm_handle.buf[exp._shutdown_offset] = 1  # stale flag
 
-        with patch.object(exp._barrier, "should_skip_publish", return_value=True):
+        with patch.object(exp._barrier, "evaluate", return_value=CheckerOutcome.SKIP_ACTIVE):
             outcome = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
 
         assert outcome == FrameOutcome.SKIPPED_BARRIER
@@ -305,7 +306,7 @@ def test_f10_f9_skip_does_not_advance_write_idx() -> None:
         exp._barrier.enabled = True
         initial_write_idx = exp.write_idx
 
-        with patch.object(exp._barrier, "should_skip_publish", return_value=True):
+        with patch.object(exp._barrier, "evaluate", return_value=CheckerOutcome.SKIP_ACTIVE):
             exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
 
         assert exp.write_idx == initial_write_idx
