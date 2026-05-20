@@ -220,28 +220,17 @@ def test_exporter_get_stats_with_observer() -> None:
 
 
 def test_importer_get_stats_with_observer() -> None:
-    """CUDAIPCImporter.get_stats() includes 'nvml' sub-dict when observer attached."""
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    """Importer.get_stats() includes 'nvml' sub-dict when observer attached."""
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._importer_port import ImportPolicy, ImportSpec
+    from cuda_link.importer import Importer
     from cuda_link.nvml_observer import NVMLObserver
 
     obs = MagicMock(spec=NVMLObserver)
     obs.snapshot.return_value = {"nvml_available": True, "temp_c": 72}
 
-    # v1.5.0: __init__ no longer auto-connects, so no patching needed
-    imp = CUDAIPCImporter(shm_name="test")
-    # Manually set attrs that would normally be set by connect()
-    imp.shape = (8, 8, 4)
-    imp.dtype = "uint8"
-    imp.num_slots = 0
-    imp.frame_count = 0
-    imp.dev_ptrs = []
-    imp.tensors = []
-    imp.wait_spin_hits = 0
-    imp.wait_sleep_hits = 0
-    imp.total_wait_spin_us = 0.0
-    imp.total_wait_sleep_us = 0.0
-
-    imp.attach_nvml_observer(obs)
+    imp = Importer(ImportSpec(shm_name="test"), ImportPolicy(), FakeCudaAdapter())
+    imp._nvml_observer = obs
     stats = imp.get_stats()
     assert "nvml" in stats
     assert stats["nvml"]["temp_c"] == 72

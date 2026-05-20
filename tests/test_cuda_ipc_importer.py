@@ -268,7 +268,7 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
 
 
 def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1) -> object:
-    """Build a CUDAIPCImporter with manually-injected value-object state (no real CUDA IPC handles).
+    """Build an Importer with manually-injected value-object state (no real CUDA IPC handles).
 
     CUDA IPC handles cannot be opened in the same process that created them, so tests
     that check routing logic inject all state via value objects and a bytearray SHM buffer.
@@ -277,12 +277,9 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
 
     import numpy as np
 
-    from cuda_link.cuda_ipc_importer import (
-        CUDAIPCImporter,
-        Format,
-        IPCConnection,
-        NumpyBuffers,
-    )
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._importer_port import ImportPolicy, ImportSpec
+    from cuda_link.importer import Format, IPCConnection, NumpyBuffers, Importer
     from cuda_link.shm_protocol import (
         METADATA_SIZE,
         SHM_HEADER_SIZE,
@@ -300,7 +297,6 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     struct.pack_into("<I", buf, 12, num_slots)  # num_slots
     struct.pack_into("<I", buf, 16, 1)  # write_idx=1
 
-    # Build value objects
     fmt = Format.from_overrides(shape, dtype)
     layout = SHMLayout(num_slots)
 
@@ -333,40 +329,17 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
         pinned_memory_available=False,
         primary_stream=mock_stream,
         d2h_streams=[mock_stream],
-        d2h_events=[],
         num_streams=1,
         chunk_plan=[],
     )
 
-    # Bypass __init__ and inject value objects directly
-    imp = object.__new__(CUDAIPCImporter)
-    imp.shm_name = "mock_shm"
-    imp.shape = shape
-    imp.dtype = dtype
-    imp.debug = False
-    imp.timeout_ms = 5000.0
-    imp.device = 0
-    imp._spin_us = 0
-    imp._d2h_num_streams = 1
-    imp._initialized = True
+    spec = ImportSpec(shm_name="mock_shm", device=0, timeout_ms=5000.0, shape=shape, dtype=dtype)
+    policy = ImportPolicy(wait_spin_us=0)
+    imp = Importer(spec, policy, FakeCudaAdapter())
     imp._conn = conn
     imp._format = fmt
-    imp._torch = None
-    imp._cupy = None
     imp._numpy = nb
-    imp.frame_count = 0
-    imp._last_write_idx = 0
-    imp.total_wait_event_time = 0.0
-    imp.total_get_frame_time = 0.0
-    imp.total_shm_read_us = 0.0
-    imp.last_latency = 0.0
-    imp.total_wait_spin_us = 0.0
-    imp.total_wait_sleep_us = 0.0
-    imp.wait_spin_hits = 0
-    imp.wait_sleep_hits = 0
-    imp._cached_dtype_str = ""
-    imp._cached_numpy_dtype = None
-
+    imp._initialized = True
     return imp
 
 
