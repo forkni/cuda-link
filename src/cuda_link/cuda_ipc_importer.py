@@ -410,8 +410,15 @@ class NumpyBuffers:
             pinned_memory_available = True
             logger.debug("Allocated portable pinned numpy buffer: %s, %s", fmt.shape, fmt.dtype_str)
         except (RuntimeError, OSError) as e:
+            if not _ALLOW_PAGEABLE_FALLBACK:
+                raise RuntimeError(
+                    f"Pinned-memory allocation failed for {nbytes} bytes ({nbytes / 1_048_576:.1f} MB). "
+                    f"Set CUDALINK_ALLOW_PAGEABLE_FALLBACK=1 to allow ~2x slower pageable fallback. "
+                    f"Original error: {e}"
+                ) from e
             logger.warning(
-                "cudaMallocHost failed for %d bytes (%.1f MB) — trying cudaHostRegister: %s",
+                "cudaMallocHost failed for %d bytes (%.1f MB); CUDALINK_ALLOW_PAGEABLE_FALLBACK=1 — "
+                "trying cudaHostRegister: %s",
                 nbytes,
                 nbytes / 1_048_576,
                 e,
