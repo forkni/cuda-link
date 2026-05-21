@@ -152,6 +152,9 @@ gemini-skills/
 # Claude auto-memory (session-specific)
 MEMORY.md
 
+# Session log (local-only; not part of the distributed repo)
+SESSION_LOG.md
+
 # Claude local settings (machine-specific permissions)
 .claude/settings.local.json
 
