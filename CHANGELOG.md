@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`CUDAIPCExporter`** removed as scheduled in the v1.6.0 deprecation notice. Use
+  `Exporter.open(FrameSpec(...))` instead. See `docs/MIGRATION_v1.6.md` (migration
+  window closed in v1.7.0).
+- `src/cuda_link/debug_utils.py` — dead code with zero importers; removed.
+
 ### Changed
 
 - **`CheckerBarrier`** now consumes a `BarrierShmPort` (production: `RealShmAdapter`,

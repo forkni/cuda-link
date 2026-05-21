@@ -86,9 +86,9 @@ def _do_cleanup() -> None:
         print(f"[sender] cleanup: cuda.free error: {exc}")
     try:
         if _exporter_ref is not None:
-            _exporter_ref.cleanup()
+            _exporter_ref.close()
     except Exception as exc:
-        print(f"[sender] cleanup: exporter.cleanup error: {exc}")
+        print(f"[sender] cleanup: exporter.close error: {exc}")
 
 
 if sys.platform == "win32":
@@ -191,16 +191,18 @@ def main() -> None:
     global _cuda_ref, _exporter_ref, _staging_ptr_ref
     # Ensure cuda_link is importable — try src/ relative to this script
     try:
-        from cuda_link import CUDAIPCExporter
+        from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+        from cuda_link.exporter import Exporter
     except ImportError:
         src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
         src_dir = os.path.normpath(src_dir)
         if src_dir not in sys.path:
             sys.path.insert(0, src_dir)
         try:
-            from cuda_link import CUDAIPCExporter
+            from cuda_link import FrameSpec, GpuFrame
             from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+            from cuda_link.exporter import Exporter
         except ImportError:
             print(f"[sender] ERROR: cuda_link not found. Searched: {src_dir}")
             print("[sender]   Run: pip install cuda-link  (from the project root)")
@@ -219,22 +221,23 @@ def main() -> None:
     print("  TD: CUDAIPCLink_from_Python  Mode=Receiver  Active=ON")
     print()
 
-    exporter = CUDAIPCExporter(
-        shm_name=SHM_NAME,
-        height=HEIGHT,
-        width=WIDTH,
-        channels=4,
-        dtype=DTYPE,
-        num_slots=NUM_SLOTS,
-        debug=False,
-    )
+    try:
+        exporter = Exporter.open(
+            FrameSpec(
+                shm_name=SHM_NAME,
+                height=HEIGHT,
+                width=WIDTH,
+                channels=4,
+                dtype=DTYPE,
+                num_slots=NUM_SLOTS,
+            )
+        )
+    except Exception as exc:
+        print(f"[sender] ERROR: Exporter.open() failed: {exc}")
+        sys.exit(1)
     _exporter_ref = exporter
 
-    if not exporter.initialize():
-        print("[sender] ERROR: exporter.initialize() failed.")
-        sys.exit(1)
-
-    graphs_active = bool(getattr(exporter, "_use_graphs", False) and not getattr(exporter, "_graphs_disabled", False))
+    graphs_active = bool(exporter._policy.use_graphs and not exporter._graphs_disabled)
     graphs_label = "ON" if graphs_active else "OFF"
     profile_on = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
     env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
@@ -264,10 +267,7 @@ def main() -> None:
             color = _COLORS[color_idx]
 
             _fill_ctypes(cuda, staging_ptr, exporter.data_size, color)
-            exporter.export_frame(
-                gpu_ptr=int(staging_ptr.value),
-                size=exporter.data_size,
-            )
+            exporter.export(GpuFrame(ptr=int(staging_ptr.value), size=exporter.data_size))
             frame_count += 1
 
             now = time.perf_counter()

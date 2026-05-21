@@ -196,27 +196,48 @@ def test_env_var_default_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_exporter_get_stats_no_observer() -> None:
     """get_stats() does not include 'nvml' key when no observer attached."""
-    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
+    import uuid
 
-    exp = CUDAIPCExporter(shm_name="test", height=8, width=8)
-    stats = exp.get_stats()
-    assert "nvml" not in stats
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link.exporter import Exporter
+
+    exp = Exporter.open(
+        FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=8, width=8),
+        policy=ExportPolicy.for_testing(),
+        cuda=FakeCudaAdapter(),
+    )
+    try:
+        stats = exp.get_stats()
+        assert "nvml" not in stats
+    finally:
+        exp.close()
 
 
 def test_exporter_get_stats_with_observer() -> None:
     """get_stats() includes 'nvml' sub-dict when NVMLObserver attached."""
-    from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
+    import uuid
+
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link.exporter import Exporter
     from cuda_link.nvml_observer import NVMLObserver
 
     obs = MagicMock(spec=NVMLObserver)
     obs.snapshot.return_value = {"nvml_available": True, "gpu_util_pct": 77}
 
-    exp = CUDAIPCExporter(shm_name="test", height=8, width=8)
-    exp.attach_nvml_observer(obs)
-
-    stats = exp.get_stats()
-    assert "nvml" in stats
-    assert stats["nvml"]["gpu_util_pct"] == 77
+    exp = Exporter.open(
+        FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=8, width=8),
+        policy=ExportPolicy.for_testing(),
+        cuda=FakeCudaAdapter(),
+    )
+    try:
+        exp.attach_nvml_observer(obs)
+        stats = exp.get_stats()
+        assert "nvml" in stats
+        assert stats["nvml"]["gpu_util_pct"] == 77
+    finally:
+        exp.close()
 
 
 def test_importer_get_stats_with_observer() -> None:

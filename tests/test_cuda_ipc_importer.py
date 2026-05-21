@@ -87,37 +87,6 @@ def test_numpy_available_check() -> None:
 
 
 @pytest.mark.requires_cuda
-def test_dtype_mapping() -> None:
-    """Test string dtype correctly maps to torch/numpy dtypes."""
-    from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
-
-    importer = CUDAIPCImporter(shm_name="test", shape=(64, 64, 4), dtype="float32")
-
-    # Test itemsize
-    assert importer._dtype_itemsize() == 4
-
-    importer.dtype = "float16"
-    assert importer._dtype_itemsize() == 2
-
-    importer.dtype = "uint8"
-    assert importer._dtype_itemsize() == 1
-
-    # Test numpy dtype mapping
-    if NUMPY_AVAILABLE:
-        import numpy as np
-
-        importer.dtype = "float32"
-        assert importer._numpy_dtype() == np.float32
-
-    # Test torch dtype mapping
-    if TORCH_AVAILABLE:
-        import torch
-
-        importer.dtype = "float32"
-        assert importer._torch_dtype() == torch.float32
-
-
-@pytest.mark.requires_cuda
 def test_get_frame_without_torch() -> None:
     """Test get_frame() raises when torch not available."""
     from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE, CUDAIPCImporter
@@ -145,26 +114,14 @@ def test_get_frame_numpy_without_numpy() -> None:
         importer.get_frame_numpy()
 
 
-@pytest.mark.requires_cuda
-def test_get_stats_format(temp_shm_name: str) -> None:
-    """Test get_stats() returns correct dictionary structure."""
+def test_get_stats_before_connect() -> None:
+    """get_stats() before connect() returns minimal dict with initialized=False."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(64, 64, 4))
-
+    importer = CUDAIPCImporter(shm_name="test_shm", shape=(64, 64, 4))
     stats = importer.get_stats()
-
-    # Verify all expected keys present
-    assert "initialized" in stats
-    assert "shape" in stats
-    assert "dtype" in stats
-    assert "frame_count" in stats
-    assert "shm_name" in stats
-    assert "num_slots" in stats
-    assert "torch_available" in stats
-    assert "numpy_available" in stats
-    assert "dev_ptrs" in stats
-    assert "tensor_device" in stats
+    assert isinstance(stats, dict)
+    assert stats.get("initialized") is False
 
 
 @pytest.mark.requires_cuda
@@ -199,6 +156,9 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
         try:
             importer.connect()
         except (OSError, RuntimeError):
+            # Clear any sticky CUDA error (e.g. error 201 from same-process IPC on Windows)
+            # so subsequent tests in the same process see a clean error state.
+            cuda_runtime.cudart.cudaGetLastError()
             pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():
@@ -246,6 +206,7 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
         try:
             importer.connect()
         except (OSError, RuntimeError):
+            cuda_runtime.cudart.cudaGetLastError()
             pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():

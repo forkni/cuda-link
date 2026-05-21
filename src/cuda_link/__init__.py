@@ -8,7 +8,6 @@ CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 
 from ._exporter_port import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from ._importer_port import ImporterCudaPort, ImportOutcome, ImportPolicy, ImportResult, ImportSpec
-from .cuda_ipc_exporter import CUDAIPCExporter
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 from .exporter import Exporter
@@ -32,16 +31,16 @@ __all__ = [
     "ExportPolicy",
     "GpuFrame",
     "FrameOutcome",
-    # v1.7.0 — new deep Importer API
+    # v1.7.0 — Importer API
     "Importer",
     "ImportSpec",
     "ImportPolicy",
     "ImportResult",
     "ImportOutcome",
     "ImporterCudaPort",
-    # deprecated — removed in v1.8.0
-    "CUDAIPCExporter",
+    # deprecated — CUDAIPCImporter removed in v1.8.0; migrate to Importer.open(ImportSpec(...))
     "CUDAIPCImporter",
+    # infrastructure / low-level symbols
     "CUDARuntimeAPI",
     "get_cuda_runtime",
     "CUPY_AVAILABLE",

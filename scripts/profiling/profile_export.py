@@ -1,7 +1,7 @@
 """
 profile_export.py — Export-path benchmarking harness for cuda-link.
 
-Runs CUDAIPCExporter.initialize() + N × export_frame() against a fixed synthetic
+Runs Exporter.open() + N × export() against a fixed synthetic
 GPU buffer, then writes per-region timing stats to a JSON file.
 
 This script is the measurement target for scalene.  Run it two ways:
@@ -56,8 +56,9 @@ def _region_stats(samples_us: list[float]) -> dict[str, float]:
 
 
 def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_count: int) -> dict[str, Any]:
-    from cuda_link import CUDAIPCExporter
+    from cuda_link import FrameSpec, GpuFrame
     from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+    from cuda_link.exporter import Exporter
 
     cuda = get_cuda_runtime()
     nbytes = width * height * channels * (1 if dtype == "uint8" else 4)
@@ -70,19 +71,19 @@ def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_co
     total_samples: list[float] = []
 
     try:
-        with CUDAIPCExporter(
-            shm_name=shm_name,
-            height=height,
-            width=width,
-            channels=channels,
-            dtype=dtype,
-            num_slots=slot_count,
+        with Exporter.open(
+            FrameSpec(
+                shm_name=shm_name,
+                height=height,
+                width=width,
+                channels=channels,
+                dtype=dtype,
+                num_slots=slot_count,
+            )
         ) as exporter:
-            exporter.initialize()
-
             for i in range(frames + WARMUP_FRAMES):
                 t0 = time.perf_counter()
-                exporter.export_frame(gpu_ptr=gpu_ptr, size=nbytes)
+                exporter.export(GpuFrame(ptr=gpu_ptr, size=nbytes))
                 elapsed_us = (time.perf_counter() - t0) * 1e6
                 if i >= WARMUP_FRAMES:
                     total_samples.append(elapsed_us)

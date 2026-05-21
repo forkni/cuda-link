@@ -1,10 +1,15 @@
 # Migrating to cuda-link v1.6.0
 
+> **Migration window closed in v1.7.0.**
+> `CUDAIPCExporter` was removed in v1.7.0 as scheduled. This guide documents the migration
+> path for reference. If you are still on the old API, apply the changes below and upgrade
+> to v1.7.0 or later.
+
 ## Overview
 
 v1.6.0 introduces `Exporter` — a deep, testable module that replaces the inline CUDA IPC
-logic in `CUDAIPCExporter`. `CUDAIPCExporter` is **deprecated** and will be **removed in
-v1.7.0**. All existing calls continue to work via a thin compatibility shim.
+logic in `CUDAIPCExporter`. `CUDAIPCExporter` was **deprecated in v1.6.0** and **removed in
+v1.7.0**.
 
 ---
 
