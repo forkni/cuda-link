@@ -23,7 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nvml_observer` docstring** clarifies the `pynvml` / `nvidia-ml-py` naming
   ambiguity. Both packages expose the same `pynvml` module name; only the deprecated
   `pynvml` PyPI package emits a `FutureWarning` on import (often installed as a
-  transitive dep of torch). Guidance: `pip uninstall pynvml && pip install nvidia-ml-py`.
+  transitive dep of torch). Users who want to remove the duplicate install can run
+  `pip uninstall pynvml && pip install nvidia-ml-py`.
+
+- **Programmatic suppression of `pynvml` `FutureWarning`** — `import pynvml` in
+  `nvml_observer.py` is now wrapped in `warnings.catch_warnings()` with a targeted
+  `filterwarnings(message=r"The pynvml package is deprecated.*", category=FutureWarning)`.
+  The filter is anchored on the deprecation-banner text so other `FutureWarning`s still
+  surface, and is scoped to the import block so global warning state is unchanged.
+  Synced to `td_exporter/NVMLObserver.py`.
 
 - **Redundant "Loaded CUDA runtime" log on reconnect** — `TDReceiverEngine` and
   `TDSenderEngine` now log this line only once per engine lifetime. Previously the
