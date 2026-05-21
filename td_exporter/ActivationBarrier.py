@@ -154,6 +154,30 @@ class BarrierShmPort(Protocol):
     def close(self) -> None: ...
 
 
+@runtime_checkable
+class HolderShmPort(Protocol):
+    """Structural interface HolderBarrier requires from a SHM backend.
+
+    Real:  RealShmAdapter (also satisfies BarrierShmPort structurally).
+    Test:  FakeShmAdapter (in-process dict; in tests/conftest.py).
+
+    All methods are best-effort: callers catch OSError / RuntimeError /
+    struct.error.
+    """
+
+    def open_and_increment(self, pid: int) -> int:
+        """Open-or-create the segment and increment active_count. Returns new count."""
+        ...
+
+    def decrement(self, pid: int) -> int:
+        """Decrement active_count (clamps at zero). Returns new count."""
+        ...
+
+    def close(self) -> None:
+        """Close SHM handle if held. Idempotent."""
+        ...
+
+
 @dataclass
 class RealShmAdapter:
     """Production adapter — wraps SharedMemory via module-level SHM-IO functions."""
@@ -176,6 +200,18 @@ class RealShmAdapter:
     def bump_skip(self) -> None:
         if self._shm is not None:
             bump_skip(self._shm)
+
+    def open_and_increment(self, pid: int) -> int:
+        """Open-or-create the segment and increment active_count. Returns new count."""
+        if self._shm is None:
+            self._shm = open_or_create(create=True)
+        return increment(self._shm, pid)
+
+    def decrement(self, pid: int) -> int:
+        """Decrement active_count (clamps at zero). Returns new count."""
+        if self._shm is None:
+            raise RuntimeError("open_and_increment() not called")
+        return decrement(self._shm, pid)
 
     def close(self) -> None:
         if self._shm is not None:
@@ -265,16 +301,14 @@ class HolderBarrier:
     settle_frames: int
     held: bool = False
     settle_remaining: int = 0
-    shm: object = None
+    port: HolderShmPort = field(default_factory=RealShmAdapter)
 
     def acquire(self, pid: int, *, log_fn: Callable) -> None:
         """Open-or-create the segment, increment, set held=True. Log+swallow failures."""
         if not self.enabled:
             return
         try:
-            if self.shm is None:
-                self.shm = open_or_create(create=True)
-            count = increment(self.shm, pid)
+            count = self.port.open_and_increment(pid)
             self.held = True
             log_fn(f"[ACTIVATION_BARRIER] held +1 (count={count}) for Sender init", force=True)
         except (OSError, RuntimeError, struct.error) as _exc:
@@ -293,9 +327,9 @@ class HolderBarrier:
         if self.settle_remaining <= 0:
             return False
         self.settle_remaining -= 1
-        if self.settle_remaining == 0 and self.held and self.shm is not None:
+        if self.settle_remaining == 0 and self.held:
             try:
-                count = decrement(self.shm, pid)
+                count = self.port.decrement(pid)
                 log_fn(
                     f"[ACTIVATION_BARRIER] released after {self.settle_frames}-frame settle (count now {count})",
                     force=True,
@@ -309,10 +343,10 @@ class HolderBarrier:
 
     def force_release(self, pid: int, *, log_fn: Callable) -> None:
         """Cleanup-time: if still held, decrement and clear. Idempotent."""
-        if not (self.held and self.shm is not None):
+        if not self.held:
             return
         try:
-            count = decrement(self.shm, pid)
+            count = self.port.decrement(pid)
             log_fn(
                 f"[ACTIVATION_BARRIER] released on cleanup (mid-settle, count now {count})",
                 force=True,
@@ -324,7 +358,4 @@ class HolderBarrier:
 
     def close(self) -> None:
         """Idempotent: close SHM handle if held."""
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
+        self.port.close()

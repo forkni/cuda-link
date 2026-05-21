@@ -156,3 +156,16 @@ class FakeShmAdapter:
 
     def close(self) -> None:
         self.attached = False
+
+    # --- HolderShmPort methods (satisfies HolderBarrier seam structurally) ---
+
+    def open_and_increment(self, pid: int) -> int:
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+        self.active_count += 1
+        return self.active_count
+
+    def decrement(self, pid: int) -> int:
+        self.active_count = max(0, self.active_count - 1)
+        return self.active_count
