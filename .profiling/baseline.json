@@ -1,24 +1,36 @@
 {
   "version": "1",
-  "timestamp": "2026-05-19T02:34:01.391152+00:00",
+  "timestamp": "2026-05-21T19:46:40.960135+00:00",
   "config": {
-    "frames": 1000,
+    "frames": 4000,
     "warmup_frames": 50,
     "width": 1920,
     "height": 1080,
     "channels": 4,
     "dtype": "uint8",
     "slot_count": 2,
-    "nbytes": 8294400
+    "nbytes": 8294400,
+    "export_profile": true
   },
   "regions": {
     "export_frame_total": {
-      "n": 1000,
-      "min_us": 12.70000939257443,
-      "median_us": 15.600002370774746,
-      "p95_us": 20.99999983329326,
-      "p99_us": 44.841992639703676,
-      "max_us": 213.29999435693026
-    }
+      "n": 4000,
+      "min_us": 17.80001912266016,
+      "median_us": 21.599989850074053,
+      "p95_us": 60.89999806135893,
+      "p99_us": 119.88298152573407,
+      "max_us": 413.70000690221786
+    },
+    "per_region_avg_us": {
+      "stream_wait": 0.0,
+      "memcpy": 22.44083930876244,
+      "record_event": 0.0,
+      "shm_write": 1.3517289865118118,
+      "export": 27.074197588925376,
+      "sync": 0.0,
+      "sticky_check": 0.6463951402470286,
+      "flush_probe": 1.4866164879712425
+    },
+    "ptr_cache_miss_per_frame": 0.0002469135802469136
   }
 }
