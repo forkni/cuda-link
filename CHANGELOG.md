@@ -11,9 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **TD-side `[GRAPHS_INIT]` diagnostic log** — `TDSenderEngine.__init__` now logs
   `_use_graphs`, `config.use_graphs`, and the `CUDALINK_TD_USE_GRAPHS` env var
-  value at startup. Reveals why TD sender shows `graphs=OFF` while the Python
-  sender shows `graphs=ON` (different env vars: TD uses `CUDALINK_TD_USE_GRAPHS`,
-  Python uses `CUDALINK_USE_GRAPHS`; TD defaults to `False`).
+  value at startup, confirming graph state on each component activation.
 
 ### Fixed
 
@@ -34,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual reload was happening.
 
 ### Changed
+
+- **TD-side CUDA Graphs enabled by default** (`TDSenderConfig.use_graphs=True`,
+  `CUDALINK_TD_USE_GRAPHS` default changed `"0"` → `"1"`). The graph-capture path
+  is byte-identical to the proven Python sender path (shared `cuda_graphs.py` mixin)
+  and ships with three auto-fallback sites that silently revert to `cudaMemcpyAsync`
+  on capture or launch failure. Set `CUDALINK_TD_USE_GRAPHS=0` to opt out. Brings
+  TD sender to default parity with the Python sender (`CUDALINK_USE_GRAPHS` defaults
+  to `1`).
 
 - **`CUDAIPCWrapper` / `cuda_ipc_wrapper` docstring** updated: runtime requirement
   now reads "CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll /

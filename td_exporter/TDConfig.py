@@ -24,7 +24,7 @@ class TDSenderConfig:
     export_sync: bool = True
     export_profile: bool = False
     export_flush_probe: bool = True
-    use_graphs: bool = False
+    use_graphs: bool = True
     graphs_deferred: bool = False
     stream_high_prio: bool = False
     init_pace: bool = False
@@ -40,7 +40,7 @@ class TDSenderConfig:
             export_sync=os.environ.get("CUDALINK_EXPORT_SYNC", "1") != "0",
             export_profile=os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1",
             export_flush_probe=os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1",
-            use_graphs=os.environ.get("CUDALINK_TD_USE_GRAPHS", "0") == "1",
+            use_graphs=os.environ.get("CUDALINK_TD_USE_GRAPHS", "1") == "1",
             graphs_deferred=os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1",
             stream_high_prio=os.environ.get("CUDALINK_TD_STREAM_PRIO", "normal") == "high",
             init_pace=os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1",
