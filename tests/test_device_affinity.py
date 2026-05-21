@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-from cuda_link._exporter_adapters import FakeCudaAdapter
+from cuda_link._cuda_adapters import FakeCudaAdapter
 from cuda_link.activation_barrier import CheckerOutcome
 from cuda_link.exporter import Exporter
 

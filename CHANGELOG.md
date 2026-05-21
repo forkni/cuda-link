@@ -117,10 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Exporter` and the CUDA runtime. Enables injecting a test double at the
   one-seam boundary without touching SHM, time, or logging.
 
-- **`CTypesCudaAdapter`** (`_exporter_adapters.py`) — production adapter that wraps
+- **`CTypesCudaAdapter`** (`_cuda_adapters.py`) — production adapter that wraps
   `CUDARuntimeAPI` and satisfies `CudaPort`.
 
-- **`FakeCudaAdapter`** (`_exporter_adapters.py`) — in-memory test adapter. No GPU, no
+- **`FakeCudaAdapter`** (`_cuda_adapters.py`) — in-memory test adapter. No GPU, no
   ctypes DLL required. Tracks allocations (`adapter.allocations`), supports failure
   injection (`fail_on_malloc_count`, `fail_on_stream_create`, `fail_on_event_create`),
   and simulates CUDA Graphs as no-ops. Used in all unit tests for device-affinity and

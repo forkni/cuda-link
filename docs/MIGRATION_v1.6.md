@@ -143,7 +143,7 @@ The `FakeCudaAdapter` lets you test export logic without hardware:
 
 ```python
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame, FrameOutcome
-from cuda_link._exporter_adapters import FakeCudaAdapter
+from cuda_link._cuda_adapters import FakeCudaAdapter
 from cuda_link.exporter import Exporter
 
 def test_my_export_logic():

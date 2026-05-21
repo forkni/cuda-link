@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from cuda_link._exporter_adapters import CTypesCudaAdapter, FakeCudaAdapter
+from cuda_link._cuda_adapters import CTypesCudaAdapter, FakeCudaAdapter
 from cuda_link._exporter_port import (
     CudaPort,
     ExportPolicy,

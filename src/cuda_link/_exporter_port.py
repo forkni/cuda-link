@@ -154,8 +154,8 @@ class FrameOutcome(Enum):
 class CudaPort(Protocol):
     """Structural interface that Exporter requires from the CUDA runtime.
 
-    Production adapter: CTypesCudaAdapter  (wraps CUDARuntimeAPI; in _exporter_adapters.py)
-    Test adapter:       FakeCudaAdapter    (in-memory, no GPU needed; in _exporter_adapters.py)
+    Production adapter: CTypesCudaAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
+    Test adapter:       FakeCudaAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
 
     All methods raise RuntimeError on CUDA failure (mirrors CUDARuntimeAPI.check_error).
     """

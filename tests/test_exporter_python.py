@@ -287,7 +287,7 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
 def _make_write_order_exporter():
     """Open a real Exporter backed by FakeCudaAdapter for write-ordering tests."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._exporter_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCudaAdapter
     from cuda_link.exporter import Exporter
 
     shm_name = f"test_shm_write_{uuid.uuid4().hex[:8]}"

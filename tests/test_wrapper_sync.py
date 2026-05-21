@@ -23,7 +23,6 @@ byte_identical pairs:
 rewrite_relative pairs:
   src/cuda_link/_exporter_port.py     <-> td_exporter/ExporterPort.py
   src/cuda_link/_importer_port.py     <-> td_exporter/ImporterPort.py
-  src/cuda_link/_exporter_adapters.py <-> td_exporter/ExporterAdapters.py
   src/cuda_link/_cuda_adapters.py     <-> td_exporter/CudaAdapters.py
   src/cuda_link/exporter.py           <-> td_exporter/Exporter.py
   src/cuda_link/importer.py           <-> td_exporter/Importer.py

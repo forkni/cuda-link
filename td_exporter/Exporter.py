@@ -10,7 +10,7 @@ Public surface:
 Context manager: ``with Exporter.open(...) as exp: ...``
 
 See _exporter_port.py for FrameSpec, ExportPolicy, GpuFrame, FrameOutcome, CudaPort.
-See _exporter_adapters.py for CTypesCudaAdapter (production) and FakeCudaAdapter (tests).
+See _cuda_adapters.py for CTypesCudaAdapter (production) and FakeCudaAdapter (tests).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 import NVTXShim as _nvtx
-from ExporterAdapters import CTypesCudaAdapter
+from CudaAdapters import CTypesCudaAdapter
 from ExporterPort import (
     CudaPort,
     ExportPolicy,
