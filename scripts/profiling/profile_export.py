@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -55,10 +56,15 @@ def _region_stats(samples_us: list[float]) -> dict[str, float]:
     }
 
 
-def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_count: int) -> dict[str, Any]:
+def run(
+    frames: int, width: int, height: int, channels: int, dtype: str, slot_count: int, export_profile: bool = False
+) -> dict[str, Any]:
     from cuda_link import FrameSpec, GpuFrame
     from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
     from cuda_link.exporter import Exporter
+
+    if export_profile:
+        os.environ["CUDALINK_EXPORT_PROFILE"] = "1"
 
     cuda = get_cuda_runtime()
     nbytes = width * height * channels * (1 if dtype == "uint8" else 4)
@@ -69,6 +75,8 @@ def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_co
 
     shm_name = f"__profiler_{uuid.uuid4().hex[:8]}"
     total_samples: list[float] = []
+    region_totals: dict[str, float] = {}
+    measurement_frames: int = 0
 
     try:
         with Exporter.open(
@@ -87,8 +95,24 @@ def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_co
                 elapsed_us = (time.perf_counter() - t0) * 1e6
                 if i >= WARMUP_FRAMES:
                     total_samples.append(elapsed_us)
+            measurement_frames = exporter.frame_count
+            if export_profile:
+                region_totals = dict(exporter._profile._totals)
     finally:
         cuda.free(gpu_buf)
+
+    regions: dict[str, Any] = {
+        "export_frame_total": _region_stats(total_samples),
+    }
+
+    if export_profile and measurement_frames > 0:
+        # Per-region running-average in µs/frame (FrameProfile stores totals, not per-frame samples).
+        # This is the same metric the 97-frame periodic stats print to stdout.
+        regions["per_region_avg_us"] = {
+            region: total / measurement_frames for region, total in region_totals.items() if region != "ptr_cache_miss"
+        }
+        ptr_misses = region_totals.get("ptr_cache_miss", 0.0)
+        regions["ptr_cache_miss_per_frame"] = ptr_misses / measurement_frames
 
     return {
         "version": "1",
@@ -102,10 +126,9 @@ def run(frames: int, width: int, height: int, channels: int, dtype: str, slot_co
             "dtype": dtype,
             "slot_count": slot_count,
             "nbytes": nbytes,
+            "export_profile": export_profile,
         },
-        "regions": {
-            "export_frame_total": _region_stats(total_samples),
-        },
+        "regions": regions,
     }
 
 
@@ -122,11 +145,19 @@ def main() -> int:
         default=".profiling/baseline.json",
         help="Output JSON path (default: .profiling/baseline.json)",
     )
+    parser.add_argument(
+        "--export-profile",
+        action="store_true",
+        dest="export_profile",
+        help="Enable CUDALINK_EXPORT_PROFILE and collect per-region averages from FrameProfile.",
+    )
     args = parser.parse_args()
 
+    graphs_flag = os.environ.get("CUDALINK_USE_GRAPHS", "1")
     print(
         f"cuda-link export harness: {args.width}x{args.height} {args.dtype} "
-        f"{args.channels}ch, {args.slot_count} slots, {args.frames} frames"
+        f"{args.channels}ch, {args.slot_count} slots, {args.frames} frames  "
+        f"[graphs={'ON' if graphs_flag != '0' else 'OFF'}]"
     )
 
     try:
@@ -137,6 +168,7 @@ def main() -> int:
             channels=args.channels,
             dtype=args.dtype,
             slot_count=args.slot_count,
+            export_profile=args.export_profile,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -148,6 +180,12 @@ def main() -> int:
 
     stats = result["regions"]["export_frame_total"]
     print(f"export_frame: median={stats['median_us']:.1f}µs  p95={stats['p95_us']:.1f}µs  p99={stats['p99_us']:.1f}µs")
+
+    if args.export_profile and "per_region_avg_us" in result["regions"]:
+        print("per-region avg µs/frame:")
+        for region, avg in result["regions"]["per_region_avg_us"].items():
+            print(f"  {region:<20} {avg:.2f}")
+
     print(f"Baseline written to: {out}")
     return 0
 
