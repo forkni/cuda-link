@@ -56,8 +56,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Pre-built NVTX strings eliminate f-string allocation on the hot path.
-_NVTX_GET_NAMES: tuple[str, ...] = tuple(f"cudalink.importer.get_frame.slot{i}" for i in range(10))
-_NVTX_NUMPY_NAMES: tuple[str, ...] = tuple(f"cudalink.importer.get_frame_numpy.slot{i}" for i in range(10))
+_NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
+_NVTX_NUMPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame_numpy.slot")
 
 _DTYPE_SIZES: dict[str, int] = {
     "float32": 4,

@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_NVTX_EXPORTER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.exporter.slot{i}" for i in range(10))
+_NVTX_EXPORTER_SLOT_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.exporter.slot")
 
 _EXPORTER_PROFILE_REGIONS: tuple[str, ...] = (
     "stream_wait",

@@ -1,6 +1,6 @@
 """NVTX annotation shim for cuda-link profiling.
 
-Enabled via environment variables (read at first use, zero-cost when off):
+Enabled via environment variables (read at module import time, zero-cost when off):
   CUDALINK_NVTX=1           — top-level phase ranges on the GPU timeline
   CUDALINK_NVTX_VERBOSE=1   — sub-operation ranges (implies CUDALINK_NVTX=1)
 
@@ -37,64 +37,66 @@ class _Noop:
 
 _NOOP = _Noop()
 
-_lib: object = None
-_AVAILABLE: bool = False
-_VERBOSE: bool = False
-_initialized: bool = False
+
+class _NvtxState:
+    __slots__ = ("lib", "available", "verbose")
+
+    def __init__(self, lib: object, available: bool, verbose: bool) -> None:
+        self.lib = lib
+        self.available = available
+        self.verbose = verbose
 
 
-def _ensure_init() -> None:
-    global _lib, _AVAILABLE, _VERBOSE, _initialized
-    if _initialized:
-        return
-    _initialized = True
-    _VERBOSE = env_bool("CUDALINK_NVTX_VERBOSE", default=False)
-    _enabled = _VERBOSE or env_bool("CUDALINK_NVTX", default=False)
-    if _enabled:
+def _detect_nvtx() -> _NvtxState:
+    verbose = env_bool("CUDALINK_NVTX_VERBOSE", default=False)
+    enabled = verbose or env_bool("CUDALINK_NVTX", default=False)
+    if enabled:
         try:
-            import nvtx as _lib_import  # type: ignore[import]
+            import nvtx as _lib  # type: ignore[import]
 
-            _lib = _lib_import
-            _AVAILABLE = True
+            return _NvtxState(lib=_lib, available=True, verbose=verbose)
         except ImportError:
-            _AVAILABLE = False
+            pass
+    return _NvtxState(lib=None, available=False, verbose=verbose)
+
+
+_NVTX_STATE = _detect_nvtx()
 
 
 def annotate(message: str, color: str = "white") -> _Noop:
     """Context manager for a named NVTX range. No-op if NVTX is disabled."""
-    _ensure_init()
-    if _AVAILABLE:
-        return _lib.annotate(message, color=color)  # type: ignore[union-attr]
+    if _NVTX_STATE.available:
+        return _NVTX_STATE.lib.annotate(message, color=color)  # type: ignore[union-attr]
     return _NOOP
 
 
 def verbose_range(message: str, color: str = "white") -> _Noop:
     """Context manager for a sub-operation range. Only active when CUDALINK_NVTX_VERBOSE=1."""
-    _ensure_init()
-    if _AVAILABLE and _VERBOSE:
-        return _lib.annotate(message, color=color)  # type: ignore[union-attr]
+    if _NVTX_STATE.available and _NVTX_STATE.verbose:
+        return _NVTX_STATE.lib.annotate(message, color=color)  # type: ignore[union-attr]
     return _NOOP
 
 
 def push_range(message: str, color: str = "white") -> None:
     """Push a named NVTX range onto the thread-local stack."""
-    _ensure_init()
-    if _AVAILABLE:
-        _lib.push_range(message, color=color)  # type: ignore[union-attr]
+    if _NVTX_STATE.available:
+        _NVTX_STATE.lib.push_range(message, color=color)  # type: ignore[union-attr]
 
 
 def pop_range() -> None:
     """Pop the innermost NVTX range from the thread-local stack."""
-    _ensure_init()
-    if _AVAILABLE:
-        _lib.pop_range()  # type: ignore[union-attr]
+    if _NVTX_STATE.available:
+        _NVTX_STATE.lib.pop_range()  # type: ignore[union-attr]
 
 
 def is_enabled() -> bool:
-    _ensure_init()
-    return _AVAILABLE
+    return _NVTX_STATE.available
 
 
 def is_verbose() -> bool:
-    _ensure_init()
-    return _AVAILABLE and _VERBOSE
+    return _NVTX_STATE.available and _NVTX_STATE.verbose
+
+
+def slot_names(prefix: str, n: int = 10) -> tuple[str, ...]:
+    """Return a pre-computed tuple of ``n`` slot annotation labels for ``prefix``."""
+    return tuple(f"{prefix}{i}" for i in range(n))
