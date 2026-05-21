@@ -484,6 +484,29 @@ class NumpyBuffers:
 
 
 # ---------------------------------------------------------------------------
+# Reconnect state machine
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RetryState:
+    """Retry policy and transient counters for the connection-attempt loop.
+
+    Mirrors RetryState in td_exporter/TDReceiver.py — keep fields in sync.
+    """
+
+    connect_attempts: int = 0
+    max_connect_attempts: int = 20
+    backoff_intervals: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
+    retry_interval_frames: int = 1
+    frames_since_last_retry: int = 0
+
+    def request_immediate_reconnect(self) -> None:
+        """Force the next get_frame*() call to attempt reconnection without waiting."""
+        self.frames_since_last_retry = self.retry_interval_frames
+
+
+# ---------------------------------------------------------------------------
 # Importer
 # ---------------------------------------------------------------------------
 
@@ -522,6 +545,16 @@ class Importer:
         self._cupy: CupyBuffers | None = None
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
+
+        # Reconnect state machine (None when reconnect_enabled=False)
+        self._retry: _RetryState | None = (
+            _RetryState(
+                max_connect_attempts=policy.reconnect_max_attempts,
+                backoff_intervals=policy.reconnect_backoff_frames,
+            )
+            if policy.reconnect_enabled
+            else None
+        )
 
         # Frame tracking
         self._last_write_idx = 0
@@ -562,7 +595,13 @@ class Importer:
             cuda = CTypesCudaAdapter.for_device(device=spec.device)
 
         imp = cls(spec, policy, cuda)
-        imp._connect()
+        if policy.reconnect_enabled:
+            try:
+                imp._connect()
+            except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
+                logger.info("Producer not yet available (%s) — will retry on get_frame*()", e)
+        else:
+            imp._connect()
         return imp
 
     # ------------------------------------------------------------------
@@ -706,6 +745,69 @@ class Importer:
         )
 
     # ------------------------------------------------------------------
+    # Reconnect helpers
+    # ------------------------------------------------------------------
+
+    def _connect_silent(self) -> bool:
+        """Attempt _connect(); return True on success, False on any connection failure."""
+        try:
+            self._connect()
+            return True
+        except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
+            logger.debug("Connect attempt failed: %s", e)
+            return False
+
+    def _drive_retry(self) -> bool:
+        """Advance the reconnect state machine by one frame. Returns True if just connected."""
+        retry = self._retry
+        retry.frames_since_last_retry += 1
+        if retry.frames_since_last_retry < retry.retry_interval_frames:
+            return False
+
+        retry.frames_since_last_retry = 0
+        retry.connect_attempts += 1
+
+        if self._connect_silent():
+            return True
+
+        backoff_idx = min(retry.connect_attempts, len(retry.backoff_intervals) - 1)
+        retry.retry_interval_frames = retry.backoff_intervals[backoff_idx]
+        if retry.connect_attempts <= retry.max_connect_attempts:
+            logger.info(
+                "Waiting for producer... (attempt %d, next retry in %d frames)",
+                retry.connect_attempts,
+                retry.retry_interval_frames,
+            )
+        elif retry.connect_attempts == retry.max_connect_attempts + 1:
+            logger.warning("Producer not found. Will keep retrying silently.")
+        return False
+
+    def _partial_cleanup_for_reconnect(self) -> None:
+        """Release IPC handles and reset connection state; keep Importer alive for retry."""
+        if getattr(self, "_numpy", None) is not None:
+            self._numpy.close()
+            self._numpy = None
+        if getattr(self, "_conn", None) is not None:
+            self._conn.close()
+            self._conn = None
+        self._torch = None
+        self._cupy = None
+        self._format = None
+        self._initialized = False
+        if self._retry is None:
+            self._retry = _RetryState(
+                max_connect_attempts=self._policy.reconnect_max_attempts,
+                backoff_intervals=self._policy.reconnect_backoff_frames,
+            )
+        self._retry.request_immediate_reconnect()
+        logger.info("Partial cleanup done — waiting for producer restart")
+
+    def request_immediate_reconnect(self) -> None:
+        """Force the next get_frame*() call to attempt reconnection without waiting."""
+        if self._retry is not None:
+            self._retry.request_immediate_reconnect()
+
+    # ------------------------------------------------------------------
     # Slot acquisition
     # ------------------------------------------------------------------
 
@@ -728,8 +830,11 @@ class Importer:
             return None, ImportOutcome.NO_FRAME
 
         if result.state is SlotState.SHUTDOWN:
-            logger.info("Producer shutdown detected — closing")
-            self.close()
+            logger.info("Producer shutdown detected")
+            if self._policy.reconnect_enabled:
+                self._partial_cleanup_for_reconnect()
+            else:
+                self.close()
             return None, ImportOutcome.SHUTDOWN
 
         if result.state is SlotState.VERSION_CHANGED:
@@ -807,6 +912,9 @@ class Importer:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
 
+        if not self._initialized and (self._retry is None or not self._drive_retry()):
+            return ImportResult(outcome=ImportOutcome.RECONNECTING)
+
         debug = self._policy.debug
         frame_start = time.perf_counter() if debug else 0.0
 
@@ -854,6 +962,9 @@ class Importer:
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
+
+        if not self._initialized and (self._retry is None or not self._drive_retry()):
+            return ImportResult(outcome=ImportOutcome.RECONNECTING)
 
         debug = self._policy.debug
         frame_start = time.perf_counter() if debug else 0.0
@@ -943,6 +1054,9 @@ class Importer:
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
+
+        if not self._initialized and (self._retry is None or not self._drive_retry()):
+            return ImportResult(outcome=ImportOutcome.RECONNECTING)
 
         slot_result, outcome = self._try_acquire()
         if outcome is not ImportOutcome.NEW_FRAME:

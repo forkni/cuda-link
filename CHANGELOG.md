@@ -14,6 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window closed in v1.7.0).
 - `src/cuda_link/debug_utils.py` — dead code with zero importers; removed.
 
+### Added
+
+- **`Importer` waits for the producer to appear and re-attaches after producer
+  restart**, matching `TDReceiverEngine` behavior. Controlled via
+  `ImportPolicy.reconnect_enabled` (default `True`) and the
+  `CUDALINK_IMPORT_RECONNECT` env var. `Importer.open()` no longer raises
+  `FileNotFoundError` when SHM is absent — it returns an `Importer` in waiting
+  state that returns `ImportOutcome.RECONNECTING` on each `get_frame*()` call
+  until the producer appears. Set `ImportPolicy(reconnect_enabled=False)` for
+  legacy fail-fast behavior. `request_immediate_reconnect()` forces the next
+  frame to attempt a connection without waiting for the backoff interval (parity
+  with `TDReceiverEngine.request_immediate_reconnect()`).
+
 ### Changed
 
 - **`CUDALINK_*` env reads consolidated behind `_env` helpers** — all scattered

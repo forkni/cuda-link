@@ -286,3 +286,106 @@ def test_get_stats_zero_counters_no_division_error() -> None:
     stats = imp.get_stats()
     assert stats["avg_spin_us"] == 0.0
     assert stats["avg_sleep_us"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-wait (PR-D)
+# ---------------------------------------------------------------------------
+
+
+def _reconnect_policy(**kwargs) -> ImportPolicy:
+    """ImportPolicy with reconnect enabled but minimal waits for tests."""
+    return ImportPolicy(
+        wait_spin_us=0,
+        d2h_num_streams=1,
+        d2h_stream_high_priority=False,
+        allow_pageable_fallback=True,
+        debug=False,
+        reconnect_enabled=True,
+        reconnect_max_attempts=kwargs.get("reconnect_max_attempts", 20),
+        reconnect_backoff_frames=kwargs.get("reconnect_backoff_frames", (1, 2, 4, 8, 16, 32, 64, 120)),
+    )
+
+
+def test_reconnect_open_returns_waiting_importer_on_missing_shm() -> None:
+    """With reconnect_enabled=True, open() does not raise — returns Importer in waiting state."""
+    from cuda_link.importer import _RetryState
+
+    spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_test_abc")
+    policy = _reconnect_policy()
+    fake = FakeCudaAdapter()
+
+    imp = Importer.open(spec, policy=policy, cuda=fake)
+
+    assert not imp._initialized
+    assert imp._retry is not None
+    assert isinstance(imp._retry, _RetryState)
+
+
+def test_reconnect_disabled_preserves_old_raise_behavior() -> None:
+    """With reconnect_enabled=False, open() raises FileNotFoundError on missing SHM."""
+    spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_disabled_test")
+    policy = ImportPolicy.for_testing()  # reconnect_enabled=False
+    fake = FakeCudaAdapter()
+
+    with pytest.raises(FileNotFoundError):
+        Importer.open(spec, policy=policy, cuda=fake)
+
+
+def test_reconnect_get_frame_numpy_returns_reconnecting_when_not_initialized() -> None:
+    """get_frame_numpy() returns RECONNECTING while waiting for producer."""
+    spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_numpy_test")
+    policy = _reconnect_policy()
+    fake = FakeCudaAdapter()
+
+    imp = Importer.open(spec, policy=policy, cuda=fake)
+    assert not imp._initialized
+
+    result = imp.get_frame_numpy()
+    assert result.outcome is ImportOutcome.RECONNECTING
+    assert result.frame is None
+
+
+def test_reconnect_backoff_caps_at_max_attempts() -> None:
+    """After max_attempts, get_frame_numpy() still returns RECONNECTING (no crash)."""
+    spec = ImportSpec(shm_name="definitely_does_not_exist_backoff_test_xyzzy")
+    policy = _reconnect_policy(reconnect_max_attempts=3, reconnect_backoff_frames=(1, 1, 1))
+    fake = FakeCudaAdapter()
+
+    imp = Importer.open(spec, policy=policy, cuda=fake)
+
+    # Drive enough frames to exhaust max_attempts (each attempt needs 1 frame to elapse)
+    # Attempt 1 at frame 1, attempt 2 at frame 2, attempt 3 at frame 3 → then silent
+    for _ in range(10):
+        result = imp.get_frame_numpy()
+        assert result.outcome is ImportOutcome.RECONNECTING
+
+    # No crash — silently retrying beyond max_attempts
+    assert imp._retry.connect_attempts > 3
+
+
+def test_reconnect_request_immediate_skips_backoff() -> None:
+    """request_immediate_reconnect() causes the next call to attempt connect immediately."""
+    spec = ImportSpec(shm_name="definitely_does_not_exist_immediate_test_xyzzy")
+    # Use a large backoff so we can confirm immediate override
+    policy = _reconnect_policy(reconnect_backoff_frames=(100, 200, 400))
+    fake = FakeCudaAdapter()
+
+    imp = Importer.open(spec, policy=policy, cuda=fake)
+    # Drive one frame to get past the first attempt and into backoff
+    imp.get_frame_numpy()  # attempt 1, sets retry_interval_frames=100
+
+    frames_before = imp._retry.frames_since_last_retry
+
+    imp.request_immediate_reconnect()
+
+    # After immediate reconnect, frames_since_last_retry == retry_interval_frames
+    assert imp._retry.frames_since_last_retry == imp._retry.retry_interval_frames
+    # And it changed from the value before
+    assert imp._retry.frames_since_last_retry != frames_before or imp._retry.retry_interval_frames == 1
+
+
+def test_reconnect_for_testing_policy_has_reconnect_disabled() -> None:
+    """ImportPolicy.for_testing() has reconnect_enabled=False so unit tests don't wait."""
+    policy = ImportPolicy.for_testing()
+    assert policy.reconnect_enabled is False

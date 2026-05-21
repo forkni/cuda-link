@@ -66,6 +66,9 @@ class ImportPolicy:
     d2h_stream_high_priority: bool = False
     allow_pageable_fallback: bool = False
     debug: bool = False
+    reconnect_enabled: bool = True
+    reconnect_max_attempts: int = 20
+    reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
 
     @classmethod
     def from_env(cls) -> ImportPolicy:
@@ -76,6 +79,8 @@ class ImportPolicy:
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
             debug=False,
+            reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
+            reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
         )
 
     @classmethod
@@ -84,6 +89,7 @@ class ImportPolicy:
 
         Disables spin-wait, multi-stream D2H, stream priority, and enables
         pageable fallback so tests can run with FakeCudaAdapter without any GPU.
+        reconnect_enabled=False so unit tests don't incur reconnect-wait delays.
         """
         return cls(
             wait_spin_us=0,
@@ -91,6 +97,7 @@ class ImportPolicy:
             d2h_stream_high_priority=False,
             allow_pageable_fallback=True,
             debug=False,
+            reconnect_enabled=False,
         )
 
     @classmethod

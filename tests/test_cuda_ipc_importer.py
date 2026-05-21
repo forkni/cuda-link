@@ -30,13 +30,15 @@ def test_construct_does_not_raise_on_nonexistent_shm() -> None:
     assert not imp._initialized
 
 
-def test_connect_raises_on_nonexistent_shm() -> None:
-    """connect() must raise when SHM does not exist."""
+def test_connect_with_nonexistent_shm_enters_waiting_state() -> None:
+    """connect() no longer raises when SHM is absent — enters reconnect-wait state."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
     imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
-    with pytest.raises((OSError, RuntimeError, FileNotFoundError)):
-        imp.connect()
+    imp.connect()  # must not raise
+    assert imp._importer is not None
+    assert not imp._importer._initialized
+    assert imp.get_frame_numpy() is None  # RECONNECTING outcome → None
 
 
 def test_connect_idempotent(temp_shm_name: str) -> None:
