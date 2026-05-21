@@ -255,6 +255,20 @@ class CUDAIPCExtension:
         if self._mode == "Receiver":
             self._engine.request_immediate_reconnect()
 
+    def reconfigure_and_reinit(self, field_name: str, new_value: object) -> None:
+        """Set a config field then trigger a full reinit cycle.
+
+        Caller is responsible for pre-validation (range checks, mode guards).
+        """
+        self._log(f"{field_name} changed - reinitializing", force=True)
+        self.cleanup()
+        setattr(self, field_name, new_value)
+        if self._mode == "Sender":
+            self._log("Sender will reinitialize on next frame export", force=False)
+        elif self._mode == "Receiver":
+            self.request_immediate_reconnect()
+            self._log("Receiver will attempt reconnection on next frame", force=False)
+
     def consume_pending_resolution(self) -> tuple | None:
         """Return (width, height) if resolution update is pending, else None.
 

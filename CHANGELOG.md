@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`CUDAIPCExtension.reconfigure_and_reinit(field_name, new_value)`** — new method
+  that consolidates the cleanup → set-field → reconnect cycle used by `parexecute_callbacks`.
+  `handle_ipcmemname_change` and `handle_numslots_change` now delegate to this method,
+  removing ~20 LOC of duplicated reinit logic.
+
 - **`CheckerBarrier`** now consumes a `BarrierShmPort` (production: `RealShmAdapter`,
   test: `FakeShmAdapter` in `tests/conftest.py`), enabling coverage without real
   `SharedMemory`. Hot-path method renamed `evaluate() -> CheckerOutcome`
