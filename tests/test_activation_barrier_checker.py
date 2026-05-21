@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
+from conftest import FakeShmAdapter
 
 from cuda_link.activation_barrier import BarrierShmPort, CheckerBarrier, CheckerOutcome
-from conftest import FakeShmAdapter
 
 # ---------------------------------------------------------------------------
 # Structural check: FakeShmAdapter satisfies BarrierShmPort

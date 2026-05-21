@@ -120,9 +120,9 @@ def bump_skip(shm: SharedMemory) -> None:
 class CheckerOutcome(Enum):
     """Result of a single CheckerBarrier.evaluate() call."""
 
-    DISABLED = auto()    # barrier off via ExportPolicy.barrier_enabled=False
-    NO_SKIP = auto()     # active_count == 0; safe to publish
-    SKIP_ACTIVE = auto() # Sender mid-activation window
+    DISABLED = auto()  # barrier off via ExportPolicy.barrier_enabled=False
+    NO_SKIP = auto()  # active_count == 0; safe to publish
+    SKIP_ACTIVE = auto()  # Sender mid-activation window
     SKIP_STALE = auto()  # active_count > 0 but past stale_ns; treat as absent
     SHM_ABSENT = auto()  # segment not yet created by any Sender
 

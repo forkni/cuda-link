@@ -5,8 +5,10 @@ pytest configuration and shared fixtures for CUDA IPC tests.
 from __future__ import annotations
 
 import sys
+import time as _time
 import uuid
 from collections.abc import Generator
+from dataclasses import dataclass as _dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -108,10 +110,6 @@ def temp_shm_name() -> str:
 # ---------------------------------------------------------------------------
 # FakeShmAdapter — satisfies BarrierShmPort structurally; no real SHM needed
 # ---------------------------------------------------------------------------
-
-import time as _time
-from dataclasses import dataclass as _dataclass
-from dataclasses import field as _field
 
 
 @_dataclass
