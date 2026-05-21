@@ -110,15 +110,7 @@ class CUDAIPCImporter:
         _warn_once()
         if self._importer is not None:
             return
-        import os
-
-        policy = ImportPolicy(
-            wait_spin_us=int(os.getenv("CUDALINK_WAIT_SPIN_US", "200")),
-            d2h_num_streams=max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1"))),
-            d2h_stream_high_priority=os.getenv("CUDALINK_D2H_STREAM_PRIO", "normal") == "high",
-            allow_pageable_fallback=os.getenv("CUDALINK_ALLOW_PAGEABLE_FALLBACK", "0") == "1",
-            debug=self.debug,
-        )
+        policy = ImportPolicy.from_env()
         spec = ImportSpec(
             shm_name=self.shm_name,
             device=self.device,

@@ -23,8 +23,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import threading
+
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +115,7 @@ class NVMLObserver:
         """
         self.device = device
         if enabled is None:
-            self.enabled = os.getenv("CUDALINK_NVML", "0") == "1"
+            self.enabled = env_bool("CUDALINK_NVML", default=False)
         else:
             self.enabled = enabled
         self._handle = None

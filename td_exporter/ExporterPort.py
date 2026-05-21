@@ -13,12 +13,12 @@ as a structural type, plus the four value objects that form the public interface
 
 from __future__ import annotations
 
-import os
 from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Protocol, runtime_checkable
 
+from Env import env_bool, env_int, env_str
 from CUDARuntimeTypes import (
     CUDAEvent_t,
     CUDAGraph_t,
@@ -74,14 +74,14 @@ class ExportPolicy:
     def from_env(cls) -> ExportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
-            export_sync=os.getenv("CUDALINK_EXPORT_SYNC", "1") != "0",
-            use_graphs=os.getenv("CUDALINK_USE_GRAPHS", "1") == "1",
-            flush_probe=os.getenv("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1",
-            strict_device=os.getenv("CUDALINK_STRICT_DEVICE", "0") == "1",
-            barrier_enabled=os.getenv("CUDALINK_ACTIVATION_BARRIER", "1") != "0",
-            barrier_stale_ns=int(os.getenv("CUDALINK_BARRIER_STALE_NS", str(5 * 1_000_000_000))),
-            high_priority_stream=os.getenv("CUDALINK_LIB_STREAM_PRIO", "high") != "normal",
-            export_profile=os.getenv("CUDALINK_EXPORT_PROFILE", "0") == "1",
+            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=True),
+            use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
+            flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
+            strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
+            barrier_enabled=env_bool("CUDALINK_ACTIVATION_BARRIER", default=True),
+            barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
+            high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
+            export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
         )
 
     @classmethod

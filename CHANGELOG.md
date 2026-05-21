@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`CUDALINK_*` env reads consolidated behind `_env` helpers** — all scattered
+  `os.getenv`/`os.environ.get` calls for `CUDALINK_*` env vars in `src/cuda_link/`
+  now flow through `_env.env_bool()`, `_env.env_int()`, and `_env.env_str()`. Each
+  helper reads `os.environ` at call time so `monkeypatch.setenv` works reliably in
+  tests without import-order constraints. `_nvtx.py` moves from module-level reads to
+  lazy first-access via `_ensure_init()`. `CUDAIPCImporter.connect()` no longer
+  duplicates env reads — delegates to `ImportPolicy.from_env()`.
+
 - **`CUDAIPCExtension.reconfigure_and_reinit(field_name, new_value)`** — new method
   that consolidates the cleanup → set-field → reconnect cycle used by `parexecute_callbacks`.
   `handle_ipcmemname_change` and `handle_numslots_change` now delegate to this method,

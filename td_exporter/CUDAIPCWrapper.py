@@ -18,6 +18,11 @@ import logging
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+
 _logger = logging.getLogger(__name__)
 
 if os.name == "nt":
@@ -111,7 +116,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             )
 
         # Default ON; set CUDALINK_STICKY_ERROR_CHECK=0 to skip the cudaPeekAtLastError call.
-        self._sticky_check_enabled: bool = os.environ.get("CUDALINK_STICKY_ERROR_CHECK", "1") != "0"
+        self._sticky_check_enabled: bool = env_bool("CUDALINK_STICKY_ERROR_CHECK", default=True)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.

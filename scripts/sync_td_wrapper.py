@@ -58,7 +58,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 NAMES: dict[str, str] = {
     # Private support modules (drop leading underscore, PascalCase)
-    "_nvtx": "NVTXShim",  # irregular (NVTXShim.py already exists)
+    "_env": "Env",
+    "_nvtx": "NVTXShim",
     "_exporter_port": "ExporterPort",
     "_importer_port": "ImporterPort",
     "_exporter_adapters": "ExporterAdapters",
@@ -79,14 +80,16 @@ _TD = REPO_ROOT / "td_exporter"
 # Each entry: (canonical, derived, mode).
 # The pre-commit hook and tests both consume this list.
 PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = [
-    # ---- byte_identical pairs (original 6) --------------------------------
+    # ---- byte_identical pairs -----------------------------------------------
+    (_SRC / "_env.py", _TD / "Env.py", "byte_identical"),
     (_SRC / "cuda_ipc_wrapper.py", _TD / "CUDAIPCWrapper.py", "byte_identical"),
     (_SRC / "cuda_runtime_types.py", _TD / "CUDARuntimeTypes.py", "byte_identical"),
     (_SRC / "cuda_graphs.py", _TD / "CUDAGraphs.py", "byte_identical"),
     (_SRC / "nvml_observer.py", _TD / "NVMLObserver.py", "byte_identical"),
     (_SRC / "shm_protocol.py", _TD / "SHMProtocol.py", "byte_identical"),
     (_SRC / "activation_barrier.py", _TD / "ActivationBarrier.py", "byte_identical"),
-    # ---- rewrite_relative pairs (new; deep modules + their dependencies) --
+    # ---- rewrite_relative pairs (deep modules + their dependencies) ---------
+    (_SRC / "_nvtx.py", _TD / "NVTXShim.py", "rewrite_relative"),
     (_SRC / "_exporter_port.py", _TD / "ExporterPort.py", "rewrite_relative"),
     (_SRC / "_importer_port.py", _TD / "ImporterPort.py", "rewrite_relative"),
     (_SRC / "_exporter_adapters.py", _TD / "ExporterAdapters.py", "rewrite_relative"),

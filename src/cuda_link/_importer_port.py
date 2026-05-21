@@ -13,12 +13,12 @@ as a structural type, plus the four value objects that form the public interface
 
 from __future__ import annotations
 
-import os
 from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
+from ._env import env_bool, env_int, env_str
 from .cuda_runtime_types import (
     CUDAEvent_t,
     CUDAStream_t,
@@ -71,10 +71,10 @@ class ImportPolicy:
     def from_env(cls) -> ImportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
-            wait_spin_us=int(os.getenv("CUDALINK_WAIT_SPIN_US", "200")),
-            d2h_num_streams=max(1, int(os.getenv("CUDALINK_D2H_STREAMS", "1"))),
-            d2h_stream_high_priority=os.getenv("CUDALINK_D2H_STREAM_PRIO", "normal") == "high",
-            allow_pageable_fallback=os.getenv("CUDALINK_ALLOW_PAGEABLE_FALLBACK", "0") == "1",
+            wait_spin_us=env_int("CUDALINK_WAIT_SPIN_US", default=200),
+            d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),
+            d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
+            allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
             debug=False,
         )
 
