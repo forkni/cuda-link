@@ -5,147 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **TD-side `[GRAPHS_INIT]` diagnostic log** — `TDSenderEngine.__init__` now logs
-  `_use_graphs`, `config.use_graphs`, and the `CUDALINK_TD_USE_GRAPHS` env var
-  value at startup, confirming graph state on each component activation.
-
-### Fixed
-
-- **cudart DLL probe order** — `cudart64_12.dll` is now tried first, falling back
-  to `cudart64_11.dll` then `cudart64_110.dll`. The previous order (`110 → 12 → 11`)
-  was a stale artifact of the W1 WDDM bisect investigation (closed 2026-04-23,
-  REFUTED). Synced to `td_exporter/CUDAIPCWrapper.py`.
-
-- **`nvml_observer` docstring** clarifies the `pynvml` / `nvidia-ml-py` naming
-  ambiguity. Both packages expose the same `pynvml` module name; only the deprecated
-  `pynvml` PyPI package emits a `FutureWarning` on import (often installed as a
-  transitive dep of torch). Users who want to remove the duplicate install can run
-  `pip uninstall pynvml && pip install nvidia-ml-py`.
-
-- **Programmatic suppression of `pynvml` `FutureWarning`** — `import pynvml` in
-  `nvml_observer.py` is now wrapped in `warnings.catch_warnings()` with a targeted
-  `filterwarnings(message=r"The pynvml package is deprecated.*", category=FutureWarning)`.
-  The filter is anchored on the deprecation-banner text so other `FutureWarning`s still
-  surface, and is scoped to the import block so global warning state is unchanged.
-  Synced to `td_exporter/NVMLObserver.py`.
-
-- **Redundant "Loaded CUDA runtime" log on reconnect** — `TDReceiverEngine` and
-  `TDSenderEngine` now log this line only once per engine lifetime. Previously the
-  line fired on every reconnect attempt (10+ times during a ~7-second post-shutdown
-  wait) because the connect path used `force=True` and the runtime is cached — no
-  actual reload was happening.
-
-### Changed
-
-- **TD-side CUDA Graphs enabled by default** (`TDSenderConfig.use_graphs=True`,
-  `CUDALINK_TD_USE_GRAPHS` default changed `"0"` → `"1"`). The graph-capture path
-  is byte-identical to the proven Python sender path (shared `cuda_graphs.py` mixin)
-  and ships with three auto-fallback sites that silently revert to `cudaMemcpyAsync`
-  on capture or launch failure. Set `CUDALINK_TD_USE_GRAPHS=0` to opt out. Brings
-  TD sender to default parity with the Python sender (`CUDALINK_USE_GRAPHS` defaults
-  to `1`).
-
-- **`CUDAIPCWrapper` / `cuda_ipc_wrapper` docstring** updated: runtime requirement
-  now reads "CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll /
-  cudart64_110.dll accepted as fallback)" to accurately reflect the probe order.
-
-### Removed
-
-- **`CUDAIPCExporter`** removed as scheduled in the v1.6.0 deprecation notice. Use
-  `Exporter.open(FrameSpec(...))` instead. See `docs/MIGRATION_v1.6.md` (migration
-  window closed in v1.7.0).
-- `src/cuda_link/debug_utils.py` — dead code with zero importers; removed.
-
-### Changed
-
-- **`CUDALINK_*` env reads consolidated behind `_env` helpers** — all scattered
-  `os.getenv`/`os.environ.get` calls for `CUDALINK_*` env vars in `src/cuda_link/`
-  now flow through `_env.env_bool()`, `_env.env_int()`, and `_env.env_str()`. Each
-  helper reads `os.environ` at call time so `monkeypatch.setenv` works reliably in
-  tests without import-order constraints. `_nvtx.py` moves from module-level reads to
-  lazy first-access via `_ensure_init()`. `CUDAIPCImporter.connect()` no longer
-  duplicates env reads — delegates to `ImportPolicy.from_env()`.
-
-- **`CUDAIPCExtension.reconfigure_and_reinit(field_name, new_value)`** — new method
-  that consolidates the cleanup → set-field → reconnect cycle used by `parexecute_callbacks`.
-  `handle_ipcmemname_change` and `handle_numslots_change` now delegate to this method,
-  removing ~20 LOC of duplicated reinit logic.
-
-- **`CheckerBarrier`** now consumes a `BarrierShmPort` (production: `RealShmAdapter`,
-  test: `FakeShmAdapter` in `tests/conftest.py`), enabling coverage without real
-  `SharedMemory`. Hot-path method renamed `evaluate() -> CheckerOutcome`
-  (DISABLED / NO_SKIP / SKIP_ACTIVE / SKIP_STALE / SHM_ABSENT). The existing
-  `should_skip_publish() -> bool` wrapper is kept for callers that only need a bool.
-  Mirror to `td_exporter/ActivationBarrier.py` stays byte-identical.
-
-## [1.6.0] — 2026-05-20
-
-### Breaking changes (deprecations)
-
-- **`CUDAIPCExporter` is deprecated** and will be **removed in v1.7.0**. Use
-  `Exporter.open(FrameSpec(...))` from `cuda_link.exporter` instead. Existing code
-  continues to work via a compatibility shim that emits `DeprecationWarning`. See
-  `docs/MIGRATION_v1.6.md` for a side-by-side migration guide.
-
-### Added
-
-- **`Exporter` module** (`src/cuda_link/exporter.py`) — deep, testable replacement for
-  the inlined CUDA IPC logic in `CUDAIPCExporter`. Three-method public surface:
-  `Exporter.open(spec, *, policy, cuda)` / `export(frame)` / `close()`. `open()` either
-  returns a fully-initialised exporter or raises — no half-states. `close()` is
-  idempotent. `export()` returns `FrameOutcome` instead of raising on backpressure.
-
-- **`FrameSpec` dataclass** — frozen value object capturing resolution, dtype, slot count,
-  and device. Replaces positional constructor arguments.
-
-- **`ExportPolicy` dataclass** — frozen value object for all export flags
-  (`export_sync`, `use_graphs`, `flush_probe`, `strict_device`, `barrier_enabled`,
-  `high_priority_stream`, `export_profile`). Replaces env-var-only configuration.
-  Env vars are still respected via `ExportPolicy.from_env()`. Named presets:
-  `ExportPolicy.for_testing()` and `ExportPolicy.low_latency()`.
-
-- **`GpuFrame` dataclass** — typed wrapper for `(ptr, size)` passed to `export()`.
-
-- **`FrameOutcome` enum** — `PUBLISHED` / `SKIPPED_BARRIER` / `SKIPPED_NOT_READY` /
-  `FAILED`. Replaces the `bool` return from `export_frame()`.
-
-- **`CudaPort` Protocol** (`_exporter_port.py`) — structural-typing seam between the
-  `Exporter` and the CUDA runtime. Enables injecting a test double at the
-  one-seam boundary without touching SHM, time, or logging.
-
-- **`CTypesCudaAdapter`** (`_cuda_adapters.py`) — production adapter that wraps
-  `CUDARuntimeAPI` and satisfies `CudaPort`.
-
-- **`FakeCudaAdapter`** (`_cuda_adapters.py`) — in-memory test adapter. No GPU, no
-  ctypes DLL required. Tracks allocations (`adapter.allocations`), supports failure
-  injection (`fail_on_malloc_count`, `fail_on_stream_create`, `fail_on_event_create`),
-  and simulates CUDA Graphs as no-ops. Used in all unit tests for device-affinity and
-  export-outcome coverage.
-
-- All five new symbols exported from `cuda_link.__init__`:
-  `Exporter`, `FrameSpec`, `ExportPolicy`, `GpuFrame`, `FrameOutcome`.
-
-### Fixed
-
-- `Exporter.export()` no longer catches `ValueError` in its broad exception handler.
-  Strict-mode violations (`strict_device=True`, wrong pointer type or wrong device)
-  now propagate to the caller as documented, instead of being silently converted to
-  `FrameOutcome.FAILED`.
-
-### Tests
-
-- Rewrote `tests/test_device_affinity.py` and the write-ordering section of
-  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCudaAdapter())`
-  instead of `object.__new__(CUDAIPCExporter)` followed by ~25 hand-populated private
-  attributes. Both test files now run without a GPU.
-
-## [1.5.0] — 2026-05-19
+## [1.5.0] — 2026-05-21
 
 ### Breaking changes
+
+- **`CUDAIPCExporter` removed** — The `CUDAIPCExporter` class has been removed. Use
+  `Exporter.open(FrameSpec(...))` from `cuda_link.exporter` instead. See
+  `docs/MIGRATION_v1.5.md` for a side-by-side migration guide.
 
 - **`CUDAIPCImporter.__init__` no longer auto-initializes.** (S3) Callers must explicitly
   invoke `.connect()` after construction, or use the `CUDAIPCImporter.from_connected()`
@@ -174,9 +40,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Exporter` module** (`src/cuda_link/exporter.py`) — deep, testable replacement for
+  the inlined CUDA IPC logic in `CUDAIPCExporter`. Three-method public surface:
+  `Exporter.open(spec, *, policy, cuda)` / `export(frame)` / `close()`. `open()` either
+  returns a fully-initialised exporter or raises — no half-states. `close()` is
+  idempotent. `export()` returns `FrameOutcome` instead of raising on backpressure.
+
+- **`FrameSpec` dataclass** — frozen value object capturing resolution, dtype, slot count,
+  and device. Replaces positional constructor arguments.
+
+- **`ExportPolicy` dataclass** — frozen value object for all export flags
+  (`export_sync`, `use_graphs`, `flush_probe`, `strict_device`, `barrier_enabled`,
+  `high_priority_stream`, `export_profile`). Replaces env-var-only configuration.
+  Env vars are still respected via `ExportPolicy.from_env()`. Named presets:
+  `ExportPolicy.for_testing()` and `ExportPolicy.low_latency()`.
+
+- **`GpuFrame` dataclass** — typed wrapper for `(ptr, size)` passed to `export()`.
+
+- **`FrameOutcome` enum** — `PUBLISHED` / `SKIPPED_BARRIER` / `SKIPPED_NOT_READY` /
+  `FAILED`. Replaces the `bool` return from `export_frame()`.
+
+- **`CudaPort` Protocol** (`_exporter_port.py`) — structural-typing seam between the
+  `Exporter` and the CUDA runtime. Enables injecting a test double at the
+  one-seam boundary without touching SHM, time, or logging.
+
+- **`CTypesCudaAdapter`** and **`FakeCudaAdapter`** (`_cuda_adapters.py`) — production
+  and in-memory test adapters satisfying `CudaPort`. `FakeCudaAdapter` requires no GPU
+  or ctypes DLL; tracks allocations and supports failure injection. Both symbols now
+  import directly from `_cuda_adapters` — the `_exporter_adapters` re-export shim has
+  been removed.
+
+- All five new symbols exported from `cuda_link.__init__`:
+  `Exporter`, `FrameSpec`, `ExportPolicy`, `GpuFrame`, `FrameOutcome`.
+
+- **`HolderBarrier` port+adapter deepening** — `HolderBarrier` now consumes a
+  `HolderShmPort` (production: `RealShmAdapter`, test: `FakeShmAdapter`) so its
+  acquire/release lifecycle can be exercised without real `SharedMemory`. Mirrors
+  the `CheckerBarrier` deepening from the same session. `RealShmAdapter` satisfies
+  both `BarrierShmPort` and `HolderShmPort` structurally.
+
+- **`slot_names(prefix, n=10)`** helper in `_nvtx.py` — consolidates three duplicate
+  slot-name tuple declarations in `exporter.py` and `importer.py` into one location.
+
+- **`Exporter.open(..., barrier=...)` kwarg** — accepts an optional
+  `barrier: CheckerBarrier | None` for injecting a pre-configured `CheckerBarrier`
+  in tests. Production callers pass nothing; the exporter constructs the default.
+
 - `CUDALINK_D2H_STREAM_PRIO=high` opt-in env var allocates the importer's D2H streams at
   high priority, mirroring `CUDALINK_LIB_STREAM_PRIO` on the exporter side. Default:
   `"normal"`. (S9)
+
+- **TD-side `[GRAPHS_INIT]` diagnostic log** — `TDSenderEngine.__init__` now logs
+  `_use_graphs`, `config.use_graphs`, and the `CUDALINK_TD_USE_GRAPHS` env var
+  value at startup, confirming graph state on each component activation.
+
+- **`docs/ctypes-audit-v1.5.md`** — full audit of all 49 CUDA runtime bindings and
+  Win32 helpers against the Python ctypes documentation. No drift found; all argtypes,
+  restypes, pointer semantics, and struct layouts verified correct.
+
+- **`docs/perf/graphs-benchmark-v1.5.md`** — A/B/C/D benchmark for CUDA Graphs ON/OFF
+  (Python and TD sides). Cell B (Python graphs ON) shows −3.4 % median latency vs
+  Cell A (OFF); no regression in any soak metric. Decision: both `CUDALINK_USE_GRAPHS`
+  and `CUDALINK_TD_USE_GRAPHS` remain default ON.
+
+### Changed
+
+- **TD-side CUDA Graphs enabled by default** (`TDSenderConfig.use_graphs=True`,
+  `CUDALINK_TD_USE_GRAPHS` default `"0"` → `"1"`). The graph-capture path is
+  byte-identical to the proven Python sender path (shared `cuda_graphs.py` mixin) and
+  ships with three auto-fallback sites that silently revert to `cudaMemcpyAsync` on
+  capture or launch failure. Set `CUDALINK_TD_USE_GRAPHS=0` to opt out. Brings TD sender
+  to default parity with the Python sender (`CUDALINK_USE_GRAPHS` defaults to `1`).
+
+- **`CUDAIPCWrapper` / `cuda_ipc_wrapper` docstring** updated: runtime requirement now
+  reads "CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll /
+  cudart64_110.dll accepted as fallback)" to accurately reflect the probe order.
+
+- **`CUDALINK_*` env reads consolidated behind `_env` helpers** — all scattered
+  `os.getenv`/`os.environ.get` calls in `src/cuda_link/` now flow through
+  `_env.env_bool()`, `_env.env_int()`, and `_env.env_str()`. Each helper reads
+  `os.environ` at call time so `monkeypatch.setenv` works reliably in tests without
+  import-order constraints. `CUDAIPCImporter.connect()` no longer duplicates env reads —
+  delegates to `ImportPolicy.from_env()`.
+
+- **`CUDAIPCExtension.reconfigure_and_reinit(field_name, new_value)`** — new method
+  that consolidates the cleanup → set-field → reconnect cycle used by `parexecute_callbacks`.
+  `handle_ipcmemname_change` and `handle_numslots_change` now delegate to this method,
+  removing ~20 LOC of duplicated reinit logic.
+
+- **`CheckerBarrier`** now consumes a `BarrierShmPort` (production: `RealShmAdapter`,
+  test: `FakeShmAdapter` in `tests/conftest.py`), enabling coverage without real
+  `SharedMemory`. Hot-path method renamed `evaluate() -> CheckerOutcome`
+  (DISABLED / NO_SKIP / SKIP_ACTIVE / SKIP_STALE / SHM_ABSENT). The existing
+  `should_skip_publish() -> bool` wrapper is kept for callers that only need a bool.
+  Mirror to `td_exporter/ActivationBarrier.py` stays byte-identical.
+
+- **`_nvtx.py` rewritten to module-import-time detection** — the `_ensure_init()` lazy
+  initialiser and associated globals are replaced by a single
+  `_NVTX_STATE = _detect_nvtx()` call at import time. All five public functions now
+  read `_NVTX_STATE.available` directly.
+
+### Fixed
+
+- **cudart DLL probe order** — `cudart64_12.dll` is now tried first, falling back to
+  `cudart64_11.dll` then `cudart64_110.dll`. The previous order (`110 → 12 → 11`) was a
+  stale artifact of the W1 WDDM bisect investigation (closed 2026-04-23, REFUTED).
+  Synced to `td_exporter/CUDAIPCWrapper.py`.
+
+- **`nvml_observer` `pynvml` `FutureWarning` suppressed** — `import pynvml` is now
+  wrapped in `warnings.catch_warnings()` with a targeted `filterwarnings` anchored on
+  the deprecation-banner text. Other `FutureWarning`s still surface; global warning
+  state is unchanged. Docstring also clarifies the `pynvml` / `nvidia-ml-py` naming
+  ambiguity. Synced to `td_exporter/NVMLObserver.py`.
+
+- **Redundant "Loaded CUDA runtime" log on reconnect** — `TDReceiverEngine` and
+  `TDSenderEngine` now log this line only once per engine lifetime.
+
+- **`Exporter.export()` no longer catches `ValueError`** in its broad exception handler.
+  Strict-mode violations (`strict_device=True`, wrong pointer type or wrong device) now
+  propagate to the caller as documented.
+
+### Removed
+
+- **`_exporter_adapters.py` re-export shim** — `CTypesCudaAdapter` and `FakeCudaAdapter`
+  now import directly from `_cuda_adapters`. The `_exporter_adapters.py ↔ ExporterAdapters.py`
+  sync pair removed from `scripts/sync_td_wrapper.py`.
+
+- **`src/cuda_link/debug_utils.py`** — dead code with zero importers.
 
 ### Hardening
 
@@ -188,6 +178,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process search order. (C8)
 - DLL-loader `OSError` catches now log `e.winerror` at DEBUG to distinguish WinError 126
   (DLL not found) from 193 (wrong bitness). (C9)
+
+### Tests
+
+- Rewrote `tests/test_device_affinity.py` and the write-ordering section of
+  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCudaAdapter())`
+  instead of `object.__new__(CUDAIPCExporter)` followed by ~25 hand-populated private
+  attributes. Both files now run without a GPU.
+
+- Added `tests/test_activation_barrier_holder.py` — 23 no-SHM tests for `HolderBarrier`
+  via `FakeShmAdapter`. Covers acquire, arm_settle_countdown, tick_and_maybe_release,
+  force_release, close, and end-to-end lifecycle.
+
+- Removed spurious `@pytest.mark.requires_cuda` from 4 CPU-only tests in
+  `tests/test_cuda_ipc_importer.py`.
+
+- Fixed stale `tests/test_wrapper_sync.py` docstring: replaced the hardcoded pair
+  listing with a pointer to `sync_td_wrapper.PAIRS` as the authoritative source.
 
 ## [1.4.2] — 2026-05-18
 
@@ -600,6 +607,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
+[1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0

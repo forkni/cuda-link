@@ -1,15 +1,12 @@
-# Migrating to cuda-link v1.6.0
+# Migrating to cuda-link v1.5.0
 
-> **Migration window closed in v1.7.0.**
-> `CUDAIPCExporter` was removed in v1.7.0 as scheduled. This guide documents the migration
-> path for reference. If you are still on the old API, apply the changes below and upgrade
-> to v1.7.0 or later.
+> **`CUDAIPCExporter` was removed in v1.5.0.** This guide documents the migration
+> path. Apply the changes below before upgrading.
 
 ## Overview
 
-v1.6.0 introduces `Exporter` — a deep, testable module that replaces the inline CUDA IPC
-logic in `CUDAIPCExporter`. `CUDAIPCExporter` was **deprecated in v1.6.0** and **removed in
-v1.7.0**.
+v1.5.0 introduces `Exporter` — a deep, testable module that replaces the inline CUDA IPC
+logic in `CUDAIPCExporter`. `CUDAIPCExporter` has been **removed in v1.5.0**.
 
 ---
 
@@ -18,11 +15,11 @@ v1.7.0**.
 ### 1. Import path
 
 ```python
-# Before (v1.5.x and earlier)
+# Before (v1.4.x and earlier)
 from cuda_link import CUDAIPCExporter
 from cuda_link.cuda_ipc_exporter import CUDAIPCExporter  # also worked
 
-# After (v1.6.0+)
+# After (v1.5.0+)
 from cuda_link import Exporter, FrameSpec, ExportPolicy, GpuFrame, FrameOutcome
 ```
 
@@ -176,23 +173,3 @@ exp = Exporter.open(FrameSpec(..., device=0), policy=policy)
 exp.export(GpuFrame(ptr=wrong_device_ptr, size=size))
 # → raises ValueError("belongs to device 1, but exporter is bound to device 0")
 ```
-
----
-
-## `CUDAIPCExporter` backwards compatibility
-
-If you cannot migrate immediately, `CUDAIPCExporter` still works via a shim:
-
-```python
-# Unchanged — emits DeprecationWarning at import time
-exp = CUDAIPCExporter(shm_name="my_shm", height=1080, width=1920)
-exp.initialize()
-exp.export_frame(ptr, size)
-exp.cleanup()
-```
-
-The shim delegates every call to an inner `Exporter` instance. All env-var flags
-(`CUDALINK_EXPORT_SYNC`, `CUDALINK_USE_GRAPHS`, etc.) are read at construction time via
-`ExportPolicy.from_env()` — identical to the v1.5.0 behaviour.
-
-**Removal timeline:** `CUDAIPCExporter` will be removed in v1.7.0.
