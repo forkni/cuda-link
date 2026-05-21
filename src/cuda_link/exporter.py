@@ -181,14 +181,17 @@ class Exporter:
         *,
         policy: ExportPolicy | None = None,
         cuda: CudaPort | None = None,
+        barrier: CheckerBarrier | None = None,
     ) -> Exporter:
         """Construct and fully initialize an Exporter. Raises on failure; leaves no half-state.
 
         Args:
-            spec:   Frame geometry + SHM routing (FrameSpec).
-            policy: Behavioural knobs. None → ExportPolicy.from_env().
-            cuda:   CudaPort adapter. None → CTypesCudaAdapter.for_device(spec.device).
-                    Pass a FakeCudaAdapter() for unit tests.
+            spec:    Frame geometry + SHM routing (FrameSpec).
+            policy:  Behavioural knobs. None → ExportPolicy.from_env().
+            cuda:    CudaPort adapter. None → CTypesCudaAdapter.for_device(spec.device).
+                     Pass a FakeCudaAdapter() for unit tests.
+            barrier: CheckerBarrier to use. None → construct from policy.
+                     Pass CheckerBarrier(shm=FakeShmAdapter(...)) for unit tests.
 
         Returns:
             A ready-to-use Exporter.
@@ -204,6 +207,9 @@ class Exporter:
             cuda = CTypesCudaAdapter.for_device(spec.device)
 
         exp = cls(spec, policy, cuda)
+        if barrier is not None:
+            exp._barrier.close()
+            exp._barrier = barrier
         try:
             exp._initialize()
         except Exception:

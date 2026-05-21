@@ -12,10 +12,11 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from conftest import FakeShmAdapter
 
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame
 from cuda_link._cuda_adapters import FakeCudaAdapter
-from cuda_link.activation_barrier import CheckerOutcome
+from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.exporter import Exporter
 
 # ---------------------------------------------------------------------------
@@ -25,7 +26,9 @@ from cuda_link.exporter import Exporter
 _DATA_SIZE = 8 * 8 * 4  # H=8, W=8, C=4, uint8
 
 
-def _make_exporter(device: int = 0, strict: bool = False) -> tuple[Exporter, FakeCudaAdapter]:
+def _make_exporter(
+    device: int = 0, strict: bool = False, barrier: CheckerBarrier | None = None
+) -> tuple[Exporter, FakeCudaAdapter]:
     """Open a real Exporter backed by FakeCudaAdapter (no GPU required).
 
     Returns (exporter, fake_cuda) so tests can configure the fake directly.
@@ -46,6 +49,7 @@ def _make_exporter(device: int = 0, strict: bool = False) -> tuple[Exporter, Fak
         FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2, device=device),
         policy=policy,
         cuda=fake,
+        barrier=barrier,
     )
     return exp, fake
 
@@ -285,13 +289,12 @@ def test_f10_f9_skip_clears_shutdown_flag() -> None:
     """
     from cuda_link import FrameOutcome
 
-    exp, _ = _make_exporter(device=0)
+    active_barrier = CheckerBarrier(enabled=True, stale_ns=5_000_000_000, shm=FakeShmAdapter(active_count=1))
+    exp, _ = _make_exporter(device=0, barrier=active_barrier)
     try:
-        exp._barrier.enabled = True
         exp.shm_handle.buf[exp._shutdown_offset] = 1  # stale flag
 
-        with patch.object(exp._barrier, "evaluate", return_value=CheckerOutcome.SKIP_ACTIVE):
-            outcome = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
+        outcome = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
 
         assert outcome == FrameOutcome.SKIPPED_BARRIER
         assert exp.shm_handle.buf[exp._shutdown_offset] == 0
@@ -301,13 +304,12 @@ def test_f10_f9_skip_clears_shutdown_flag() -> None:
 
 def test_f10_f9_skip_does_not_advance_write_idx() -> None:
     """F9 skip must not increment write_idx (no phantom frame published)."""
-    exp, _ = _make_exporter(device=0)
+    active_barrier = CheckerBarrier(enabled=True, stale_ns=5_000_000_000, shm=FakeShmAdapter(active_count=1))
+    exp, _ = _make_exporter(device=0, barrier=active_barrier)
     try:
-        exp._barrier.enabled = True
         initial_write_idx = exp.write_idx
 
-        with patch.object(exp._barrier, "evaluate", return_value=CheckerOutcome.SKIP_ACTIVE):
-            exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
+        exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
 
         assert exp.write_idx == initial_write_idx
     finally:

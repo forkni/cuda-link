@@ -1,9 +1,12 @@
 """Test that TD-exporter copies stay in sync with canonical sources.
 
 Two check modes:
-  byte_identical   — canonical and derived must be byte-identical (6 original pairs).
+  byte_identical   — canonical and derived must be byte-identical.
   rewrite_relative — derived must equal the output of rewrite_relative_imports()
-                     applied to the canonical source (6 new pairs for deep modules).
+                     applied to the canonical source (deep modules with relative imports).
+
+The authoritative pair list lives in scripts/sync_td_wrapper.PAIRS — keep this
+docstring free of the listing so it doesn't drift.
 
 To update any paired file: edit src/cuda_link/<file>.py, then run:
 
@@ -11,21 +14,6 @@ To update any paired file: edit src/cuda_link/<file>.py, then run:
 
 Never edit td_exporter/ paired files directly — this test and the pre-commit
 hook will reject the commit.
-
-byte_identical pairs:
-  src/cuda_link/cuda_ipc_wrapper.py   <-> td_exporter/CUDAIPCWrapper.py
-  src/cuda_link/cuda_runtime_types.py <-> td_exporter/CUDARuntimeTypes.py
-  src/cuda_link/cuda_graphs.py        <-> td_exporter/CUDAGraphs.py
-  src/cuda_link/nvml_observer.py      <-> td_exporter/NVMLObserver.py
-  src/cuda_link/shm_protocol.py       <-> td_exporter/SHMProtocol.py
-  src/cuda_link/activation_barrier.py <-> td_exporter/ActivationBarrier.py
-
-rewrite_relative pairs:
-  src/cuda_link/_exporter_port.py     <-> td_exporter/ExporterPort.py
-  src/cuda_link/_importer_port.py     <-> td_exporter/ImporterPort.py
-  src/cuda_link/_cuda_adapters.py     <-> td_exporter/CudaAdapters.py
-  src/cuda_link/exporter.py           <-> td_exporter/Exporter.py
-  src/cuda_link/importer.py           <-> td_exporter/Importer.py
 """
 
 from __future__ import annotations

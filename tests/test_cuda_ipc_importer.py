@@ -70,7 +70,6 @@ def test_connect_idempotent(temp_shm_name: str) -> None:
         shm.unlink()
 
 
-@pytest.mark.requires_cuda
 def test_torch_available_check() -> None:
     """Test torch availability detection."""
     from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE
@@ -79,7 +78,6 @@ def test_torch_available_check() -> None:
     assert isinstance(TORCH_AVAILABLE, bool)
 
 
-@pytest.mark.requires_cuda
 def test_numpy_available_check() -> None:
     """Test numpy availability detection."""
     from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE
@@ -88,7 +86,6 @@ def test_numpy_available_check() -> None:
     assert isinstance(NUMPY_AVAILABLE, bool)
 
 
-@pytest.mark.requires_cuda
 def test_get_frame_without_torch() -> None:
     """Test get_frame() raises when torch not available."""
     from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE, CUDAIPCImporter
@@ -102,7 +99,6 @@ def test_get_frame_without_torch() -> None:
         importer.get_frame()
 
 
-@pytest.mark.requires_cuda
 def test_get_frame_numpy_without_numpy() -> None:
     """Test get_frame_numpy() raises when numpy not available."""
     from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
