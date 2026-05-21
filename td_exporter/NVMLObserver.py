@@ -17,6 +17,13 @@ Usage:
 
 Install optional dep:
     pip install "cuda-link[nvml]"    # adds nvidia-ml-py>=12.535
+
+Note: this module imports ``pynvml``, a module name shared by both the deprecated
+``pynvml`` PyPI package and the maintained ``nvidia-ml-py`` package. cuda-link's
+``[nvml]`` extra declares ``nvidia-ml-py>=12.535``. If you see a FutureWarning
+about ``pynvml`` being deprecated, the deprecated ``pynvml`` package is installed
+(often as a transitive dep of torch). Fix with:
+    pip uninstall pynvml && pip install nvidia-ml-py
 """
 
 from __future__ import annotations

@@ -136,6 +136,12 @@ class TDSenderEngine:
         self._export_profile: bool = self._config.export_profile
         self._export_flush_probe: bool = self._config.export_flush_probe
         self._use_graphs: bool = self._config.use_graphs
+        self._log(
+            f"[GRAPHS_INIT] _use_graphs={self._use_graphs} "
+            f"(config.use_graphs={self._config.use_graphs}, "
+            f"CUDALINK_TD_USE_GRAPHS env={os.environ.get('CUDALINK_TD_USE_GRAPHS', '(unset)')})",
+            force=True,
+        )
         self._graphs_disabled: bool = False
         self._graph_execs: list = [None] * self.num_slots
         self._graph_templates: list = [None] * self.num_slots
@@ -235,7 +241,9 @@ class TDSenderEngine:
 
             # Load CUDA runtime bound to the configured device
             self.cuda = get_cuda_runtime(device=self.device)
-            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+            if not getattr(self, "_runtime_load_logged", False):
+                self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+                self._runtime_load_logged = True
 
             # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.

@@ -534,7 +534,9 @@ class TDReceiverEngine:
         _t0 = time.perf_counter()
         try:
             self.cuda = get_cuda_runtime(device=self.device)
-            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+            if not getattr(self, "_runtime_load_logged", False):
+                self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+                self._runtime_load_logged = True
 
             # Open SharedMemory (sender must have created it)
             try:

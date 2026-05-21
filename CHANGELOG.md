@@ -7,25 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TD-side `[GRAPHS_INIT]` diagnostic log** — `TDSenderEngine.__init__` now logs
+  `_use_graphs`, `config.use_graphs`, and the `CUDALINK_TD_USE_GRAPHS` env var
+  value at startup. Reveals why TD sender shows `graphs=OFF` while the Python
+  sender shows `graphs=ON` (different env vars: TD uses `CUDALINK_TD_USE_GRAPHS`,
+  Python uses `CUDALINK_USE_GRAPHS`; TD defaults to `False`).
+
+### Fixed
+
+- **cudart DLL probe order** — `cudart64_12.dll` is now tried first, falling back
+  to `cudart64_11.dll` then `cudart64_110.dll`. The previous order (`110 → 12 → 11`)
+  was a stale artifact of the W1 WDDM bisect investigation (closed 2026-04-23,
+  REFUTED). Synced to `td_exporter/CUDAIPCWrapper.py`.
+
+- **`nvml_observer` docstring** clarifies the `pynvml` / `nvidia-ml-py` naming
+  ambiguity. Both packages expose the same `pynvml` module name; only the deprecated
+  `pynvml` PyPI package emits a `FutureWarning` on import (often installed as a
+  transitive dep of torch). Guidance: `pip uninstall pynvml && pip install nvidia-ml-py`.
+
+- **Redundant "Loaded CUDA runtime" log on reconnect** — `TDReceiverEngine` and
+  `TDSenderEngine` now log this line only once per engine lifetime. Previously the
+  line fired on every reconnect attempt (10+ times during a ~7-second post-shutdown
+  wait) because the connect path used `force=True` and the runtime is cached — no
+  actual reload was happening.
+
+### Changed
+
+- **`CUDAIPCWrapper` / `cuda_ipc_wrapper` docstring** updated: runtime requirement
+  now reads "CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll /
+  cudart64_110.dll accepted as fallback)" to accurately reflect the probe order.
+
 ### Removed
 
 - **`CUDAIPCExporter`** removed as scheduled in the v1.6.0 deprecation notice. Use
   `Exporter.open(FrameSpec(...))` instead. See `docs/MIGRATION_v1.6.md` (migration
   window closed in v1.7.0).
 - `src/cuda_link/debug_utils.py` — dead code with zero importers; removed.
-
-### Added
-
-- **`Importer` waits for the producer to appear and re-attaches after producer
-  restart**, matching `TDReceiverEngine` behavior. Controlled via
-  `ImportPolicy.reconnect_enabled` (default `True`) and the
-  `CUDALINK_IMPORT_RECONNECT` env var. `Importer.open()` no longer raises
-  `FileNotFoundError` when SHM is absent — it returns an `Importer` in waiting
-  state that returns `ImportOutcome.RECONNECTING` on each `get_frame*()` call
-  until the producer appears. Set `ImportPolicy(reconnect_enabled=False)` for
-  legacy fail-fast behavior. `request_immediate_reconnect()` forces the next
-  frame to attempt a connection without waiting for the backoff interval (parity
-  with `TDReceiverEngine.request_immediate_reconnect()`).
 
 ### Changed
 

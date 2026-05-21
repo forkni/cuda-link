@@ -6,7 +6,7 @@ Provides ctypes interface to CUDA Runtime API for inter-process communication.
 Compatible with both TouchDesigner and Python processes.
 
 Requirements:
-- CUDA 12.x runtime (cudart64_12.dll)
+- CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll / cudart64_110.dll accepted as fallback)
 - Windows operating system
 - Same GPU visible to both processes
 """
@@ -131,10 +131,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        # cudart64_110.dll is preferred for bisect testing (W1): reverts the 12.x
-        # preference introduced in 4695d8f to test whether cudart64_12 ABI is the
-        # driver-error amplifier on WDDM.
-        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
+        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
+        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
