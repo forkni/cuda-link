@@ -103,6 +103,13 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Establish CUDA primary context on the requested device.
+        # Must run AFTER _setup_function_signatures() (argtypes needed) but as the
+        # very next statement — ensures context exists before any IPC handle operation.
+        # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
+        # alongside torch (which has its own bundled cudart). Each DLL instance needs
+        # its own context initialized before IPC handle operations can succeed.
+        self.check_error(self.cudart.cudaSetDevice(device), "cudaSetDevice")
 
         if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
             _logger.warning(
@@ -428,12 +435,6 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # Updates the event waited on by an event-wait node. CUDA 11.4+.
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
-
-        # Establish CUDA primary context on the requested device.
-        # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
-        # alongside torch (which has its own bundled cudart). Each DLL instance needs
-        # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(self.device)
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
