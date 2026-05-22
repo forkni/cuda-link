@@ -93,9 +93,27 @@ _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
 
 **Assessment:** Fully correct.
 
-### 2.2 `winmm` — Not present
+### 2.2 `winmm` — `timeBeginPeriod` / `timeEndPeriod`
 
-No `winmm` binding exists in the codebase. This is expected — there is no multimedia timer or waveform audio usage.
+`winmm` is bound in `src/cuda_link/importer.py` for high-resolution timer control:
+
+```python
+_winmm = ctypes.WinDLL("winmm", use_last_error=True)
+_winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
+_winmm.timeBeginPeriod.restype = ctypes.c_uint
+_winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+_winmm.timeEndPeriod.restype = ctypes.c_uint
+```
+
+| Check | Status | Notes |
+|-------|--------|-------|
+| `argtypes` declared | Yes | `[c_uint]` for both — `timeBeginPeriod`/`timeEndPeriod` take a single `UINT` |
+| `restype` correct | Yes | `c_uint` — both functions return `MMRESULT` (a `UINT` typedef) |
+| `WinDLL` vs `CDLL` | Correct | `winmm` uses `__stdcall`; `WinDLL` is correct |
+| `use_last_error=True` | Yes | Enables `ctypes.get_last_error()` after call |
+| Lifetime | Module-level | `_winmm` is a module-level variable; binding persists for the process lifetime. The `_HighResTimer` context manager calls `timeBeginPeriod(1)` on enter and `timeEndPeriod(1)` on exit, setting the Windows multimedia timer resolution to 1 ms for the duration of an IPC send. |
+
+**Assessment:** Fully correct.
 
 ---
 
@@ -237,9 +255,11 @@ Note: CUDA 10.x used a slightly different `cudaPointerAttributes` that included 
 
 ---
 
-### F-9 — No `CFUNCTYPE` / `WINFUNCTYPE` callbacks (EXPECTED)
+### F-9 — No `CFUNCTYPE` / `WINFUNCTYPE` callbacks in audited files (SCOPE CLARIFICATION)
 
-A grep of both files confirms zero use of `CFUNCTYPE`, `WINFUNCTYPE`, or any ctypes callback type. There is no risk of GIL re-entry via callbacks. As expected.
+Within the three audited files (`cuda_ipc_wrapper.py`, `cuda_runtime_types.py`, `cuda_graphs.py`): no `CFUNCTYPE`, `WINFUNCTYPE`, or any ctypes callback type is used. There is no GIL re-entry risk from callbacks in these files.
+
+**Repo-wide note:** `td_exporter/example_sender_python.py` defines a `WINFUNCTYPE` callback at module scope for `SetConsoleCtrlHandler` (line 62: `_HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)`). The callback object is stored in a module-level variable (`_ctrl_handler`) to prevent garbage collection during the process lifetime — this is the required pattern for `SetConsoleCtrlHandler` callbacks and is correctly implemented. This file is a standalone TD-only sender script, outside the three-file canonical audit scope.
 
 ---
 
