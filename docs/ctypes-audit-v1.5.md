@@ -259,7 +259,7 @@ Note: CUDA 10.x used a slightly different `cudaPointerAttributes` that included 
 
 Within the three audited files (`cuda_ipc_wrapper.py`, `cuda_runtime_types.py`, `cuda_graphs.py`): no `CFUNCTYPE`, `WINFUNCTYPE`, or any ctypes callback type is used. There is no GIL re-entry risk from callbacks in these files.
 
-**Repo-wide note:** `td_exporter/example_sender_python.py` defines a `WINFUNCTYPE` callback at module scope for `SetConsoleCtrlHandler` (line 62: `_HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)`). The callback object is stored in a module-level variable (`_ctrl_handler`) to prevent garbage collection during the process lifetime — this is the required pattern for `SetConsoleCtrlHandler` callbacks and is correctly implemented. This file is a standalone TD-only sender script, outside the three-file canonical audit scope.
+**Repo-wide note:** `td_exporter/example_sender_python.py` defines a `WINFUNCTYPE` callback at module scope for `SetConsoleCtrlHandler` (line 62: `_HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)`). The callback object is stored in a module-level variable (`_ctrl_handler`) to prevent garbage collection during the process lifetime — this is the required pattern for `SetConsoleCtrlHandler` callbacks and is correctly implemented. This file is a standalone TD-only sender script, outside the three-file canonical audit scope.
 
 ---
 
