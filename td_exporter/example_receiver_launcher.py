@@ -23,21 +23,54 @@ TD Setup:
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()
 
-Environment variables (set before launching TouchDesigner):
-    CUDALINK_RECEIVER_PYTHON_EXE
-        Python executable to use for the receiver subprocess.
-        Default: "python" (resolves via PATH — may not be the system Python that
-        has torch/cupy if TD's bundled Python appears first in PATH).
-        Set to the full path of your preferred interpreter, e.g.:
-            C:\\Python312\\python.exe
-            C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe
-        Any CUDALINK_RECEIVER_* env vars are forwarded automatically to the
-        receiver subprocess through the inherited environment.
+Python executable resolution (priority order):
+    1. CUDALINK_RECEIVER_PYTHON_EXE env var — full path, highest priority.
+    2. Windows Python Launcher: 'py -3' resolves the system Python 3 installation
+       and returns its full path (e.g. C:\\Users\\...\\Python311\\python.exe).
+       Reliable on any Windows machine with the standard Python installer.
+    3. 'python' — bare fallback if the Launcher is unavailable (may be TD's
+       bundled Python, which lacks third-party packages like torch/cupy).
+
+    The resolved path is printed on each onStart() so you can verify which
+    interpreter is used without opening a terminal.
 """
 
 import os
+import shutil
 import signal
 import subprocess
+
+
+def _find_python_exe() -> str:
+    """Resolve the Python executable for the receiver subprocess.
+
+    Runs once at Execute DAT load time so the path is ready before onStart().
+    """
+    # 1. Explicit env-var override — highest priority.
+    if env := os.environ.get("CUDALINK_RECEIVER_PYTHON_EXE", ""):
+        return env
+
+    # 2. Windows Python Launcher: 'py -3' always resolves the registered system
+    #    Python 3, regardless of PATH order.  Ask it for sys.executable so we
+    #    get the full absolute path rather than relying on 'py' staying available.
+    if shutil.which("py"):
+        try:
+            result = subprocess.run(
+                ["py", "-3", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+    # 3. Bare fallback — first 'python' in PATH.
+    return "python"
+
+
+_RECEIVER_PYTHON_EXE = _find_python_exe()
 
 _process = None  # Receiver subprocess handle
 
@@ -53,10 +86,8 @@ def onStart() -> None:
         print(f"  {script}")
         return
 
-    python_exe = os.environ.get("CUDALINK_RECEIVER_PYTHON_EXE", "python")
-
     _process = subprocess.Popen(
-        [python_exe, script],
+        [_RECEIVER_PYTHON_EXE, script],
         # CREATE_NEW_CONSOLE: opens a visible console window for the receiver.
         # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on shutdown
         # (CTRL_C_EVENT is blocked for new process groups on Windows).
@@ -64,7 +95,7 @@ def onStart() -> None:
     )
     print(f"[CUDA-Link Receiver Launcher] Receiver subprocess started  (PID {_process.pid})")
     print(f"  Script:     {script}")
-    print(f"  Python exe: {python_exe}")
+    print(f"  Python exe: {_RECEIVER_PYTHON_EXE}")
 
 
 def onCreate() -> None:
