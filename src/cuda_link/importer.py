@@ -1010,7 +1010,7 @@ class Importer:
             n_streams = nb.num_streams
             if n_streams <= 1:
                 conn.cuda.memcpy_async(
-                    dst=ctypes.c_void_p(nb.buffer.ctypes.data),
+                    dst=nb.buffer.ctypes.data_as(ctypes.c_void_p),
                     src=conn.dev_ptrs[read_slot],
                     count=nbytes,
                     kind=2,  # cudaMemcpyDeviceToHost
