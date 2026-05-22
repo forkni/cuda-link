@@ -53,14 +53,12 @@ class FakeTOPHandle(TOPHandle):
         height: int = 64,
         channels: int = 4,
         gpu_ptr: int = 0xDEADBEEF,
-        inputs: list[FakeTOPHandle] | None = None,
     ) -> None:
         self._pixel_format = pixel_format
         self._width = width
         self._height = height
         self._channels = channels
         self._gpu_ptr = gpu_ptr
-        self._inputs = inputs or []
         self.format_set: list[str] = []
         self.copy_cuda_calls: list[tuple] = []
         self.copy_numpy_calls: list[Any] = []
@@ -79,10 +77,6 @@ class FakeTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return self._pixel_format
-
-    @property
-    def inputs(self) -> list[FakeTOPHandle]:
-        return self._inputs
 
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)

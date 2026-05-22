@@ -55,11 +55,6 @@ class TOPHandle(Protocol):
         """top.pixelFormat as a string."""
         ...
 
-    @property
-    def inputs(self) -> list[TOPHandle]:
-        """Wrapped TOPHandle for each upstream input operator."""
-        ...
-
     def set_format(self, fmt: str) -> None:
         """Write top.par.format = fmt."""
         ...
@@ -173,13 +168,6 @@ class RealTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return str(getattr(self._top, "pixelFormat", ""))
-
-    @property
-    def inputs(self) -> list[TOPHandle]:
-        try:
-            return [RealTOPHandle(t) for t in self._top.inputs]
-        except (AttributeError, TypeError):
-            return []
 
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError):
