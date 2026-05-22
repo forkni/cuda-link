@@ -12,18 +12,16 @@ from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 
-# Protocol v0.5.0 constants
-_MAGIC = 0x43495044  # "CIPD"
-_HEADER_SIZE = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
-_SLOT_SIZE = 128  # 64B mem_handle + 64B event_handle
+from cuda_link.shm_protocol import SHMLayout
+
+_HEADER_SIZE = 20  # kept for slot-offset arithmetic in test body
+_SLOT_SIZE = 128
 
 
 def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: int = 0) -> None:
     """Write v0.5.0 protocol header into SharedMemory."""
-    shm.buf[0:4] = struct.pack("<I", _MAGIC)
-    shm.buf[4:12] = struct.pack("<Q", version)
-    shm.buf[12:16] = struct.pack("<I", num_slots)
-    shm.buf[16:20] = struct.pack("<I", write_idx)
+    layout = SHMLayout(num_slots)
+    shm.buf[: layout.total_size] = layout.build_buffer(version=version, write_idx=write_idx)
 
 
 @pytest.mark.requires_cuda

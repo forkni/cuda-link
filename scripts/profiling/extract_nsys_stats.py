@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-import sys
-from pathlib import Path
 
 
 def extract_stats(db_path: str) -> None:
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
 
-    tables = [r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).fetchall()]
+    tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
     print(f"Tables: {tables}\n")
 
     # --- CUDA kernel summary ---
@@ -26,14 +22,12 @@ def extract_stats(db_path: str) -> None:
         if tbl in tables:
             print(f"=== {tbl} (top 10 by total duration) ===")
             try:
-                rows = con.execute(
-                    f"SELECT * FROM {tbl} ORDER BY \"Total Time (ns)\" DESC LIMIT 10"
-                ).fetchall()
+                rows = con.execute(f'SELECT * FROM {tbl} ORDER BY "Total Time (ns)" DESC LIMIT 10').fetchall()
                 if rows:
                     print("  " + " | ".join(rows[0].keys()))
                     for r in rows:
                         print("  " + " | ".join(str(v) for v in r))
-            except Exception as e:
+            except Exception:
                 # Try without quoted column
                 try:
                     rows = con.execute(f"SELECT * FROM {tbl} LIMIT 10").fetchall()
@@ -79,7 +73,9 @@ def extract_stats(db_path: str) -> None:
             print(f"  {'Kernel':<60} {'count':>6} {'total_ms':>10} {'avg_us':>8} {'min_us':>7} {'max_us':>7}")
             print("  " + "-" * 100)
             for r in rows:
-                print(f"  {str(r[0]):<60} {r[1]:>6} {r[2]/1e6:>10.3f} {r[3]/1e3:>8.2f} {r[4]/1e3:>7.2f} {r[5]/1e3:>7.2f}")
+                print(
+                    f"  {str(r[0]):<60} {r[1]:>6} {r[2] / 1e6:>10.3f} {r[3] / 1e3:>8.2f} {r[4] / 1e3:>7.2f} {r[5] / 1e3:>7.2f}"
+                )
         except Exception as e:
             print(f"  Error: {e}")
         print()
@@ -101,7 +97,9 @@ def extract_stats(db_path: str) -> None:
             for r in rows:
                 kind_map = {1: "HtoD", 2: "DtoH", 3: "HtoH", 4: "DtoD", 8: "DtoD_async"}
                 kind = kind_map.get(r[0], str(r[0]))
-                print(f"  {kind}: count={r[1]}, total={r[2]/1e6:.2f}ms, avg={r[3]/1e3:.1f}µs, avg_bytes={r[4]/1024:.1f}KB")
+                print(
+                    f"  {kind}: count={r[1]}, total={r[2] / 1e6:.2f}ms, avg={r[3] / 1e3:.1f}µs, avg_bytes={r[4] / 1024:.1f}KB"
+                )
         except Exception as e:
             print(f"  Error: {e}")
         print()
@@ -131,7 +129,7 @@ def extract_stats(db_path: str) -> None:
             print("  " + "-" * 75)
             for r in rows:
                 name = name_map.get(r[0], f"id={r[0]}")
-                print(f"  {name:<45} {r[1]:>6} {r[2]/1e6:>10.3f} {r[3]/1e3:>8.2f}")
+                print(f"  {name:<45} {r[1]:>6} {r[2] / 1e6:>10.3f} {r[3] / 1e3:>8.2f}")
         except Exception as e:
             print(f"  Error: {e}")
         print()
