@@ -55,7 +55,6 @@ Call _probe_cleanup() manually when done, or just restart TD.
 
 import ctypes
 import os
-import sys
 from ctypes import POINTER, byref, c_int, c_size_t, c_uint, c_void_p
 
 # ---------------------------------------------------------------------------
@@ -95,8 +94,7 @@ def _load_driver_api() -> ctypes.CDLL:
         drv = ctypes.CDLL("nvcuda.dll")
     except OSError as exc:
         raise RuntimeError(
-            f"[PROBE] Cannot load nvcuda.dll: {exc}\n"
-            "Ensure the CUDA driver is installed and nvcuda.dll is on PATH."
+            f"[PROBE] Cannot load nvcuda.dll: {exc}\nEnsure the CUDA driver is installed and nvcuda.dll is on PATH."
         ) from exc
 
     # cuInit(unsigned int flags) → CUresult
@@ -277,8 +275,7 @@ def probe_consumer(device: int = 0) -> None:
     """
     if not os.path.exists(_HANDLE_FILE):
         print(
-            f"[PROBE CONSUMER] ERROR: {_HANDLE_FILE} not found. "
-            "Run probe_producer() first.",
+            f"[PROBE CONSUMER] ERROR: {_HANDLE_FILE} not found. Run probe_producer() first.",
             flush=True,
         )
         return
@@ -288,8 +285,7 @@ def probe_consumer(device: int = 0) -> None:
 
     if len(raw_bytes) != _HANDLE_BYTES:
         print(
-            f"[PROBE CONSUMER] ERROR: expected {_HANDLE_BYTES} bytes, "
-            f"got {len(raw_bytes)}",
+            f"[PROBE CONSUMER] ERROR: expected {_HANDLE_BYTES} bytes, got {len(raw_bytes)}",
             flush=True,
         )
         return
