@@ -103,11 +103,6 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
-        # Establish CUDA primary context on the requested device.
-        # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
-        # alongside torch (which has its own bundled cudart). Each DLL instance needs
-        # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(device)
 
         if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
             _logger.warning(
@@ -434,6 +429,12 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
 
+        # Establish CUDA primary context on the requested device.
+        # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
+        # alongside torch (which has its own bundled cudart). Each DLL instance needs
+        # its own context initialized before IPC handle operations can succeed.
+        self.cudart.cudaSetDevice(self.device)
+
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
 
@@ -445,7 +446,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If result indicates an error
         """
         if result != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(result).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(result)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
 
@@ -468,7 +470,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             return
         code = int(self.cudart.cudaPeekAtLastError())
         if code != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(code).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(code)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {code}"
             _logger.warning(
                 "Sticky CUDA error detected after %s: %s (code %d). "
                 "The CUDA context is poisoned — restart the process. "
@@ -684,7 +687,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         result = self.cudart.cudaEventRecord(event, stream)
         self.check_error(result, "cudaEventRecord")
 
-    def query_event(self, event: c_void_p) -> bool:
+    def query_event(self, event: CUDAEvent_t) -> bool:
         """Query if event has completed (non-blocking).
 
         Args:
