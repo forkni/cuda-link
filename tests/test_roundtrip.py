@@ -1,7 +1,7 @@
 """
-Round-trip integration tests: CUDAIPCExporter -> SharedMemory -> CUDAIPCImporter.
+Round-trip integration tests: Exporter -> SharedMemory -> CUDAIPCImporter.
 
-Tests the Python->TD code path: Python CUDAIPCExporter writes IPC handles to
+Tests the Python->TD code path: Python Exporter writes IPC handles to
 SharedMemory; Python CUDAIPCImporter (standing in for TD Receiver) reads them.
 
 Windows requires separate OS processes for CUDA IPC (cudaIpcOpenMemHandle returns
@@ -59,25 +59,23 @@ def _worker_producer_basic(
     num_slots: int,
     rq: object,
 ) -> None:
-    """Exports GPU frames via CUDAIPCExporter."""
+    """Exports GPU frames via Exporter."""
     try:
-        from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
+        from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+        from cuda_link.exporter import Exporter
 
         cuda = get_cuda_runtime()
-        exporter = CUDAIPCExporter(
-            shm_name=shm_name,
-            height=height,
-            width=width,
-            channels=channels,
-            dtype=dtype,
-            num_slots=num_slots,
-            debug=False,
+        exporter = Exporter.open(
+            FrameSpec(
+                shm_name=shm_name,
+                height=height,
+                width=width,
+                channels=channels,
+                dtype=dtype,
+                num_slots=num_slots,
+            )
         )
-        ok = exporter.initialize()
-        if not ok:
-            rq.put(("ERROR", "exporter.initialize() returned False"))
-            return
 
         data_size = exporter.data_size
         src_ptr = cuda.malloc(data_size)
@@ -92,12 +90,12 @@ def _worker_producer_basic(
         )
 
         for _ in range(num_frames):
-            exporter.export_frame(gpu_ptr=int(src_ptr.value), size=data_size)
+            exporter.export(GpuFrame(ptr=int(src_ptr.value), size=data_size))
             time.sleep(0.05)  # 50ms between frames
 
         time.sleep(2.0)  # Grace period so consumer can drain
         cuda.free(src_ptr)
-        exporter.cleanup()
+        exporter.close()
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -121,12 +119,17 @@ def _worker_consumer_basic(
             rq.put(("ERROR", f"SharedMemory '{shm_name}' never appeared within 20s"))
             return
 
-        # Short extra delay so producer can write the CIPC magic and IPC handles
+        # Short extra delay so producer can write the CIPD magic and IPC handles
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready after SharedMemory appeared"))
+            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
             return
 
         frames_received = 0
@@ -166,8 +169,13 @@ def _worker_consumer_verify(
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready"))
+            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
             return
 
         frames_received = 0
@@ -193,23 +201,25 @@ def _worker_consumer_verify(
 def _worker_producer_shutdown(shm_name: str, num_frames: int, rq: object) -> None:
     """Exports frames then cleanly shuts down (sets shutdown flag)."""
     try:
-        from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
+        from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+        from cuda_link.exporter import Exporter
 
         cuda = get_cuda_runtime()
-        exporter = CUDAIPCExporter(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2)
-        exporter.initialize()
+        exporter = Exporter.open(
+            FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2)
+        )
 
         src_ptr = cuda.malloc(exporter.data_size)
         for _ in range(num_frames):
-            exporter.export_frame(gpu_ptr=int(src_ptr.value), size=exporter.data_size)
+            exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
             time.sleep(0.05)
 
         # Stay alive long enough for consumer to connect, read at least 1 frame,
-        # then set the shutdown flag via cleanup()
+        # then set the shutdown flag via close()
         time.sleep(4.0)
         cuda.free(src_ptr)
-        exporter.cleanup()
+        exporter.close()
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -233,8 +243,13 @@ def _worker_consumer_shutdown(shm_name: str, rq: object) -> None:
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=(8, 8, 4), dtype="uint8")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "Importer not ready when connecting to live producer"))
+            rq.put(("ERROR", "Importer not ready after connect() — live producer present"))
             return
 
         # Poll for frames and watch for shutdown
@@ -258,21 +273,23 @@ def _worker_consumer_shutdown(shm_name: str, rq: object) -> None:
 def _worker_producer_float32(shm_name: str, num_frames: int, rq: object) -> None:
     """Exports float32 frames for metadata auto-detect test."""
     try:
-        from cuda_link.cuda_ipc_exporter import CUDAIPCExporter
+        from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+        from cuda_link.exporter import Exporter
 
         cuda = get_cuda_runtime()
-        exporter = CUDAIPCExporter(shm_name=shm_name, height=8, width=8, channels=4, dtype="float32", num_slots=2)
-        exporter.initialize()
+        exporter = Exporter.open(
+            FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="float32", num_slots=2)
+        )
 
         src_ptr = cuda.malloc(exporter.data_size)
         for _ in range(num_frames):
-            exporter.export_frame(gpu_ptr=int(src_ptr.value), size=exporter.data_size)
+            exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
             time.sleep(0.05)
 
         time.sleep(2.0)
         cuda.free(src_ptr)
-        exporter.cleanup()
+        exporter.close()
         rq.put(("OK", num_frames))
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -296,8 +313,13 @@ def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
         time.sleep(0.3)
 
         importer = CUDAIPCImporter(shm_name=shm_name, shape=None, dtype=None)
+        try:
+            importer.connect()
+        except (OSError, RuntimeError) as e:
+            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
+            return
         if not importer.is_ready():
-            rq.put(("ERROR", "Importer with shape=None not ready"))
+            rq.put(("ERROR", "Importer with shape=None not ready after connect()"))
             return
 
         detected_shape = importer.shape
@@ -369,7 +391,7 @@ def _run_pair(
 @pytest.mark.requires_cuda
 @pytest.mark.slow
 def test_roundtrip_exporter_importer(temp_shm_name: str) -> None:
-    """CUDAIPCExporter (producer) sends GPU frames; CUDAIPCImporter reads them."""
+    """Exporter (producer) sends GPU frames; CUDAIPCImporter reads them."""
     num_frames = 5
 
     results = _run_pair(
@@ -428,7 +450,7 @@ def test_roundtrip_data_integrity(temp_shm_name: str) -> None:
 @pytest.mark.requires_cuda
 @pytest.mark.slow
 def test_roundtrip_shutdown_detection(temp_shm_name: str) -> None:
-    """CUDAIPCImporter detects shutdown flag set by CUDAIPCExporter.cleanup()."""
+    """CUDAIPCImporter detects shutdown flag set by Exporter.close()."""
     results = _run_pair(
         producer_target=_worker_producer_shutdown,
         producer_args=(temp_shm_name, 5),

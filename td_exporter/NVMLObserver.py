@@ -17,42 +17,73 @@ Usage:
 
 Install optional dep:
     pip install "cuda-link[nvml]"    # adds nvidia-ml-py>=12.535
+
+Note: this module imports ``pynvml``, a module name shared by both the deprecated
+``pynvml`` PyPI package and the maintained ``nvidia-ml-py`` package. cuda-link's
+``[nvml]`` extra declares ``nvidia-ml-py>=12.535``. If the deprecated ``pynvml``
+package is also installed (often as a transitive dep of torch), it may win the
+import race and emit a ``FutureWarning``. That specific warning is suppressed at
+the import site below so it doesn't pollute logs; users who prefer to remove the
+duplicate install can run ``pip uninstall pynvml && pip install nvidia-ml-py``.
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
+import logging
 import threading
+import warnings
 
 try:
-    import pynvml
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+
+logger = logging.getLogger(__name__)
+
+try:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The pynvml package is deprecated.*",
+            category=FutureWarning,
+        )
+        import pynvml
 
     NVML_AVAILABLE = True
 except ImportError:
     pynvml = None  # type: ignore[assignment]
     NVML_AVAILABLE = False
 
-# Process-global ref-count for nvmlInit / nvmlShutdown — tolerates multiple
-# NVMLObserver instances in the same process without double-init/shutdown errors.
-_nvml_ref_count = 0
-_nvml_lock = threading.Lock()
+
+class _NvmlRefCounter:
+    """Process-global ref-count for nvmlInit/nvmlShutdown.
+
+    Tolerates multiple NVMLObserver instances without double-init/shutdown errors.
+    """
+
+    def __init__(self) -> None:
+        self._count: int = 0
+        self._lock: threading.Lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if not NVML_AVAILABLE:
+            return
+        with self._lock:
+            if self._count == 0:
+                pynvml.nvmlInit()
+            self._count += 1
+
+    def release(self) -> None:
+        if not NVML_AVAILABLE:
+            return
+        with self._lock:
+            self._count = max(0, self._count - 1)
+            if self._count == 0:
+                pynvml.nvmlShutdown()
 
 
-def _nvml_init() -> None:
-    global _nvml_ref_count
-    with _nvml_lock:
-        if _nvml_ref_count == 0:
-            pynvml.nvmlInit()
-        _nvml_ref_count += 1
-
-
-def _nvml_shutdown() -> None:
-    global _nvml_ref_count
-    with _nvml_lock:
-        _nvml_ref_count = max(0, _nvml_ref_count - 1)
-        if _nvml_ref_count == 0:
-            pynvml.nvmlShutdown()
+_NVML_REFS = _NvmlRefCounter()
 
 
 _THROTTLE_NAMES: dict[int, str] = {
@@ -86,6 +117,7 @@ class NVMLObserver:
         temp_c                          (from nvmlDeviceGetTemperature)
         power_w, power_limit_w          (from nvmlDeviceGetPowerUsage)
         throttle_reasons                (decoded bitmask list)
+        driver_model                    "WDDM" / "TCC" / "MCDM" (Windows only; absent on Linux)
     """
 
     def __init__(self, device: int = 0, enabled: bool | None = None) -> None:
@@ -98,11 +130,12 @@ class NVMLObserver:
         """
         self.device = device
         if enabled is None:
-            self.enabled = os.getenv("CUDALINK_NVML", "0") == "1"
+            self.enabled = env_bool("CUDALINK_NVML", default=False)
         else:
             self.enabled = enabled
         self._handle = None
         self._started = False
+        self._driver_model: str | None = None
 
     def start(self) -> bool:
         """Initialize NVML and open device handle.
@@ -115,17 +148,28 @@ class NVMLObserver:
         if self._started:
             return True
         try:
-            _nvml_init()
+            _NVML_REFS.acquire()
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device)
+            with contextlib.suppress(pynvml.NVMLError):
+                # Raises NVMLError_NotSupported on Linux (driver-model is Windows-only).
+                _model = pynvml.nvmlDeviceGetCurrentDriverModel(self._handle)
+                _names = {
+                    pynvml.NVML_DRIVER_WDDM: "WDDM",
+                    pynvml.NVML_DRIVER_WDM: "TCC",
+                }
+                if hasattr(pynvml, "NVML_DRIVER_MCDM"):
+                    _names[pynvml.NVML_DRIVER_MCDM] = "MCDM"
+                self._driver_model = _names.get(_model, f"unknown({_model})")
             self._started = True
             return True
-        except Exception:  # noqa: BLE001
+        except (pynvml.NVMLError, RuntimeError, OSError) as e:
+            logger.warning("NVML start failed for device %d: %s", self.device, e)
             return False
 
     def stop(self) -> None:
         """Release NVML handle and decrement global ref-count."""
         if self._started:
-            _nvml_shutdown()
+            _NVML_REFS.release()
             self._handle = None
             self._started = False
 
@@ -189,5 +233,8 @@ class NVMLObserver:
             out["throttle_reasons"] = _decode_throttle(bitmask)
         except pynvml.NVMLError:
             pass
+
+        if self._driver_model is not None:
+            out["driver_model"] = self._driver_model
 
         return out

@@ -53,7 +53,7 @@ The shared memory channel carries only control data (no pixel data):
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic number | 4 B | Protocol validation (`CIPC`) |
+| Magic number | 4 B | Protocol validation (`CIPD`) |
 | Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
 | Slot count | 4 B | Number of ring buffer slots |
 | Write index | 4 B | Current producer slot (atomic counter) |
@@ -174,7 +174,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `CUDAIPCLink_v0.x.x.tox` into your TD network.
+1. Drop `CUDAIPCLink_v1.4.1.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -182,7 +182,7 @@ Use this when distributing the component to end-users who should not need to int
 6. In Python, install `cuda-link` and connect:
    ```python
    from cuda_link import CUDAIPCImporter
-   importer = CUDAIPCImporter(shm_name="my_pipeline")
+   importer = CUDAIPCImporter.from_connected(shm_name="my_pipeline")
    frame = importer.get_frame()          # torch.Tensor on GPU (zero-copy)
    frame_np = importer.get_frame_numpy() # numpy array (CPU copy)
    ```

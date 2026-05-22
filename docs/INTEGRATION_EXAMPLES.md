@@ -30,7 +30,7 @@ import torch
 from cuda_link import CUDAIPCImporter
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="ai_input",
     shape=(512, 512, 4),  # RGBA
     dtype="float32",
@@ -50,7 +50,7 @@ while True:
     if not importer.is_ready():
         break
 
-    # Get frame (zero-copy, < 5μs)
+    # Get frame (zero-copy GPU tensor)
     input_tensor = importer.get_frame()  # Shape: (512, 512, 4)
 
     # Preprocess (convert RGBA → RGB, normalize)
@@ -75,7 +75,7 @@ while True:
 importer.cleanup()
 ```
 
-**Performance**: ~60 FPS at 512x512, ~25 FPS at 1080p (model-dependent).
+**Performance**: 60 FPS achievable at 512x512; throughput is limited by model inference, not IPC overhead. See [docs/BENCHMARKS.md](BENCHMARKS.md) for IPC timings.
 
 ---
 
@@ -101,7 +101,7 @@ import numpy as np
 from cuda_link import CUDAIPCImporter
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="cv_input",
     shape=(720, 1280, 4),  # 720p RGBA
     dtype="uint8",         # OpenCV expects uint8
@@ -130,7 +130,7 @@ cv2.destroyAllWindows()
 importer.cleanup()
 ```
 
-**Performance**: ~60 FPS at 720p (OpenCV Canny is fast).
+**Performance**: 60 FPS achievable at 720p; IPC is not the bottleneck. See [docs/BENCHMARKS.md](BENCHMARKS.md) for IPC timings.
 
 ---
 
@@ -156,13 +156,13 @@ import torch
 from cuda_link import CUDAIPCImporter
 
 # Initialize both importers
-main_importer = CUDAIPCImporter(
+main_importer = CUDAIPCImporter.from_connected(
     shm_name="main_input",
     shape=(512, 512, 4),
     dtype="float32"
 )
 
-cn_importer = CUDAIPCImporter(
+cn_importer = CUDAIPCImporter.from_connected(
     shm_name="controlnet_input",
     shape=(512, 512, 4),
     dtype="float32"
@@ -226,7 +226,7 @@ Select TOP → CUDAIPCExporter
 from cuda_link import CUDAIPCImporter
 
 # Start with initial resolution
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="dynamic_input",
     shape=(720, 1280, 4),  # Initial guess
     dtype="float32",
@@ -274,7 +274,7 @@ import signal
 import sys
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="clean_shutdown",
     shape=(512, 512, 4),
     dtype="float32"
@@ -312,12 +312,7 @@ print("Clean shutdown complete")
 ### Use Case
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For cross-method comparison with statistical rigor (avg, p50, p95, p99, CSV export), use the automated benchmark suite:
-> ```bash
-> python benchmarks/compare_all.py --resolution 1080p --frames 500
-> python benchmarks/compare_all.py --sweep   # all standard resolutions
-> ```
-> See [README Benchmarks section](../README.md#benchmarks) for results and Tier 2 TD-integrated benchmarks.
+> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99, CSV + JSON export), contributors with a local clone may run `python benchmarks/bench_sweep.py` (full 16-cell, ~12 min) or `python benchmarks/bench_sweep.py --quick` (1 cell, ~1 min). See [docs/BENCHMARKS.md](BENCHMARKS.md) for pre-measured results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a live TD sender.
 
@@ -327,7 +322,7 @@ The manual script below is useful for quick ad-hoc profiling of the consumer sid
 import time
 from cuda_link import CUDAIPCImporter
 
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="benchmark",
     shape=(1080, 1920, 4),
     dtype="float32",
@@ -357,23 +352,13 @@ print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} μs")
 importer.cleanup()
 ```
 
-**Expected output** (PyTorch zero-copy mode, TD sender, 1080p):
-```
-IPC get_frame() overhead:
-  Mean:   3.5 μs
-  Median: 2.8 μs
-  P95:    6.0 μs
-  P99:    9.0 μs
-```
+**Expected output** (PyTorch zero-copy mode, `get_frame()`, 1080p):
+
+The call returns a pre-mapped GPU tensor; overhead is the ring-buffer poll and `cudaStreamWaitEvent` enqueue. Reference timings: IPC notify p50 ~136 µs at 1080p f32 (see [docs/BENCHMARKS.md](BENCHMARKS.md)).
 
 **Expected output** (numpy D2H copy mode, `get_frame_numpy()`, 1080p float32):
-```
-IPC get_frame_numpy() overhead:
-  Mean:   4150 μs
-  Median: 4100 μs
-  P95:    4600 μs
-  P99:    5200 μs
-```
+
+Dominated by GPU-to-CPU D2H transfer. `get_frame_numpy()` p50 ~5000 µs at 1080p f32 (two-process context); ~1320 µs isolated. See [docs/BENCHMARKS.md](BENCHMARKS.md) for full tables.
 
 ---
 
@@ -411,7 +396,7 @@ while running:
     with torch.no_grad():
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
-    # Export to TD: ~10-20μs overhead at 512x512 (async D2D memcpy + event record)
+    # Export to TD (see docs/BENCHMARKS.md for timing)
     exporter.export_frame(
         gpu_ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
@@ -454,15 +439,16 @@ Script TOP (receives AI frames via IPC)
 
 | Metric | Value |
 |--------|-------|
-| Python export overhead | ~10-20μs per frame (512x512) |
-| TD import overhead | <5μs per frame |
-| Total IPC overhead | ~15-25μs per frame (512x512) |
-| Maximum theoretical FPS | ~10,000 (IPC-limited) |
+| export_frame() p50, 512x512 f32 (bench_graphs isolated) | 22 us |
+| export_frame() p50, 1080p f32 (bench_graphs isolated) | 117 us |
+| Max theoretical FPS (1080p, bench_graphs) | ~8,500 FPS |
 | Practical FPS | Limited by AI model inference |
+
+Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENCHMARKS.md).
 
 **Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
 - AI inference: ~32ms/frame (31 FPS)
-- IPC export: ~20μs per frame (0.06% overhead)
+- IPC export overhead: small fraction of inference time
 - TD display: 60 FPS locked (reads latest available frame)
 
 ---
@@ -570,5 +556,5 @@ for i in range(max_retries):
 
 ---
 
-**Last Updated**: 2026-02-26
-**Version**: 1.1.0
+**Last Updated**: 2026-05-09
+**Version**: 1.2.1

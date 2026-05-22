@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuda-link"
-version = "0.9.0"
+version = "1.5.0"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,9 +40,11 @@ dev = [
     "cuda-link[all]",
     "pytest>=7.0",
     "ruff",
-    "mypy",
+    "pyrefly",
     "snoop>=0.4",
     "py-heat>=0.0.6",
+    "nvtx>=0.2",
+    "scalene>=1.5",
 ]
 
 [project.urls]
@@ -58,6 +60,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -77,19 +80,25 @@ ignore = ["E501"]  # Line length handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
-"td_exporter/*" = ["N801", "N802", "N803", "N814", "F821"]  # TD naming: __delTD__, ownerComp, COMP/TOP fallbacks; C-struct naming (cudaIpcMemHandle_t); TD built-in globals (op, parent, etc.)
+"td_exporter/*" = ["N801", "N802", "N803", "N813", "N814", "F821", "I001"]  # TD naming + generated-file exemptions: __delTD__, ownerComp, COMP/TOP fallbacks; C-struct naming; TD built-in globals; import sort irrelevant in generated files
 "benchmarks/*" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t)
 "tests/*" = ["N802", "N806"]  # Allow test method names like test_* and test constant naming
-"src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
+"src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, etc.)
+"src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
+"verification/*" = ["F821", "SIM105", "SIM210"]  # TD textport scripts: op/baseCOMP/scriptTOP etc. are TD built-in globals; probe patterns intentionally use try/except/pass
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
 
-[tool.mypy]
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
+[tool.pyrefly]
+python-version = "3.11.0"
+
+# ctypes-heavy library code: these error codes are false positives throughout.
+# Optional-typed ctypes handles (cudart, mmap.buf, pynvml, etc.) are always
+# validated at runtime via NVML_AVAILABLE / _initialized guards before use.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/**"
+errors = {missing-attribute = false, unsupported-operation = false, bad-argument-type = false, bad-index = false, not-callable = false, no-matching-overload = false, missing-import = false, invalid-inheritance = false, bad-assignment = false}

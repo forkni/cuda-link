@@ -138,20 +138,22 @@ TD_RAG/
 # Backup .toe files
 Backup/
 
-# Old .tox versions (keep only latest release)
-TOXES/CUDAIPCLink_v*.tox
-!TOXES/CUDAIPCLink_v0.9.0.tox
+# TOXES/ binary policy: only the LATEST CUDAIPCLink_vX.Y.Z.tox lives on main.
+# Older versions are removed via `git rm` at release time and preserved as
+# GitHub Release assets attached to their version tag (see release.yml).
 
 # AI assistant config (Gemini)
 GEMINI.md
 gemini-skills/
 
-# Gemini CLI runtime artifacts (telemetry, session logs)
-.gemini/telemetry.log
-.gemini/*.log
+# Gemini CLI data (removed locally; excluded from repo entirely)
+.gemini/
 
 # Claude auto-memory (session-specific)
 MEMORY.md
+
+# Session log (local-only; not part of the distributed repo)
+SESSION_LOG.md
 
 # Claude local settings (machine-specific permissions)
 .claude/settings.local.json
@@ -160,6 +162,13 @@ MEMORY.md
 stat_sender.txt
 stat_receiver.txt
 nul
+
+# Scalene profiling output (local-only; only .profiling/baseline.json is committed)
+.profiling/scalene_*.json
+.profiling/current.json
+
+# Verification probe outputs (timestamped JSON from probe_cook_context runs)
+verification/results/probe_cook_context_*.json
 
 # Test artifacts
 test_timeout_manual.py
@@ -171,6 +180,14 @@ Benchmark.toe
 Benchmark.5.toe
 CUDA_IPC_Comp.toe
 CUDA_IPC_Comp.*.toe
+
+# Probe .toe files (diagnostic helpers, never distributed)
+probe_consumer*.toe
+probe_producer*.toe
+
+# Local diagnostic session artifacts
+scratch/
+profiler/
 
 # FLUX pipeline files (local-only)
 FLUX_TD_Pipeline.toe
@@ -186,6 +203,11 @@ Receiver_benchmark.*.toe
 Sender_benchmark.toe
 Sender_benchmark.*.toe
 
+# Test receiver .toe files (local-only)
+Test_TD_Receiver1.toe
+Test_TD_Receiver1.*.toe
+
+
 # Audit reports (local-only)
 audit_reports/
 
@@ -196,8 +218,22 @@ init_heatmap.png
 # Reference materials (local-only)
 References/
 
-# Benchmarks (local development only)
-benchmarks/
+# Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
+# Use wildcard (not trailing slash) so nested exceptions can re-include specific files.
+benchmarks/**
+!benchmarks/results/
+benchmarks/results/**
+!benchmarks/results/td/
+benchmarks/results/td/**
+!benchmarks/results/td/cell_C_td/
+!benchmarks/results/td/cell_D_td/
+benchmarks/results/td/cell_C_td/**
+benchmarks/results/td/cell_D_td/**
+!benchmarks/results/td/cell_C_td/textport.txt
+!benchmarks/results/td/cell_D_td/textport.txt
+
+# Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
+CONTEXT.md
 
 # Claude Code commands, skills, and local docs (local-only)
 .claude/commands/
@@ -205,6 +241,7 @@ benchmarks/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
 
 # Local-only docs (style guides, workflow docs, debug protocol)
+docs/STYLE_AUDIT_REPORT.md
 docs/OPT_1_implementation_PLAN.md
 docs/AUTOMATED_GIT_WORKFLOW.md
 docs/BASH_STYLE_GUIDE.md
@@ -216,4 +253,8 @@ docs/PYTHON_STYLE_GUIDE_QUICK.md
 docs/PYTHON_STYLE_GUIDE.md
 docs/SHELL_STYLE_GUIDE.md
 logs/
-.cgw.conf
+
+# Git workflow scripts and hooks (local-only; .cgw.conf is tracked — not ignored)
+scripts/git/
+.githooks/
+cgw.conf.example

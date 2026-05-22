@@ -5,8 +5,10 @@ pytest configuration and shared fixtures for CUDA IPC tests.
 from __future__ import annotations
 
 import sys
+import time as _time
 import uuid
 from collections.abc import Generator
+from dataclasses import dataclass as _dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,9 +17,14 @@ import pytest
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
-# Add project root and td_exporter to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+# Prepend this repo's src/ ahead of any installed cuda_link package.
+_REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+# Fake doubles — deferred until after sys.path setup
+from _td_fakes import FakeCUDAMemoryRef, FakeTDHost, FakeTOPHandle  # noqa: E402, F401
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -92,3 +99,73 @@ def temp_shm_name() -> str:
         Unique SharedMemory name string
     """
     return f"test_cuda_ipc_{uuid.uuid4().hex[:8]}"
+
+
+# FakeTDHost / FakeTOPHandle / FakeCUDAMemoryRef imported from _td_fakes above.
+# They are re-exported here so existing tests that do
+#   ``from conftest import FakeTDHost, FakeTOPHandle``
+# continue to work without change.
+
+
+# ---------------------------------------------------------------------------
+# FakeShmAdapter — satisfies BarrierShmPort structurally; no real SHM needed
+# ---------------------------------------------------------------------------
+
+
+@_dataclass
+class FakeShmAdapter:
+    """In-process fake satisfying BarrierShmPort (structural).
+
+    Tests construct the scenario they want and pass it as `shm=` to
+    CheckerBarrier.  No real SharedMemory is touched.
+
+    Use `raise_on_*` fields to simulate I/O failures at specific callpoints.
+    `last_change_ns` defaults to None; `attach()` sets it to time.monotonic_ns()
+    on first call, simulating a freshly-written segment.  Pass an explicit
+    value to simulate a stale segment (e.g. ``last_change_ns=0``).
+    """
+
+    active_count: int = 0
+    last_change_ns: int | None = None
+    barrier_skips: int = 0
+    attached: bool = False
+    raise_on_attach: type[Exception] | None = None
+    raise_on_read: type[Exception] | None = None
+    raise_on_bump: type[Exception] | None = None
+
+    @property
+    def is_attached(self) -> bool:
+        return self.attached
+
+    def attach(self, *, create: bool) -> None:
+        if self.raise_on_attach is not None:
+            raise self.raise_on_attach("simulated")
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+
+    def read_state(self) -> tuple[int, int, int]:
+        if self.raise_on_read is not None:
+            raise self.raise_on_read("simulated")
+        return (self.active_count, self.last_change_ns or 0, self.barrier_skips)
+
+    def bump_skip(self) -> None:
+        if self.raise_on_bump is not None:
+            raise self.raise_on_bump("simulated")
+        self.barrier_skips += 1
+
+    def close(self) -> None:
+        self.attached = False
+
+    # --- HolderShmPort methods (satisfies HolderBarrier seam structurally) ---
+
+    def open_and_increment(self, pid: int) -> int:
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+        self.active_count += 1
+        return self.active_count
+
+    def decrement(self, pid: int) -> int:
+        self.active_count = max(0, self.active_count - 1)
+        return self.active_count

@@ -7,7 +7,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/cuda-link/.claude/hooks/git-commit-enforcer.py"
+            "command": "python .claude/hooks/git-commit-enforcer.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/cc-block-dangerous-git.sh"
           }
         ]
       }

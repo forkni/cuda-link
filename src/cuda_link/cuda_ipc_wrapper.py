@@ -6,7 +6,7 @@ Provides ctypes interface to CUDA Runtime API for inter-process communication.
 Compatible with both TouchDesigner and Python processes.
 
 Requirements:
-- CUDA 12.x runtime (cudart64_12.dll)
+- CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll / cudart64_110.dll accepted as fallback)
 - Windows operating system
 - Same GPU visible to both processes
 """
@@ -18,84 +18,54 @@ import logging
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+
 _logger = logging.getLogger(__name__)
 
-# CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
-# See: https://github.com/pytorch/pytorch/pull/162920
-CUDAEvent_t = c_uint64  # cudaEvent_t is opaque pointer (unsigned 64-bit)
-CUDAStream_t = c_uint64  # cudaStream_t is opaque pointer (unsigned 64-bit)
+if os.name == "nt":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+else:
+    _kernel32 = None
+
+try:
+    from cuda_link.cuda_runtime_types import (  # noqa: E402
+        CUDAError,
+        CUDAEvent_t,
+        CUDAGraph_t,
+        CUDAGraphExec_t,
+        CUDAGraphNode_t,
+        CUDAStream_t,
+        cudaIpcEventHandle_t,
+        cudaIpcMemHandle_t,
+        cudaMemcpy3DParms,
+        cudaPointerAttributes,
+    )
+except ImportError:
+    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
+        CUDAError,
+        CUDAEvent_t,
+        CUDAGraph_t,
+        CUDAGraphExec_t,
+        CUDAGraphNode_t,
+        CUDAStream_t,
+        cudaIpcEventHandle_t,
+        cudaIpcMemHandle_t,
+        cudaMemcpy3DParms,
+        cudaPointerAttributes,
+    )
+
+try:
+    from cuda_link.cuda_graphs import CUDAGraphsMixin  # noqa: E402
+except ImportError:
+    from CUDAGraphs import CUDAGraphsMixin  # type: ignore[no-redef]  # noqa: E402
 
 
-# CUDA IPC Handle structure (64 bytes, CUDA_IPC_HANDLE_SIZE per NVIDIA spec)
-class cudaIpcMemHandle_t(ctypes.Structure):
-    """CUDA IPC memory handle structure.
-
-    This opaque handle can be transferred between processes via
-    SharedMemory or other IPC mechanisms to enable GPU memory sharing.
-    """
-
-    _fields_ = [("internal", ctypes.c_byte * 64)]
-
-
-# CUDA IPC Event Handle structure (64 bytes per NVIDIA spec)
-class cudaIpcEventHandle_t(ctypes.Structure):
-    """CUDA IPC event handle structure.
-
-    Used for lightweight cross-process synchronization.
-    """
-
-    _fields_ = [("reserved", ctypes.c_byte * 64)]
-
-
-# CUDA pointer attributes — memory type and owning device for a GPU pointer
-class cudaPointerAttributes(ctypes.Structure):
-    """Result of cudaPointerGetAttributes.
-
-    Useful for validating that a caller-supplied GPU pointer belongs to the
-    expected device before issuing D2D operations (C2 affinity check).
-
-    .type values: 0=unregistered, 1=host, 2=device, 3=managed
-    .device: GPU index that owns the allocation
-    """
-
-    _fields_ = [
-        ("type", c_int),  # cudaMemoryType enum (2 = cudaMemoryTypeDevice)
-        ("device", c_int),  # GPU device index owning this allocation
-        ("devicePointer", c_void_p),
-        ("hostPointer", c_void_p),
-    ]
-
-
-# CUDA Error codes (subset)
-class CUDAError:
-    """CUDA runtime error codes."""
-
-    SUCCESS = 0
-    INVALID_VALUE = 1
-    MEMORY_ALLOCATION = 2
-    INVALID_DEVICE_POINTER = 17
-    INVALID_DEVICE = 101
-    INVALID_CONTEXT = 201  # Common in same-process IPC testing
-    NOT_READY = 600
-    PEER_ACCESS_ALREADY_ENABLED = 704
-
-    @staticmethod
-    def get_name(code: int) -> str:
-        """Get human-readable error name."""
-        names = {
-            0: "SUCCESS",
-            1: "INVALID_VALUE",
-            2: "MEMORY_ALLOCATION",
-            17: "INVALID_DEVICE_POINTER",
-            101: "INVALID_DEVICE",
-            201: "INVALID_CONTEXT",
-            600: "NOT_READY",
-            704: "PEER_ACCESS_ALREADY_ENABLED",
-        }
-        return names.get(code, f"UNKNOWN_ERROR_{code}")
-
-
-class CUDARuntimeAPI:
+class CUDARuntimeAPI(CUDAGraphsMixin):
     """CUDA Runtime API wrapper using ctypes.
 
     Provides access to CUDA IPC functions for zero-copy GPU memory
@@ -133,11 +103,16 @@ class CUDARuntimeAPI:
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
+        # Must follow _setup_function_signatures() so cudart argtypes are already wired.
+        self._drv: ctypes.CDLL | None = self._load_driver_api()
         # Establish CUDA primary context on the requested device.
+        # Must run AFTER _setup_function_signatures() (argtypes needed) but as the
+        # very next statement — ensures context exists before any IPC handle operation.
         # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
         # alongside torch (which has its own bundled cudart). Each DLL instance needs
         # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(device)
+        self.check_error(self.cudart.cudaSetDevice(device), "cudaSetDevice")
 
         if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
             _logger.warning(
@@ -146,7 +121,7 @@ class CUDARuntimeAPI:
             )
 
         # Default ON; set CUDALINK_STICKY_ERROR_CHECK=0 to skip the cudaPeekAtLastError call.
-        self._sticky_check_enabled: bool = os.environ.get("CUDALINK_STICKY_ERROR_CHECK", "1") != "0"
+        self._sticky_check_enabled: bool = env_bool("CUDALINK_STICKY_ERROR_CHECK", default=True)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -161,13 +136,16 @@ class CUDARuntimeAPI:
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
+        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
+        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
                 self._log_dll_path(dll, name)
                 return dll
-            except OSError:
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
                 continue
 
         # Fallback: try full toolkit paths when not already in PATH
@@ -180,10 +158,11 @@ class CUDARuntimeAPI:
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
-                    dll = ctypes.CDLL(dll_path)
+                    dll = ctypes.CDLL(dll_path, winmode=0)
                     self._log_dll_path(dll, dll_path)
                     return dll
-                except OSError:
+                except OSError as e:
+                    _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
                     continue
 
         raise RuntimeError(
@@ -194,14 +173,51 @@ class CUDARuntimeAPI:
 
     @staticmethod
     def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
-        """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        """Print the resolved filesystem path of a loaded DLL (Windows only).
+
+        Always prints (not gated on debug level) so each TD process textport
+        shows which cudart DLL it loaded — critical for diagnosing cross-process
+        IPC handle mismatches when two TD instances pick different DLL versions.
+        """
+        if _kernel32 is None:
+            print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
-            ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            _logger.debug("Loaded CUDA runtime: %s", buf.value)
-        except Exception:  # noqa: BLE001
-            pass
+            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
+            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
+        except (OSError, AttributeError) as e:
+            print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
+
+    def _load_driver_api(self) -> ctypes.CDLL | None:
+        """Load nvcuda.dll (CUDA Driver API) and bind the 5 context-management symbols.
+
+        Returns the loaded DLL, or None if unavailable (Linux, driver not installed).
+        Failure is non-fatal: set_device() falls back to the runtime-API path.
+        """
+        try:
+            drv = ctypes.CDLL("nvcuda.dll")
+        except OSError:
+            _logger.debug("nvcuda.dll unavailable; driver-API context switch will not be used")
+            return None
+
+        drv.cuInit.argtypes = [c_uint]
+        drv.cuInit.restype = c_int
+        drv.cuDeviceGet.argtypes = [POINTER(c_int), c_int]
+        drv.cuDeviceGet.restype = c_int
+        drv.cuDevicePrimaryCtxRetain.argtypes = [POINTER(c_void_p), c_int]
+        drv.cuDevicePrimaryCtxRetain.restype = c_int
+        drv.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
+        drv.cuCtxGetCurrent.restype = c_int
+        drv.cuCtxSetCurrent.argtypes = [c_void_p]
+        drv.cuCtxSetCurrent.restype = c_int
+
+        r = drv.cuInit(0)
+        if r != 0:
+            _logger.warning("cuInit returned %d; driver-API context switch will not be used", r)
+            return None
+
+        return drv
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
@@ -358,6 +374,107 @@ class CUDARuntimeAPI:
         self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
         self.cudart.cudaPointerGetAttributes.restype = c_int
 
+        # === G1: non-graph helpers (re-enabled Phase 1.1) ===
+        # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
+        # Replaces cudaMallocHost with explicit flag control.
+        # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
+        # cudaHostAllocMapped    = 0x02 — map into device address space
+        # cudaHostAllocWriteCombined = 0x04 — write-combined (fast CPU writes, slow CPU reads)
+        self.cudart.cudaHostAlloc.argtypes = [POINTER(c_void_p), c_size_t, c_uint]
+        self.cudart.cudaHostAlloc.restype = c_int
+
+        # cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr, int device)
+        # Used to query cudaDevAttrAsyncEngineCount (attr=4) — how many DMA copy engines exist.
+        self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
+        self.cudart.cudaDeviceGetAttribute.restype = c_int
+
+        # === G2: graph lifecycle (re-enabled Phase 1.2) ===
+        # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
+
+        # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
+        # mode: 0=global, 1=thread_local, 2=relaxed
+        self.cudart.cudaStreamBeginCapture.argtypes = [CUDAStream_t, c_int]
+        self.cudart.cudaStreamBeginCapture.restype = c_int
+
+        # cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* pGraph)
+        self.cudart.cudaStreamEndCapture.argtypes = [CUDAStream_t, POINTER(CUDAGraph_t)]
+        self.cudart.cudaStreamEndCapture.restype = c_int
+
+        # cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
+        #                               unsigned long long flags)   [CUDA 11.4+ stable 3-arg form]
+        # Prefer this over cudaGraphInstantiate on any cudart 11.x: the latter changed
+        # from 5-arg (CUDA 10.0–11.8) to 3-arg (CUDA 12.0+) — calling the 12.0 3-arg
+        # binding against an 11.x DLL mismatches the ABI and crashes (WDDM access
+        # violation). cudaGraphInstantiateWithFlags has had a stable 3-arg signature
+        # since 11.4 and is available in all 12.x releases as well.
+        self.cudart.cudaGraphInstantiateWithFlags.argtypes = [POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64]
+        self.cudart.cudaGraphInstantiateWithFlags.restype = c_int
+
+        # cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
+        self.cudart.cudaGraphLaunch.argtypes = [CUDAGraphExec_t, CUDAStream_t]
+        self.cudart.cudaGraphLaunch.restype = c_int
+
+        # cudaGraphDestroy(cudaGraph_t graph)
+        self.cudart.cudaGraphDestroy.argtypes = [CUDAGraph_t]
+        self.cudart.cudaGraphDestroy.restype = c_int
+
+        # cudaGraphExecDestroy(cudaGraphExec_t graphExec)
+        self.cudart.cudaGraphExecDestroy.argtypes = [CUDAGraphExec_t]
+        self.cudart.cudaGraphExecDestroy.restype = c_int
+
+        # cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t* numNodes)
+        # Pass nodes=NULL to query count; then call again with allocated array.
+        self.cudart.cudaGraphGetNodes.argtypes = [CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)]
+        self.cudart.cudaGraphGetNodes.restype = c_int
+
+        # cudaRuntimeGetVersion(int* runtimeVersion)
+        # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
+        # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
+        # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
+        self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
+        self.cudart.cudaRuntimeGetVersion.restype = c_int
+
+        # === G3: graph node setters (re-enabled Phase 1.3) ===
+        # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
+        # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
+
+        # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
+        #                                  const cudaMemcpy3DParms*)
+        # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
+        # (1D form) use cudaGraphExecMemcpyNodeSetParams1D instead.
+        self.cudart.cudaGraphExecMemcpyNodeSetParams.argtypes = [
+            CUDAGraphExec_t,
+            CUDAGraphNode_t,
+            POINTER(cudaMemcpy3DParms),
+        ]
+        self.cudart.cudaGraphExecMemcpyNodeSetParams.restype = c_int
+
+        # cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t, cudaGraphNode_t,
+        #                                    void* dst, const void* src,
+        #                                    size_t count, cudaMemcpyKind kind)
+        # Updates a 1D memcpy node (captured from cudaMemcpyAsync). CUDA 11.3+.
+        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.argtypes = [
+            CUDAGraphExec_t,
+            CUDAGraphNode_t,
+            c_void_p,
+            c_void_p,
+            c_size_t,
+            c_int,
+        ]
+        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.restype = c_int
+
+        # cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
+        #                                      cudaEvent_t event)
+        # Updates the event recorded by an event-record node. CUDA 11.4+.
+        self.cudart.cudaGraphExecEventRecordNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
+        self.cudart.cudaGraphExecEventRecordNodeSetEvent.restype = c_int
+
+        # cudaGraphExecEventWaitNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
+        #                                    cudaEvent_t event)
+        # Updates the event waited on by an event-wait node. CUDA 11.4+.
+        self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
+        self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
+
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
 
@@ -369,7 +486,8 @@ class CUDARuntimeAPI:
             RuntimeError: If result indicates an error
         """
         if result != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(result).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(result)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
 
@@ -392,7 +510,8 @@ class CUDARuntimeAPI:
             return
         code = int(self.cudart.cudaPeekAtLastError())
         if code != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(code).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(code)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {code}"
             _logger.warning(
                 "Sticky CUDA error detected after %s: %s (code %d). "
                 "The CUDA context is poisoned — restart the process. "
@@ -464,11 +583,50 @@ class CUDARuntimeAPI:
         result = self.cudart.cudaFree(dev_ptr)
         self.check_error(result, "cudaFree")
 
+    def set_device(self, device: int) -> int:
+        """Switch the calling thread to the device's CUDA primary context.
+
+        Uses the driver API (nvcuda.dll) to save the current context and install
+        the primary context, ensuring cudaMalloc allocates in a context whose IPC
+        handles are portable to other processes.
+
+        On systems where nvcuda.dll is unavailable, falls back to the runtime-API
+        cudaSetDevice (handles the empty-driver-stack case only).
+
+        Returns an opaque integer token for restore_context(). The caller must
+        call restore_context() after the allocation block is complete.
+        """
+        if self._drv is not None:
+            cu_dev = c_int()
+            self._drv.cuDeviceGet(byref(cu_dev), device)
+            saved_ctx = c_void_p()
+            self._drv.cuCtxGetCurrent(byref(saved_ctx))
+            primary_ctx = c_void_p()
+            self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
+            self._drv.cuCtxSetCurrent(primary_ctx)
+            return saved_ctx.value or 0
+        # Fallback: runtime API only — effective when driver-API stack is empty
+        self.check_error(self.cudart.cudaSetDevice(c_int(device)), "cudaSetDevice")
+        return 0
+
+    def restore_context(self, token: int) -> None:
+        """Restore the driver-API context saved by the preceding set_device() call.
+
+        token is the value returned by set_device(). No-op if the driver API was
+        unavailable (token will be 0 and self._drv will be None).
+        """
+        if self._drv is not None:
+            self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
+
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
 
         Pinned memory enables direct DMA for D2H transfers, eliminating the
         CUDA driver's internal staging copy that pageable memory requires.
+
+        Note: this project is single-GPU by construction (get_cuda_runtime rejects
+        a second device). Multi-GPU would require cudaHostAlloc with
+        cudaHostAllocPortable for cross-device visibility (Handbook §5.1).
 
         Args:
             size: Number of bytes to allocate
@@ -604,7 +762,7 @@ class CUDARuntimeAPI:
         result = self.cudart.cudaEventRecord(event, stream)
         self.check_error(result, "cudaEventRecord")
 
-    def query_event(self, event: c_void_p) -> bool:
+    def query_event(self, event: CUDAEvent_t) -> bool:
         """Query if event has completed (non-blocking).
 
         Args:
@@ -931,6 +1089,59 @@ class CUDARuntimeAPI:
         result = self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
         self.check_error(result, "cudaDeviceCanAccessPeer")
         return bool(can_access.value)
+
+    # --- Phase 1: cudaHostAlloc (replaces cudaMallocHost with portable flag) ---
+
+    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
+        """Allocate pinned host memory via cudaHostAlloc with explicit flags.
+
+        Unlike malloc_host() which calls cudaMallocHost (no flags), this lets
+        callers pass cudaHostAllocPortable (0x01) to make the allocation visible
+        from any CUDA context in the process — useful when PyTorch and CuPy share
+        the same process.
+
+        Args:
+            size:  Number of bytes to allocate.
+            flags: OR-combination of:
+                   cudaHostAllocPortable    = 0x01 (cross-context visibility)
+                   cudaHostAllocMapped      = 0x02 (map into device address space)
+                   cudaHostAllocWriteCombined = 0x04 (WC; fast write, slow CPU read)
+
+        Returns:
+            Host pointer to allocated pinned memory.
+
+        Raises:
+            RuntimeError: If allocation fails.
+        """
+        ptr = c_void_p()
+        result = self.cudart.cudaHostAlloc(byref(ptr), c_size_t(size), c_uint(flags))
+        self.check_error(result, "cudaHostAlloc")
+        return ptr
+
+    # --- Phase 0: device attribute query ---
+
+    def get_device_attribute(self, attr: int, device: int | None = None) -> int:
+        """Query a cudaDeviceAttr value for a given device.
+
+        Common attrs:
+            cudaDevAttrAsyncEngineCount = 4 — number of DMA copy engines
+
+        Args:
+            attr:   cudaDeviceAttr integer constant.
+            device: GPU device index. Defaults to self.device.
+
+        Returns:
+            Integer attribute value.
+
+        Raises:
+            RuntimeError: If query fails.
+        """
+        if device is None:
+            device = self.device
+        value = c_int()
+        result = self.cudart.cudaDeviceGetAttribute(byref(value), c_int(attr), c_int(device))
+        self.check_error(result, "cudaDeviceGetAttribute")
+        return value.value
 
 
 # Global singleton instance (lazy initialization)
