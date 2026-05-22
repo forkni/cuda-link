@@ -181,6 +181,14 @@ Benchmark.5.toe
 CUDA_IPC_Comp.toe
 CUDA_IPC_Comp.*.toe
 
+# Probe .toe files (diagnostic helpers, never distributed)
+probe_consumer*.toe
+probe_producer*.toe
+
+# Local diagnostic session artifacts
+scratch/
+profiler/
+
 # FLUX pipeline files (local-only)
 FLUX_TD_Pipeline.toe
 FLUX_TD_Pipeline.*.toe
