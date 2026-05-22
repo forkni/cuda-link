@@ -330,7 +330,7 @@ class Exporter:
         for slot in range(self._spec.num_slots):
             base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
             _mem_bytes = bytes(self.ipc_handles[slot].internal)
-            print(f"[SENDER-HEX] slot{slot} mem handle: {_mem_bytes[:16].hex()}...", flush=True)
+            logger.debug("Slot %d IPC mem handle prefix: %s...", slot, _mem_bytes[:16].hex())
             self.shm_handle.buf[base_offset : base_offset + 64] = _mem_bytes
             if self.ipc_event_handles[slot]:
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = bytes(self.ipc_event_handles[slot].reserved)

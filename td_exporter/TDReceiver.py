@@ -706,7 +706,7 @@ class TDReceiverEngine:
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
                     return False
 
-                print(f"[RECV-HEX] slot{slot} read handle: {mem_handle_bytes[:16].hex()}...", flush=True)
+                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
                 ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
 
                 try:

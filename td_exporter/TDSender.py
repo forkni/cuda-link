@@ -541,7 +541,7 @@ class TDSenderEngine:
             # Write memory handle (64 bytes)
             mem_handle_bytes = bytes(self.ipc_handles[slot].internal)
             self.shm_handle.buf[base_offset : base_offset + 64] = mem_handle_bytes
-            print(f"[SENDER-HEX] slot{slot} mem handle: {mem_handle_bytes[:16].hex()}...", flush=True)
+            self._log(f"[IPC-HEX] slot{slot} mem handle prefix: {mem_handle_bytes[:16].hex()}...")
 
             # Write event handle (64 bytes) if available
             if self.ipc_event_handles[slot]:

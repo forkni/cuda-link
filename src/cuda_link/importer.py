@@ -711,7 +711,7 @@ class Importer:
             base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
 
             mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
-            print(f"[RECV-HEX] slot{slot} read handle: {mem_handle_bytes[:16].hex()}...", flush=True)
+            logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
             ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
             dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
 
