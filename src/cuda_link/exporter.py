@@ -320,7 +320,9 @@ class Exporter:
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
             base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
-            self.shm_handle.buf[base_offset : base_offset + 64] = bytes(self.ipc_handles[slot].internal)
+            _mem_bytes = bytes(self.ipc_handles[slot].internal)
+            print(f"[SENDER-HEX] slot{slot} mem handle: {_mem_bytes[:16].hex()}...", flush=True)
+            self.shm_handle.buf[base_offset : base_offset + 64] = _mem_bytes
             if self.ipc_event_handles[slot]:
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = bytes(self.ipc_event_handles[slot].reserved)
         self._layout = SHMLayout(self._spec.num_slots)
