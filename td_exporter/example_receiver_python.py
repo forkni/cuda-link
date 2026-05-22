@@ -11,10 +11,18 @@ Pipeline:  CUDAIPCLink_to_Python  (Sender mode, in TouchDesigner)
                ↓  CUDA IPC  (cudalink_input_ipc)
            this script  (separate OS process)
                ↓
-           Prints frame stats  →  shape, dtype, FPS, latency
+           Prints frame stats  →  shape, dtype, FPS, latency, get_frame µs
 
 TD Setup (handled by example_receiver_launcher.py Execute DAT):
     CUDAIPCLink_to_Python → Mode=Sender, Ipcmemname=cudalink_input_ipc, Active=ON
+
+Environment variables (all optional):
+    CUDALINK_RECEIVER_SHM_NAME     IPC channel name          (default: cudalink_input_ipc)
+    CUDALINK_RECEIVER_DEVICE       GPU device index           (default: 0)
+    CUDALINK_RECEIVER_TIMEOUT_MS   Frame-wait timeout ms      (default: 5000)
+    CUDALINK_RECEIVER_REPORT_EVERY Frames between status lines (default: 150)
+    CUDALINK_RECEIVER_FRAME_MODE   numpy | torch | cupy       (default: numpy)
+    CUDALINK_IMPORT_PROFILE        1 = enable lib debug logging
 """
 
 from __future__ import annotations
@@ -115,10 +123,11 @@ if sys.platform == "win32":
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHM_NAME = "cudalink_input_ipc"
-DEVICE = 0
-TIMEOUT_MS = 5000.0
-REPORT_EVERY = 150  # Print status every N frames
+SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_input_ipc")
+DEVICE = int(os.environ.get("CUDALINK_RECEIVER_DEVICE", "0"))
+TIMEOUT_MS = float(os.environ.get("CUDALINK_RECEIVER_TIMEOUT_MS", "5000"))
+REPORT_EVERY = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+FRAME_MODE = os.environ.get("CUDALINK_RECEIVER_FRAME_MODE", "numpy").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +158,7 @@ def main() -> None:
     print(f"  channel   : {SHM_NAME}")
     print(f"  device    : {DEVICE}")
     print(f"  timeout   : {TIMEOUT_MS:.0f} ms")
+    print(f"  mode      : {FRAME_MODE}")
     print()
     print("  TD: CUDAIPCLink_to_Python  Mode=Sender  Active=ON")
     print()
@@ -169,26 +179,65 @@ def main() -> None:
         sys.exit(1)
     _importer_ref = importer
 
+    # Resolve frame-fetch callable once — avoids per-iteration dispatch overhead
+    # and lets the timing wrapper cover all three modes uniformly.
+    if FRAME_MODE == "torch":
+        get_frame = importer.get_frame
+    elif FRAME_MODE == "cupy":
+        get_frame = importer.get_frame_cupy
+    elif FRAME_MODE == "numpy":
+        get_frame = importer.get_frame_numpy
+    else:
+        print(f"[receiver] ERROR: unknown CUDALINK_RECEIVER_FRAME_MODE={FRAME_MODE!r} (expected: numpy, torch, cupy)")
+        sys.exit(1)
+
     profile_on = os.environ.get("CUDALINK_IMPORT_PROFILE", "0") == "1"
     frame_count = 0
     no_frame_count = 0
     start_time = time.perf_counter()
     last_report = start_time
 
+    # Per-call timing accumulators — updated on NEW_FRAME only (excludes NO_FRAME sleeps).
+    get_frame_total_s = 0.0
+    get_frame_min_s = float("inf")
+    get_frame_max_s = 0.0
+
+    last_outcome = None  # tracks state transitions for RECONNECTING rate-limiting
+
     try:
         while True:
-            result = importer.get_frame_numpy()
+            gf_t0 = time.perf_counter()
+            try:
+                result = get_frame()
+            except RuntimeError as exc:
+                print(
+                    f"[receiver] ERROR: get_frame() raised RuntimeError — "
+                    f"is the {FRAME_MODE!r} library installed?"
+                )
+                print(f"  {exc}")
+                sys.exit(1)
+            gf_dt = time.perf_counter() - gf_t0
 
             if result.outcome is ImportOutcome.NEW_FRAME:
                 frame = result.frame
                 frame_count += 1
                 no_frame_count = 0
 
+                get_frame_total_s += gf_dt
+                if gf_dt < get_frame_min_s:
+                    get_frame_min_s = gf_dt
+                if gf_dt > get_frame_max_s:
+                    get_frame_max_s = gf_dt
+
+                if last_outcome is ImportOutcome.RECONNECTING:
+                    print("[receiver] Reconnected.", flush=True)
+
                 now = time.perf_counter()
                 if frame_count % REPORT_EVERY == 0 or (now - last_report) >= 5.0:
                     elapsed = now - start_time
                     fps = frame_count / elapsed if elapsed > 0 else 0.0
                     latency_ms = importer.last_latency
+                    avg_gf_us = (get_frame_total_s / frame_count) * 1e6
                     if profile_on:
                         stats = importer.get_stats()
                         profile_suffix = (
@@ -199,7 +248,8 @@ def main() -> None:
                     print(
                         f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
                         f"shape={frame.shape} dtype={frame.dtype} | "
-                        f"latency={latency_ms:.2f} ms"
+                        f"latency={latency_ms:.2f} ms | "
+                        f"get_frame={avg_gf_us:.1f} µs avg"
                         f"{profile_suffix}"
                     )
                     last_report = now
@@ -213,11 +263,14 @@ def main() -> None:
                 break
 
             elif result.outcome is ImportOutcome.RECONNECTING:
-                print("[receiver] Producer restarted — reconnecting ...", flush=True)
+                if last_outcome is not ImportOutcome.RECONNECTING:
+                    print("[receiver] Producer restarted — reconnecting ...", flush=True)
 
             elif result.outcome is ImportOutcome.TIMEOUT:
                 print(f"[receiver] Frame wait timed out after {TIMEOUT_MS:.0f} ms — TD sender may be paused.")
                 time.sleep(0.1)
+
+            last_outcome = result.outcome
 
     except KeyboardInterrupt:
         print(f"\n[receiver] Stopped after {frame_count} frames.")
@@ -230,6 +283,16 @@ def main() -> None:
             f"[receiver] Done — {frame_count} frames in {total:.1f}s  ({avg_fps:.1f} FPS avg)",
             flush=True,
         )
+        if frame_count > 0:
+            avg_us = (get_frame_total_s / frame_count) * 1e6
+            min_us = get_frame_min_s * 1e6
+            max_us = get_frame_max_s * 1e6
+            print(
+                f"[receiver] Perf: mode={FRAME_MODE}  "
+                f"get_frame avg={avg_us:.1f} µs  min={min_us:.1f} µs  max={max_us:.1f} µs  "
+                f"(n={frame_count})",
+                flush=True,
+            )
         print("[receiver] TD Sender will detect consumer disconnect on next cook.", flush=True)
 
         if _shutdown_via != "ctrl_break":
