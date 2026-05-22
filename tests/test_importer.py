@@ -8,22 +8,14 @@ full open→get_frame→close lifecycle without a real CUDA device.
 from __future__ import annotations
 
 import struct
-from ctypes import c_void_p
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fakes import make_fake_ipc_connection
 
 from cuda_link._cuda_adapters import FakeCudaAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
-from cuda_link.importer import Format, Importer, IPCConnection, NumpyBuffers
-from cuda_link.shm_protocol import (
-    METADATA_SIZE,
-    SHM_HEADER_SIZE,
-    SHUTDOWN_FLAG_SIZE,
-    SLOT_SIZE,
-    TIMESTAMP_SIZE,
-    SHMLayout,
-)
+from cuda_link.importer import Format, Importer, NumpyBuffers
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -42,33 +34,12 @@ def _make_connected_importer(
     """Build an Importer with a fully-wired IPCConnection (no real SHM / CUDA)."""
     import numpy as np
 
-    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
-    buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, ipc_version)  # ipc_version
-    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
-    struct.pack_into("<I", buf, 16, write_idx)  # write_idx
-
-    fmt = Format.from_overrides(shape, dtype)
-    layout = SHMLayout(num_slots)
-
-    mock_cuda = MagicMock()
-    mock_cuda.query_event.return_value = True  # events are always ready
-    mock_shm = MagicMock()
-    mock_shm.buf = buf
-
-    conn = IPCConnection(
-        cuda=mock_cuda,
-        shm_handle=mock_shm,
-        ipc_version=ipc_version,
+    conn, mock_cuda, _ = make_fake_ipc_connection(
         num_slots=num_slots,
-        ipc_handles=[None] * num_slots,
-        dev_ptrs=[c_void_p(0x1000 * (i + 1)) for i in range(num_slots)],
-        ipc_events=[None] * num_slots,
-        layout=layout,
-        shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
+        ipc_version=ipc_version,
+        write_idx=write_idx,
     )
+    fmt = Format.from_overrides(shape, dtype)
 
     # Pre-build NumpyBuffers so get_frame_numpy() skips the lazy allocation
     # path (which would call mock_cuda.malloc_host_alloc → MagicMock, not c_void_p).

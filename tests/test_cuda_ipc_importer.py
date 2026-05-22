@@ -235,46 +235,17 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     from unittest.mock import MagicMock
 
     import numpy as np
+    from fakes import make_fake_ipc_connection
 
     from cuda_link._cuda_adapters import FakeCudaAdapter
     from cuda_link._importer_port import ImportPolicy, ImportSpec
-    from cuda_link.importer import Format, Importer, IPCConnection, NumpyBuffers
-    from cuda_link.shm_protocol import (
-        METADATA_SIZE,
-        SHM_HEADER_SIZE,
-        SHUTDOWN_FLAG_SIZE,
-        SLOT_SIZE,
-        TIMESTAMP_SIZE,
-        SHMLayout,
-    )
+    from cuda_link.importer import Format, Importer, NumpyBuffers
 
-    # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
-    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
-    buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, 1)  # version=1
-    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
-    struct.pack_into("<I", buf, 16, 1)  # write_idx=1
-
-    fmt = Format.from_overrides(shape, dtype)
-    layout = SHMLayout(num_slots)
-
-    mock_cuda = MagicMock()
-    mock_shm = MagicMock()
-    mock_shm.buf = buf
-
-    conn = IPCConnection(
-        cuda=mock_cuda,
-        shm_handle=mock_shm,
-        ipc_version=1,
+    conn, mock_cuda, _ = make_fake_ipc_connection(
         num_slots=num_slots,
-        ipc_handles=[None] * num_slots,
-        dev_ptrs=[MagicMock() for _ in range(num_slots)],
-        ipc_events=[None] * num_slots,
-        layout=layout,
-        shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
+        dev_ptr_style="mock",
     )
+    fmt = Format.from_overrides(shape, dtype)
 
     # Pre-build NumpyBuffers with a real numpy buffer so get_frame_numpy() skips
     # reallocation and memcpy_async receives a valid ctypes pointer.
