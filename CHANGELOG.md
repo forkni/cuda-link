@@ -7,16 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- `TDSenderConfig.from_env()` now routes all `CUDALINK_*` reads through the
-  `Env.env_bool` / `env_int` / `env_str` helpers, matching `ExportPolicy.from_env()`.
-  **Behaviour change**: `CUDALINK_EXPORT_SYNC`, `CUDALINK_TD_PERSIST_STREAM`, and
-  `CUDALINK_TD_ACTIVATION_BARRIER` now use strict `"1"` = enabled semantics
-  (previously permissive: anything except `"0"` was enabled). Set the env var
-  to `"1"` or `"0"` explicitly. `CUDALINK_TD_BARRIER_SETTLE_FRAMES` now falls
-  back to default `30` on non-numeric input instead of raising.
-
 ## [1.5.0] — 2026-05-21
 
 ### Breaking changes
@@ -134,6 +124,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `os.environ` at call time so `monkeypatch.setenv` works reliably in tests without
   import-order constraints. `CUDAIPCImporter.connect()` no longer duplicates env reads —
   delegates to `ImportPolicy.from_env()`.
+
+- **`TDSenderConfig.from_env()` now routes all `CUDALINK_*` reads through the
+  `Env.env_bool` / `env_int` / `env_str` helpers**, matching `ExportPolicy.from_env()`.
+  **Behaviour change**: `CUDALINK_EXPORT_SYNC`, `CUDALINK_TD_PERSIST_STREAM`, and
+  `CUDALINK_TD_ACTIVATION_BARRIER` now use strict `"1"` = enabled semantics
+  (previously permissive: anything except `"0"` was enabled). Set the env var
+  to `"1"` or `"0"` explicitly. `CUDALINK_TD_BARRIER_SETTLE_FRAMES` now falls
+  back to default `30` on non-numeric input instead of raising.
 
 - **`CUDAIPCExtension.reconfigure_and_reinit(field_name, new_value)`** — new method
   that consolidates the cleanup → set-field → reconnect cycle used by `parexecute_callbacks`.
