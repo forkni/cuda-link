@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **TD-side CUDA Graphs disabled by default** (`TDSenderConfig.use_graphs=False`,
+  `CUDALINK_TD_USE_GRAPHS` default `"1"` → `"0"`). Per-frame timing data from the
+  receiver example shows the graph-launch path provides negligible latency benefit
+  at WDDM-bound 60 FPS workloads (TD-side `cudaMemory ≈ 97 µs` with or without graphs
+  at 1920×1080 uint8). Set `CUDALINK_TD_USE_GRAPHS=1` to opt back in. Reverses the
+  v1.5.0 default-ON decision; the prior benchmark analysis remains valid and is
+  documented in `docs/perf/graphs-benchmark-v1.5.md`.
+
+- **Receiver example (`td_exporter/example_receiver_python.py`) defaults to
+  `CUDALINK_RECEIVER_FRAME_MODE=torch`** (zero-copy GPU tensor path). Previously
+  defaulted to `numpy` (D2H copy, ≈ 4 ms avg at 1920×1080 uint8). Set to `numpy`
+  for the legacy D2H path or `cupy` for the CuPy zero-copy path.
+
 ## [1.5.0] — 2026-05-21
 
 ### Breaking changes

@@ -204,7 +204,7 @@ $env:CUDALINK_TD_USE_GRAPHS  = "0"
 # Run 5 min, copy full textport text, save to benchmarks/results/td/cell_C_td/textport.txt
 ```
 
-### To capture Cell D-td (TD graphs ON, current default):
+### To capture Cell D-td (TD graphs ON, opt-in since v1.5.x):
 
 ```powershell
 $env:CUDALINK_EXPORT_PROFILE = "1"
@@ -262,6 +262,8 @@ Phase E ([graphs-benchmark-v1.5.md](graphs-benchmark-v1.5.md)) found **−3.4% m
 **However:** the one-time graph instantiation cost (2 × 817µs) is fully amortized at 4000 frames (~0.4ns/frame). The implementation is correct (compute-sanitizer clean). The wall-clock improvement, while an attribution artifact, translates to real CPU-thread time savings.
 
 **Selected: Option A — keep `CUDALINK_USE_GRAPHS=1` and `CUDALINK_TD_USE_GRAPHS=1` default ON.**
+
+> **Post-v1.5.0:** `CUDALINK_TD_USE_GRAPHS` default subsequently flipped to `0`. See `docs/perf/graphs-benchmark-v1.5.md` for the update note.
 
 Rationale:
 - Wall-clock median improves (−2.7%), which is what the Python caller observes.
