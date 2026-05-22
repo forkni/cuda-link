@@ -170,15 +170,21 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
     @staticmethod
     def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
-        """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        """Print the resolved filesystem path of a loaded DLL (Windows only).
+
+        Always prints (not gated on debug level) so each TD process textport
+        shows which cudart DLL it loaded — critical for diagnosing cross-process
+        IPC handle mismatches when two TD instances pick different DLL versions.
+        """
         if _kernel32 is None:
+            print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
             return
         try:
             buf = ctypes.create_unicode_buffer(260)
             _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            _logger.debug("Loaded CUDA runtime: %s", buf.value)
+            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
         except (OSError, AttributeError) as e:
-            _logger.debug("Could not log DLL path: %s", e)
+            print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
