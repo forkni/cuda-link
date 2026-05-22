@@ -550,6 +550,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         result = self.cudart.cudaFree(dev_ptr)
         self.check_error(result, "cudaFree")
 
+    def set_device(self, device: int) -> None:
+        """Bind the calling thread to the Runtime API primary context for `device`.
+
+        Must be called immediately before cudaMalloc when the thread may have entered
+        a non-primary context (e.g. TD's interop context via top.cudaMemory()).
+        IPC mem handles embed the source context identity; allocations in a
+        non-primary context produce handles that other processes cannot open.
+        """
+        self.check_error(self.cudart.cudaSetDevice(c_int(device)), "cudaSetDevice")
+
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
 

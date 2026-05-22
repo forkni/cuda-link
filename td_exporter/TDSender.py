@@ -287,6 +287,12 @@ class TDSenderEngine:
                 self.ipc_events = [None] * self.num_slots
                 self.ipc_event_handles = [None] * self.num_slots
 
+            # Re-assert primary context before allocating IPC buffers.  TD's cook thread may
+            # have entered TD's interop context (via top.cudaMemory / cudaGraphicsMap*) between
+            # CUDARuntimeAPI.__init__ and here; cudaMalloc in that context mints IPC handles
+            # that are bound to the interop context and cannot be opened by a second process.
+            self.cuda.set_device(self.device)
+
             # Allocate ring buffer slots
             for slot in range(self.num_slots):
                 # Allocate persistent GPU buffer for this slot

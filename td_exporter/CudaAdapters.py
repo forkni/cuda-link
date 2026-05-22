@@ -316,6 +316,9 @@ class FakeCudaAdapter:
     def get_device(self) -> int:
         return self.device
 
+    def set_device(self, device: int) -> None:
+        pass  # no-op in fake; real impl re-binds thread to Runtime API primary context
+
     def peek_last_error(self) -> int:
         return self._sticky_error
 

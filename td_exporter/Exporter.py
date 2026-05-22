@@ -259,6 +259,12 @@ class Exporter:
             self._spec.num_slots,
         )
 
+        # Re-assert primary context before allocating IPC buffers.  TD's cook thread may
+        # have entered TD's interop context (via top.cudaMemory / cudaGraphicsMap*) between
+        # CUDARuntimeAPI.__init__ and here; cudaMalloc in that context mints IPC handles
+        # that are bound to the interop context and cannot be opened by a second process.
+        self._cuda.set_device(self._spec.device)
+
         for slot in range(self._spec.num_slots):
             self.dev_ptrs[slot] = self._cuda.malloc(self.buffer_size)
             logger.info(
