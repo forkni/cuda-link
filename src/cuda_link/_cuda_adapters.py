@@ -61,6 +61,9 @@ class CTypesCudaAdapter:
     def get_device(self) -> int:
         return self._api.get_device()
 
+    def set_device(self, device: int) -> None:
+        self._api.set_device(device)
+
     def peek_last_error(self) -> int:
         return self._api.peek_at_last_error()
 
