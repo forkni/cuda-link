@@ -191,6 +191,21 @@ def main() -> None:
         print(f"[receiver] ERROR: unknown CUDALINK_RECEIVER_FRAME_MODE={FRAME_MODE!r} (expected: numpy, torch, cupy)")
         sys.exit(1)
 
+    # Pre-flight: verify the requested library is importable now, before the loop starts.
+    # Falls back to numpy with a warning rather than exiting mid-run on RuntimeError.
+    effective_mode = FRAME_MODE
+    if FRAME_MODE in ("torch", "cupy"):
+        try:
+            __import__(FRAME_MODE)
+        except ImportError:
+            print(
+                f"[receiver] WARNING: {FRAME_MODE!r} not installed — falling back to numpy. "
+                f"(Set CUDALINK_RECEIVER_FRAME_MODE=numpy to suppress.)",
+                flush=True,
+            )
+            effective_mode = "numpy"
+            get_frame = importer.get_frame_numpy
+
     profile_on = os.environ.get("CUDALINK_IMPORT_PROFILE", "0") == "1"
     frame_count = 0
     no_frame_count = 0
@@ -212,7 +227,7 @@ def main() -> None:
             except RuntimeError as exc:
                 print(
                     f"[receiver] ERROR: get_frame() raised RuntimeError — "
-                    f"is the {FRAME_MODE!r} library installed?"
+                    f"is the {effective_mode!r} library installed?"
                 )
                 print(f"  {exc}")
                 sys.exit(1)
@@ -288,7 +303,7 @@ def main() -> None:
             min_us = get_frame_min_s * 1e6
             max_us = get_frame_max_s * 1e6
             print(
-                f"[receiver] Perf: mode={FRAME_MODE}  "
+                f"[receiver] Perf: mode={effective_mode}  "
                 f"get_frame avg={avg_us:.1f} µs  min={min_us:.1f} µs  max={max_us:.1f} µs  "
                 f"(n={frame_count})",
                 flush=True,
