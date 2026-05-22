@@ -8,19 +8,11 @@ but uses the same IPCConnection scaffold (bytearray SHM + MagicMock cuda).
 
 from __future__ import annotations
 
-import struct
 from ctypes import c_void_p
 from unittest.mock import MagicMock
 
 from cuda_link.importer import IPCConnection
-from cuda_link.shm_protocol import (
-    METADATA_SIZE,
-    SHM_HEADER_SIZE,
-    SHUTDOWN_FLAG_SIZE,
-    SLOT_SIZE,
-    TIMESTAMP_SIZE,
-    SHMLayout,
-)
+from cuda_link.shm_protocol import SHMLayout
 
 
 def make_fake_ipc_connection(
@@ -52,12 +44,8 @@ def make_fake_ipc_connection(
         - mock_cuda: MagicMock with query_event.return_value=True pre-wired.
         - mock_shm: MagicMock with .buf set, or None if with_shm_handle=False.
     """
-    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
-    buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, ipc_version)  # version (uint64)
-    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
-    struct.pack_into("<I", buf, 16, write_idx)  # write_idx
+    layout = SHMLayout(num_slots)
+    buf = layout.build_buffer(version=ipc_version, write_idx=write_idx)
 
     mock_cuda = MagicMock()
     mock_cuda.query_event.return_value = True
@@ -79,7 +67,6 @@ def make_fake_ipc_connection(
 
     ipc_events = [MagicMock() for _ in range(num_slots)] if with_events else [None] * num_slots
 
-    layout = SHMLayout(num_slots)
     conn = IPCConnection(
         cuda=mock_cuda,
         shm_handle=mock_shm,

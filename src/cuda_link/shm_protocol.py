@@ -130,6 +130,19 @@ class SHMLayout:
     def total_size(self) -> int:
         return self.timestamp_offset + TIMESTAMP_SIZE
 
+    def build_buffer(self, *, version: int = 1, write_idx: int = 0) -> bytearray:
+        """Allocate a SHM-sized bytearray with the 20-byte header packed in.
+
+        Test factories and out-of-process probes use this; production callers use
+        publish_frame / bump_version against an existing mmap buffer.
+        """
+        buf = bytearray(self.total_size)
+        _ST_U32.pack_into(buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+        _ST_U64.pack_into(buf, VERSION_OFFSET, version)
+        _ST_U32.pack_into(buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, write_idx)
+        return buf
+
 
 # ---------------------------------------------------------------------------
 # Metadata — typed representation of the 20-byte metadata region
