@@ -193,38 +193,41 @@ NVTX trace requires admin privileges (unavailable on this machine). No NVTX rang
 ## 6. Per-Region Timing — TD Side (G6)
 
 **Tool:** `CUDALINK_EXPORT_PROFILE=1` env gate → FrameProfile periodic stats every 97 frames in TD textport via `CUDAIPCExtension`.
-**Status:** PENDING — requires manual TD session (open CUDA_Link_Example.toe, 5-min soak per cell).
+**Status:** DONE — captured 2026-05-22. Medians from last 3 FrameProfile emissions per cell (every 97 frames). Source files in `benchmarks/results/td/`.
 
 ### To capture Cell C-td (TD graphs OFF):
 
 ```powershell
 $env:CUDALINK_EXPORT_PROFILE = "1"
-$env:CUDALINK_TD_USE_GRAPHS = "0"
-# Open CUDA_Link_Example.toe, run 5 min, copy textport scroll
-# Save to benchmarks/results/td/cell_C_td/
+$env:CUDALINK_TD_USE_GRAPHS  = "0"
+& "C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe" CUDA_Link_Example.toe
+# Run 5 min, copy full textport text, save to benchmarks/results/td/cell_C_td/textport.txt
 ```
 
 ### To capture Cell D-td (TD graphs ON, current default):
 
 ```powershell
 $env:CUDALINK_EXPORT_PROFILE = "1"
-$env:CUDALINK_TD_USE_GRAPHS = "1"
-# Open CUDA_Link_Example.toe, run 5 min, copy textport scroll
-# Save to benchmarks/results/td/cell_D_td/
+$env:CUDALINK_TD_USE_GRAPHS  = "1"
+& "C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe" CUDA_Link_Example.toe
+# Run 5 min, copy full textport text, save to benchmarks/results/td/cell_D_td/textport.txt
 ```
 
 ### Summary table (TD textport averages)
 
-| Region | Cell C-td (TD graphs OFF) avg µs | Cell D-td (TD graphs ON) avg µs | Δ % |
+| Region | Cell C-td (TD graphs OFF) µs | Cell D-td (TD graphs ON) µs | Δ % |
 |---|---|---|---|
-| `pre_interop` | PENDING | PENDING | — |
-| `cuda_memory` | PENDING | PENDING | — |
-| `post_interop` | PENDING | PENDING | — |
-| `sync` | PENDING | PENDING | — |
-| `sticky_check` | PENDING | PENDING | — |
-| `flush_probe` | PENDING | PENDING | — |
-| `shm_publish` | PENDING | PENDING | — |
-| `export` total | PENDING | PENDING | — |
+| `pre_interop` | 11.3 | 14.1 | +24.8% |
+| `cuda_memory` | 80.7 | 104.0 | +28.9% |
+| `post_interop` | 10.7 | 7.7 | −28.0% |
+| `sync` | 0.0 | 0.0 | — |
+| `sticky_check` | 1.7 | 2.1 | +23.5% |
+| `flush_probe` | 2.7 | 3.6 | +33.3% |
+| `shm_publish` | 5.9 | 7.3 | +23.7% |
+| `export` total | 113.0 | 138.8 | +22.8% |
+
+Medians from last 3 FrameProfile emissions per cell (every 97 Sender frames):
+Cell C-td — frames 1940/2037/2134 (~35 s soak). Cell D-td — frames 14841/14938/15035 (~4.2 min soak, fully settled). Both at 1920×1080 float32, same TD build and .toe file. **These are separate sessions captured on the same day** — cross-session variability (GPU clock state, thermal conditions) may contribute to some of the per-region differences. The `cuda_memory` and `pre_interop` increase with graphs ON may partly reflect a longer/warmer session rather than graph-mode overhead alone.
 
 > TD-side regions differ from Python-side: `pre_interop`/`cuda_memory`/`post_interop` cover the TD→CUDA interop path (`cudaMemory()` call inside TouchDesigner's cook), which has no equivalent in the Python-only harness.
 
@@ -244,8 +247,8 @@ Phase E ([graphs-benchmark-v1.5.md](graphs-benchmark-v1.5.md)) found **−3.4% m
 | cudaGraphLaunch replaces N individual launches? | Yes — 1 launch replaces `cudaMemcpyAsync` + `cudaStreamWaitEvent`. But N=2, not a large-N consolidation | G3 Section 3.2 |
 | WDDM 4ms tax confirmed absent? | Confirmed absent in Phase E; no WDDM data in this run (admin required) | Phase E |
 | compute-sanitizer: clean? | ✅ 0 errors | G2 |
-| TD-side graphs: measurable difference? | PENDING (G6 not yet run) | — |
-| E2E roundtrip: graphs effect on IPC? | Pending Cell D completion | G4 |
+| TD-side graphs: measurable difference? | `export` total +22.8% with graphs ON (113.0→138.8 µs). `cuda_memory` +28.9%, `pre_interop` +24.8%. However sessions differ in soak duration (35 s vs 4.2 min) — cross-session thermal/clock effects cannot be fully excluded. `post_interop` −28% with graphs (7.7 vs 10.7 µs). | G6 |
+| E2E roundtrip: graphs effect on IPC? | `shm_publish` +23.7% (5.9→7.3 µs) in line with overall session-level increase; Receiver frame counts in G6 capture show no handoff stalls. | G6 |
 
 ### Decision
 
