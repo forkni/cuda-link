@@ -9,8 +9,9 @@ textDAT name: TDConfig  (must match the importable module name inside the COMP n
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+
+from Env import env_bool, env_int, env_str
 
 
 @dataclass(frozen=True)
@@ -37,17 +38,17 @@ class TDSenderConfig:
     def from_env(cls) -> TDSenderConfig:
         """Build a config from environment variables (production path)."""
         return cls(
-            export_sync=os.environ.get("CUDALINK_EXPORT_SYNC", "1") != "0",
-            export_profile=os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1",
-            export_flush_probe=os.environ.get("CUDALINK_EXPORT_FLUSH_PROBE", "1") == "1",
-            use_graphs=os.environ.get("CUDALINK_TD_USE_GRAPHS", "1") == "1",
-            graphs_deferred=os.environ.get("CUDALINK_TD_GRAPHS_DEFERRED", "0") == "1",
-            stream_high_prio=os.environ.get("CUDALINK_TD_STREAM_PRIO", "normal") == "high",
-            init_pace=os.environ.get("CUDALINK_TD_INIT_PACE", "0") == "1",
-            persist_stream=os.environ.get("CUDALINK_TD_PERSIST_STREAM", "1") != "0",
-            activation_barrier=os.environ.get("CUDALINK_TD_ACTIVATION_BARRIER", "1") != "0",
-            barrier_settle_frames=int(os.environ.get("CUDALINK_TD_BARRIER_SETTLE_FRAMES", "30")),
-            nvml=os.environ.get("CUDALINK_NVML", "0") == "1",
+            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=True),
+            export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
+            export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
+            use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=True),
+            graphs_deferred=env_bool("CUDALINK_TD_GRAPHS_DEFERRED", default=False),
+            stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
+            init_pace=env_bool("CUDALINK_TD_INIT_PACE", default=False),
+            persist_stream=env_bool("CUDALINK_TD_PERSIST_STREAM", default=True),
+            activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
+            barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
+            nvml=env_bool("CUDALINK_NVML", default=False),
         )
 
     def __post_init__(self) -> None:
