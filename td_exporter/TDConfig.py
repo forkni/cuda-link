@@ -63,3 +63,21 @@ class TDReceiverConfig:
 
     No env vars are Receiver-only at present; placeholder for future additions.
     """
+
+
+@dataclass
+class TDRuntimeState:
+    """Mutable runtime config — single source of truth for fields that change at runtime.
+
+    Pairs with frozen TDSenderConfig (knobs read once at engine construction and never mutate).
+    Owned by CUDAIPCExtension; engines receive copies of the values at construction time.
+    """
+
+    shm_name: str
+    num_slots: int
+    verbose: bool
+
+    def update(self, field: str, value: object) -> None:
+        if field not in {"shm_name", "num_slots", "verbose"}:
+            raise KeyError(f"TDRuntimeState has no field {field!r}")
+        setattr(self, field, value)
