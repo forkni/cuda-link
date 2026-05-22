@@ -61,6 +61,10 @@ if sys.platform == "win32":
 
     _HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
 
+    _k32 = ctypes.windll.kernel32
+    _k32.SetConsoleCtrlHandler.argtypes = [_HandlerRoutine, _wintypes.BOOL]
+    _k32.SetConsoleCtrlHandler.restype = _wintypes.BOOL
+
 # Module-level refs so the handler thread can access them regardless of stack.
 _cuda_ref = None
 _exporter_ref = None
@@ -119,11 +123,11 @@ if sys.platform == "win32":
     # The launcher uses CREATE_NEW_PROCESS_GROUP, which DISABLES Ctrl+C delivery to the
     # child process by default. SetConsoleCtrlHandler(NULL, FALSE) re-enables it before
     # we install our own handler.
-    ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+    _k32.SetConsoleCtrlHandler(None, False)
 
     # MUST be module-level; a local variable would be GC'd and Windows would call freed memory.
     _ctrl_handler_ref = _HandlerRoutine(_ctrl_handler)
-    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler_ref, True):
+    if not _k32.SetConsoleCtrlHandler(_ctrl_handler_ref, True):
         print("[sender] WARNING: SetConsoleCtrlHandler failed — console-close cleanup unavailable")
 
 # ---------------------------------------------------------------------------
