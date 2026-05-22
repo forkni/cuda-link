@@ -21,7 +21,7 @@ Environment variables (all optional):
     CUDALINK_RECEIVER_DEVICE       GPU device index           (default: 0)
     CUDALINK_RECEIVER_TIMEOUT_MS   Frame-wait timeout ms      (default: 5000)
     CUDALINK_RECEIVER_REPORT_EVERY Frames between status lines (default: 150)
-    CUDALINK_RECEIVER_FRAME_MODE   numpy | torch | cupy       (default: numpy)
+    CUDALINK_RECEIVER_FRAME_MODE   numpy | torch | cupy       (default: torch)
     CUDALINK_IMPORT_PROFILE        1 = enable lib debug logging
 """
 
@@ -127,7 +127,7 @@ SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_input_ipc")
 DEVICE = int(os.environ.get("CUDALINK_RECEIVER_DEVICE", "0"))
 TIMEOUT_MS = float(os.environ.get("CUDALINK_RECEIVER_TIMEOUT_MS", "5000"))
 REPORT_EVERY = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
-FRAME_MODE = os.environ.get("CUDALINK_RECEIVER_FRAME_MODE", "numpy").lower()
+FRAME_MODE = os.environ.get("CUDALINK_RECEIVER_FRAME_MODE", "torch").lower()
 
 
 # ---------------------------------------------------------------------------
