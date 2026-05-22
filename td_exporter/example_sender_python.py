@@ -62,7 +62,11 @@ if sys.platform == "win32":
     _HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
 
     _k32 = ctypes.windll.kernel32
-    _k32.SetConsoleCtrlHandler.argtypes = [_HandlerRoutine, _wintypes.BOOL]
+    # arg 0 is PHANDLER_ROUTINE — a Win32 function pointer. We use c_void_p (not
+    # WINFUNCTYPE) because the documented "restore default Ctrl+C" call passes NULL
+    # there, and ctypes refuses None for a strict WINFUNCTYPE argtype. c_void_p
+    # accepts both None (== NULL) and WINFUNCTYPE instances (same pointer ABI).
+    _k32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, _wintypes.BOOL]
     _k32.SetConsoleCtrlHandler.restype = _wintypes.BOOL
 
 # Module-level refs so the handler thread can access them regardless of stack.
