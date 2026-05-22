@@ -22,6 +22,17 @@ TD Setup:
     4. Set Active     → ON
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()
+
+Environment variables (set before launching TouchDesigner):
+    CUDALINK_RECEIVER_PYTHON_EXE
+        Python executable to use for the receiver subprocess.
+        Default: "python" (resolves via PATH — may not be the system Python that
+        has torch/cupy if TD's bundled Python appears first in PATH).
+        Set to the full path of your preferred interpreter, e.g.:
+            C:\\Python312\\python.exe
+            C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe
+        Any CUDALINK_RECEIVER_* env vars are forwarded automatically to the
+        receiver subprocess through the inherited environment.
 """
 
 import os
@@ -42,15 +53,18 @@ def onStart() -> None:
         print(f"  {script}")
         return
 
+    python_exe = os.environ.get("CUDALINK_RECEIVER_PYTHON_EXE", "python")
+
     _process = subprocess.Popen(
-        ["python", script],
+        [python_exe, script],
         # CREATE_NEW_CONSOLE: opens a visible console window for the receiver.
         # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on shutdown
         # (CTRL_C_EVENT is blocked for new process groups on Windows).
         creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     print(f"[CUDA-Link Receiver Launcher] Receiver subprocess started  (PID {_process.pid})")
-    print(f"  Script: {script}")
+    print(f"  Script:     {script}")
+    print(f"  Python exe: {python_exe}")
 
 
 def onCreate() -> None:
