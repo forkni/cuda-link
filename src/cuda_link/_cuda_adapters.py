@@ -61,8 +61,11 @@ class CTypesCudaAdapter:
     def get_device(self) -> int:
         return self._api.get_device()
 
-    def set_device(self, device: int) -> None:
-        self._api.set_device(device)
+    def set_device(self, device: int) -> int:
+        return self._api.set_device(device)
+
+    def restore_context(self, token: int) -> None:
+        self._api.restore_context(token)
 
     def peek_last_error(self) -> int:
         return self._api.peek_at_last_error()
@@ -319,8 +322,11 @@ class FakeCudaAdapter:
     def get_device(self) -> int:
         return self.device
 
-    def set_device(self, device: int) -> None:
-        pass  # no-op in fake; real impl re-binds thread to Runtime API primary context
+    def set_device(self, device: int) -> int:
+        return 0  # no-op in fake; real impl saves/restores the driver-API context
+
+    def restore_context(self, token: int) -> None:
+        pass  # no-op in fake
 
     def peek_last_error(self) -> int:
         return self._sticky_error

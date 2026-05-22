@@ -287,11 +287,13 @@ class TDSenderEngine:
                 self.ipc_events = [None] * self.num_slots
                 self.ipc_event_handles = [None] * self.num_slots
 
-            # Re-assert primary context before allocating IPC buffers.  TD's cook thread may
-            # have entered TD's interop context (via top.cudaMemory / cudaGraphicsMap*) between
-            # CUDARuntimeAPI.__init__ and here; cudaMalloc in that context mints IPC handles
-            # that are bound to the interop context and cannot be opened by a second process.
-            self.cuda.set_device(self.device)
+            # Switch to CUDA primary context before allocating IPC buffers.  TD's cook thread
+            # may have entered TD's interop context (via top.cudaMemory / cudaGraphicsMap*)
+            # between CUDARuntimeAPI.__init__ and here.  cudaMalloc in the interop context
+            # mints IPC handles bound to that context; a second process (with its own primary
+            # context) cannot open them (error 400).  We save the current context and restore
+            # it after the alloc block so TD's interop machinery is unaffected.
+            _ctx_token = self.cuda.set_device(self.device)
 
             # Allocate ring buffer slots
             for slot in range(self.num_slots):
@@ -312,6 +314,7 @@ class TDSenderEngine:
                 self.ipc_event_handles[slot] = self.cuda.ipc_get_event_handle(self.ipc_events[slot])
                 self._log(f"Created IPC event for slot {slot} (64 bytes)")
 
+            self.cuda.restore_context(_ctx_token)
             self._log(f"Created {self.num_slots} IPC buffer slots with events", force=True)
 
             # INIT_PACE checkpoint 1/3 — CUDALINK_TD_INIT_PACE=1: flush WDDM queue after per-slot

@@ -103,6 +103,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
+        # Must follow _setup_function_signatures() so cudart argtypes are already wired.
+        self._drv: ctypes.CDLL | None = self._load_driver_api()
         # Establish CUDA primary context on the requested device.
         # Must run AFTER _setup_function_signatures() (argtypes needed) but as the
         # very next statement — ensures context exists before any IPC handle operation.
@@ -185,6 +188,36 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
         except (OSError, AttributeError) as e:
             print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
+
+    def _load_driver_api(self) -> ctypes.CDLL | None:
+        """Load nvcuda.dll (CUDA Driver API) and bind the 5 context-management symbols.
+
+        Returns the loaded DLL, or None if unavailable (Linux, driver not installed).
+        Failure is non-fatal: set_device() falls back to the runtime-API path.
+        """
+        try:
+            drv = ctypes.CDLL("nvcuda.dll")
+        except OSError:
+            _logger.debug("nvcuda.dll unavailable; driver-API context switch will not be used")
+            return None
+
+        drv.cuInit.argtypes = [c_uint]
+        drv.cuInit.restype = c_int
+        drv.cuDeviceGet.argtypes = [POINTER(c_int), c_int]
+        drv.cuDeviceGet.restype = c_int
+        drv.cuDevicePrimaryCtxRetain.argtypes = [POINTER(c_void_p), c_int]
+        drv.cuDevicePrimaryCtxRetain.restype = c_int
+        drv.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
+        drv.cuCtxGetCurrent.restype = c_int
+        drv.cuCtxSetCurrent.argtypes = [c_void_p]
+        drv.cuCtxSetCurrent.restype = c_int
+
+        r = drv.cuInit(0)
+        if r != 0:
+            _logger.warning("cuInit returned %d; driver-API context switch will not be used", r)
+            return None
+
+        return drv
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
@@ -550,15 +583,40 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         result = self.cudart.cudaFree(dev_ptr)
         self.check_error(result, "cudaFree")
 
-    def set_device(self, device: int) -> None:
-        """Bind the calling thread to the Runtime API primary context for `device`.
+    def set_device(self, device: int) -> int:
+        """Switch the calling thread to the device's CUDA primary context.
 
-        Must be called immediately before cudaMalloc when the thread may have entered
-        a non-primary context (e.g. TD's interop context via top.cudaMemory()).
-        IPC mem handles embed the source context identity; allocations in a
-        non-primary context produce handles that other processes cannot open.
+        Uses the driver API (nvcuda.dll) to save the current context and install
+        the primary context, ensuring cudaMalloc allocates in a context whose IPC
+        handles are portable to other processes.
+
+        On systems where nvcuda.dll is unavailable, falls back to the runtime-API
+        cudaSetDevice (handles the empty-driver-stack case only).
+
+        Returns an opaque integer token for restore_context(). The caller must
+        call restore_context() after the allocation block is complete.
         """
+        if self._drv is not None:
+            cu_dev = c_int()
+            self._drv.cuDeviceGet(byref(cu_dev), device)
+            saved_ctx = c_void_p()
+            self._drv.cuCtxGetCurrent(byref(saved_ctx))
+            primary_ctx = c_void_p()
+            self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
+            self._drv.cuCtxSetCurrent(primary_ctx)
+            return saved_ctx.value or 0
+        # Fallback: runtime API only — effective when driver-API stack is empty
         self.check_error(self.cudart.cudaSetDevice(c_int(device)), "cudaSetDevice")
+        return 0
+
+    def restore_context(self, token: int) -> None:
+        """Restore the driver-API context saved by the preceding set_device() call.
+
+        token is the value returned by set_device(). No-op if the driver API was
+        unavailable (token will be 0 and self._drv will be None).
+        """
+        if self._drv is not None:
+            self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
 
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
