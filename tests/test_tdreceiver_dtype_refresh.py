@@ -14,7 +14,6 @@ in-place refresh seam independently of the sender bug.
 from __future__ import annotations
 
 import contextlib
-import struct
 import sys
 import uuid
 from multiprocessing.shared_memory import SharedMemory
@@ -89,22 +88,11 @@ def _write_shm_frame(
     data_size: int,
 ) -> None:
     """Write a complete SHM frame (header + slot placeholder + metadata)."""
-    from SHMProtocol import (
-        MAGIC_OFFSET,
-        NUM_SLOTS_OFFSET,
-        PROTOCOL_MAGIC,
-        VERSION_OFFSET,
-    )
-
     from cuda_link.shm_protocol import Metadata, SHMLayout
 
-    buf = shm.buf
-    struct.pack_into("<I", buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
-    struct.pack_into("<Q", buf, VERSION_OFFSET, version)
-    struct.pack_into("<I", buf, NUM_SLOTS_OFFSET, 1)
-
     layout = SHMLayout(num_slots=1)
-    buf[layout.shutdown_offset] = 0
+    buf = shm.buf
+    buf[: layout.total_size] = layout.build_buffer(version=version, write_idx=0)
     Metadata(
         width=width,
         height=height,

@@ -17,19 +17,38 @@ Usage:
 
 Install optional dep:
     pip install "cuda-link[nvml]"    # adds nvidia-ml-py>=12.535
+
+Note: this module imports ``pynvml``, a module name shared by both the deprecated
+``pynvml`` PyPI package and the maintained ``nvidia-ml-py`` package. cuda-link's
+``[nvml]`` extra declares ``nvidia-ml-py>=12.535``. If the deprecated ``pynvml``
+package is also installed (often as a transitive dep of torch), it may win the
+import race and emit a ``FutureWarning``. That specific warning is suppressed at
+the import site below so it doesn't pollute logs; users who prefer to remove the
+duplicate install can run ``pip uninstall pynvml && pip install nvidia-ml-py``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import threading
+import warnings
+
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
 
 logger = logging.getLogger(__name__)
 
 try:
-    import pynvml
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The pynvml package is deprecated.*",
+            category=FutureWarning,
+        )
+        import pynvml
 
     NVML_AVAILABLE = True
 except ImportError:
@@ -111,7 +130,7 @@ class NVMLObserver:
         """
         self.device = device
         if enabled is None:
-            self.enabled = os.getenv("CUDALINK_NVML", "0") == "1"
+            self.enabled = env_bool("CUDALINK_NVML", default=False)
         else:
             self.enabled = enabled
         self._handle = None

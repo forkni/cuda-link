@@ -11,8 +11,8 @@ Compatible with both Python package and TD COMP namespace imports.
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import byref, c_int, c_size_t, c_void_p
+from ctypes import byref, c_int, c_size_t, c_uint64, c_void_p
+from typing import Any
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
@@ -45,6 +45,9 @@ class CUDAGraphsMixin:
 
     Requires self.cudart (cudart DLL handle) and self.check_error from the host class.
     """
+
+    cudart: Any
+    check_error: Any
 
     # --- Phase 2: CUDA Graph API wrappers ---
 
@@ -112,8 +115,6 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If instantiation fails.
         """
-        from ctypes import c_uint64
-
         graph_exec = CUDAGraphExec_t()
         result = self.cudart.cudaGraphInstantiateWithFlags(byref(graph_exec), graph, c_uint64(flags))
         self.check_error(result, "cudaGraphInstantiateWithFlags")
@@ -206,7 +207,7 @@ class CUDAGraphsMixin:
         params.srcArray = None
         params.srcPos = cudaPos(0, 0, 0)
         params.srcPtr = cudaPitchedPtr(
-            ptr=ctypes.cast(src, c_void_p),
+            ptr=src,
             pitch=count,
             xsize=count,
             ysize=1,
@@ -214,7 +215,7 @@ class CUDAGraphsMixin:
         params.dstArray = None
         params.dstPos = cudaPos(0, 0, 0)
         params.dstPtr = cudaPitchedPtr(
-            ptr=ctypes.cast(dst, c_void_p),
+            ptr=dst,
             pitch=count,
             xsize=count,
             ysize=1,
@@ -269,8 +270,8 @@ class CUDAGraphsMixin:
         (graph_exec_memcpy_node_set_params) returns INVALID_VALUE on 1D nodes.
         Requires CUDA 11.3+.
         """
-        dst_int = dst.value if isinstance(dst, c_void_p) else int(dst)
-        src_int = src.value if isinstance(src, c_void_p) else int(src)
+        dst_int = int(dst.value)
+        src_int = int(src.value)
         result = self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
             graph_exec,
             node,

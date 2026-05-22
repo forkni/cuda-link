@@ -152,6 +152,9 @@ gemini-skills/
 # Claude auto-memory (session-specific)
 MEMORY.md
 
+# Session log (local-only; not part of the distributed repo)
+SESSION_LOG.md
+
 # Claude local settings (machine-specific permissions)
 .claude/settings.local.json
 
@@ -159,6 +162,10 @@ MEMORY.md
 stat_sender.txt
 stat_receiver.txt
 nul
+
+# Scalene profiling output (local-only; only .profiling/baseline.json is committed)
+.profiling/scalene_*.json
+.profiling/current.json
 
 # Verification probe outputs (timestamped JSON from probe_cook_context runs)
 verification/results/probe_cook_context_*.json
@@ -192,8 +199,6 @@ Sender_benchmark.*.toe
 Test_TD_Receiver1.toe
 Test_TD_Receiver1.*.toe
 
-# Session log (local-only; also listed in CGW_LOCAL_FILES)
-SESSION_LOG.md
 
 # Audit reports (local-only)
 audit_reports/
@@ -206,7 +211,18 @@ init_heatmap.png
 References/
 
 # Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
-benchmarks/
+# Use wildcard (not trailing slash) so nested exceptions can re-include specific files.
+benchmarks/**
+!benchmarks/results/
+benchmarks/results/**
+!benchmarks/results/td/
+benchmarks/results/td/**
+!benchmarks/results/td/cell_C_td/
+!benchmarks/results/td/cell_D_td/
+benchmarks/results/td/cell_C_td/**
+benchmarks/results/td/cell_D_td/**
+!benchmarks/results/td/cell_C_td/textport.txt
+!benchmarks/results/td/cell_D_td/textport.txt
 
 # Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
 CONTEXT.md

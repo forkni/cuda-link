@@ -1,0 +1,24 @@
+{
+  "version": "1",
+  "timestamp": "2026-05-21T18:19:48.596336+00:00",
+  "config": {
+    "frames": 4000,
+    "warmup_frames": 50,
+    "width": 1920,
+    "height": 1080,
+    "channels": 4,
+    "dtype": "uint8",
+    "slot_count": 2,
+    "nbytes": 8294400
+  },
+  "regions": {
+    "export_frame_total": {
+      "n": 4000,
+      "min_us": 14.399993233382702,
+      "median_us": 18.29996472224593,
+      "p95_us": 30.69500089623034,
+      "p99_us": 83.2970516057685,
+      "max_us": 493.79997653886676
+    }
+  }
+}

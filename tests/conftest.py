@@ -5,10 +5,12 @@ pytest configuration and shared fixtures for CUDA IPC tests.
 from __future__ import annotations
 
 import sys
+import time as _time
 import uuid
 from collections.abc import Generator
+from dataclasses import dataclass as _dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,8 +23,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-# TDHost import deferred until after sys.path setup (td_exporter not in path until above)
-from TDHost import TDHost, TOPHandle  # noqa: E402
+# Fake doubles — deferred until after sys.path setup
+from _td_fakes import FakeCUDAMemoryRef, FakeTDHost, FakeTOPHandle  # noqa: E402, F401
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -99,131 +101,71 @@ def temp_shm_name() -> str:
     return f"test_cuda_ipc_{uuid.uuid4().hex[:8]}"
 
 
+# FakeTDHost / FakeTOPHandle / FakeCUDAMemoryRef imported from _td_fakes above.
+# They are re-exported here so existing tests that do
+#   ``from conftest import FakeTDHost, FakeTOPHandle``
+# continue to work without change.
+
+
 # ---------------------------------------------------------------------------
-# FakeTDHost / FakeTOPHandle — test doubles for the TDHost seam
+# FakeShmAdapter — satisfies BarrierShmPort structurally; no real SHM needed
 # ---------------------------------------------------------------------------
 
 
-class FakeCUDAMemoryRef:
-    """Minimal CUDAMemoryRef-shaped object for tests that don't need the real type."""
+@_dataclass
+class FakeShmAdapter:
+    """In-process fake satisfying BarrierShmPort (structural).
 
-    def __init__(
-        self,
-        ptr: int = 0xDEADBEEF,
-        width: int = 64,
-        height: int = 64,
-        channels: int = 4,
-        size: int = 0,
-        data_type: Any = None,
-    ) -> None:
-        self.ptr = ptr
-        self.width = width
-        self.height = height
-        self.channels = channels
-        self.size = size or width * height * channels * 4
-        self.data_type = data_type
+    Tests construct the scenario they want and pass it as `shm=` to
+    CheckerBarrier.  No real SharedMemory is touched.
 
-
-class FakeTOPHandle(TOPHandle):
-    """In-process test double for TOPHandle.
-
-    Stores calls so tests can assert on what was invoked.
+    Use `raise_on_*` fields to simulate I/O failures at specific callpoints.
+    `last_change_ns` defaults to None; `attach()` sets it to time.monotonic_ns()
+    on first call, simulating a freshly-written segment.  Pass an explicit
+    value to simulate a stale segment (e.g. ``last_change_ns=0``).
     """
 
-    def __init__(
-        self,
-        pixel_format: str = "rgba32float",
-        width: int = 64,
-        height: int = 64,
-        channels: int = 4,
-        gpu_ptr: int = 0xDEADBEEF,
-        inputs: list[FakeTOPHandle] | None = None,
-    ) -> None:
-        self._pixel_format = pixel_format
-        self._width = width
-        self._height = height
-        self._channels = channels
-        self._gpu_ptr = gpu_ptr
-        self._inputs = inputs or []
-        self.format_set: list[str] = []
-        self.copy_cuda_calls: list[tuple] = []
-        self.copy_numpy_calls: list[Any] = []
-        self.resolution_set: list[tuple[int, int]] = []
-
-    def cuda_memory(self, stream: Any = None) -> FakeCUDAMemoryRef:
-        size = self._width * self._height * self._channels * 4
-        return FakeCUDAMemoryRef(
-            ptr=self._gpu_ptr,
-            width=self._width,
-            height=self._height,
-            channels=self._channels,
-            size=size,
-        )
+    active_count: int = 0
+    last_change_ns: int | None = None
+    barrier_skips: int = 0
+    attached: bool = False
+    raise_on_attach: type[Exception] | None = None
+    raise_on_read: type[Exception] | None = None
+    raise_on_bump: type[Exception] | None = None
 
     @property
-    def pixel_format(self) -> str:
-        return self._pixel_format
+    def is_attached(self) -> bool:
+        return self.attached
 
-    @property
-    def inputs(self) -> list[FakeTOPHandle]:
-        return self._inputs
+    def attach(self, *, create: bool) -> None:
+        if self.raise_on_attach is not None:
+            raise self.raise_on_attach("simulated")
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
 
-    def set_format(self, fmt: str) -> None:
-        self.format_set.append(fmt)
+    def read_state(self) -> tuple[int, int, int]:
+        if self.raise_on_read is not None:
+            raise self.raise_on_read("simulated")
+        return (self.active_count, self.last_change_ns or 0, self.barrier_skips)
 
-    def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
-        self.copy_cuda_calls.append((ptr, size, shape, stream))
+    def bump_skip(self) -> None:
+        if self.raise_on_bump is not None:
+            raise self.raise_on_bump("simulated")
+        self.barrier_skips += 1
 
-    def copy_numpy_array(self, arr: Any) -> None:
-        self.copy_numpy_calls.append(arr)
+    def close(self) -> None:
+        self.attached = False
 
-    def set_resolution(self, width: int, height: int) -> None:
-        self.resolution_set.append((width, height))
+    # --- HolderShmPort methods (satisfies HolderBarrier seam structurally) ---
 
-    def is_valid(self) -> bool:
-        return True
+    def open_and_increment(self, pid: int) -> int:
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+        self.active_count += 1
+        return self.active_count
 
-
-class FakeTDHost(TDHost):
-    """In-process test double for TDHost.
-
-    Backed by a plain dict of parameter values; records all write calls.
-    """
-
-    def __init__(self, params: dict[str, Any] | None = None, tops: dict[str, FakeTOPHandle] | None = None) -> None:
-        self._params: dict[str, Any] = dict(params or {})
-        self._tops: dict[str, FakeTOPHandle] = dict(tops or {})
-        self.param_writes: list[tuple[str, Any]] = []
-        self.enable_writes: list[tuple[str, bool]] = []
-        self.custom_only_calls: list[bool] = []
-
-    def param_value(self, name: str) -> Any:
-        return self._params.get(name)
-
-    def set_param_value(self, name: str, value: Any) -> None:
-        self._params[name] = value
-        self.param_writes.append((name, value))
-
-    def set_param_enabled(self, name: str, enabled: bool) -> None:
-        self.enable_writes.append((name, enabled))
-
-    def show_custom_only(self, value: bool) -> None:
-        self.custom_only_calls.append(value)
-
-    def is_active(self) -> bool:
-        return bool(self._params.get("Active", True))
-
-    def find_top(self, name: str) -> FakeTOPHandle | None:
-        return self._tops.get(name)
-
-    def set_warning_status(self, msg: str) -> None:
-        pass
-
-    def set_error_status(self, msg: str) -> None:
-        pass
-
-    def clear_status(self) -> None:
-        pass
-
-    def set_info_status(self, msg: str) -> None:
-        pass
+    def decrement(self, pid: int) -> int:
+        self.active_count = max(0, self.active_count - 1)
+        return self.active_count

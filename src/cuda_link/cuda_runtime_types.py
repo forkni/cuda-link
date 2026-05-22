@@ -104,6 +104,17 @@ class cudaPointerAttributes(ctypes.Structure):
     ]
 
 
+assert ctypes.sizeof(cudaIpcMemHandle_t) == 64, (
+    f"cudaIpcMemHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcMemHandle_t)}"
+)
+assert ctypes.sizeof(cudaIpcEventHandle_t) == 64, (
+    f"cudaIpcEventHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcEventHandle_t)}"
+)
+assert ctypes.sizeof(cudaPointerAttributes) == 24, (
+    f"cudaPointerAttributes ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPointerAttributes)}"
+)
+
+
 # CUDA Error codes (subset)
 class CUDAError:
     """CUDA runtime error codes."""

@@ -286,22 +286,17 @@ Once the TD exporter is running, connect from Python:
 from cuda_link import CUDAIPCImporter
 
 # Use SAME name as TD's Ipcmemname parameter
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="my_project_ipc",  # ← MUST MATCH TD parameter
     shape=(1080, 1920, 4),       # height, width, channels (match your source TOP resolution)
     dtype="float32",             # or "float16", "uint8"
     debug=True                   # Enable debug logging
 )
 
-# Wait for initialization
-if importer.is_ready():
-    print("✓ Connected to TouchDesigner CUDA IPC")
-
-    # Get frames
-    tensor = importer.get_frame()  # torch.Tensor on GPU
-    print(f"Received frame: {tensor.shape}")
-else:
-    print("✗ Connection failed - check SharedMemory name matches")
+# from_connected() raises on failure — no need for is_ready() check at startup
+print("✓ Connected to TouchDesigner CUDA IPC")
+tensor = importer.get_frame()  # torch.Tensor on GPU
+print(f"Received frame: {tensor.shape}")
 ```
 
 ---
@@ -355,8 +350,8 @@ You can use multiple `CUDAIPCExporter` components in one project:
 
 Python side:
 ```python
-main_importer = CUDAIPCImporter(shm_name="main_camera", ...)
-cn_importer = CUDAIPCImporter(shm_name="controlnet", ...)
+main_importer = CUDAIPCImporter.from_connected(shm_name="main_camera", ...)
+cn_importer = CUDAIPCImporter.from_connected(shm_name="controlnet", ...)
 
 main_frame = main_importer.get_frame()
 cn_frame = cn_importer.get_frame()

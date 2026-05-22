@@ -33,12 +33,37 @@ repos:
         args: [--fix, --disable, MD013, MD033]
         exclude: ^(CLAUDE\.md|MEMORY\.md|GEMINI\.md|TD_RAG/|Backup/)
 
-  # Mypy - Type checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.1
+  # Sync check — td_exporter/ paired files must stay byte-identical to src/cuda_link/
+  # Edit src/cuda_link/<file>.py then run: python scripts/sync_td_wrapper.py
+  - repo: local
     hooks:
-      - id: mypy
-        name: mypy (type checking)
-        args: [--config-file=pyproject.toml]
+      - id: td-wrapper-sync-check
+        name: td_exporter sync check (6 paired modules)
+        language: python
+        entry: python scripts/sync_td_wrapper.py --check
         pass_filenames: false
-        additional_dependencies: []
+        always_run: false
+        files: >-
+          ^(src/cuda_link/cuda_ipc_wrapper\.py|
+            src/cuda_link/cuda_runtime_types\.py|
+            src/cuda_link/cuda_graphs\.py|
+            src/cuda_link/nvml_observer\.py|
+            src/cuda_link/shm_protocol\.py|
+            src/cuda_link/activation_barrier\.py|
+            td_exporter/CUDAIPCWrapper\.py|
+            td_exporter/CUDARuntimeTypes\.py|
+            td_exporter/CUDAGraphs\.py|
+            td_exporter/NVMLObserver\.py|
+            td_exporter/SHMProtocol\.py|
+            td_exporter/ActivationBarrier\.py)$
+
+  # Pyrefly - Type checking
+  - repo: local
+    hooks:
+      - id: pyrefly
+        name: pyrefly (type checking)
+        language: system
+        entry: pyrefly check src/cuda_link/
+        pass_filenames: false
+        always_run: false
+        files: ^src/cuda_link/.*\.py$

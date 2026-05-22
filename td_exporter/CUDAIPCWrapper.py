@@ -6,7 +6,7 @@ Provides ctypes interface to CUDA Runtime API for inter-process communication.
 Compatible with both TouchDesigner and Python processes.
 
 Requirements:
-- CUDA 12.x runtime (cudart64_12.dll)
+- CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll / cudart64_110.dll accepted as fallback)
 - Windows operating system
 - Same GPU visible to both processes
 """
@@ -18,7 +18,19 @@ import logging
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+
 _logger = logging.getLogger(__name__)
+
+if os.name == "nt":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+else:
+    _kernel32 = None
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
@@ -91,11 +103,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
+        # Must follow _setup_function_signatures() so cudart argtypes are already wired.
+        self._drv: ctypes.CDLL | None = self._load_driver_api()
         # Establish CUDA primary context on the requested device.
+        # Must run AFTER _setup_function_signatures() (argtypes needed) but as the
+        # very next statement — ensures context exists before any IPC handle operation.
         # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
         # alongside torch (which has its own bundled cudart). Each DLL instance needs
         # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(device)
+        self.check_error(self.cudart.cudaSetDevice(device), "cudaSetDevice")
 
         if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
             _logger.warning(
@@ -104,7 +121,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             )
 
         # Default ON; set CUDALINK_STICKY_ERROR_CHECK=0 to skip the cudaPeekAtLastError call.
-        self._sticky_check_enabled: bool = os.environ.get("CUDALINK_STICKY_ERROR_CHECK", "1") != "0"
+        self._sticky_check_enabled: bool = env_bool("CUDALINK_STICKY_ERROR_CHECK", default=True)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -119,16 +136,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        # cudart64_110.dll is preferred for bisect testing (W1): reverts the 12.x
-        # preference introduced in 4695d8f to test whether cudart64_12 ABI is the
-        # driver-error amplifier on WDDM.
-        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
+        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
+        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
                 self._log_dll_path(dll, name)
                 return dll
-            except OSError:
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
                 continue
 
         # Fallback: try full toolkit paths when not already in PATH
@@ -141,10 +158,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
-                    dll = ctypes.CDLL(dll_path)
+                    dll = ctypes.CDLL(dll_path, winmode=0)
                     self._log_dll_path(dll, dll_path)
                     return dll
-                except OSError:
+                except OSError as e:
+                    _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
                     continue
 
         raise RuntimeError(
@@ -155,14 +173,51 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
     @staticmethod
     def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
-        """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        """Print the resolved filesystem path of a loaded DLL (Windows only).
+
+        Always prints (not gated on debug level) so each TD process textport
+        shows which cudart DLL it loaded — critical for diagnosing cross-process
+        IPC handle mismatches when two TD instances pick different DLL versions.
+        """
+        if _kernel32 is None:
+            print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
-            ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            _logger.debug("Loaded CUDA runtime: %s", buf.value)
+            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
+            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
         except (OSError, AttributeError) as e:
-            _logger.debug("Could not log DLL path: %s", e)
+            print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
+
+    def _load_driver_api(self) -> ctypes.CDLL | None:
+        """Load nvcuda.dll (CUDA Driver API) and bind the 5 context-management symbols.
+
+        Returns the loaded DLL, or None if unavailable (Linux, driver not installed).
+        Failure is non-fatal: set_device() falls back to the runtime-API path.
+        """
+        try:
+            drv = ctypes.CDLL("nvcuda.dll")
+        except OSError:
+            _logger.debug("nvcuda.dll unavailable; driver-API context switch will not be used")
+            return None
+
+        drv.cuInit.argtypes = [c_uint]
+        drv.cuInit.restype = c_int
+        drv.cuDeviceGet.argtypes = [POINTER(c_int), c_int]
+        drv.cuDeviceGet.restype = c_int
+        drv.cuDevicePrimaryCtxRetain.argtypes = [POINTER(c_void_p), c_int]
+        drv.cuDevicePrimaryCtxRetain.restype = c_int
+        drv.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
+        drv.cuCtxGetCurrent.restype = c_int
+        drv.cuCtxSetCurrent.argtypes = [c_void_p]
+        drv.cuCtxSetCurrent.restype = c_int
+
+        r = drv.cuInit(0)
+        if r != 0:
+            _logger.warning("cuInit returned %d; driver-API context switch will not be used", r)
+            return None
+
+        return drv
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
@@ -431,7 +486,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If result indicates an error
         """
         if result != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(result).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(result)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
 
@@ -454,7 +510,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             return
         code = int(self.cudart.cudaPeekAtLastError())
         if code != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(code).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(code)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {code}"
             _logger.warning(
                 "Sticky CUDA error detected after %s: %s (code %d). "
                 "The CUDA context is poisoned — restart the process. "
@@ -525,6 +582,41 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         result = self.cudart.cudaFree(dev_ptr)
         self.check_error(result, "cudaFree")
+
+    def set_device(self, device: int) -> int:
+        """Switch the calling thread to the device's CUDA primary context.
+
+        Uses the driver API (nvcuda.dll) to save the current context and install
+        the primary context, ensuring cudaMalloc allocates in a context whose IPC
+        handles are portable to other processes.
+
+        On systems where nvcuda.dll is unavailable, falls back to the runtime-API
+        cudaSetDevice (handles the empty-driver-stack case only).
+
+        Returns an opaque integer token for restore_context(). The caller must
+        call restore_context() after the allocation block is complete.
+        """
+        if self._drv is not None:
+            cu_dev = c_int()
+            self._drv.cuDeviceGet(byref(cu_dev), device)
+            saved_ctx = c_void_p()
+            self._drv.cuCtxGetCurrent(byref(saved_ctx))
+            primary_ctx = c_void_p()
+            self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
+            self._drv.cuCtxSetCurrent(primary_ctx)
+            return saved_ctx.value or 0
+        # Fallback: runtime API only — effective when driver-API stack is empty
+        self.check_error(self.cudart.cudaSetDevice(c_int(device)), "cudaSetDevice")
+        return 0
+
+    def restore_context(self, token: int) -> None:
+        """Restore the driver-API context saved by the preceding set_device() call.
+
+        token is the value returned by set_device(). No-op if the driver API was
+        unavailable (token will be 0 and self._drv will be None).
+        """
+        if self._drv is not None:
+            self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
 
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
@@ -670,7 +762,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         result = self.cudart.cudaEventRecord(event, stream)
         self.check_error(result, "cudaEventRecord")
 
-    def query_event(self, event: c_void_p) -> bool:
+    def query_event(self, event: CUDAEvent_t) -> bool:
         """Query if event has completed (non-blocking).
 
         Args:

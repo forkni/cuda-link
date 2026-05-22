@@ -52,6 +52,9 @@ from SHMProtocol import (  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
+# Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
+_NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
+
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
 cp = None
@@ -348,7 +351,7 @@ class TDReceiverEngine:
                 return False
 
         _nvtx_push(
-            f"cudalink.receiver.import_frame.slot{(self._connection.last_write_idx) % max(self._connection.num_slots, 1)}",
+            _NVTX_RECEIVER_SLOT_NAMES[self._connection.last_write_idx % max(self._connection.num_slots, 1)],
             "blue",
         )
         try:
@@ -531,7 +534,9 @@ class TDReceiverEngine:
         _t0 = time.perf_counter()
         try:
             self.cuda = get_cuda_runtime(device=self.device)
-            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+            if not getattr(self, "_runtime_load_logged", False):
+                self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+                self._runtime_load_logged = True
 
             # Open SharedMemory (sender must have created it)
             try:
@@ -701,6 +706,7 @@ class TDReceiverEngine:
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
                     return False
 
+                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
                 ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
 
                 try:

@@ -1,47 +1,53 @@
-"""Test to verify that TD-exporter copies stay in sync with canonical sources.
+"""Test that TD-exporter copies stay in sync with canonical sources.
 
-Duplicated pairs (byte-identical):
-  src/cuda_link/cuda_ipc_wrapper.py   <-> td_exporter/CUDAIPCWrapper.py
-  src/cuda_link/cuda_runtime_types.py <-> td_exporter/CUDARuntimeTypes.py
-  src/cuda_link/cuda_graphs.py        <-> td_exporter/CUDAGraphs.py
-  src/cuda_link/nvml_observer.py      <-> td_exporter/NVMLObserver.py
+Two check modes:
+  byte_identical   — canonical and derived must be byte-identical.
+  rewrite_relative — derived must equal the output of rewrite_relative_imports()
+                     applied to the canonical source (deep modules with relative imports).
 
-Run scripts/sync_td_wrapper.py to regenerate the TD-exporter copies.
+The authoritative pair list lives in scripts/sync_td_wrapper.PAIRS — keep this
+docstring free of the listing so it doesn't drift.
+
+To update any paired file: edit src/cuda_link/<file>.py, then run:
+
+    python scripts/sync_td_wrapper.py
+
+Never edit td_exporter/ paired files directly — this test and the pre-commit
+hook will reject the commit.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
-_SYNC_PAIRS = [
-    (
-        _PROJECT_ROOT / "src" / "cuda_link" / "cuda_ipc_wrapper.py",
-        _PROJECT_ROOT / "td_exporter" / "CUDAIPCWrapper.py",
-    ),
-    (
-        _PROJECT_ROOT / "src" / "cuda_link" / "cuda_runtime_types.py",
-        _PROJECT_ROOT / "td_exporter" / "CUDARuntimeTypes.py",
-    ),
-    (
-        _PROJECT_ROOT / "src" / "cuda_link" / "cuda_graphs.py",
-        _PROJECT_ROOT / "td_exporter" / "CUDAGraphs.py",
-    ),
-    (
-        _PROJECT_ROOT / "src" / "cuda_link" / "nvml_observer.py",
-        _PROJECT_ROOT / "td_exporter" / "NVMLObserver.py",
-    ),
-]
+# Import the sync script's PAIRS list and rewrite function directly so the
+# test and the script always agree on the transform.
+sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+from sync_td_wrapper import PAIRS, rewrite_relative_imports  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Parametrise by mode
+# ---------------------------------------------------------------------------
+
+_BYTE_IDENTICAL_PAIRS = [(src, dst) for src, dst, mode in PAIRS if mode == "byte_identical"]
+_REWRITE_PAIRS = [(src, dst) for src, dst, mode in PAIRS if mode == "rewrite_relative"]
+
+_BYTE_IDS = [dst.stem for _, dst, mode in PAIRS if mode == "byte_identical"]
+_REWRITE_IDS = [dst.stem for _, dst, mode in PAIRS if mode == "rewrite_relative"]
 
 
 @pytest.mark.parametrize(
-    "canonical,derived", _SYNC_PAIRS, ids=["CUDAIPCWrapper", "CUDARuntimeTypes", "CUDAGraphs", "NVMLObserver"]
+    "canonical,derived",
+    _BYTE_IDENTICAL_PAIRS,
+    ids=_BYTE_IDS,
 )
 def test_td_exporter_file_is_identical(canonical: Path, derived: Path) -> None:
-    """Verify each TD-exporter copy is byte-identical to its canonical source."""
+    """Verify each byte_identical TD-exporter copy is byte-identical to its canonical source."""
     assert canonical.exists(), f"Canonical source not found: {canonical}"
     assert derived.exists(), f"Derived copy not found: {derived}\nRun: python scripts/sync_td_wrapper.py"
 
@@ -52,8 +58,29 @@ def test_td_exporter_file_is_identical(canonical: Path, derived: Path) -> None:
         f"{derived.name} is out of sync with {canonical.name}!\n"
         f"  canonical: {canonical} ({len(canonical_content)} chars)\n"
         f"  derived:   {derived} ({len(derived_content)} chars)\n"
-        "\n"
-        "Run: python scripts/sync_td_wrapper.py"
+        "\nRun: python scripts/sync_td_wrapper.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "canonical,derived",
+    _REWRITE_PAIRS,
+    ids=_REWRITE_IDS,
+)
+def test_td_exporter_rewrite_pair_is_in_sync(canonical: Path, derived: Path) -> None:
+    """Verify each rewrite_relative TD-exporter copy matches the expected transform output."""
+    assert canonical.exists(), f"Canonical source not found: {canonical}"
+    assert derived.exists(), f"Derived copy not found: {derived}\nRun: python scripts/sync_td_wrapper.py"
+
+    canonical_content = canonical.read_text(encoding="utf-8")
+    expected = rewrite_relative_imports(canonical_content)
+    derived_content = derived.read_text(encoding="utf-8")
+
+    assert derived_content == expected, (
+        f"{derived.name} is out of sync with the rewrite of {canonical.name}!\n"
+        f"  canonical: {canonical} ({len(canonical_content)} chars)\n"
+        f"  derived:   {derived} ({len(derived_content)} chars)\n"
+        "\nRun: python scripts/sync_td_wrapper.py"
     )
 
 
