@@ -166,8 +166,8 @@ def main() -> None:
     spec = ImportSpec(
         shm_name=SHM_NAME,
         device=DEVICE,
-        shape=None,   # auto-detected from TD sender
-        dtype=None,   # auto-detected from TD sender
+        shape=None,  # auto-detected from TD sender
+        dtype=None,  # auto-detected from TD sender
         timeout_ms=TIMEOUT_MS,
     )
 
@@ -226,8 +226,7 @@ def main() -> None:
                 result = get_frame()
             except RuntimeError as exc:
                 print(
-                    f"[receiver] ERROR: get_frame() raised RuntimeError — "
-                    f"is the {effective_mode!r} library installed?"
+                    f"[receiver] ERROR: get_frame() raised RuntimeError — is the {effective_mode!r} library installed?"
                 )
                 print(f"  {exc}")
                 sys.exit(1)
