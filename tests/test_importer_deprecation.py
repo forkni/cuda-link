@@ -91,4 +91,4 @@ def test_deprecation_message_mentions_migration_guide() -> None:
 
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(dep_warnings) >= 1
-    assert "MIGRATION_v1.7.md" in str(dep_warnings[0].message)
+    assert "MIGRATION_v1.5.md" in str(dep_warnings[0].message)
