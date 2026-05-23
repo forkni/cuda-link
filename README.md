@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `CUDAIPCLink_v1.4.1.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.5.1.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -78,12 +78,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-1.4.1-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-1.5.1-py3-none-any.whl
 
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -96,41 +96,46 @@ pip install -e ".[all]"
 #### Use in your Python script
 
 ```python
-from cuda_link import CUDAIPCImporter
+from cuda_link import Importer, ImportSpec, ImportOutcome
 
-# One-shot construction + connect (equivalent to pre-v1.5.0 CUDAIPCImporter(...))
-importer = CUDAIPCImporter.from_connected(
-    shm_name="my_texture_ipc",
-    shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
-    dtype="float32",         # "float32", "float16", or "uint8" — or None for auto-detect
-    debug=False,
-    timeout_ms=5000.0,       # Wait up to 5s for producer to appear (default)
+importer = Importer.open(
+    ImportSpec(
+        shm_name="my_texture_ipc",
+        shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
+        dtype="float32",         # "float32", "float16", "uint8" — or None for auto-detect
+        timeout_ms=5000.0,       # Wait up to 5s for producer to appear (default)
+    )
 )
 
 # Option 1: Get torch.Tensor (GPU, zero-copy)
-if importer.is_ready():
-    tensor = importer.get_frame()  # torch.Tensor on GPU, shape (1080, 1920, 4)
+result = importer.get_frame()
+if result.outcome is ImportOutcome.NEW_FRAME:
+    tensor = result.frame  # torch.Tensor on GPU, shape (1080, 1920, 4)
     # Use directly in AI model:
     # output = model(tensor)
 
 # Option 2: Get numpy array (CPU, involves D2H copy)
-if importer.is_ready():
-    array = importer.get_frame_numpy()  # numpy.ndarray on CPU
+result = importer.get_frame_numpy()
+if result.outcome is ImportOutcome.NEW_FRAME:
+    array = result.frame  # numpy.ndarray on CPU
     # Use in OpenCV, PIL, etc.:
     # cv2.imwrite("frame.png", array)
 
 # Option 3: Get CuPy array (GPU, zero-copy)
-if importer.is_ready():
-    cupy_arr = importer.get_frame_cupy()  # cupy.ndarray on GPU
+result = importer.get_frame_cupy()
+if result.outcome is ImportOutcome.NEW_FRAME:
+    cupy_arr = result.frame  # cupy.ndarray on GPU
     # Use in CuPy/JAX workflows
 
-# Context manager (recommended — auto-connects and ensures cleanup on exit)
-with CUDAIPCImporter(shm_name="my_texture_ipc") as importer:
+# Context manager (recommended — ensures cleanup on exit)
+with Importer.open(ImportSpec(shm_name="my_texture_ipc")) as importer:
     for _ in range(100):
-        tensor = importer.get_frame()
+        result = importer.get_frame()
+        if result.outcome is ImportOutcome.NEW_FRAME:
+            tensor = result.frame
 
-# Manual cleanup
-importer.cleanup()
+# Explicit cleanup
+importer.close()
 ```
 
 ### 3. Python → TouchDesigner (AI Output)
@@ -138,23 +143,21 @@ importer.cleanup()
 Send AI-generated frames **back to TD** for display:
 
 ```python
-from cuda_link import CUDAIPCExporter
+from cuda_link import Exporter, FrameSpec, GpuFrame
 
-exporter = CUDAIPCExporter(
-    shm_name="ai_output_ipc",   # Must match TD Receiver's Ipcmemname parameter
-    height=512, width=512,
-    channels=4, dtype="uint8",
-    num_slots=2,                 # Ring buffer slots (double-buffering)
-)
-exporter.initialize()
-
-# Export each AI-generated frame (~10-20μs overhead at 512x512)
-exporter.export_frame(
-    gpu_ptr=output_tensor.data_ptr(),
-    size=output_tensor.nbytes,
-)
-
-exporter.cleanup()
+with Exporter.open(
+    FrameSpec(
+        shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
+        height=512, width=512,
+        channels=4, dtype="uint8",
+        num_slots=2,               # Ring buffer slots (double-buffering)
+    )
+) as exporter:
+    # Export each AI-generated frame (~10-20μs overhead at 512x512)
+    exporter.export(GpuFrame(
+        ptr=output_tensor.data_ptr(),
+        size=output_tensor.nbytes,
+    ))
 ```
 
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
@@ -165,15 +168,15 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
 CUDAIPCExtension facade
-  └── TDSenderEngine               CUDAIPCImporter
+  └── TDSenderEngine               Importer
         │ export_frame(top_op)       │ get_frame() / get_frame_numpy()
         │ cudaMemcpy D2D → ring buf  │ Waits on IPC event
         └─→ SharedMemory ←───────────┘
 
 Direction B: Python (Producer) → TD (Consumer)
 ───────────────────────────────────────────────
-CUDAIPCExporter                    CUDAIPCExtension facade
-  │ export_frame(gpu_ptr, size)      └── TDReceiverEngine
+Exporter                           CUDAIPCExtension facade
+  │ export(GpuFrame(ptr, size))      └── TDReceiverEngine
   │ cudaMemcpy D2D → ring buf             │ import_frame(script_top)
   └─→ SharedMemory ←──────────────────────┘ copyCUDAMemory()
 
@@ -255,7 +258,7 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export_frame()` (Python-side `CUDAIPCExporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. With EXPORT_SYNC=1 (default) the GPU D2D copy dominates wall-clock time and the net savings are small (<5% at 1080p on PCIe 4.0); see [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measured A/B. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
+| `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export()` (Python-side `Exporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. With EXPORT_SYNC=1 (default) the GPU D2D copy dominates wall-clock time and the net savings are small (<5% at 1080p on PCIe 4.0); see [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measured A/B. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
 | `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender. Same mechanism as `CUDALINK_USE_GRAPHS`, gated independently because TD ships `cudart64_110.dll` and the per-frame `cudaGraphExecMemcpyNodeSetParams1D` API requires CUDA 11.3+. Auto-disabled on older runtimes (probed via `cudaRuntimeGetVersion` at `initialize()`). Disabled by default. Set to `1` to opt in; falls back to the legacy `cudaMemcpyAsync` stream path automatically on any capture or launch failure. |
 | `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
 | `CUDALINK_EXPORT_SYNC` | `1` | Block CPU on the IPC stream after each `export_frame()`. Default on — load-bearing for concurrent topologies (prevents cycle-2 first-settle TDR cascade when a TD Sender shares a process with a TD Receiver, Phase 3.6 confirmed). Cost equals GPU D2D copy time: ~42 µs (512×512) → ~400 µs (4K) float32 RGBA on PCIe 4.0 (see `bench_graphs.py`). Set to `0` to opt out for low-latency single-producer async scenarios. |
@@ -281,10 +284,11 @@ For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer)
 
 **Cause**: Python importer started before TD exporter initialized.
 
-**Solution**: Ensure TD's `CUDAIPCExporter` is active before starting Python process. If starting both together, use `timeout_ms` to give the producer time to initialize:
+**Solution**: Ensure the TD component is active before starting the Python process. If starting both together, use `timeout_ms` to give the producer time to initialize:
 
 ```python
-importer = CUDAIPCImporter.from_connected(shm_name="my_project_ipc", timeout_ms=10000.0)  # Wait up to 10s
+from cuda_link import Importer, ImportSpec
+importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.0))  # Wait up to 10s
 ```
 
 ### "CUDA IPC overhead unexpectedly high"
@@ -306,12 +310,15 @@ importer = CUDAIPCImporter.from_connected(shm_name="my_project_ipc", timeout_ms=
 **Solution**: Use the context manager pattern for automatic cleanup:
 
 ```python
-with CUDAIPCImporter(shm_name="my_project_ipc") as importer:
-    # importer.cleanup() is called automatically on exit
-    tensor = importer.get_frame()
+from cuda_link import Importer, ImportSpec, ImportOutcome
+with Importer.open(ImportSpec(shm_name="my_project_ipc")) as importer:
+    # importer.close() is called automatically on exit
+    result = importer.get_frame()
+    if result.outcome is ImportOutcome.NEW_FRAME:
+        tensor = result.frame
 ```
 
-Or call `importer.cleanup()` explicitly in a `finally` block.
+Or call `importer.close()` explicitly in a `finally` block.
 
 ## Distribution
 
@@ -327,16 +334,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-1.4.1-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.5.1-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.4.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.5.1-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.4.1-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -359,10 +366,12 @@ pip install -e ".[all]"     # All output modes
 **Usage**:
 
 ```python
-from cuda_link import CUDAIPCImporter
+from cuda_link import Importer, ImportSpec, ImportOutcome
 
-importer = CUDAIPCImporter.from_connected(shm_name="my_project_ipc")
-tensor = importer.get_frame()  # torch.Tensor, GPU zero-copy
+importer = Importer.open(ImportSpec(shm_name="my_project_ipc"))
+result = importer.get_frame()
+if result.outcome is ImportOutcome.NEW_FRAME:
+    tensor = result.frame  # torch.Tensor, GPU zero-copy
 ```
 
 The `cuda-link` package contains only the **consumer-side** Python code (`src/cuda_link/`). The TouchDesigner extension is distributed separately.
@@ -371,7 +380,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `CUDAIPCLink_v1.4.1.tox` into your TouchDesigner network from the project root.
+Drag `TOXES/CUDAIPCLink_v1.5.1.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag

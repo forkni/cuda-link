@@ -8,7 +8,7 @@
 
 ## Context
 
-Before v1.6.0, the Exporter and Importer were monolithic classes (`CUDAIPCExporter`, `CUDAIPCImporter`) that directly invoked the CUDA runtime via ctypes on every operation. This made them:
+Before v1.5.0, the Exporter and Importer were monolithic classes (`CUDAIPCExporter`, `CUDAIPCImporter`) that directly invoked the CUDA runtime via ctypes on every operation. This made them:
 
 - **Untestable without a GPU** — any test that exercised real code paths needed a live CUDA device.
 - **Leaky at their interface** — callers needed to know internal resource lifecycle (when handles were valid, which CUDA calls had been made).
@@ -47,9 +47,9 @@ Apply the **Port + Adapters + value-object** template to every module that owns 
 
 ## Evidence
 
-- v1.6.0: `feat: extract Exporter module` — commit `92fa384`; `refactor: deprecate CUDAIPCExporter` — commit `ac93b67`.
-- v1.7.0: `feat: deepen CUDAIPCImporter with v1.6 Exporter template` — commit `6ff8c45`.
-- 307 no-GPU tests pass post-v1.7.0. 0 tests use `object.__new__` bypass.
+- v1.5.0: `feat: extract Exporter module` — commit `92fa384`; `refactor: deprecate CUDAIPCExporter` — commit `ac93b67`.
+- v1.5.x: `feat: deepen CUDAIPCImporter with Exporter template` — commit `6ff8c45`.
+- 307 no-GPU tests pass (current). 0 tests use `object.__new__` bypass.
 
 ## Template checklist (for future deepening)
 

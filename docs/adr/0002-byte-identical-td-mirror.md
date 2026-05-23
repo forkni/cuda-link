@@ -16,7 +16,7 @@ TouchDesigner loads Python modules from sibling Text DATs inside a COMP, not fro
 
 The six original byte-identical pairs (`cuda_ipc_wrapper`, `cuda_runtime_types`, `cuda_graphs`, `nvml_observer`, `shm_protocol`, `activation_barrier`) work because none of them use relative imports — they can be byte-copied verbatim.
 
-The deepened `Exporter` (v1.6.0) and `Importer` (v1.7.0) use relative imports (`from ._exporter_port import …`, `from ._importer_port import …`, etc.). This blocked byte-identical mirroring and was the explicit reason v1.6 step 7 ("TDSender collapse + byte-identical `Exporter.py` mirror") was deferred.
+The deepened `Exporter` (v1.5.0) and `Importer` (v1.5.x) use relative imports (`from ._exporter_port import …`, `from ._importer_port import …`, etc.). This blocked byte-identical mirroring and was the explicit reason the "TDSender collapse + byte-identical `Exporter.py` mirror" step was deferred.
 
 ## Decision
 

@@ -684,6 +684,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1

@@ -2,6 +2,13 @@
 
 Complete workflows for common CUDA IPC use cases.
 
+> **API Note (v1.5.x):** The consumer-side API is now `Importer.open(ImportSpec(...))` (returns
+> `ImportResult` with `.outcome` and `.frame`). The producer-side API is `Exporter.open(FrameSpec(...))`.
+> Code examples below that use `CUDAIPCImporter.from_connected(...)` or `CUDAIPCExporter` reflect the
+> pre-v1.5 API: `CUDAIPCImporter` still works via a deprecation shim (removed in v1.8), but
+> `CUDAIPCExporter` was **removed in v1.5.0** — use `Exporter.open(FrameSpec(...))` instead.
+> See `docs/MIGRATION_v1.5.md` for migration guides.
+
 ---
 
 ## Example 1: TouchDesigner → PyTorch AI Pipeline (Zero-Copy)
@@ -370,25 +377,25 @@ AI pipeline generates frames (e.g., diffusion model output) in Python and sends 
 TouchDesigner for display, compositing, or recording. This is the **reverse direction** — Python
 is the producer, TD is the consumer.
 
-### Python Side (Producer: `CUDAIPCExporter`)
+### Python Side (Producer: `Exporter`)
 
 ```python
 import torch
-from cuda_link import CUDAIPCExporter
+from cuda_link import Exporter, FrameSpec, GpuFrame
 
 HEIGHT, WIDTH = 512, 512
 
 # Initialize exporter once (at startup)
-exporter = CUDAIPCExporter(
-    shm_name="ai_output_ipc",   # Must match TD Receiver's Ipcmemname parameter
-    height=HEIGHT,
-    width=WIDTH,
-    channels=4,                 # BGRA/RGBA
-    dtype="uint8",              # uint8 is typical for display
-    num_slots=2,                # Double-buffer (default)
-    debug=False,
+exporter = Exporter.open(
+    FrameSpec(
+        shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
+        height=HEIGHT,
+        width=WIDTH,
+        channels=4,                # BGRA/RGBA
+        dtype="uint8",             # uint8 is typical for display
+        num_slots=2,               # Double-buffer (default)
+    )
 )
-exporter.initialize()
 
 # AI inference loop
 while running:
@@ -397,26 +404,25 @@ while running:
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
     # Export to TD (see docs/BENCHMARKS.md for timing)
-    exporter.export_frame(
-        gpu_ptr=output_tensor.data_ptr(),
+    exporter.export(GpuFrame(
+        ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
-    )
+    ))
 
-exporter.cleanup()
+exporter.close()
 ```
 
 Or use it as a context manager for automatic cleanup:
 
 ```python
-with CUDAIPCExporter(shm_name="ai_output_ipc", height=512, width=512) as exporter:
-    exporter.initialize()
+with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) as exporter:
     while running:
-        exporter.export_frame(gpu_ptr=tensor.data_ptr(), size=tensor.nbytes)
+        exporter.export(GpuFrame(ptr=tensor.data_ptr(), size=tensor.nbytes))
 ```
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add the CUDAIPCExporter TOX** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.5.1.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -557,4 +563,4 @@ for i in range(max_retries):
 ---
 
 **Last Updated**: 2026-05-09
-**Version**: 1.2.1
+**Version**: 1.5.1

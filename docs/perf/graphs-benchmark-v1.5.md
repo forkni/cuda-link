@@ -1,7 +1,7 @@
 # CUDA Graphs A/B/C/D Benchmark — cuda-link v1.5
 
 **Date:** 2026-05-21  
-**Branch:** release/cuda-link-v1.6.0  
+**Branch:** release/cuda-link-v1.6.0 *(internal dev branch; work shipped in v1.5.x)*
 **Commit:** post-Phase-E (Phases A–D landed)
 
 ## Setup

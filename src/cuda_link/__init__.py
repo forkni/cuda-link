@@ -24,16 +24,16 @@ from .shm_protocol import (
     publish_frame,
 )
 
-__version__ = "1.7.0"
+__version__ = "1.5.1"
 __all__ = [
-    # v1.6.0 — Exporter API
+    # Exporter API (v1.5.0+)
     "Exporter",
     "FrameSpec",
     "ExportPolicy",
     "GpuFrame",
     "FrameOutcome",
     "CudaPort",
-    # v1.7.0 — Importer API
+    # Importer API (v1.5.x)
     "Importer",
     "ImportSpec",
     "ImportPolicy",
