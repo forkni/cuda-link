@@ -21,5 +21,16 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(./scripts/git/check_lint.sh *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Test-Path *)",
+      "Bash(shellcheck *)",
+      "Bash(where *)",
+      "Bash(fc *)"
+    ]
   }
 }

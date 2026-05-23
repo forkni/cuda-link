@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.4.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.5.1.tox` component in TouchDesigner.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -202,11 +202,11 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```
-CUDA IPC Exporter v1.0.0
+CUDA IPC Exporter v1.5.1
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-01-30
+Date: 2026-05-22
 License: MIT
 ```
 
@@ -216,9 +216,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.4.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.5.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.4.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.5.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -226,7 +226,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.4.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.5.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -241,7 +241,7 @@ License: MIT
 
 1. **Mode**: Set to `Sender` (exporting TD textures to Python) or `Receiver` (importing Python frames into TD)
 2. **Ipcmemname**: Set to a unique name (e.g., `"my_project_ipc"`)
-   - This MUST match the `shm_name` in your Python `CUDAIPCImporter`/`CUDAIPCExporter` code
+   - This MUST match the `shm_name` in your Python `Importer`/`Exporter` code
 3. **Active**: Toggle ON to start exporting/importing
 4. **Numslots**: Leave at 3 (optimal for most cases; ignored in Receiver mode)
 5. **Debug**: Toggle ON to see performance metrics every ~97 frames
@@ -261,10 +261,10 @@ Open the **Textport** (Alt+T) and look for:
 
 ### Receiver Mode
 
-When **Mode** = `Receiver`, the component imports GPU frames from a Python `CUDAIPCExporter`:
+When **Mode** = `Receiver`, the component imports GPU frames from a Python `Exporter`:
 
 1. Set **Mode** to `Receiver`
-2. Set **Ipcmemname** to match your Python `CUDAIPCExporter`'s `shm_name`
+2. Set **Ipcmemname** to match your Python `Exporter`'s `shm_name`
 3. Add a **Script TOP** (name it `ImportBuffer`) inside the COMP
 4. In the Script TOP's **DAT** field, reference `script_top_callbacks.py`
 5. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
@@ -283,25 +283,23 @@ If you see errors, check:
 Once the TD exporter is running, connect from Python:
 
 ```python
-from cuda_link import CUDAIPCImporter
+from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # Use SAME name as TD's Ipcmemname parameter
-importer = CUDAIPCImporter(
-    shm_name="my_project_ipc",  # ← MUST MATCH TD parameter
-    shape=(1080, 1920, 4),       # height, width, channels (match your source TOP resolution)
-    dtype="float32",             # or "float16", "uint8"
-    debug=True                   # Enable debug logging
+importer = Importer.open(
+    ImportSpec(
+        shm_name="my_project_ipc",  # ← MUST MATCH TD parameter
+        shape=(1080, 1920, 4),       # height, width, channels (match your source TOP resolution)
+        dtype="float32",             # or "float16", "uint8"
+        timeout_ms=5000.0,
+    )
 )
 
-# Wait for initialization
-if importer.is_ready():
-    print("✓ Connected to TouchDesigner CUDA IPC")
-
-    # Get frames
-    tensor = importer.get_frame()  # torch.Tensor on GPU
+print("✓ Connected to TouchDesigner CUDA IPC")
+result = importer.get_frame()  # returns ImportResult
+if result.outcome is ImportOutcome.NEW_FRAME:
+    tensor = result.frame  # torch.Tensor on GPU
     print(f"Received frame: {tensor.shape}")
-else:
-    print("✗ Connection failed - check SharedMemory name matches")
 ```
 
 ---
@@ -355,11 +353,17 @@ You can use multiple `CUDAIPCExporter` components in one project:
 
 Python side:
 ```python
-main_importer = CUDAIPCImporter(shm_name="main_camera", ...)
-cn_importer = CUDAIPCImporter(shm_name="controlnet", ...)
+from cuda_link import Importer, ImportSpec, ImportOutcome
 
-main_frame = main_importer.get_frame()
-cn_frame = cn_importer.get_frame()
+main_importer = Importer.open(ImportSpec(shm_name="main_camera"))
+cn_importer = Importer.open(ImportSpec(shm_name="controlnet"))
+
+main_result = main_importer.get_frame()
+cn_result = cn_importer.get_frame()
+if main_result.outcome is ImportOutcome.NEW_FRAME:
+    main_frame = main_result.frame
+if cn_result.outcome is ImportOutcome.NEW_FRAME:
+    cn_frame = cn_result.frame
 ```
 
 ### Dynamic Resolution Handling
@@ -386,7 +390,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
-| `CUDAIPCLink_v1.4.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.5.1.tox` | `TOXES/` | Final built .tox component |
 
 ---
 
@@ -398,6 +402,6 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-05-10
-**Component Version**: 1.4.1
+**Build Date**: 2026-05-22
+**Component Version**: 1.5.1
 **TouchDesigner Version**: 2022.x or later

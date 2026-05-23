@@ -558,3 +558,44 @@ def test_export_frame_returns_false_in_receiver_mode() -> None:
     assert ext.mode == "Receiver"
     result = ext.export_frame()
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# reconfigure_and_reinit — unit tests (no CUDA required)
+# ---------------------------------------------------------------------------
+
+
+def test_reconfigure_and_reinit_calls_cleanup_then_sets_field() -> None:
+    """reconfigure_and_reinit() calls cleanup() then sets the named field via its setter."""
+    from unittest.mock import patch
+
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("original_name", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
+
+    cleanup_calls: list[None] = []
+    with patch.object(ext, "cleanup", side_effect=lambda: cleanup_calls.append(None)):
+        ext.reconfigure_and_reinit("shm_name", "new_name")
+
+    assert len(cleanup_calls) == 1, "cleanup() must be called exactly once"
+    assert ext.shm_name == "new_name", "field must be updated after cleanup"
+
+
+def test_reconfigure_and_reinit_triggers_immediate_reconnect_in_receiver_mode() -> None:
+    """reconfigure_and_reinit() calls request_immediate_reconnect() in Receiver mode."""
+    from unittest.mock import patch
+
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_receiver_host("original_name", num_slots=3)
+    ext = CUDAIPCExtension(None, host=host)
+
+    reconnect_calls: list[None] = []
+    with (
+        patch.object(ext, "cleanup"),
+        patch.object(ext, "request_immediate_reconnect", side_effect=lambda: reconnect_calls.append(None)),
+    ):
+        ext.reconfigure_and_reinit("shm_name", "new_name")
+
+    assert len(reconnect_calls) == 1, "request_immediate_reconnect() must be called in Receiver mode"

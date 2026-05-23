@@ -35,8 +35,8 @@ from SHMProtocol import (  # noqa: E402
     SHM_HEADER_SIZE,
     SLOT_SIZE,
 )
-from TDConfig import TDSenderConfig  # noqa: E402
-from TDHost import RealTDHost, RealTOPHandle, TDHost  # noqa: E402
+from TDConfig import TDRuntimeState, TDSenderConfig  # noqa: E402
+from TDHost import RealTDHost, TDHost  # noqa: E402
 from TDReceiver import TDReceiverEngine  # noqa: E402
 from TDSender import TDSenderEngine  # noqa: E402
 
@@ -81,12 +81,11 @@ class CUDAIPCExtension:
         _mode_val = self._host.param_value("Mode")
         self._mode: str = str(_mode_val) if _mode_val is not None else "Sender"
 
-        # Read construction params once (engine uses them at build time)
         _slots_val = self._host.param_value("Numslots")
         try:
-            self._num_slots: int = int(_slots_val) if _slots_val is not None else 3
+            _num_slots: int = int(_slots_val) if _slots_val is not None else 3
         except (ValueError, TypeError):
-            self._num_slots = 3
+            _num_slots = 3
 
         _dev_val = self._host.param_value("Cudadevice")
         try:
@@ -95,12 +94,18 @@ class CUDAIPCExtension:
             self._device = 0
 
         _shm_val = self._host.param_value("Ipcmemname")
-        self._shm_name: str = str(_shm_val) if _shm_val is not None else "cudalink_output_ipc"
+        _shm_name: str = str(_shm_val) if _shm_val is not None else "cudalink_output_ipc"
 
         _debug_val = self._host.param_value("Debug")
-        self._verbose: bool = bool(_debug_val) if _debug_val is not None else False
+        _verbose: bool = bool(_debug_val) if _debug_val is not None else False
         if self._config.export_profile:
-            self._verbose = True
+            _verbose = True
+
+        self._runtime_state = TDRuntimeState(
+            shm_name=_shm_name,
+            num_slots=_num_slots,
+            verbose=_verbose,
+        )
 
         _hide_val = self._host.param_value("Hidebuiltin")
         if _hide_val is not None:
@@ -118,26 +123,27 @@ class CUDAIPCExtension:
     # ------------------------------------------------------------------
 
     def _make_engine(self) -> TDSenderEngine | TDReceiverEngine:
+        rs = self._runtime_state
         if self._mode == "Sender":
             return TDSenderEngine(
                 host=self._host,
                 config=self._config,
                 cuda=None,
                 log_fn=self._log,
-                num_slots=self._num_slots,
+                num_slots=rs.num_slots,
                 device=self._device,
-                shm_name=self._shm_name,
-                verbose=self._verbose,
+                shm_name=rs.shm_name,
+                verbose=rs.verbose,
             )
         return TDReceiverEngine(
             host=self._host,
             config=self._config,
             cuda=None,
             log_fn=self._log,
-            num_slots=self._num_slots,
+            num_slots=rs.num_slots,
             device=self._device,
-            shm_name=self._shm_name,
-            verbose=self._verbose,
+            shm_name=rs.shm_name,
+            verbose=rs.verbose,
         )
 
     # ------------------------------------------------------------------
@@ -146,7 +152,7 @@ class CUDAIPCExtension:
 
     def _log(self, msg: str, force: bool = False) -> None:
         prefix = f"[CUDAIPCExtension:{self._mode}]"
-        if force or self._verbose:
+        if force or self._runtime_state.verbose:
             print(f"{prefix} {msg}")
 
     # ------------------------------------------------------------------
@@ -169,7 +175,7 @@ class CUDAIPCExtension:
     def import_frame(self, import_buffer: TOP) -> bool:
         if self._mode != "Receiver":
             return False
-        handle = RealTOPHandle(import_buffer) if import_buffer is not None else None
+        handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
         return self._engine.import_frame(handle)
 
     def _check_deferred_cleanup(self) -> None:
@@ -178,7 +184,7 @@ class CUDAIPCExtension:
 
     def update_receiver_resolution(self, import_buffer: TOP) -> None:
         if self._mode == "Receiver":
-            handle = RealTOPHandle(import_buffer) if import_buffer is not None else None
+            handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
             self._engine.update_receiver_resolution(handle)
 
     def is_active(self) -> bool:
@@ -213,47 +219,49 @@ class CUDAIPCExtension:
             _ns = self._host.param_value("Numslots")
             if _ns is not None:
                 with contextlib.suppress(ValueError, TypeError):
-                    self._num_slots = int(_ns)
+                    self._runtime_state.num_slots = int(_ns)
         self._engine = self._make_engine()
         self._host.set_param_enabled("Numslots", new_mode == "Sender")
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
 
     # ------------------------------------------------------------------
-    # Attribute bridges — callbacks in parexecute_callbacks.py write
-    # these directly; properties propagate to the current engine.
+    # Runtime config accessors
     # ------------------------------------------------------------------
 
     @property
     def shm_name(self) -> str:
-        return self._engine.shm_name
-
-    @shm_name.setter
-    def shm_name(self, value: str) -> None:
-        self._shm_name = value
-        self._engine.shm_name = value
+        return self._runtime_state.shm_name
 
     @property
     def num_slots(self) -> int:
-        return self._engine.num_slots
-
-    @num_slots.setter
-    def num_slots(self, value: int) -> None:
-        self._num_slots = value
-        self._engine.num_slots = value
+        return self._runtime_state.num_slots
 
     @property
     def verbose_performance(self) -> bool:
-        return self._engine.verbose_performance
+        return self._runtime_state.verbose
 
     @verbose_performance.setter
     def verbose_performance(self, value: bool) -> None:
-        self._verbose = value
+        self._runtime_state.update("verbose", value)
         self._engine.verbose_performance = value
 
     def request_immediate_reconnect(self) -> None:
         """Force next import_frame to attempt reconnection (called from parexecute callbacks)."""
         if self._mode == "Receiver":
             self._engine.request_immediate_reconnect()
+
+    def reconfigure_and_reinit(self, field_name: str, new_value: object) -> None:
+        """Update a runtime config field and immediately recreate the engine.
+
+        Caller is responsible for pre-validation (range checks, mode guards).
+        The new engine initialises lazily on the next export_frame / import_frame call.
+        """
+        self._log(f"{field_name} changed - reinitializing", force=True)
+        self.cleanup()
+        self._runtime_state.update(field_name, new_value)
+        self._engine = self._make_engine()
+        if self._mode == "Receiver":
+            self.request_immediate_reconnect()
 
     def consume_pending_resolution(self) -> tuple | None:
         """Return (width, height) if resolution update is pending, else None.

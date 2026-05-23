@@ -97,7 +97,7 @@ Master enable/disable switch for the CUDA IPC pipeline.
 Sets the direction of data flow.
 
 - **Sender:** This component is the producer. It captures the upstream texture each frame, copies it into the GPU ring buffer, and makes it available to an external Python process (or another TD instance in Receiver mode).
-- **Receiver:** This component is the consumer. It reads GPU frames produced by an external Python process (using `CUDAIPCExporter`) and imports them into a Script TOP for use in the TD network.
+- **Receiver:** This component is the consumer. It reads GPU frames produced by an external Python process (using `Exporter`) and imports them into a Script TOP for use in the TD network.
 
 Switching modes triggers a full cleanup of the current state and lazy re-initialization on the next frame. In Receiver mode, the `Numslots` parameter is locked and read-only — the slot count is determined by the sender's shared memory protocol and automatically reflected in the parameter display.
 
@@ -174,26 +174,26 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `CUDAIPCLink_v1.4.1.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.5.1.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
 5. Toggle **Active** = On.
 6. In Python, install `cuda-link` and connect:
    ```python
-   from cuda_link import CUDAIPCImporter
-   importer = CUDAIPCImporter(shm_name="my_pipeline")
-   frame = importer.get_frame()          # torch.Tensor on GPU (zero-copy)
-   frame_np = importer.get_frame_numpy() # numpy array (CPU copy)
+   from cuda_link import Importer, ImportSpec, ImportOutcome
+   importer = Importer.open(ImportSpec(shm_name="my_pipeline"))
+   result = importer.get_frame()          # ImportResult; .frame is torch.Tensor (zero-copy)
+   result_np = importer.get_frame_numpy() # ImportResult; .frame is numpy array (CPU copy)
    ```
 
 ### Python → TD (Receiver mode)
 
 1. In Python, create an exporter:
    ```python
-   from cuda_link import CUDAIPCExporter
-   exporter = CUDAIPCExporter(shm_name="ai_output", width=1920, height=1080)
-   exporter.export_frame(gpu_tensor)
+   from cuda_link import Exporter, FrameSpec, GpuFrame
+   exporter = Exporter.open(FrameSpec(shm_name="ai_output", width=1920, height=1080))
+   exporter.export(GpuFrame(ptr=gpu_tensor.data_ptr(), size=gpu_tensor.nbytes))
    ```
 2. Drop the component into TD and set **Mode** = `Receiver`.
 3. Set **Ipcmemname** to the same name (`ai_output`).

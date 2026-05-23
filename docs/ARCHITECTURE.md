@@ -589,4 +589,4 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 ---
 
 **Last Updated**: 2026-05-09
-**Version**: 1.2.1
+**Version**: 1.5.1

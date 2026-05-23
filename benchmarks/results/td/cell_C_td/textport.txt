@@ -1,0 +1,25 @@
+TouchDesigner  Build 2025.32820
+# Capture: Cell C-td — TD Sender, graphs=OFF, 1920×1080 float32
+# Session: 2026-05-22  CUDALINK_EXPORT_PROFILE=1  CUDALINK_TD_USE_GRAPHS=0
+# 21 FrameProfile lines emitted (Frame 97 → Frame 2134); last 4 shown below.
+# Sender runs on CUDA_Link_Example.toe (TD-A); consumer is probe_consumer.toe (TD-B).
+
+[CUDAIPC] cudart loaded: C:\Program Files\Derivative\TouchDesigner.2025.32820\bin\cudart64_12.dll
+[CUDAIPCExtension:Sender] [GRAPHS_INIT] _use_graphs=False (config.use_graphs=False, CUDALINK_TD_USE_GRAPHS env=0)
+[CUDAIPCExtension:Sender] Extension initialized on /project1/CUDAIPCLink_to_Touchdesigner [Mode: Sender]
+[CUDAIPCExtension:Sender] Parameter 'Active' changed: False -> True
+[CUDAIPCExtension:Sender] Component activated
+[CUDAIPCExtension:Sender] Sender mode ready - will initialize on first frame export
+[CUDAIPCExtension:Sender] Created IPC stream (pre-init, normal-priority): 0x...
+[CUDAIPCExtension:Sender] [ACTIVATION_BARRIER] held +1 (count=1) for Sender init
+[CUDAIPCExtension:Sender] Loaded CUDA runtime on device 0
+[CUDAIPCExtension:Sender] Allocated GPU buffer slot 0/1/2: 32.0 MB each (1920x1080x4 float32)
+[CUDAIPCExtension:Sender] [IPC-HEX] slot0 mem handle prefix: d06fe2e54e0200005098000000000000...
+[CUDAIPCExtension:Sender] Wrote all IPC handles v1 to SharedMemory (433 bytes total)
+[CUDAIPCExtension:Sender] Wrote metadata: 1920x1080x4, kind=2 bits=32 flags=0x0000, size=33177600B
+[CUDAIPCExtension:Sender] FIRST FRAME: cudaMemory=632.1us, memcpy=57.6us, total=13035.4us, res=1920x1080, size=31.6MB
+[CUDAIPCExtension:Sender] [ACTIVATION_BARRIER] released after 30-frame settle (count now 0)
+[CUDAIPCExtension:Sender] Frame 1843: slot 1, avg cudaMemory=80.3us, avg memcpy=27.8us, record=4.2us, total=182.4us, mode=GPU-Events[3], graphs=OFF, GPU memcpy=28.4us (actual GPU time) | [PROFILE] pre=11.3us interop=80.3us post=11.2us memcpy=27.8us record=4.2us sync=0.0us sticky=1.7us flush_probe=2.6us shm=5.8us unacc=6.3us
+[CUDAIPCExtension:Sender] Frame 1940: slot 2, avg cudaMemory=80.5us, avg memcpy=27.7us, record=4.2us, total=182.2us, mode=GPU-Events[3], graphs=OFF, GPU memcpy=28.4us (actual GPU time) | [PROFILE] pre=11.3us interop=80.5us post=10.9us memcpy=27.7us record=4.2us sync=0.0us sticky=1.7us flush_probe=2.6us shm=5.8us unacc=6.3us
+[CUDAIPCExtension:Sender] Frame 2037: slot 0, avg cudaMemory=80.7us, avg memcpy=27.8us, record=4.2us, total=182.6us, mode=GPU-Events[3], graphs=OFF, GPU memcpy=28.4us (actual GPU time) | [PROFILE] pre=11.3us interop=80.7us post=10.7us memcpy=27.8us record=4.2us sync=0.0us sticky=1.7us flush_probe=2.7us shm=5.9us unacc=6.2us
+[CUDAIPCExtension:Sender] Frame 2134: slot 1, avg cudaMemory=81.1us, avg memcpy=27.8us, record=4.2us, total=182.5us, mode=GPU-Events[3], graphs=OFF, GPU memcpy=28.4us (actual GPU time) | [PROFILE] pre=11.3us interop=81.1us post=10.4us memcpy=27.8us record=4.2us sync=0.0us sticky=1.7us flush_probe=2.7us shm=5.9us unacc=6.2us

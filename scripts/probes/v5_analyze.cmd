@@ -43,17 +43,31 @@ IF NOT EXIST "%CONS_OUT%\td_consumer.nsys-rep" (
 )
 
 :: --- export SQLite (nsys 2026+ syntax) ----------------------------------------
-:: Skip if SQLite already exists -- nsys export exits 1 on existing files (no skip behaviour).
+:: Skip only if SQLite is NEWER than (or same age as) the .nsys-rep.
+:: If the .sqlite predates the .nsys-rep (fresh capture over old artefacts),
+:: delete and re-export — otherwise nsys stats refuses to use the stale file.
 ECHO.
 IF EXIST "%PROD_OUT%\producer.sqlite" (
-    ECHO [INFO] SQLite already exists for producer, skipping export.
+    powershell -NoProfile -Command ^
+      "if ((Get-Item '%PROD_OUT%\producer.sqlite').LastWriteTime -lt (Get-Item '%PROD_OUT%\producer.nsys-rep').LastWriteTime) { Remove-Item '%PROD_OUT%\producer.sqlite'; exit 1 } exit 0" && (
+        ECHO [INFO] SQLite is current for producer, skipping export.
+    ) || (
+        ECHO [INFO] Stale SQLite detected for producer, re-exporting...
+        nsys export --type sqlite --output "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
+    )
 ) ELSE (
     ECHO [INFO] Exporting SQLite (producer^)...
     nsys export --type sqlite --output "%PROD_OUT%\producer.sqlite" "%PROD_OUT%\producer.nsys-rep"
 )
 
 IF EXIST "%CONS_OUT%\td_consumer.sqlite" (
-    ECHO [INFO] SQLite already exists for consumer, skipping export.
+    powershell -NoProfile -Command ^
+      "if ((Get-Item '%CONS_OUT%\td_consumer.sqlite').LastWriteTime -lt (Get-Item '%CONS_OUT%\td_consumer.nsys-rep').LastWriteTime) { Remove-Item '%CONS_OUT%\td_consumer.sqlite'; exit 1 } exit 0" && (
+        ECHO [INFO] SQLite is current for consumer, skipping export.
+    ) || (
+        ECHO [INFO] Stale SQLite detected for consumer, re-exporting...
+        nsys export --type sqlite --output "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
+    )
 ) ELSE (
     ECHO [INFO] Exporting SQLite (consumer^)...
     nsys export --type sqlite --output "%CONS_OUT%\td_consumer.sqlite" "%CONS_OUT%\td_consumer.nsys-rep"
@@ -91,8 +105,8 @@ IF %ERRORLEVEL% NEQ 0 (
 ECHO.
 ECHO [INFO] Exporting nsys stats CSVs...
 SET "STAT_REPORTS=nvtx_sum,cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_size_sum,cuda_gpu_mem_time_sum,wddm_queue_sum"
-nsys stats --format csv --report %STAT_REPORTS% --output "%PROD_OUT%\producer" "%PROD_OUT%\producer.nsys-rep"
-nsys stats --format csv --report %STAT_REPORTS% --output "%CONS_OUT%\td_consumer" "%CONS_OUT%\td_consumer.nsys-rep"
+nsys stats --force-export=true --format csv --report %STAT_REPORTS% --output "%PROD_OUT%\producer" "%PROD_OUT%\producer.nsys-rep"
+nsys stats --force-export=true --format csv --report %STAT_REPORTS% --output "%CONS_OUT%\td_consumer" "%CONS_OUT%\td_consumer.nsys-rep"
 
 ECHO.
 ECHO ============================================================
