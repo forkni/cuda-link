@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-05-22
+
+### Added
+
+- **TD→Python receiver example** (`td_exporter/example_receiver_python.py` +
+  `td_exporter/example_receiver_launcher.py`) — complete example for receiving RGBA
+  frames from a TouchDesigner `CUDAIPCLink_to_Python` Sender COMP into a Python
+  subprocess. Mirrors the existing Python→TD sender pair. Launch via the Execute DAT
+  or run `python td_exporter/example_receiver_python.py` directly.
+
+- **Receiver example env-var overrides** — all receiver knobs configurable without
+  editing the script:
+
+  | Variable | Default | Effect |
+  |---|---|---|
+  | `CUDALINK_RECEIVER_SHM_NAME` | `cudalink_input_ipc` | IPC channel name |
+  | `CUDALINK_RECEIVER_DEVICE` | `0` | GPU device index |
+  | `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout ms |
+  | `CUDALINK_RECEIVER_REPORT_EVERY` | `150` | Frames between status prints |
+  | `CUDALINK_RECEIVER_FRAME_MODE` | `torch` | Frame-fetch mode: `numpy` / `torch` / `cupy` |
+
+- **Per-call `get_frame()` timing in receiver example** — each status line now
+  includes a running `get_frame avg` µs figure. On exit a perf-summary line prints
+  `mode=<mode>  get_frame avg/min/max µs  (n=<frames>)` for direct A/B comparison
+  across frame modes.
+
+- **`CUDALINK_RECEIVER_PYTHON_EXE` env var + Windows Python Launcher auto-detection**
+  in the receiver Execute DAT launcher. At DAT load time the launcher queries
+  `py -3 -c "import sys; print(sys.executable)"` to resolve the registered system
+  Python 3 path, ensuring third-party packages (torch, cupy) are found. Override
+  with `CUDALINK_RECEIVER_PYTHON_EXE=<full path>` before launching TouchDesigner.
+  The resolved path is printed on each `onStart()`.
+
+### Fixed
+
+- **`SetConsoleCtrlHandler` argtype crash in example scripts** — `c_void_p` is now
+  used for the `PHANDLER_ROUTINE` argument position (previously `_HandlerRoutine`,
+  a strict `WINFUNCTYPE` subclass). `ctypes` rejected `None` for a strict `WINFUNCTYPE`
+  argtype, causing a module-import crash when `SetConsoleCtrlHandler(None, False)` was
+  called to re-enable Ctrl+C in the new process group. Fixed in both
+  `example_sender_python.py` and `example_receiver_python.py`.
+
+- **Graceful fallback to numpy when torch/cupy is not installed** — the receiver
+  example previously exited with a hard `RuntimeError` if `get_frame()` could not
+  find `torch`/`cupy`. It now pre-flights the import and silently falls back to
+  `get_frame_numpy()` with a one-line warning, keeping the example functional in
+  environments without GPU ML libraries.
+
+- **Receiver launcher uses system Python, not PATH `python`** — the Execute DAT
+  previously called `["python", script]`, which could resolve to TD's bundled Python
+  (no third-party packages). Auto-detection via `py -3` now finds the registered
+  system Python 3 at DAT load time.
+
+### Changed
+
+- **TD-side CUDA Graphs disabled by default** (`TDSenderConfig.use_graphs=False`,
+  `CUDALINK_TD_USE_GRAPHS` default `"1"` → `"0"`). Per-frame receiver timing shows
+  the graph-launch path provides negligible benefit at WDDM-bound 60 FPS
+  (`cudaMemory ≈ 97 µs` with or without graphs at 1920×1080 uint8). Set
+  `CUDALINK_TD_USE_GRAPHS=1` to opt back in. Reverses the v1.5.0 default-ON
+  decision; prior benchmark analysis is preserved in
+  `docs/perf/graphs-benchmark-v1.5.md`.
+
+- **Receiver example defaults to `CUDALINK_RECEIVER_FRAME_MODE=torch`** (zero-copy
+  GPU tensor path). Previously defaulted to `numpy` (D2H copy, ≈ 4 ms avg at
+  1920×1080 uint8). Set to `numpy` for the D2H path or `cupy` for CuPy zero-copy.
+
 ## [1.5.0] — 2026-05-21
 
 ### Breaking changes

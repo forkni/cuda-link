@@ -96,6 +96,14 @@ The benchmark meets the ±2% threshold from the plan: Cell B is −3.4 % vs Cell
 the decision tree: "Cell D ties (±2%) but doesn't regress → keep ON." The
 qualitative TD-side evidence and zero regressions across soak confirm the call.
 
+> **Post-v1.5.0 update (2026-05-22):** `CUDALINK_TD_USE_GRAPHS` default subsequently
+> flipped to `0` (OFF). Per-frame receiver timing at WDDM-bound 60 FPS showed
+> negligible TD-side benefit (`cudaMemory ≈ 97 µs` with or without graphs at
+> 1920×1080 uint8). The v1.5.0 analysis above is accurate for its measurement
+> conditions; the flip reflects a conservative default preference over marginal gain.
+> Set `CUDALINK_TD_USE_GRAPHS=1` to restore the ON behaviour. Python-side
+> `CUDALINK_USE_GRAPHS` default is unchanged (still `1`).
+
 ## Out of scope / future work
 
 - Per-region timing breakdown (`CUDALINK_EXPORT_PROFILE=1`) comparing graphs ON/OFF —

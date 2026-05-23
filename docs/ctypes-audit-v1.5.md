@@ -259,7 +259,9 @@ Note: CUDA 10.x used a slightly different `cudaPointerAttributes` that included 
 
 Within the three audited files (`cuda_ipc_wrapper.py`, `cuda_runtime_types.py`, `cuda_graphs.py`): no `CFUNCTYPE`, `WINFUNCTYPE`, or any ctypes callback type is used. There is no GIL re-entry risk from callbacks in these files.
 
-**Repo-wide note:** `td_exporter/example_sender_python.py` defines a `WINFUNCTYPE` callback at module scope for `SetConsoleCtrlHandler` (line 62: `_HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)`). The callback object is stored in a module-level variable (`_ctrl_handler`) to prevent garbage collection during the process lifetime — this is the required pattern for `SetConsoleCtrlHandler` callbacks and is correctly implemented. This file is a standalone TD-only sender script, outside the three-file canonical audit scope.
+**Repo-wide note:** `td_exporter/example_sender_python.py` defines a `WINFUNCTYPE` callback at module scope for `SetConsoleCtrlHandler` (line 62: `_HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)`). The callback object is stored in a module-level variable (`_ctrl_handler`) to prevent garbage collection during the process lifetime — this is the required pattern for `SetConsoleCtrlHandler` callbacks and is correctly implemented. This file is a standalone TD-only sender script, outside the three-file canonical audit scope.
+
+> **v1.5.1 follow-up (commit E3 regression fix):** The E3 audit fix set `argtypes = [_HandlerRoutine, _wintypes.BOOL]` on `SetConsoleCtrlHandler`. The strict `WINFUNCTYPE` argtype refuses `None`, immediately breaking the next line — the documented `SetConsoleCtrlHandler(NULL, FALSE)` call that re-enables Ctrl+C delivery to `CREATE_NEW_PROCESS_GROUP` children. The fix: use `ctypes.c_void_p` for the `PHANDLER_ROUTINE` argtype instead of `_HandlerRoutine`. `c_void_p` accepts both `None` (→ NULL) and `WINFUNCTYPE` instances (same pointer ABI), preserving the spirit of E3 while supporting the documented NULL-handler call. See `td_exporter/example_sender_python.py:64-66`.
 
 ---
 
