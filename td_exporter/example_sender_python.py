@@ -91,7 +91,7 @@ def _do_cleanup() -> None:
     # state. cudaFree on the staging buffer implicitly synchronises the device and
     # blocks until the queue drains — which never happens in that state, causing a
     # 30+ s hang. Wrap in a daemon thread with a 0.5 s watchdog; same pattern as
-    # cuda_ipc_exporter.cleanup() Step 6. The 1 MB staging buffer is reclaimed by
+    # Exporter.close() Step 6. The 1 MB staging buffer is reclaimed by
     # the OS on process exit, so leaking it here is harmless.
     if _staging_ptr_ref is not None and _cuda_ref is not None:
 
@@ -107,24 +107,23 @@ def _do_cleanup() -> None:
         if t.is_alive():
             print("[sender] cudaFree(staging) timed out — OS will reclaim on process exit", flush=True)
 
-    # Under ncu kernel-replay, Steps 1c/2/3 of exporter.cleanup()
+    # Under ncu kernel-replay, Steps 1c/2/3 of Exporter.close()
     # (graph_exec_destroy, destroy_event, destroy_stream) can block on a
     # paused command queue. Bound total cleanup time so main returns and
-    # ncu finalizes. Same pattern as staging watchdog above and
-    # cuda_ipc_exporter.cleanup() Step 6.
+    # ncu finalizes. Same pattern as staging watchdog above.
     if _exporter_ref is not None:
 
         def _do_exporter_cleanup() -> None:
             try:
-                _exporter_ref.cleanup()
+                _exporter_ref.close()
             except Exception as exc:
-                print(f"[sender] cleanup: exporter.cleanup error: {exc}", flush=True)
+                print(f"[sender] cleanup: exporter.close error: {exc}", flush=True)
 
         t = threading.Thread(target=_do_exporter_cleanup, daemon=True)
         t.start()
         t.join(timeout=3.0)
         if t.is_alive():
-            print("[sender] exporter.cleanup() timed out — OS will reclaim resources on process exit", flush=True)
+            print("[sender] exporter.close() timed out — OS will reclaim resources on process exit", flush=True)
 
 
 if sys.platform == "win32":
@@ -230,16 +229,18 @@ def main() -> None:
     global _cuda_ref, _exporter_ref, _staging_ptr_ref
     # Ensure cuda_link is importable — try src/ relative to this script
     try:
-        from cuda_link import CUDAIPCExporter
+        from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+        from cuda_link.exporter import Exporter
     except ImportError:
         src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
         src_dir = os.path.normpath(src_dir)
         if src_dir not in sys.path:
             sys.path.insert(0, src_dir)
         try:
-            from cuda_link import CUDAIPCExporter
+            from cuda_link import FrameSpec, GpuFrame
             from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
+            from cuda_link.exporter import Exporter
         except ImportError:
             print(f"[sender] ERROR: cuda_link not found. Searched: {src_dir}")
             print("[sender]   Run: pip install cuda-link  (from the project root)")
@@ -258,22 +259,23 @@ def main() -> None:
     print("  TD: CUDAIPCLink_from_Python  Mode=Receiver  Active=ON")
     print()
 
-    exporter = CUDAIPCExporter(
-        shm_name=SHM_NAME,
-        height=HEIGHT,
-        width=WIDTH,
-        channels=4,
-        dtype=DTYPE,
-        num_slots=NUM_SLOTS,
-        debug=False,
-    )
+    try:
+        exporter = Exporter.open(
+            FrameSpec(
+                shm_name=SHM_NAME,
+                height=HEIGHT,
+                width=WIDTH,
+                channels=4,
+                dtype=DTYPE,
+                num_slots=NUM_SLOTS,
+            )
+        )
+    except Exception as exc:
+        print(f"[sender] ERROR: Exporter.open() failed: {exc}")
+        sys.exit(1)
     _exporter_ref = exporter
 
-    if not exporter.initialize():
-        print("[sender] ERROR: exporter.initialize() failed.")
-        sys.exit(1)
-
-    graphs_active = bool(getattr(exporter, "_use_graphs", False) and not getattr(exporter, "_graphs_disabled", False))
+    graphs_active = bool(exporter._policy.use_graphs and not exporter._graphs_disabled)
     graphs_label = "ON" if graphs_active else "OFF"
     profile_on = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
     env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
@@ -303,10 +305,7 @@ def main() -> None:
             color = _COLORS[color_idx]
 
             _fill_ctypes(cuda, staging_ptr, exporter.data_size, color)
-            exporter.export_frame(
-                gpu_ptr=int(staging_ptr.value),
-                size=exporter.data_size,
-            )
+            exporter.export(GpuFrame(ptr=int(staging_ptr.value), size=exporter.data_size))
             frame_count += 1
 
             now = time.perf_counter()
