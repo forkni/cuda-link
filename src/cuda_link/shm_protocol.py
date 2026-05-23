@@ -77,7 +77,20 @@ _ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_
 # On x86/x64 plain stores are TSO-ordered by hardware, but CPython provides no
 # compiler-level guarantee between two separate bytearray writes. threading.Lock
 # acquire/release issues OS-level memory barriers on all supported platforms,
-# providing the needed release semantics. Cost: ~80ns.
+# providing the needed release semantics.
+#
+# CPython internals: PyThread_release_lock() calls pthread_mutex_unlock() on
+# POSIX and WakeAllConditionVariable() / ReleaseMutex() on Windows — both
+# emit a full store-fence before the unlock. The Python language spec does not
+# guarantee this, but CPython 3.x documents it via the GIL memory-model notes
+# (https://docs.python.org/3/c-api/init.html#thread-state-and-the-global-interpreter-lock).
+#
+# Cost: ~80 ns — below the noise floor of a single cudaMemcpyAsync call
+# (~500 ns on the same machine), so the fence adds no perceptible latency.
+#
+# PEP 703 (free-threaded Python, 3.13+): without the GIL, the same OS barrier
+# semantics still hold for threading.Lock, but the per-thread store buffer
+# assumptions change. Re-evaluate if this codebase targets nogil builds.
 
 _fence_lock = threading.Lock()
 
@@ -116,6 +129,19 @@ class SHMLayout:
     @property
     def total_size(self) -> int:
         return self.timestamp_offset + TIMESTAMP_SIZE
+
+    def build_buffer(self, *, version: int = 1, write_idx: int = 0) -> bytearray:
+        """Allocate a SHM-sized bytearray with the 20-byte header packed in.
+
+        Test factories and out-of-process probes use this; production callers use
+        publish_frame / bump_version against an existing mmap buffer.
+        """
+        buf = bytearray(self.total_size)
+        _ST_U32.pack_into(buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+        _ST_U64.pack_into(buf, VERSION_OFFSET, version)
+        _ST_U32.pack_into(buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, write_idx)
+        return buf
 
 
 # ---------------------------------------------------------------------------

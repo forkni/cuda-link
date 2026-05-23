@@ -6,7 +6,7 @@ Provides ctypes interface to CUDA Runtime API for inter-process communication.
 Compatible with both TouchDesigner and Python processes.
 
 Requirements:
-- CUDA 12.x runtime (cudart64_12.dll)
+- CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll / cudart64_110.dll accepted as fallback)
 - Windows operating system
 - Same GPU visible to both processes
 """
@@ -18,7 +18,19 @@ import logging
 import os
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
+try:
+    from cuda_link._env import env_bool
+except (ImportError, ModuleNotFoundError):
+    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+
 _logger = logging.getLogger(__name__)
+
+if os.name == "nt":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+else:
+    _kernel32 = None
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
@@ -91,11 +103,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.device = device
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
+        # Must follow _setup_function_signatures() so cudart argtypes are already wired.
+        self._drv: ctypes.CDLL | None = self._load_driver_api()
         # Establish CUDA primary context on the requested device.
+        # Must run AFTER _setup_function_signatures() (argtypes needed) but as the
+        # very next statement — ensures context exists before any IPC handle operation.
         # Prevents cudaIpcOpenMemHandle error 400 when a second cudart DLL is loaded
         # alongside torch (which has its own bundled cudart). Each DLL instance needs
         # its own context initialized before IPC handle operations can succeed.
-        self.cudart.cudaSetDevice(device)
+        self.cudart.cudaSetDevice(c_int(device))
 
         if os.environ.get("CUDA_LAUNCH_BLOCKING") == "1":
             _logger.warning(
@@ -104,7 +121,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             )
 
         # Default ON; set CUDALINK_STICKY_ERROR_CHECK=0 to skip the cudaPeekAtLastError call.
-        self._sticky_check_enabled: bool = os.environ.get("CUDALINK_STICKY_ERROR_CHECK", "1") != "0"
+        self._sticky_check_enabled: bool = env_bool("CUDALINK_STICKY_ERROR_CHECK", default=True)
 
     def _load_cuda_runtime(self) -> ctypes.CDLL:
         """Load CUDA runtime DLL.
@@ -119,16 +136,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # torch), Windows returns the cached handle — ensuring we share the same
         # runtime instance and CUDA context. Loading by full path can create a second
         # independent instance with its own state, breaking cross-process IPC.
-        # cudart64_110.dll is preferred for bisect testing (W1): reverts the 12.x
-        # preference introduced in 4695d8f to test whether cudart64_12 ABI is the
-        # driver-error amplifier on WDDM.
-        dll_names = ["cudart64_110.dll", "cudart64_12.dll", "cudart64_11.dll"]
+        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
+        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
                 self._log_dll_path(dll, name)
                 return dll
-            except OSError:
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
                 continue
 
         # Fallback: try full toolkit paths when not already in PATH
@@ -141,10 +158,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
-                    dll = ctypes.CDLL(dll_path)
+                    dll = ctypes.CDLL(dll_path, winmode=0)
                     self._log_dll_path(dll, dll_path)
                     return dll
-                except OSError:
+                except OSError as e:
+                    _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
                     continue
 
         raise RuntimeError(
@@ -155,14 +173,51 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
     @staticmethod
     def _log_dll_path(dll: ctypes.CDLL, hint: str) -> None:
-        """Log the resolved filesystem path of a loaded DLL (Windows only)."""
+        """Print the resolved filesystem path of a loaded DLL (Windows only).
+
+        Always prints (not gated on debug level) so each TD process textport
+        shows which cudart DLL it loaded — critical for diagnosing cross-process
+        IPC handle mismatches when two TD instances pick different DLL versions.
+        """
+        if _kernel32 is None:
+            print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # GetModuleFileNameW needs HMODULE as c_void_p to avoid 32-bit overflow
-            ctypes.windll.kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            _logger.debug("Loaded CUDA runtime: %s", buf.value)
+            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
+            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
         except (OSError, AttributeError) as e:
-            _logger.debug("Could not log DLL path: %s", e)
+            print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
+
+    def _load_driver_api(self) -> ctypes.CDLL | None:
+        """Load nvcuda.dll (CUDA Driver API) and bind the 5 context-management symbols.
+
+        Returns the loaded DLL, or None if unavailable (Linux, driver not installed).
+        Failure is non-fatal: set_device() falls back to the runtime-API path.
+        """
+        try:
+            drv = ctypes.CDLL("nvcuda.dll")
+        except OSError:
+            _logger.debug("nvcuda.dll unavailable; driver-API context switch will not be used")
+            return None
+
+        drv.cuInit.argtypes = [c_uint]
+        drv.cuInit.restype = c_int
+        drv.cuDeviceGet.argtypes = [POINTER(c_int), c_int]
+        drv.cuDeviceGet.restype = c_int
+        drv.cuDevicePrimaryCtxRetain.argtypes = [POINTER(c_void_p), c_int]
+        drv.cuDevicePrimaryCtxRetain.restype = c_int
+        drv.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
+        drv.cuCtxGetCurrent.restype = c_int
+        drv.cuCtxSetCurrent.argtypes = [c_void_p]
+        drv.cuCtxSetCurrent.restype = c_int
+
+        r = drv.cuInit(0)
+        if r != 0:
+            _logger.warning("cuInit returned %d; driver-API context switch will not be used", r)
+            return None
+
+        return drv
 
     def _setup_function_signatures(self) -> None:
         """Define function signatures for CUDA runtime functions."""
@@ -419,6 +474,49 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # Updates the event waited on by an event-wait node. CUDA 11.4+.
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
         self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
+        self._install_errcheck()
+
+    def _install_errcheck(self) -> None:
+        """Install ctypes errcheck on all cudart functions that always treat non-zero as fatal.
+
+        Exempted: cudaGetErrorString (c_char_p restype), cudaEventQuery/cudaStreamQuery
+        (poll sentinels that allow cudaErrorNotReady), cudaGetLastError/cudaPeekAtLastError
+        (read the sticky-error value, raising would defeat their purpose).
+        """
+        cudart = self.cudart
+
+        def _strict_errcheck(result, func, _args):
+            if result != 0:
+                cstr = cudart.cudaGetErrorString(result)
+                error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
+                raise RuntimeError(f"CUDA {func.__name__} failed: {error_str} (code {result})")
+            return result
+
+        _strict_funcs = (
+            "cudaMalloc", "cudaFree", "cudaMallocHost", "cudaFreeHost", "cudaMemcpy",
+            "cudaIpcGetMemHandle", "cudaIpcOpenMemHandle", "cudaIpcCloseMemHandle",
+            "cudaIpcGetEventHandle", "cudaIpcOpenEventHandle",
+            "cudaEventCreateWithFlags", "cudaEventRecord", "cudaEventSynchronize",
+            "cudaEventDestroy", "cudaEventElapsedTime",
+            "cudaDeviceSynchronize",
+            "cudaHostRegister", "cudaHostUnregister",
+            "cudaStreamCreateWithFlags", "cudaStreamDestroy",
+            "cudaStreamWaitEvent", "cudaStreamSynchronize",
+            "cudaMemcpyAsync", "cudaMemGetInfo",
+            "cudaSetDevice", "cudaGetDevice",
+            "cudaDeviceCanAccessPeer", "cudaDeviceGetStreamPriorityRange",
+            "cudaStreamCreateWithPriority",
+            "cudaPointerGetAttributes",
+            "cudaHostAlloc", "cudaDeviceGetAttribute",
+            "cudaStreamBeginCapture", "cudaStreamEndCapture",
+            "cudaGraphInstantiateWithFlags", "cudaGraphLaunch",
+            "cudaGraphDestroy", "cudaGraphExecDestroy",
+            "cudaGraphGetNodes", "cudaRuntimeGetVersion",
+            "cudaGraphExecMemcpyNodeSetParams", "cudaGraphExecMemcpyNodeSetParams1D",
+            "cudaGraphExecEventRecordNodeSetEvent", "cudaGraphExecEventWaitNodeSetEvent",
+        )
+        for fname in _strict_funcs:
+            getattr(cudart, fname).errcheck = _strict_errcheck
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
@@ -431,7 +529,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If result indicates an error
         """
         if result != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(result).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(result)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
 
@@ -454,7 +553,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             return
         code = int(self.cudart.cudaPeekAtLastError())
         if code != CUDAError.SUCCESS:
-            error_str = self.cudart.cudaGetErrorString(code).decode("utf-8")
+            cstr = self.cudart.cudaGetErrorString(code)
+            error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {code}"
             _logger.warning(
                 "Sticky CUDA error detected after %s: %s (code %d). "
                 "The CUDA context is poisoned — restart the process. "
@@ -480,8 +580,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If registration fails
         """
-        result = self.cudart.cudaHostRegister(c_void_p(ptr), c_size_t(size), c_uint(flags))
-        self.check_error(result, "cudaHostRegister")
+        self.cudart.cudaHostRegister(c_void_p(ptr), c_size_t(size), c_uint(flags))
 
     def host_unregister(self, ptr: int) -> None:
         """Unregister a page-locked host allocation registered with host_register().
@@ -492,8 +591,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If unregistration fails
         """
-        result = self.cudart.cudaHostUnregister(c_void_p(ptr))
-        self.check_error(result, "cudaHostUnregister")
+        self.cudart.cudaHostUnregister(c_void_p(ptr))
 
     # High-level API
 
@@ -510,8 +608,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If allocation fails
         """
         dev_ptr = c_void_p()
-        result = self.cudart.cudaMalloc(byref(dev_ptr), size)
-        self.check_error(result, "cudaMalloc")
+        self.cudart.cudaMalloc(byref(dev_ptr), size)
         return dev_ptr
 
     def free(self, dev_ptr: c_void_p) -> None:
@@ -523,8 +620,42 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If free fails
         """
-        result = self.cudart.cudaFree(dev_ptr)
-        self.check_error(result, "cudaFree")
+        self.cudart.cudaFree(dev_ptr)
+
+    def set_device(self, device: int) -> int:
+        """Switch the calling thread to the device's CUDA primary context.
+
+        Uses the driver API (nvcuda.dll) to save the current context and install
+        the primary context, ensuring cudaMalloc allocates in a context whose IPC
+        handles are portable to other processes.
+
+        On systems where nvcuda.dll is unavailable, falls back to the runtime-API
+        cudaSetDevice (handles the empty-driver-stack case only).
+
+        Returns an opaque integer token for restore_context(). The caller must
+        call restore_context() after the allocation block is complete.
+        """
+        if self._drv is not None:
+            cu_dev = c_int()
+            self._drv.cuDeviceGet(byref(cu_dev), device)
+            saved_ctx = c_void_p()
+            self._drv.cuCtxGetCurrent(byref(saved_ctx))
+            primary_ctx = c_void_p()
+            self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
+            self._drv.cuCtxSetCurrent(primary_ctx)
+            return saved_ctx.value or 0
+        # Fallback: runtime API only — effective when driver-API stack is empty
+        self.cudart.cudaSetDevice(c_int(device))
+        return 0
+
+    def restore_context(self, token: int) -> None:
+        """Restore the driver-API context saved by the preceding set_device() call.
+
+        token is the value returned by set_device(). No-op if the driver API was
+        unavailable (token will be 0 and self._drv will be None).
+        """
+        if self._drv is not None:
+            self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
 
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
@@ -546,8 +677,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If allocation fails
         """
         ptr = c_void_p()
-        result = self.cudart.cudaMallocHost(byref(ptr), size)
-        self.check_error(result, "cudaMallocHost")
+        self.cudart.cudaMallocHost(byref(ptr), size)
         return ptr
 
     def free_host(self, ptr: c_void_p) -> None:
@@ -559,8 +689,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If free fails
         """
-        result = self.cudart.cudaFreeHost(ptr)
-        self.check_error(result, "cudaFreeHost")
+        self.cudart.cudaFreeHost(ptr)
 
     def memcpy(self, dst: c_void_p, src: c_void_p, count: int, kind: int) -> None:
         """Copy memory (device-to-device, host-to-device, or device-to-host).
@@ -574,8 +703,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If copy fails
         """
-        result = self.cudart.cudaMemcpy(dst, src, count, kind)
-        self.check_error(result, "cudaMemcpy")
+        self.cudart.cudaMemcpy(dst, src, count, kind)
 
     def ipc_get_mem_handle(self, dev_ptr: c_void_p) -> cudaIpcMemHandle_t:
         """Get IPC handle for GPU memory.
@@ -593,8 +721,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If export fails
         """
         handle = cudaIpcMemHandle_t()
-        result = self.cudart.cudaIpcGetMemHandle(byref(handle), dev_ptr)
-        self.check_error(result, "cudaIpcGetMemHandle")
+        self.cudart.cudaIpcGetMemHandle(byref(handle), dev_ptr)
         return handle
 
     def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
@@ -611,8 +738,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If opening fails
         """
         dev_ptr = c_void_p()
-        result = self.cudart.cudaIpcOpenMemHandle(byref(dev_ptr), handle, flags)
-        self.check_error(result, "cudaIpcOpenMemHandle")
+        self.cudart.cudaIpcOpenMemHandle(byref(dev_ptr), handle, flags)
         return dev_ptr
 
     def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
@@ -624,8 +750,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If closing fails
         """
-        result = self.cudart.cudaIpcCloseMemHandle(dev_ptr)
-        self.check_error(result, "cudaIpcCloseMemHandle")
+        self.cudart.cudaIpcCloseMemHandle(dev_ptr)
 
     def synchronize(self) -> None:
         """Synchronize all CUDA operations on current device.
@@ -633,8 +758,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If synchronization fails
         """
-        result = self.cudart.cudaDeviceSynchronize()
-        self.check_error(result, "cudaDeviceSynchronize")
+        self.cudart.cudaDeviceSynchronize()
 
     # CUDA Event API (for async synchronization)
 
@@ -650,8 +774,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         event = CUDAEvent_t()
         # cudaEventInterprocess (4) | cudaEventDisableTiming (2) = 6
         # NVIDIA requires cudaEventDisableTiming when using cudaEventInterprocess
-        result = self.cudart.cudaEventCreateWithFlags(byref(event), 6)
-        self.check_error(result, "cudaEventCreateWithFlags")
+        self.cudart.cudaEventCreateWithFlags(byref(event), 6)
         return event
 
     def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
@@ -667,10 +790,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # Convert None to CUDA default stream (0) for ctypes compatibility
         if stream is None:
             stream = CUDAStream_t(0)
-        result = self.cudart.cudaEventRecord(event, stream)
-        self.check_error(result, "cudaEventRecord")
+        self.cudart.cudaEventRecord(event, stream)
 
-    def query_event(self, event: c_void_p) -> bool:
+    def query_event(self, event: CUDAEvent_t) -> bool:
         """Query if event has completed (non-blocking).
 
         Args:
@@ -699,8 +821,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If wait fails
         """
-        result = self.cudart.cudaEventSynchronize(event)
-        self.check_error(result, "cudaEventSynchronize")
+        self.cudart.cudaEventSynchronize(event)
 
     def ipc_get_event_handle(self, event: CUDAEvent_t) -> cudaIpcEventHandle_t:
         """Get IPC handle for event (for cross-process signaling).
@@ -715,8 +836,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If export fails
         """
         handle = cudaIpcEventHandle_t()
-        result = self.cudart.cudaIpcGetEventHandle(byref(handle), event)
-        self.check_error(result, "cudaIpcGetEventHandle")
+        self.cudart.cudaIpcGetEventHandle(byref(handle), event)
         return handle
 
     def ipc_open_event_handle(self, handle: cudaIpcEventHandle_t) -> CUDAEvent_t:
@@ -732,8 +852,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If opening fails
         """
         event = CUDAEvent_t()
-        result = self.cudart.cudaIpcOpenEventHandle(byref(event), handle)
-        self.check_error(result, "cudaIpcOpenEventHandle")
+        self.cudart.cudaIpcOpenEventHandle(byref(event), handle)
         return event
 
     def destroy_event(self, event: CUDAEvent_t) -> None:
@@ -745,8 +864,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If destruction fails
         """
-        result = self.cudart.cudaEventDestroy(event)
-        self.check_error(result, "cudaEventDestroy")
+        self.cudart.cudaEventDestroy(event)
 
     def create_timing_event(self) -> CUDAEvent_t:
         """Create CUDA event suitable for GPU timing (NOT for IPC).
@@ -764,8 +882,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         event = CUDAEvent_t()
         # flags=0 enables timing (no cudaEventDisableTiming, no cudaEventInterprocess)
-        result = self.cudart.cudaEventCreateWithFlags(byref(event), 0)
-        self.check_error(result, "cudaEventCreateWithFlags(timing)")
+        self.cudart.cudaEventCreateWithFlags(byref(event), 0)
         return event
 
     def create_sync_event(self) -> CUDAEvent_t:
@@ -785,8 +902,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         event = CUDAEvent_t()
         # cudaEventDisableTiming = 0x02 — optimal for ordering-only events
-        result = self.cudart.cudaEventCreateWithFlags(byref(event), 0x02)
-        self.check_error(result, "cudaEventCreateWithFlags(sync)")
+        self.cudart.cudaEventCreateWithFlags(byref(event), 0x02)
         return event
 
     def event_elapsed_time(self, start: CUDAEvent_t, end: CUDAEvent_t) -> float:
@@ -807,8 +923,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             Events with cudaEventDisableTiming flag cannot be used for timing.
         """
         elapsed_ms = c_float()
-        result = self.cudart.cudaEventElapsedTime(byref(elapsed_ms), start, end)
-        self.check_error(result, "cudaEventElapsedTime")
+        self.cudart.cudaEventElapsedTime(byref(elapsed_ms), start, end)
         return elapsed_ms.value
 
     def get_device(self) -> int:
@@ -821,8 +936,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If query fails
         """
         device = c_int()
-        result = self.cudart.cudaGetDevice(byref(device))
-        self.check_error(result, "cudaGetDevice")
+        self.cudart.cudaGetDevice(byref(device))
         return device.value
 
     def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
@@ -838,8 +952,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If stream creation fails
         """
         stream = CUDAStream_t()
-        result = self.cudart.cudaStreamCreateWithFlags(byref(stream), flags)
-        self.check_error(result, "cudaStreamCreateWithFlags")
+        self.cudart.cudaStreamCreateWithFlags(byref(stream), flags)
         return stream
 
     def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
@@ -862,12 +975,10 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         if priority is None:
             least = c_int()
             greatest = c_int()
-            result = self.cudart.cudaDeviceGetStreamPriorityRange(byref(least), byref(greatest))
-            self.check_error(result, "cudaDeviceGetStreamPriorityRange")
+            self.cudart.cudaDeviceGetStreamPriorityRange(byref(least), byref(greatest))
             priority = greatest.value
         stream = CUDAStream_t()
-        result = self.cudart.cudaStreamCreateWithPriority(byref(stream), flags, priority)
-        self.check_error(result, "cudaStreamCreateWithPriority")
+        self.cudart.cudaStreamCreateWithPriority(byref(stream), flags, priority)
         return stream
 
     def destroy_stream(self, stream: CUDAStream_t) -> None:
@@ -879,8 +990,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If destruction fails
         """
-        result = self.cudart.cudaStreamDestroy(stream)
-        self.check_error(result, "cudaStreamDestroy")
+        self.cudart.cudaStreamDestroy(stream)
 
     def stream_wait_event(self, stream: CUDAStream_t, event: CUDAEvent_t, flags: int = 0) -> None:
         """Make stream wait on event (GPU-side, non-blocking to CPU).
@@ -893,8 +1003,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If wait enqueue fails
         """
-        result = self.cudart.cudaStreamWaitEvent(stream, event, flags)
-        self.check_error(result, "cudaStreamWaitEvent")
+        self.cudart.cudaStreamWaitEvent(stream, event, flags)
 
     def stream_synchronize(self, stream: CUDAStream_t) -> None:
         """Wait for all operations on stream to complete (CPU-blocking).
@@ -905,8 +1014,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If synchronization fails
         """
-        result = self.cudart.cudaStreamSynchronize(stream)
-        self.check_error(result, "cudaStreamSynchronize")
+        self.cudart.cudaStreamSynchronize(stream)
 
     def memcpy_async(self, dst: c_void_p, src: c_void_p, count: int, kind: int, stream: CUDAStream_t) -> None:
         """Asynchronous memory copy on a stream.
@@ -921,8 +1029,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If async copy enqueue fails
         """
-        result = self.cudart.cudaMemcpyAsync(dst, src, count, kind, stream)
-        self.check_error(result, "cudaMemcpyAsync")
+        self.cudart.cudaMemcpyAsync(dst, src, count, kind, stream)
 
     def mem_get_info(self) -> tuple[int, int]:
         """Get free and total device memory in bytes.
@@ -935,8 +1042,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         free = c_size_t()
         total = c_size_t()
-        result = self.cudart.cudaMemGetInfo(byref(free), byref(total))
-        self.check_error(result, "cudaMemGetInfo")
+        self.cudart.cudaMemGetInfo(byref(free), byref(total))
         return free.value, total.value
 
     def stream_query(self, stream: CUDAStream_t) -> bool:
@@ -972,8 +1078,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If query fails (e.g., unregistered host pointer passed)
         """
         attrs = cudaPointerAttributes()
-        result = self.cudart.cudaPointerGetAttributes(byref(attrs), c_void_p(ptr))
-        self.check_error(result, "cudaPointerGetAttributes")
+        self.cudart.cudaPointerGetAttributes(byref(attrs), c_void_p(ptr))
         return attrs
 
     def device_can_access_peer(self, device: int, peer_device: int) -> bool:
@@ -994,8 +1099,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If query fails
         """
         can_access = c_int(0)
-        result = self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
-        self.check_error(result, "cudaDeviceCanAccessPeer")
+        self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
         return bool(can_access.value)
 
     # --- Phase 1: cudaHostAlloc (replaces cudaMallocHost with portable flag) ---
@@ -1022,8 +1126,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             RuntimeError: If allocation fails.
         """
         ptr = c_void_p()
-        result = self.cudart.cudaHostAlloc(byref(ptr), c_size_t(size), c_uint(flags))
-        self.check_error(result, "cudaHostAlloc")
+        self.cudart.cudaHostAlloc(byref(ptr), c_size_t(size), c_uint(flags))
         return ptr
 
     # --- Phase 0: device attribute query ---
@@ -1047,8 +1150,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         if device is None:
             device = self.device
         value = c_int()
-        result = self.cudart.cudaDeviceGetAttribute(byref(value), c_int(attr), c_int(device))
-        self.check_error(result, "cudaDeviceGetAttribute")
+        self.cudart.cudaDeviceGetAttribute(byref(value), c_int(attr), c_int(device))
         return value.value
 
 

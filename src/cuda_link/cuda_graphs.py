@@ -11,8 +11,8 @@ Compatible with both Python package and TD COMP namespace imports.
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import byref, c_int, c_size_t, c_void_p
+from ctypes import byref, c_int, c_size_t, c_uint64, c_void_p
+from typing import Any
 
 try:
     from cuda_link.cuda_runtime_types import (  # noqa: E402
@@ -46,6 +46,9 @@ class CUDAGraphsMixin:
     Requires self.cudart (cudart DLL handle) and self.check_error from the host class.
     """
 
+    cudart: Any
+    check_error: Any
+
     # --- Phase 2: CUDA Graph API wrappers ---
 
     def stream_begin_capture(self, stream: CUDAStream_t, mode: int = 0) -> None:
@@ -56,14 +59,22 @@ class CUDAGraphsMixin:
 
         Args:
             stream: Stream to capture.
-            mode:   cudaStreamCaptureMode — 0=global (safest), 1=thread_local,
-                    2=relaxed. Use 0 unless you know what you're doing.
+            mode:   cudaStreamCaptureMode integer value:
+                      0 = Global  — any CUDA op from any thread in the process
+                                    invalidates all ongoing captures. Only safe
+                                    when this is the sole library performing capture.
+                      1 = ThreadLocal — only ops from the calling thread can
+                                    invalidate; other threads see normal execution.
+                      2 = Relaxed — no automatic cross-stream invalidation.
+                                    Required when co-resident with TensorRT, CuPy
+                                    graphs, or PyTorch CUDA Graphs. Caller is
+                                    responsible for not enqueuing ops on the
+                                    captured stream from other threads during build.
 
         Raises:
             RuntimeError: If capture start fails (e.g., stream already capturing).
         """
-        result = self.cudart.cudaStreamBeginCapture(stream, c_int(mode))
-        self.check_error(result, "cudaStreamBeginCapture")
+        self.cudart.cudaStreamBeginCapture(stream, c_int(mode))
 
     def stream_end_capture(self, stream: CUDAStream_t) -> CUDAGraph_t:
         """End stream capture and return the captured graph.
@@ -82,8 +93,7 @@ class CUDAGraphsMixin:
             RuntimeError: If capture end fails.
         """
         graph = CUDAGraph_t()
-        result = self.cudart.cudaStreamEndCapture(stream, byref(graph))
-        self.check_error(result, "cudaStreamEndCapture")
+        self.cudart.cudaStreamEndCapture(stream, byref(graph))
         return graph
 
     def graph_instantiate(self, graph: CUDAGraph_t, flags: int = 0) -> CUDAGraphExec_t:
@@ -103,11 +113,8 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If instantiation fails.
         """
-        from ctypes import c_uint64
-
         graph_exec = CUDAGraphExec_t()
-        result = self.cudart.cudaGraphInstantiateWithFlags(byref(graph_exec), graph, c_uint64(flags))
-        self.check_error(result, "cudaGraphInstantiateWithFlags")
+        self.cudart.cudaGraphInstantiateWithFlags(byref(graph_exec), graph, c_uint64(flags))
         return graph_exec
 
     def graph_launch(self, graph_exec: CUDAGraphExec_t, stream: CUDAStream_t) -> None:
@@ -124,8 +131,7 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If launch fails.
         """
-        result = self.cudart.cudaGraphLaunch(graph_exec, stream)
-        self.check_error(result, "cudaGraphLaunch")
+        self.cudart.cudaGraphLaunch(graph_exec, stream)
 
     def graph_get_nodes(self, graph: CUDAGraph_t) -> list[CUDAGraphNode_t]:
         """Return all nodes in a graph in topological (capture) order.
@@ -144,11 +150,9 @@ class CUDAGraphsMixin:
             RuntimeError: If query fails.
         """
         count = c_size_t(0)
-        result = self.cudart.cudaGraphGetNodes(graph, None, byref(count))
-        self.check_error(result, "cudaGraphGetNodes (count)")
+        self.cudart.cudaGraphGetNodes(graph, None, byref(count))
         node_array = (CUDAGraphNode_t * count.value)()
-        result = self.cudart.cudaGraphGetNodes(graph, node_array, byref(count))
-        self.check_error(result, "cudaGraphGetNodes (fill)")
+        self.cudart.cudaGraphGetNodes(graph, node_array, byref(count))
         return list(node_array)
 
     def graph_destroy(self, graph: CUDAGraph_t) -> None:
@@ -160,8 +164,7 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If destruction fails.
         """
-        result = self.cudart.cudaGraphDestroy(graph)
-        self.check_error(result, "cudaGraphDestroy")
+        self.cudart.cudaGraphDestroy(graph)
 
     def graph_exec_destroy(self, graph_exec: CUDAGraphExec_t) -> None:
         """Destroy an executable graph and free its resources.
@@ -172,8 +175,7 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If destruction fails.
         """
-        result = self.cudart.cudaGraphExecDestroy(graph_exec)
-        self.check_error(result, "cudaGraphExecDestroy")
+        self.cudart.cudaGraphExecDestroy(graph_exec)
 
     @staticmethod
     def make_memcpy3d_params(dst: c_void_p, src: c_void_p, count: int, kind: int) -> cudaMemcpy3DParms:
@@ -197,7 +199,7 @@ class CUDAGraphsMixin:
         params.srcArray = None
         params.srcPos = cudaPos(0, 0, 0)
         params.srcPtr = cudaPitchedPtr(
-            ptr=ctypes.cast(src, c_void_p),
+            ptr=src,
             pitch=count,
             xsize=count,
             ysize=1,
@@ -205,7 +207,7 @@ class CUDAGraphsMixin:
         params.dstArray = None
         params.dstPos = cudaPos(0, 0, 0)
         params.dstPtr = cudaPitchedPtr(
-            ptr=ctypes.cast(dst, c_void_p),
+            ptr=dst,
             pitch=count,
             xsize=count,
             ysize=1,
@@ -242,8 +244,7 @@ class CUDAGraphsMixin:
             RuntimeError: If parameter update fails.
         """
         params = self.make_memcpy3d_params(dst, src, count, kind)
-        result = self.cudart.cudaGraphExecMemcpyNodeSetParams(graph_exec, node, byref(params))
-        self.check_error(result, "cudaGraphExecMemcpyNodeSetParams")
+        self.cudart.cudaGraphExecMemcpyNodeSetParams(graph_exec, node, byref(params))
 
     def graph_exec_memcpy_node_set_params_1d(
         self,
@@ -260,9 +261,9 @@ class CUDAGraphsMixin:
         (graph_exec_memcpy_node_set_params) returns INVALID_VALUE on 1D nodes.
         Requires CUDA 11.3+.
         """
-        dst_int = dst.value if isinstance(dst, c_void_p) else int(dst)
-        src_int = src.value if isinstance(src, c_void_p) else int(src)
-        result = self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
+        dst_int = int(dst.value)
+        src_int = int(src.value)
+        self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
             graph_exec,
             node,
             c_void_p(dst_int),
@@ -270,7 +271,6 @@ class CUDAGraphsMixin:
             c_size_t(count),
             c_int(kind),
         )
-        self.check_error(result, "cudaGraphExecMemcpyNodeSetParams1D")
 
     def graph_exec_event_record_node_set_event(
         self,
@@ -291,8 +291,7 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If update fails.
         """
-        result = self.cudart.cudaGraphExecEventRecordNodeSetEvent(graph_exec, node, event)
-        self.check_error(result, "cudaGraphExecEventRecordNodeSetEvent")
+        self.cudart.cudaGraphExecEventRecordNodeSetEvent(graph_exec, node, event)
 
     def graph_exec_event_wait_node_set_event(
         self,
@@ -310,8 +309,7 @@ class CUDAGraphsMixin:
         Raises:
             RuntimeError: If update fails.
         """
-        result = self.cudart.cudaGraphExecEventWaitNodeSetEvent(graph_exec, node, event)
-        self.check_error(result, "cudaGraphExecEventWaitNodeSetEvent")
+        self.cudart.cudaGraphExecEventWaitNodeSetEvent(graph_exec, node, event)
 
     def get_runtime_version(self) -> int:
         """Return the CUDA runtime version as an int.
@@ -321,6 +319,5 @@ class CUDAGraphsMixin:
         an older patch level (e.g., TouchDesigner ships ``cudart64_110.dll``).
         """
         version = c_int(0)
-        result = self.cudart.cudaRuntimeGetVersion(byref(version))
-        self.check_error(result, "cudaRuntimeGetVersion")
+        self.cudart.cudaRuntimeGetVersion(byref(version))
         return int(version.value)

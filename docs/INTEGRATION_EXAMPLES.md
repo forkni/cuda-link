@@ -30,7 +30,7 @@ import torch
 from cuda_link import CUDAIPCImporter
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="ai_input",
     shape=(512, 512, 4),  # RGBA
     dtype="float32",
@@ -101,7 +101,7 @@ import numpy as np
 from cuda_link import CUDAIPCImporter
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="cv_input",
     shape=(720, 1280, 4),  # 720p RGBA
     dtype="uint8",         # OpenCV expects uint8
@@ -156,13 +156,13 @@ import torch
 from cuda_link import CUDAIPCImporter
 
 # Initialize both importers
-main_importer = CUDAIPCImporter(
+main_importer = CUDAIPCImporter.from_connected(
     shm_name="main_input",
     shape=(512, 512, 4),
     dtype="float32"
 )
 
-cn_importer = CUDAIPCImporter(
+cn_importer = CUDAIPCImporter.from_connected(
     shm_name="controlnet_input",
     shape=(512, 512, 4),
     dtype="float32"
@@ -226,7 +226,7 @@ Select TOP → CUDAIPCExporter
 from cuda_link import CUDAIPCImporter
 
 # Start with initial resolution
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="dynamic_input",
     shape=(720, 1280, 4),  # Initial guess
     dtype="float32",
@@ -274,7 +274,7 @@ import signal
 import sys
 
 # Initialize importer
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="clean_shutdown",
     shape=(512, 512, 4),
     dtype="float32"
@@ -322,7 +322,7 @@ The manual script below is useful for quick ad-hoc profiling of the consumer sid
 import time
 from cuda_link import CUDAIPCImporter
 
-importer = CUDAIPCImporter(
+importer = CUDAIPCImporter.from_connected(
     shm_name="benchmark",
     shape=(1080, 1920, 4),
     dtype="float32",

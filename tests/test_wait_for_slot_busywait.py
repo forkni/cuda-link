@@ -1,5 +1,5 @@
 """
-Tests for N1: spin-then-sleep busy-wait in CUDAIPCImporter._wait_for_slot.
+Tests for N1: spin-then-sleep busy-wait in Importer._wait_for_slot.
 
 All tests are pure unit tests (no CUDA required) — they mock query_event.
 """
@@ -16,61 +16,25 @@ import pytest
 
 
 def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
-    """Build a CUDAIPCImporter with mocked IPCConnection state (no real CUDA/SHM required)."""
-    from ctypes import c_void_p
+    """Build an Importer with mocked IPCConnection state (no real CUDA/SHM required)."""
+    from fakes import make_fake_ipc_connection
 
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter, IPCConnection
-    from cuda_link.shm_protocol import SHMLayout
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._importer_port import ImportPolicy, ImportSpec
+    from cuda_link.importer import Importer
 
-    mock_cuda = MagicMock()
-    layout = SHMLayout(2)
-    conn = IPCConnection(
-        cuda=mock_cuda,
-        shm_handle=None,
-        ipc_version=1,
+    spec = ImportSpec(shm_name="mock", device=0, timeout_ms=timeout_ms)
+    policy = ImportPolicy(wait_spin_us=spin_us)
+
+    conn, _, _ = make_fake_ipc_connection(
         num_slots=2,
-        ipc_handles=[None, None],
-        dev_ptrs=[c_void_p(0x1000), c_void_p(0x2000)],
-        ipc_events=[MagicMock(), MagicMock()],  # both non-None → GPU event path
-        layout=layout,
-        shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
+        with_shm_handle=False,
+        with_events=True,
     )
 
-    imp = object.__new__(CUDAIPCImporter)
-    imp.device = 0
-    imp._spin_us = spin_us
-    imp.timeout_ms = timeout_ms
-    imp._initialized = True
-    imp.debug = False
-    imp.shm_name = "mock"
-    imp.shape = (8, 8, 4)
-    imp.dtype = "uint8"
-    imp._d2h_num_streams = 1
-    imp.frame_count = 0
-    imp._last_write_idx = 0
-
-    # N1 counters
-    imp.total_wait_spin_us = 0.0
-    imp.total_wait_sleep_us = 0.0
-    imp.wait_spin_hits = 0
-    imp.wait_sleep_hits = 0
-
-    # Other perf counters
-    imp.total_wait_event_time = 0.0
-    imp.total_get_frame_time = 0.0
-    imp.total_shm_read_us = 0.0
-    imp.last_latency = 0.0
-    imp._cached_dtype_str = ""
-    imp._cached_numpy_dtype = None
-
-    # Value-object references
+    imp = Importer(spec, policy, FakeCudaAdapter())
     imp._conn = conn
-    imp._format = None
-    imp._torch = None
-    imp._cupy = None
-    imp._numpy = None
-
+    imp._initialized = True
     return imp
 
 
@@ -84,7 +48,7 @@ def test_spin_resolves_immediately_no_sleep() -> None:
     imp = _make_importer(spin_us=200)
     imp._conn.cuda.query_event.return_value = True
 
-    with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
+    with patch("cuda_link.importer.time") as mock_time:
         # Calls: wait_start(1), while-check(2), spin_us-calc(3)
         mock_time.perf_counter.side_effect = [0.0, 0.00001, 0.00001]
         result = imp._wait_for_slot(slot=0)
@@ -100,7 +64,7 @@ def test_spin_resolves_on_second_poll_no_sleep() -> None:
     imp = _make_importer(spin_us=200)
     imp._conn.cuda.query_event.side_effect = [False, True]
 
-    with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
+    with patch("cuda_link.importer.time") as mock_time:
         # Calls: wait_start(1), while-check(2), timeout-check(3),
         #        while-check(4), spin_us-calc(5)
         mock_time.perf_counter.side_effect = [0.0, 0.00005, 0.00005, 0.00010, 0.00010]
@@ -119,7 +83,6 @@ def test_spin_resolves_on_second_poll_no_sleep() -> None:
 def test_falls_through_to_sleep_after_spin_budget() -> None:
     """Events not ready within spin budget — Phase 2 sleep loop is entered."""
     imp = _make_importer(spin_us=200, timeout_ms=5000.0)
-    # query_event always False except at the very end
     call_count = [0]
 
     def query_side_effect(event):
@@ -128,14 +91,12 @@ def test_falls_through_to_sleep_after_spin_budget() -> None:
 
     imp._conn.cuda.query_event.side_effect = query_side_effect
 
-    # perf_counter: start=0, then rapidly exceed spin_deadline (0.0002s),
-    # then timeout check in phase 2 passes, then True returned
     times = iter(
         [0.0]  # wait_start
         + [0.0003] * 20  # all Phase 1 checks: already past spin_deadline
         + [0.0004] * 20  # Phase 2 checks
     )
-    with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
+    with patch("cuda_link.importer.time") as mock_time:
         mock_time.perf_counter.side_effect = lambda: next(times)
         mock_time.sleep = MagicMock()
         imp._wait_for_slot(slot=0)
@@ -146,12 +107,12 @@ def test_falls_through_to_sleep_after_spin_budget() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Disabled spin (CUDALINK_WAIT_SPIN_US=0)
+# Disabled spin (wait_spin_us=0)
 # ---------------------------------------------------------------------------
 
 
 def test_spin_us_zero_disables_phase_one() -> None:
-    """CUDALINK_WAIT_SPIN_US=0: Phase 1 is skipped entirely, goes straight to sleep."""
+    """wait_spin_us=0: Phase 1 is skipped entirely, goes straight to sleep."""
     imp = _make_importer(spin_us=0, timeout_ms=5000.0)
 
     call_count = [0]
@@ -163,12 +124,11 @@ def test_spin_us_zero_disables_phase_one() -> None:
     imp._conn.cuda.query_event.side_effect = query_side_effect
 
     times = iter([0.0] + [0.0001] * 20 + [0.0002] * 20)
-    with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
+    with patch("cuda_link.importer.time") as mock_time:
         mock_time.perf_counter.side_effect = lambda: next(times)
         mock_time.sleep = MagicMock()
         imp._wait_for_slot(slot=0)
 
-    # With spin_us=0, loop never enters Phase 1, immediately goes to sleep phase
     assert imp.wait_spin_hits == 0
     assert imp.wait_sleep_hits == 1
 
@@ -186,7 +146,7 @@ def test_timeout_still_raised() -> None:
     # wait_start=0.0; all subsequent calls return 2.0, which is:
     # - past spin_deadline (0.0002) → Phase 1 exits immediately
     # - past deadline (0.001)       → Phase 2 raises TimeoutError on first check
-    with patch("cuda_link.cuda_ipc_importer.time") as mock_time:
+    with patch("cuda_link.importer.time") as mock_time:
         mock_time.perf_counter.side_effect = [0.0] + [2.0] * 20
         mock_time.sleep = MagicMock()
         with pytest.raises(TimeoutError, match="timed out"):
@@ -224,32 +184,25 @@ def test_get_stats_zero_hits_no_division_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Env var
+# Env var (ImportPolicy.from_env)
 # ---------------------------------------------------------------------------
 
 
 def test_spin_us_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_WAIT_SPIN_US env var is read at __init__ time."""
-
+    """CUDALINK_WAIT_SPIN_US env var is read by ImportPolicy.from_env()."""
     monkeypatch.setenv("CUDALINK_WAIT_SPIN_US", "500")
 
-    # Need a real __init__ call — build a minimal mock that satisfies _initialize()
-    # by patching _initialize to be a no-op
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    from cuda_link._importer_port import ImportPolicy
 
-    with patch.object(CUDAIPCImporter, "_initialize", return_value=None):
-        imp = CUDAIPCImporter(shm_name="noop")
-
-    assert imp._spin_us == 500
+    policy = ImportPolicy.from_env()
+    assert policy.wait_spin_us == 500
 
 
 def test_spin_us_env_var_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """CUDALINK_WAIT_SPIN_US=0 disables spin."""
     monkeypatch.setenv("CUDALINK_WAIT_SPIN_US", "0")
 
-    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+    from cuda_link._importer_port import ImportPolicy
 
-    with patch.object(CUDAIPCImporter, "_initialize", return_value=None):
-        imp = CUDAIPCImporter(shm_name="noop")
-
-    assert imp._spin_us == 0
+    policy = ImportPolicy.from_env()
+    assert policy.wait_spin_us == 0

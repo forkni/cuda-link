@@ -116,7 +116,7 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
     """Test SharedMemory header layout (version, num_slots, write_idx)."""
     import struct
 
-    from CUDAIPCExtension import CUDAIPCExtension
+    from CUDAIPCExtension import PROTOCOL_MAGIC, CUDAIPCExtension
 
     host = FakeTDHost(params={"Ipcmemname": temp_shm_name, "Numslots": 3})
     shared_memory_cleanup.append(temp_shm_name)
@@ -133,7 +133,7 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
     num_slots = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[12:16]))[0]
     write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
 
-    assert magic == 0x43495044  # "CIPD" magic number
+    assert magic == PROTOCOL_MAGIC
     assert version >= 1  # Should be at least 1 after initialization
     assert num_slots == 3
     assert write_idx == 0  # Initially 0
@@ -276,11 +276,10 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     Bypasses real CUDA/CuPy initialization to test routing logic only.
     Returns a TDReceiverEngine directly (no facade needed for unit tests).
     """
-    import struct
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from CUDAIPCExtension import FORMAT_KIND_FLOAT, SHM_HEADER_SIZE, SLOT_SIZE
+    from CUDAIPCExtension import FORMAT_KIND_FLOAT
 
     from cuda_link.shm_protocol import SHMLayout
 
@@ -292,12 +291,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     F16_SIZE = HEIGHT * WIDTH * COMPS * 2  # float16 = 2 bytes/elem
 
     # Build a bytearray that looks like valid SHM (write_idx=1)
-    shm_size = SHM_HEADER_SIZE + NUM_SLOTS * SLOT_SIZE + 1 + 20 + 8
-    buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, 1)  # version
-    struct.pack_into("<I", buf, 12, NUM_SLOTS)  # num_slots
-    struct.pack_into("<I", buf, 16, 1)  # write_idx=1
+    buf = SHMLayout(NUM_SLOTS).build_buffer(version=1, write_idx=1)
 
     fake_host = MagicMock()
     fake_host.is_active.return_value = True

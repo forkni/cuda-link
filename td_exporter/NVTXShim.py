@@ -1,77 +1,102 @@
-"""NVTX annotation shim for the td_exporter COMP namespace.
+"""NVTX annotation shim for cuda-link profiling.
 
-Mirror of src/cuda_link/_nvtx.py for use by TDSender and TDReceiver.
-Identical semantics; different module name since td_exporter uses flat imports.
-
-Enabled via environment variables (read once at import, zero-cost when off):
+Enabled via environment variables (read at module import time, zero-cost when off):
   CUDALINK_NVTX=1           — top-level phase ranges on the GPU timeline
   CUDALINK_NVTX_VERBOSE=1   — sub-operation ranges (implies CUDALINK_NVTX=1)
 
 Requires the `nvtx` PyPI package when enabled:  pip install nvtx
+
+Usage:
+  from cuda_link import _nvtx
+
+  _nvtx.push_range("cudalink.exporter.export_frame", "green")
+  try:
+      ...gpu work...
+  finally:
+      _nvtx.pop_range()
+
+  # or as a context manager for sub-ranges:
+  with _nvtx.annotate("cudalink.exporter.memcpy", "green"):
+      cuda.memcpy_async(...)
 """
 
 from __future__ import annotations
 
-import os
-
-_VERBOSE = os.environ.get("CUDALINK_NVTX_VERBOSE", "0") == "1"
-_ENABLED = _VERBOSE or os.environ.get("CUDALINK_NVTX", "0") == "1"
-
-if _ENABLED:
-    try:
-        import nvtx as _lib
-
-        _AVAILABLE = True
-    except ImportError:
-        _lib = None
-        _AVAILABLE = False
-else:
-    _lib = None
-    _AVAILABLE = False
+from Env import env_bool
 
 
 class _Noop:
     __slots__ = ()
 
-    def __enter__(self):
+    def __enter__(self) -> _Noop:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         pass
 
 
 _NOOP = _Noop()
 
 
-def annotate(message, color="white"):
+class _NvtxState:
+    __slots__ = ("lib", "available", "verbose")
+
+    def __init__(self, lib: object, available: bool, verbose: bool) -> None:
+        self.lib = lib
+        self.available = available
+        self.verbose = verbose
+
+
+def _detect_nvtx() -> _NvtxState:
+    verbose = env_bool("CUDALINK_NVTX_VERBOSE", default=False)
+    enabled = verbose or env_bool("CUDALINK_NVTX", default=False)
+    if enabled:
+        try:
+            import nvtx as _lib  # type: ignore[import]
+
+            return _NvtxState(lib=_lib, available=True, verbose=verbose)
+        except ImportError:
+            pass
+    return _NvtxState(lib=None, available=False, verbose=verbose)
+
+
+_NVTX_STATE = _detect_nvtx()
+
+
+def annotate(message: str, color: str = "white") -> _Noop:
     """Context manager for a named NVTX range. No-op if NVTX is disabled."""
-    if _AVAILABLE:
-        return _lib.annotate(message, color=color)
+    if _NVTX_STATE.available:
+        return _NVTX_STATE.lib.annotate(message, color=color)  # type: ignore[union-attr]
     return _NOOP
 
 
-def verbose_range(message, color="white"):
+def verbose_range(message: str, color: str = "white") -> _Noop:
     """Context manager for a sub-operation range. Only active when CUDALINK_NVTX_VERBOSE=1."""
-    if _AVAILABLE and _VERBOSE:
-        return _lib.annotate(message, color=color)
+    if _NVTX_STATE.available and _NVTX_STATE.verbose:
+        return _NVTX_STATE.lib.annotate(message, color=color)  # type: ignore[union-attr]
     return _NOOP
 
 
-def push_range(message, color="white"):
+def push_range(message: str, color: str = "white") -> None:
     """Push a named NVTX range onto the thread-local stack."""
-    if _AVAILABLE:
-        _lib.push_range(message, color=color)
+    if _NVTX_STATE.available:
+        _NVTX_STATE.lib.push_range(message, color=color)  # type: ignore[union-attr]
 
 
-def pop_range():
+def pop_range() -> None:
     """Pop the innermost NVTX range from the thread-local stack."""
-    if _AVAILABLE:
-        _lib.pop_range()
+    if _NVTX_STATE.available:
+        _NVTX_STATE.lib.pop_range()  # type: ignore[union-attr]
 
 
-def is_enabled():
-    return _AVAILABLE
+def is_enabled() -> bool:
+    return _NVTX_STATE.available
 
 
-def is_verbose():
-    return _AVAILABLE and _VERBOSE
+def is_verbose() -> bool:
+    return _NVTX_STATE.available and _NVTX_STATE.verbose
+
+
+def slot_names(prefix: str, n: int = 10) -> tuple[str, ...]:
+    """Return a pre-computed tuple of ``n`` slot annotation labels for ``prefix``."""
+    return tuple(f"{prefix}{i}" for i in range(n))

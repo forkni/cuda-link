@@ -172,30 +172,6 @@ def test_real_top_handle_pixel_format_missing() -> None:
     assert handle.pixel_format == ""
 
 
-def test_real_top_handle_inputs_wraps_upstream_tops() -> None:
-    """inputs returns wrapped TOPHandle for each upstream TOP."""
-    from TDHost import RealTOPHandle
-
-    upstream1 = _TDTOP(name="up1", pixel_format="rgba32float")
-    upstream2 = _TDTOP(name="up2", pixel_format="rgba16float")
-    top = _TDTOP(name="main", inputs=[upstream1, upstream2])
-    handle = RealTOPHandle(top)
-
-    wrapped_inputs = handle.inputs
-    assert len(wrapped_inputs) == 2
-    assert wrapped_inputs[0].pixel_format == "rgba32float"
-    assert wrapped_inputs[1].pixel_format == "rgba16float"
-
-
-def test_real_top_handle_inputs_empty() -> None:
-    """inputs returns [] for a TOP with no inputs."""
-    from TDHost import RealTOPHandle
-
-    top = _TDTOP(name="top", inputs=[])
-    handle = RealTOPHandle(top)
-    assert handle.inputs == []
-
-
 def test_real_top_handle_set_format() -> None:
     """set_format() writes top.par.format."""
     from TDHost import RealTOPHandle

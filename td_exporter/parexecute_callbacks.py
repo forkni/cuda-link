@@ -96,21 +96,7 @@ def handle_ipcmemname_change(ext: object, new_value: object, prev: object) -> No
     if new_value == prev:
         return
 
-    ext._log("IPC memory name changed - reinitializing", force=True)
-
-    # Clean up existing connection
-    ext.cleanup()
-
-    # Update internal state
-    ext.shm_name = new_value
-
-    # Re-initialize based on mode
-    if ext.mode == "Sender":
-        ext._log("Sender will reinitialize on next frame export", force=False)
-    elif ext.mode == "Receiver":
-        # Force immediate reconnection on next frame
-        ext.request_immediate_reconnect()
-        ext._log("Receiver will attempt reconnection on next frame", force=False)
+    ext.reconfigure_and_reinit("shm_name", new_value)
 
 
 def handle_numslots_change(ext: object, new_value: object, prev: object) -> None:
@@ -145,21 +131,7 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
     if new_value < 2 or new_value > 5:
         ext._log(f"WARNING: Numslots={new_value} outside recommended range (2-5)", force=True)
 
-    ext._log("Ring buffer slot count changed - reinitializing", force=True)
-
-    # Clean up existing buffers
-    ext.cleanup()
-
-    # Update internal state
-    ext.num_slots = new_value
-
-    # Re-initialize based on mode
-    if ext.mode == "Sender":
-        ext._log("Sender will recreate ring buffer on next frame export", force=False)
-    elif ext.mode == "Receiver":
-        # Force immediate reconnection on next frame
-        ext.request_immediate_reconnect()
-        ext._log("Receiver will reconnect with new slot count on next frame", force=False)
+    ext.reconfigure_and_reinit("num_slots", new_value)
 
 
 def handle_debug_change(ext: object, new_value: object, prev: object) -> None:

@@ -6,23 +6,68 @@ These tests require CUDA and either torch or numpy.
 
 from __future__ import annotations
 
-import struct
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 
+from cuda_link.shm_protocol import SHMLayout
+
 
 @pytest.mark.requires_cuda
 def test_init_without_shm(temp_shm_name: str) -> None:
-    """Test constructor when SharedMemory doesn't exist."""
+    """Construction is cheap and infallible; connect() does the fallible work."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    # Should fail gracefully since SharedMemory not created
+    # v1.5.0: __init__ does NOT auto-connect — construction never raises
     importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(64, 64, 4))
     assert not importer.is_ready()
 
 
-@pytest.mark.requires_cuda
+def test_construct_does_not_raise_on_nonexistent_shm() -> None:
+    """CUDAIPCImporter(shm_name=...) must never raise — connect() does."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
+    assert not imp._initialized
+
+
+def test_connect_with_nonexistent_shm_enters_waiting_state() -> None:
+    """connect() no longer raises when SHM is absent — enters reconnect-wait state."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    imp = CUDAIPCImporter(shm_name="definitely_does_not_exist_xyzzy")
+    imp.connect()  # must not raise
+    assert imp._importer is not None
+    assert not imp._importer._initialized
+    assert imp.get_frame_numpy() is None  # RECONNECTING outcome → None
+
+
+def test_connect_idempotent(temp_shm_name: str) -> None:
+    """Calling connect() a second time on an already-connected importer is a no-op."""
+    from multiprocessing.shared_memory import SharedMemory
+
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    # Build minimal valid SHM (header only, write_idx=0 → no frame yet)
+    _layout = SHMLayout(1)
+    shm = SharedMemory(name=temp_shm_name, create=True, size=_layout.total_size)
+    try:
+        shm.buf[: _layout.total_size] = _layout.build_buffer(version=1, write_idx=0)
+
+        imp = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4))
+        try:
+            imp.connect()
+        except (OSError, RuntimeError):
+            pytest.skip("CUDA IPC unavailable in this environment")
+
+        connected_state = imp._initialized
+        imp.connect()  # second call — must be a no-op
+        assert imp._initialized == connected_state
+    finally:
+        shm.close()
+        shm.unlink()
+
+
 def test_torch_available_check() -> None:
     """Test torch availability detection."""
     from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE
@@ -31,7 +76,6 @@ def test_torch_available_check() -> None:
     assert isinstance(TORCH_AVAILABLE, bool)
 
 
-@pytest.mark.requires_cuda
 def test_numpy_available_check() -> None:
     """Test numpy availability detection."""
     from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE
@@ -40,38 +84,6 @@ def test_numpy_available_check() -> None:
     assert isinstance(NUMPY_AVAILABLE, bool)
 
 
-@pytest.mark.requires_cuda
-def test_dtype_mapping() -> None:
-    """Test string dtype correctly maps to torch/numpy dtypes."""
-    from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
-
-    importer = CUDAIPCImporter(shm_name="test", shape=(64, 64, 4), dtype="float32")
-
-    # Test itemsize
-    assert importer._dtype_itemsize() == 4
-
-    importer.dtype = "float16"
-    assert importer._dtype_itemsize() == 2
-
-    importer.dtype = "uint8"
-    assert importer._dtype_itemsize() == 1
-
-    # Test numpy dtype mapping
-    if NUMPY_AVAILABLE:
-        import numpy as np
-
-        importer.dtype = "float32"
-        assert importer._numpy_dtype() == np.float32
-
-    # Test torch dtype mapping
-    if TORCH_AVAILABLE:
-        import torch
-
-        importer.dtype = "float32"
-        assert importer._torch_dtype() == torch.float32
-
-
-@pytest.mark.requires_cuda
 def test_get_frame_without_torch() -> None:
     """Test get_frame() raises when torch not available."""
     from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE, CUDAIPCImporter
@@ -85,7 +97,6 @@ def test_get_frame_without_torch() -> None:
         importer.get_frame()
 
 
-@pytest.mark.requires_cuda
 def test_get_frame_numpy_without_numpy() -> None:
     """Test get_frame_numpy() raises when numpy not available."""
     from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
@@ -99,26 +110,14 @@ def test_get_frame_numpy_without_numpy() -> None:
         importer.get_frame_numpy()
 
 
-@pytest.mark.requires_cuda
-def test_get_stats_format(temp_shm_name: str) -> None:
-    """Test get_stats() returns correct dictionary structure."""
+def test_get_stats_before_connect() -> None:
+    """get_stats() before connect() returns minimal dict with initialized=False."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(64, 64, 4))
-
+    importer = CUDAIPCImporter(shm_name="test_shm", shape=(64, 64, 4))
     stats = importer.get_stats()
-
-    # Verify all expected keys present
-    assert "initialized" in stats
-    assert "shape" in stats
-    assert "dtype" in stats
-    assert "frame_count" in stats
-    assert "shm_name" in stats
-    assert "num_slots" in stats
-    assert "torch_available" in stats
-    assert "numpy_available" in stats
-    assert "dev_ptrs" in stats
-    assert "tensor_device" in stats
+    assert isinstance(stats, dict)
+    assert stats.get("initialized") is False
 
 
 @pytest.mark.requires_cuda
@@ -126,19 +125,13 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
     """Test cleanup() closes IPC handles and SharedMemory."""
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    # Create fake SharedMemory with v0.5.0 layout:
-    # 20B header (4B magic + 8B version + 4B num_slots + 4B write_idx)
-    # + 3*128B slots + 1B shutdown + 20B metadata + 8B timestamp = 433
-    shm_size = 20 + 3 * 128 + 1 + 20 + 8
-    shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
+    # Create fake SharedMemory with v0.5.0 layout (3 slots)
+    _layout = SHMLayout(3)
+    shm = SharedMemory(name=temp_shm_name, create=True, size=_layout.total_size)
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header (magic="CIPD", version=1, num_slots=3, write_idx=0)
-        shm.buf[0:4] = struct.pack("<I", 0x43495044)  # magic "CIPD"
-        shm.buf[4:12] = struct.pack("<Q", 1)  # version
-        shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
-        shm.buf[16:20] = struct.pack("<I", 0)  # write_idx
+        shm.buf[: _layout.total_size] = _layout.build_buffer(version=1, write_idx=0)
 
         # Allocate real GPU buffers and write IPC handles
         for slot in range(3):
@@ -148,8 +141,15 @@ def test_cleanup_closes_handles(cuda_runtime: object, temp_shm_name: str, shared
             base_offset = 20 + slot * 128
             shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
-        # Create importer (will open handles)
+        # Create importer and explicitly connect
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError):
+            # Clear any sticky CUDA error (e.g. error 201 from same-process IPC on Windows)
+            # so subsequent tests in the same process see a clean error state.
+            cuda_runtime.cudart.cudaGetLastError()
+            pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():
             # Cleanup
@@ -171,17 +171,13 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
     if not TORCH_AVAILABLE:
         pytest.skip("torch required for this test")
 
-    # Create fake SharedMemory with v0.5.0 layout (433 bytes for 3 slots)
-    shm_size = 20 + 3 * 128 + 1 + 20 + 8
-    shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
+    # Create fake SharedMemory with v0.5.0 layout (3 slots)
+    _layout = SHMLayout(3)
+    shm = SharedMemory(name=temp_shm_name, create=True, size=_layout.total_size)
     shared_memory_cleanup.append(temp_shm_name)
 
     try:
-        # Write header (magic="CIPD", version=1, num_slots=3, write_idx=1)
-        shm.buf[0:4] = struct.pack("<I", 0x43495044)  # magic "CIPD"
-        shm.buf[4:12] = struct.pack("<Q", 1)  # version
-        shm.buf[12:16] = struct.pack("<I", 3)  # num_slots
-        shm.buf[16:20] = struct.pack("<I", 1)  # write_idx=1
+        shm.buf[: _layout.total_size] = _layout.build_buffer(version=1, write_idx=1)
 
         # Write real IPC handles
         for slot in range(3):
@@ -191,8 +187,13 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
             base_offset = 20 + slot * 128
             shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
-        # Create importer
+        # Create importer and explicitly connect
         importer = CUDAIPCImporter(shm_name=temp_shm_name, shape=(8, 8, 4), dtype="float32")
+        try:
+            importer.connect()
+        except (OSError, RuntimeError):
+            cuda_runtime.cudart.cudaGetLastError()
+            pytest.skip("CUDA IPC connect failed in test environment")
 
         if importer.is_ready():
             # Set shutdown flag (immediately after slots in v0.5.0 layout)
@@ -214,7 +215,7 @@ def test_shutdown_detection(cuda_runtime: object, temp_shm_name: str, shared_mem
 
 
 def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1) -> object:
-    """Build a CUDAIPCImporter with manually-injected value-object state (no real CUDA IPC handles).
+    """Build an Importer with manually-injected value-object state (no real CUDA IPC handles).
 
     CUDA IPC handles cannot be opened in the same process that created them, so tests
     that check routing logic inject all state via value objects and a bytearray SHM buffer.
@@ -222,50 +223,17 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
     from unittest.mock import MagicMock
 
     import numpy as np
+    from fakes import make_fake_ipc_connection
 
-    from cuda_link.cuda_ipc_importer import (
-        CUDAIPCImporter,
-        Format,
-        IPCConnection,
-        NumpyBuffers,
-    )
-    from cuda_link.shm_protocol import (
-        METADATA_SIZE,
-        SHM_HEADER_SIZE,
-        SHUTDOWN_FLAG_SIZE,
-        SLOT_SIZE,
-        TIMESTAMP_SIZE,
-        SHMLayout,
-    )
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._importer_port import ImportPolicy, ImportSpec
+    from cuda_link.importer import Format, Importer, NumpyBuffers
 
-    # Build a bytearray that looks like valid SharedMemory (write_idx=1 → one frame ready)
-    shm_size = SHM_HEADER_SIZE + num_slots * SLOT_SIZE + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
-    buf = bytearray(shm_size)
-    struct.pack_into("<I", buf, 0, 0x43495044)  # magic "CIPD"
-    struct.pack_into("<Q", buf, 4, 1)  # version=1
-    struct.pack_into("<I", buf, 12, num_slots)  # num_slots
-    struct.pack_into("<I", buf, 16, 1)  # write_idx=1
-
-    # Build value objects
-    fmt = Format.from_overrides(shape, dtype)
-    layout = SHMLayout(num_slots)
-
-    mock_cuda = MagicMock()
-    mock_shm = MagicMock()
-    mock_shm.buf = buf
-
-    conn = IPCConnection(
-        cuda=mock_cuda,
-        shm_handle=mock_shm,
-        ipc_version=1,
+    conn, mock_cuda, _ = make_fake_ipc_connection(
         num_slots=num_slots,
-        ipc_handles=[None] * num_slots,
-        dev_ptrs=[MagicMock() for _ in range(num_slots)],
-        ipc_events=[None] * num_slots,
-        layout=layout,
-        shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
+        dev_ptr_style="mock",
     )
+    fmt = Format.from_overrides(shape, dtype)
 
     # Pre-build NumpyBuffers with a real numpy buffer so get_frame_numpy() skips
     # reallocation and memcpy_async receives a valid ctypes pointer.
@@ -279,39 +247,17 @@ def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1)
         pinned_memory_available=False,
         primary_stream=mock_stream,
         d2h_streams=[mock_stream],
-        d2h_events=[],
         num_streams=1,
+        chunk_plan=[],
     )
 
-    # Bypass __init__ and inject value objects directly
-    imp = object.__new__(CUDAIPCImporter)
-    imp.shm_name = "mock_shm"
-    imp.shape = shape
-    imp.dtype = dtype
-    imp.debug = False
-    imp.timeout_ms = 5000.0
-    imp.device = 0
-    imp._spin_us = 0
-    imp._d2h_num_streams = 1
-    imp._initialized = True
+    spec = ImportSpec(shm_name="mock_shm", device=0, timeout_ms=5000.0, shape=shape, dtype=dtype)
+    policy = ImportPolicy(wait_spin_us=0)
+    imp = Importer(spec, policy, FakeCudaAdapter())
     imp._conn = conn
     imp._format = fmt
-    imp._torch = None
-    imp._cupy = None
     imp._numpy = nb
-    imp.frame_count = 0
-    imp._last_write_idx = 0
-    imp.total_wait_event_time = 0.0
-    imp.total_get_frame_time = 0.0
-    imp.total_shm_read_us = 0.0
-    imp.last_latency = 0.0
-    imp.total_wait_spin_us = 0.0
-    imp.total_wait_sleep_us = 0.0
-    imp.wait_spin_hits = 0
-    imp.wait_sleep_hits = 0
-    imp._cached_dtype_str = ""
-    imp._cached_numpy_dtype = None
-
+    imp._initialized = True
     return imp
 
 

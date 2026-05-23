@@ -11,25 +11,16 @@ from __future__ import annotations
 
 import contextlib
 import os
-import struct
 import time
 import traceback
 from ctypes import c_void_p
-from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Callable
 
-from ActivationBarrier import (  # noqa: E402, I001
-    decrement as _ab_decrement,
-)
-from ActivationBarrier import (
-    increment as _ab_increment,
-)
-from ActivationBarrier import (
-    open_or_create as _ab_open_or_create,
-)
+from ActivationBarrier import HolderBarrier  # noqa: E402, I001
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
 from CUDARuntimeTypes import CUDART_GRAPHS_MIN_VERSION  # noqa: E402
+from FrameProfile import FrameProfile  # noqa: E402
 from NVMLObserver import NVML_AVAILABLE, NVMLObserver  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
@@ -69,90 +60,23 @@ _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
 }
 _EXPORT_BUFFER_NAME = "ExportBuffer"
 
+# Pre-built NVTX range name strings per slot — eliminates f-string allocation on every export_frame call.
+_NVTX_SENDER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.sender.export_frame.slot{i}" for i in range(10))
 
-@dataclass
-class SenderActivationBarrier:
-    """TD-side Sender activation-barrier state.
-
-    Replaces five scattered attributes on TDSenderEngine (_activation_barrier,
-    _barrier_settle_frames, _barrier_settle_remaining, _barrier_held,
-    _barrier_shm) with a single cohesive value object.
-    """
-
-    enabled: bool
-    settle_frames: int
-    held: bool = False
-    settle_remaining: int = 0
-    shm: object = None
-
-    @classmethod
-    def from_config(cls, config: TDSenderConfig) -> SenderActivationBarrier:
-        return cls(
-            enabled=config.activation_barrier,
-            settle_frames=config.barrier_settle_frames,
-        )
-
-    def acquire(self, pid: int, *, log_fn: Callable) -> None:
-        """Open-or-create the segment, increment, set held=True. Log+swallow failures."""
-        if not self.enabled:
-            return
-        try:
-            if self.shm is None:
-                self.shm = _ab_open_or_create(create=True)
-            count = _ab_increment(self.shm, pid)
-            self.held = True
-            log_fn(f"[ACTIVATION_BARRIER] held +1 (count={count}) for Sender init", force=True)
-        except (OSError, RuntimeError, struct.error) as _exc:
-            log_fn(f"[ACTIVATION_BARRIER] init increment failed (ignored): {_exc}", force=True)
-
-    def arm_settle_countdown(self) -> None:
-        """Called from initialize() tail when init succeeds — settle_remaining = settle_frames."""
-        if self.held:
-            self.settle_remaining = self.settle_frames
-
-    def tick_and_maybe_release(self, pid: int, *, log_fn: Callable) -> bool:
-        """Per-frame: decrement settle_remaining. When it hits 0 and held, release barrier.
-
-        Returns True iff the release fired this frame.
-        """
-        if self.settle_remaining <= 0:
-            return False
-        self.settle_remaining -= 1
-        if self.settle_remaining == 0 and self.held and self.shm is not None:
-            try:
-                count = _ab_decrement(self.shm, pid)
-                log_fn(
-                    f"[ACTIVATION_BARRIER] released after {self.settle_frames}-frame settle (count now {count})",
-                    force=True,
-                )
-                return True
-            except (OSError, RuntimeError, struct.error) as _exc:
-                log_fn(f"[ACTIVATION_BARRIER] settle decrement failed (ignored): {_exc}", force=True)
-            finally:
-                self.held = False
-        return False
-
-    def force_release(self, pid: int, *, log_fn: Callable) -> None:
-        """Cleanup-time: if still held, decrement and clear. Idempotent."""
-        if not (self.held and self.shm is not None):
-            return
-        try:
-            count = _ab_decrement(self.shm, pid)
-            log_fn(
-                f"[ACTIVATION_BARRIER] released on cleanup (mid-settle, count now {count})",
-                force=True,
-            )
-        except (OSError, RuntimeError, struct.error) as _exc:
-            log_fn(f"[ACTIVATION_BARRIER] cleanup decrement failed (ignored): {_exc}", force=True)
-        finally:
-            self.held = False
-
-    def close(self) -> None:
-        """Idempotent: close SHM handle if held."""
-        if self.shm is not None:
-            with contextlib.suppress(OSError, RuntimeError):
-                self.shm.close()
-            self.shm = None
+# FrameProfile region names for TDSender — defines column order for report() / avg().
+_SENDER_PROFILE_REGIONS: tuple[str, ...] = (
+    "pre_interop",
+    "cuda_memory",
+    "post_interop",
+    "memcpy",
+    "record_event",
+    "sync",
+    "sticky_check",
+    "flush_probe",
+    "shm_publish",
+    "export",
+    "unaccounted",
+)
 
 
 class TDSenderEngine:
@@ -212,6 +136,12 @@ class TDSenderEngine:
         self._export_profile: bool = self._config.export_profile
         self._export_flush_probe: bool = self._config.export_flush_probe
         self._use_graphs: bool = self._config.use_graphs
+        self._log(
+            f"[GRAPHS_INIT] _use_graphs={self._use_graphs} "
+            f"(config.use_graphs={self._config.use_graphs}, "
+            f"CUDALINK_TD_USE_GRAPHS env={os.environ.get('CUDALINK_TD_USE_GRAPHS', '(unset)')})",
+            force=True,
+        )
         self._graphs_disabled: bool = False
         self._graph_execs: list = [None] * self.num_slots
         self._graph_templates: list = [None] * self.num_slots
@@ -221,21 +151,14 @@ class TDSenderEngine:
         self._graphs_pending: bool = False
         self._graphs_deferred: bool = self._config.graphs_deferred
         self._persist_stream: bool = self._config.persist_stream
-        self._barrier = SenderActivationBarrier.from_config(self._config)
+        self._barrier = HolderBarrier(
+            enabled=self._config.activation_barrier,
+            settle_frames=self._config.barrier_settle_frames,
+        )
 
         self._nvml_observer: NVMLObserver | None = None
 
-        self.total_memcpy_time = 0.0
-        self.total_record_event_time = 0.0
-        self.total_export_time = 0.0
-        self.total_cuda_memory_time = 0.0
-        self.total_pre_interop_us: float = 0.0
-        self.total_post_interop_us: float = 0.0
-        self.total_sync_us: float = 0.0
-        self.total_sticky_check_us: float = 0.0
-        self.total_flush_probe_us: float = 0.0
-        self.total_shm_publish_us: float = 0.0
-        self.total_unaccounted_us: float = 0.0
+        self._profile: FrameProfile = FrameProfile(_SENDER_PROFILE_REGIONS)
 
         self._warned_format = False
         self._export_buffer: object = None
@@ -246,6 +169,7 @@ class TDSenderEngine:
         self._last_cuda_mem_err = ""
         self._detected_numpy_dtype: object = None
         self._last_numpy_dtype: object = None
+        self._last_status_tuple: tuple | None = None
 
         # Profiling events (created lazily in initialize when _export_profile=True)
         self._timing_start = None
@@ -317,7 +241,9 @@ class TDSenderEngine:
 
             # Load CUDA runtime bound to the configured device
             self.cuda = get_cuda_runtime(device=self.device)
-            self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+            if not getattr(self, "_runtime_load_logged", False):
+                self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
+                self._runtime_load_logged = True
 
             # Create dedicated non-blocking stream for IPC operations.
             # Reuse existing stream on re-init to avoid leaks.
@@ -361,6 +287,14 @@ class TDSenderEngine:
                 self.ipc_events = [None] * self.num_slots
                 self.ipc_event_handles = [None] * self.num_slots
 
+            # Switch to CUDA primary context before allocating IPC buffers.  TD's cook thread
+            # may have entered TD's interop context (via top.cudaMemory / cudaGraphicsMap*)
+            # between CUDARuntimeAPI.__init__ and here.  cudaMalloc in the interop context
+            # mints IPC handles bound to that context; a second process (with its own primary
+            # context) cannot open them (error 400).  We save the current context and restore
+            # it after the alloc block so TD's interop machinery is unaffected.
+            _ctx_token = self.cuda.set_device(self.device)
+
             # Allocate ring buffer slots
             for slot in range(self.num_slots):
                 # Allocate persistent GPU buffer for this slot
@@ -380,6 +314,7 @@ class TDSenderEngine:
                 self.ipc_event_handles[slot] = self.cuda.ipc_get_event_handle(self.ipc_events[slot])
                 self._log(f"Created IPC event for slot {slot} (64 bytes)")
 
+            self.cuda.restore_context(_ctx_token)
             self._log(f"Created {self.num_slots} IPC buffer slots with events", force=True)
 
             # INIT_PACE checkpoint 1/3 — CUDALINK_TD_INIT_PACE=1: flush WDDM queue after per-slot
@@ -504,7 +439,9 @@ class TDSenderEngine:
         for slot in range(self.num_slots):
             capture_started = False
             try:
-                self.cuda.stream_begin_capture(self.ipc_stream, mode=0)
+                # Relaxed: required to coexist with TensorRT's per-engine
+                # cudaStreamBeginCapture (PyTorch, CuPy, TRT may all be in the same process).
+                self.cuda.stream_begin_capture(self.ipc_stream, mode=2)
                 capture_started = True
                 self.cuda.memcpy_async(
                     dst=self.dev_ptrs[slot],
@@ -604,6 +541,7 @@ class TDSenderEngine:
             # Write memory handle (64 bytes)
             mem_handle_bytes = bytes(self.ipc_handles[slot].internal)
             self.shm_handle.buf[base_offset : base_offset + 64] = mem_handle_bytes
+            self._log(f"[IPC-HEX] slot{slot} mem handle prefix: {mem_handle_bytes[:16].hex()}...")
 
             # Write event handle (64 bytes) if available
             if self.ipc_event_handles[slot]:
@@ -750,13 +688,13 @@ class TDSenderEngine:
                 # record_event_time is only set in the ipc_events path; init here for the fallback
                 record_event_time = 0.0
 
-        _nvtx_push(f"cudalink.sender.export_frame.slot{self.write_idx % self.num_slots}", "green")
+        _nvtx_push(_NVTX_SENDER_SLOT_NAMES[self.write_idx % self.num_slots], "green")
         try:
             # Ensure CUDA runtime and stream exist BEFORE first cudaMemory() call.
-            # Always use a non-blocking stream (never None/default stream) for TD 2025 compat.
-            if self.cuda is None:
-                self.cuda = get_cuda_runtime(device=self.device)
+            # cuda and ipc_stream are always set together; one outer check covers both.
             if self.ipc_stream is None:
+                if self.cuda is None:
+                    self.cuda = get_cuda_runtime(device=self.device)
                 # Honour CUDALINK_TD_STREAM_PRIO in the pre-init lazy path too (mirror of init).
                 if self._stream_high_prio:
                     self.ipc_stream = self.cuda.create_stream_with_priority(flags=0x01)
@@ -770,6 +708,7 @@ class TDSenderEngine:
                         f"Created IPC stream (pre-init, normal-priority): 0x{int(self.ipc_stream.value):016x}",
                         force=True,
                     )
+            _cuda = self.cuda
 
             # Block transfer when the source pixel format is unsupported by cudaMemory().
             # Probe (verification/results/cuda_memory_probe_20260510_090919.json) confirmed
@@ -799,7 +738,7 @@ class TDSenderEngine:
             if self.verbose_performance:
                 if self._export_profile:
                     _this_pre = (time.perf_counter() - _t_pre) * 1_000_000
-                    self.total_pre_interop_us += _this_pre
+                    self._profile.record("pre_interop", _this_pre)
                 cuda_mem_start = time.perf_counter()
 
             # Get TOP's CUDA memory — always pass a valid stream (never None)
@@ -819,7 +758,7 @@ class TDSenderEngine:
 
             if self.verbose_performance:
                 cuda_mem_time = (time.perf_counter() - cuda_mem_start) * 1_000_000  # microseconds
-                self.total_cuda_memory_time += cuda_mem_time
+                self._profile.record("cuda_memory", cuda_mem_time)
                 if self._export_profile:
                     _t_post = time.perf_counter()
 
@@ -845,7 +784,10 @@ class TDSenderEngine:
             _dtype_str = (
                 getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
             )
-            self._host.set_info_status(f"{actual_width}x{actual_height} {_dtype_str} {actual_channels}ch")
+            _status_key = (actual_width, actual_height, actual_channels, _dtype_str)
+            if _status_key != self._last_status_tuple:
+                self._host.set_info_status(f"{actual_width}x{actual_height} {_dtype_str} {actual_channels}ch")
+                self._last_status_tuple = _status_key
 
             # Check if we need to (re)initialize
             if not self._initialized or actual_size != self.data_size:
@@ -894,11 +836,11 @@ class TDSenderEngine:
             if self.verbose_performance:
                 if self._export_profile:
                     _this_post = (time.perf_counter() - _t_post) * 1_000_000
-                    self.total_post_interop_us += _this_post
+                    self._profile.record("post_interop", _this_post)
                 memcpy_start = time.perf_counter()
                 # Record GPU timing start event (actual GPU time measurement)
                 if self._timing_start:
-                    self.cuda.record_event(self._timing_start, stream=self.ipc_stream)
+                    _cuda.record_event(self._timing_start, stream=self.ipc_stream)
 
             # Deferred graph build (CUDALINK_TD_GRAPHS_DEFERRED=1): fires once after 30
             # steady-state frames so the capture burst doesn't overlap Sender-B's cold activation.
@@ -913,7 +855,7 @@ class TDSenderEngine:
             # Falls back automatically (and permanently for this instance) if launch fails.
             if self._use_graphs and not self._graphs_disabled and self._graph_execs[slot] is not None:
                 try:
-                    self.cuda.graph_exec_memcpy_node_set_params_1d(
+                    _cuda.graph_exec_memcpy_node_set_params_1d(
                         self._graph_execs[slot],
                         self._graph_memcpy_nodes[slot],
                         dst=self.dev_ptrs[slot],
@@ -921,7 +863,7 @@ class TDSenderEngine:
                         count=self.data_size,
                         kind=3,  # cudaMemcpyDeviceToDevice
                     )
-                    self.cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
+                    _cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
                 except (RuntimeError, OSError) as _graph_err:
                     self._log(
                         f"Graph launch failed ({_graph_err}) — disabling graphs, "
@@ -929,7 +871,7 @@ class TDSenderEngine:
                         force=True,
                     )
                     self._graphs_disabled = True
-                    self.cuda.memcpy_async(
+                    _cuda.memcpy_async(
                         dst=self.dev_ptrs[slot],
                         src=c_void_p(cuda_mem.ptr),
                         count=self.data_size,
@@ -938,7 +880,7 @@ class TDSenderEngine:
                     )
             else:
                 with _nvtx_verbose("cudalink.sender.memcpy", "green"):
-                    self.cuda.memcpy_async(
+                    _cuda.memcpy_async(
                         dst=self.dev_ptrs[slot],
                         src=c_void_p(cuda_mem.ptr),
                         count=self.data_size,
@@ -949,11 +891,11 @@ class TDSenderEngine:
             if self.verbose_performance:
                 # Record GPU timing end event (actual GPU time measurement)
                 if self._timing_end:
-                    self.cuda.record_event(self._timing_end, stream=self.ipc_stream)
+                    _cuda.record_event(self._timing_end, stream=self.ipc_stream)
                 memcpy_time = (
                     time.perf_counter() - memcpy_start
                 ) * 1_000_000  # microseconds (enqueue time only, copy is async)
-                self.total_memcpy_time += memcpy_time
+                self._profile.record("memcpy", memcpy_time)
 
             # GPU-side synchronization with CUDA IPC Events
             if self.ipc_events[slot]:
@@ -962,11 +904,11 @@ class TDSenderEngine:
 
                 # Record event for this slot after async memcpy (stream-ordered)
                 with _nvtx_verbose("cudalink.sender.record_event", "green"):
-                    self.cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
+                    _cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
 
                 if self.verbose_performance:
                     record_event_time = (time.perf_counter() - record_start) * 1_000_000
-                    self.total_record_event_time += record_event_time
+                    self._profile.record("record_event", record_event_time)
 
                 # CUDALINK_EXPORT_SYNC=1: CPU-blocks on ipc_stream after record_event.
                 # Default is now "0" (receiver cudaStreamWaitEvent guarantees correctness).
@@ -974,17 +916,17 @@ class TDSenderEngine:
                 if self._export_sync:
                     if self.verbose_performance and self._export_profile:
                         _t_sync = time.perf_counter()
-                    self.cuda.stream_synchronize(self.ipc_stream)
+                    _cuda.stream_synchronize(self.ipc_stream)
                     if self.verbose_performance and self._export_profile:
                         _this_sync = (time.perf_counter() - _t_sync) * 1_000_000
-                        self.total_sync_us += _this_sync
+                        self._profile.record("sync", _this_sync)
 
                 if self.verbose_performance and self._export_profile:
                     _t_sticky = time.perf_counter()
-                self.cuda.check_sticky_error("export_frame")
+                _cuda.check_sticky_error("export_frame")
                 if self.verbose_performance and self._export_profile:
                     _this_sticky = (time.perf_counter() - _t_sticky) * 1_000_000
-                    self.total_sticky_check_us += _this_sticky
+                    self._profile.record("sticky_check", _this_sticky)
 
                 # WDDM deferred-submission probe: forces pending GPU work to submit without
                 # blocking. Per CUDA Handbook p3/pg56, WDDM buffers commands until a flush;
@@ -993,15 +935,15 @@ class TDSenderEngine:
                 if self._export_flush_probe and not self._export_sync:
                     if self.verbose_performance and self._export_profile:
                         _t_fp = time.perf_counter()
-                    self.cuda.stream_query(self.ipc_stream)
+                    _cuda.stream_query(self.ipc_stream)
                     if self.verbose_performance and self._export_profile:
                         _this_fp = (time.perf_counter() - _t_fp) * 1_000_000
-                        self.total_flush_probe_us += _this_fp
+                        self._profile.record("flush_probe", _this_fp)
 
             else:
                 # FALLBACK: Conditional CPU synchronization
                 if self.frame_count % self.sync_interval == 0:
-                    self.cuda.synchronize()
+                    _cuda.synchronize()
 
             # Publish: timestamp + clear shutdown_flag + fence + write_idx — in that order.
             # publish_frame() encodes the C3 ordering guarantee; do not replicate inline.
@@ -1011,7 +953,7 @@ class TDSenderEngine:
             publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
             if self.verbose_performance and self._export_profile:
                 _this_shm = (time.perf_counter() - _t_shm) * 1_000_000
-                self.total_shm_publish_us += _this_shm
+                self._profile.record("shm_publish", _this_shm)
 
             # Frame tracking
             self.frame_count += 1
@@ -1023,7 +965,7 @@ class TDSenderEngine:
             # Calculate total frame time (only if verbose)
             if self.verbose_performance:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
-                self.total_export_time += frame_time
+                self._profile.record("export", frame_time)
                 if self._export_profile:
                     _this_accounted = (
                         _this_pre
@@ -1036,7 +978,7 @@ class TDSenderEngine:
                         + _this_fp
                         + _this_shm
                     )
-                    self.total_unaccounted_us += frame_time - _this_accounted
+                    self._profile.record("unaccounted", frame_time - _this_accounted)
 
             # Detailed first-frame diagnostic (one-time, not affected by 100-frame interval)
             if self.verbose_performance and self.frame_count == 1:
@@ -1049,10 +991,11 @@ class TDSenderEngine:
 
             # Log performance metrics every 97 frames (prime — avoids aliasing with slot counts 2,4,5)
             if self.verbose_performance and self.frame_count % 97 == 0:
-                avg_memcpy = self.total_memcpy_time / self.frame_count
-                avg_record = self.total_record_event_time / self.frame_count if all(self.ipc_events) else 0
-                avg_total = self.total_export_time / self.frame_count
-                avg_cuda_mem = self.total_cuda_memory_time / self.frame_count
+                n = self.frame_count
+                avg_memcpy = self._profile.avg("memcpy", n)
+                avg_record = self._profile.avg("record_event", n) if all(self.ipc_events) else 0
+                avg_total = self._profile.avg("export", n)
+                avg_cuda_mem = self._profile.avg("cuda_memory", n)
                 sync_mode = (
                     f"GPU-Events[{self.num_slots}]" if all(self.ipc_events) else f"CPU-Sync(1/{self.sync_interval})"
                 )
@@ -1093,13 +1036,13 @@ class TDSenderEngine:
                             log_msg += f" throttle={','.join(reasons)}"
 
                 if self._export_profile:
-                    avg_pre = self.total_pre_interop_us / self.frame_count
-                    avg_post = self.total_post_interop_us / self.frame_count
-                    avg_sync = self.total_sync_us / self.frame_count
-                    avg_sticky = self.total_sticky_check_us / self.frame_count
-                    avg_fp = self.total_flush_probe_us / self.frame_count
-                    avg_shm = self.total_shm_publish_us / self.frame_count
-                    avg_unacc = self.total_unaccounted_us / self.frame_count
+                    avg_pre = self._profile.avg("pre_interop", n)
+                    avg_post = self._profile.avg("post_interop", n)
+                    avg_sync = self._profile.avg("sync", n)
+                    avg_sticky = self._profile.avg("sticky_check", n)
+                    avg_fp = self._profile.avg("flush_probe", n)
+                    avg_shm = self._profile.avg("shm_publish", n)
+                    avg_unacc = self._profile.avg("unaccounted", n)
                     log_msg += (
                         f" | [PROFILE] pre={avg_pre:.1f}us"
                         f" interop={avg_cuda_mem:.1f}us"
@@ -1330,10 +1273,8 @@ class TDSenderEngine:
         # and slot selection starts from 0 (matching SharedMemory write_idx=0 written on init).
         self.write_idx = 0
         self.frame_count = 0
-        self.total_memcpy_time = 0.0
-        self.total_record_event_time = 0.0
-        self.total_export_time = 0.0
-        self.total_cuda_memory_time = 0.0
+        self._profile = FrameProfile(_SENDER_PROFILE_REGIONS)
+        self._last_status_tuple = None
 
         self._initialized = False
         self._log("Sender cleanup complete", force=True)

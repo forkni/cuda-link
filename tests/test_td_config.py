@@ -17,7 +17,7 @@ def test_sender_config_defaults() -> None:
     assert cfg.export_sync is True
     assert cfg.export_profile is False
     assert cfg.export_flush_probe is True
-    assert cfg.use_graphs is False
+    assert cfg.use_graphs is True
     assert cfg.graphs_deferred is False
     assert cfg.stream_high_prio is False
     assert cfg.init_pace is False
