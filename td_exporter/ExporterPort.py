@@ -61,7 +61,7 @@ class ExportPolicy:
     on the per-frame hot path.
     """
 
-    export_sync: bool = True
+    export_sync: bool = False
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
@@ -74,7 +74,7 @@ class ExportPolicy:
     def from_env(cls) -> ExportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
-            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=True),
+            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=False),
             use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
