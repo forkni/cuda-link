@@ -576,7 +576,7 @@ class Exporter:
                 if profile:
                     self._profile.record("record_event", (time.perf_counter() - _t) * 1_000_000)
 
-            if self._policy.export_sync:
+            if self._policy.export_sync or not self.ipc_events[slot]:
                 if profile:
                     _t_sync = time.perf_counter()
                 _cuda.stream_synchronize(self.ipc_stream)

@@ -105,6 +105,51 @@ def test_double_close_no_crash() -> None:
     exp.close()  # Double-close must not raise
 
 
+def test_export_sync_false_no_stream_sync_when_event_present() -> None:
+    """export_sync=False (default): stream_synchronize NOT called when IPC event exists."""
+    from unittest.mock import patch
+
+    from cuda_link import ExportPolicy, FrameSpec, GpuFrame
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link.exporter import Exporter
+
+    fake_cuda = FakeCudaAdapter()
+    exp = Exporter.open(
+        FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
+        policy=ExportPolicy.for_testing(),
+        cuda=fake_cuda,
+    )
+    try:
+        with patch.object(fake_cuda, "stream_synchronize") as mock_sync:
+            exp.export(GpuFrame(ptr=1000, size=exp.data_size))
+        mock_sync.assert_not_called()
+    finally:
+        exp.close()
+
+
+def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
+    """export_sync=False: stream_synchronize IS called when no IPC event (correctness backstop)."""
+    from unittest.mock import patch
+
+    from cuda_link import ExportPolicy, FrameSpec, GpuFrame
+    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link.exporter import Exporter
+
+    fake_cuda = FakeCudaAdapter()
+    with patch.object(fake_cuda, "create_ipc_event", return_value=None):
+        exp = Exporter.open(
+            FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
+            policy=ExportPolicy.for_testing(),
+            cuda=fake_cuda,
+        )
+    try:
+        with patch.object(fake_cuda, "stream_synchronize") as mock_sync:
+            exp.export(GpuFrame(ptr=1000, size=exp.data_size))
+        mock_sync.assert_called_once()
+    finally:
+        exp.close()
+
+
 # ---------------------------------------------------------------------------
 # CUDA integration tests
 # ---------------------------------------------------------------------------
