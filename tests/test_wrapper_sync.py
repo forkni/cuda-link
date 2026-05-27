@@ -28,7 +28,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 # Import the sync script's PAIRS list and rewrite function directly so the
 # test and the script always agree on the transform.
 sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-from sync_td_wrapper import PAIRS, rewrite_relative_imports  # noqa: E402
+from sync_td_wrapper import CANONICAL_ONLY, PAIRS, rewrite_relative_imports  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Parametrise by mode
@@ -81,6 +81,34 @@ def test_td_exporter_rewrite_pair_is_in_sync(canonical: Path, derived: Path) -> 
         f"  canonical: {canonical} ({len(canonical_content)} chars)\n"
         f"  derived:   {derived} ({len(derived_content)} chars)\n"
         "\nRun: python scripts/sync_td_wrapper.py"
+    )
+
+
+def test_pairs_cover_all_mirrorable_modules() -> None:
+    """Every src/cuda_link/*.py must be in PAIRS or CANONICAL_ONLY.
+
+    This invariant prevents a module from being silently omitted from the sync
+    script (as happened with _profile.py / FrameProfile.py).  To add a new
+    canonical module: register it in PAIRS in scripts/sync_td_wrapper.py, or
+    add its filename to CANONICAL_ONLY if it intentionally has no TD twin.
+    """
+    project_root = Path(__file__).parent.parent
+    src_dir = project_root / "src" / "cuda_link"
+    paired_canonicals = {src for src, _, _ in PAIRS}
+
+    unregistered = []
+    for module_path in sorted(src_dir.glob("*.py")):
+        if module_path.name in CANONICAL_ONLY:
+            continue
+        if module_path in paired_canonicals:
+            continue
+        unregistered.append(module_path.name)
+
+    assert not unregistered, (
+        "The following src/cuda_link/ modules are neither in PAIRS nor in CANONICAL_ONLY:\n"
+        + "".join(f"  {name}\n" for name in unregistered)
+        + "Add each to PAIRS in scripts/sync_td_wrapper.py (with the appropriate mode),\n"
+        "or to CANONICAL_ONLY if it intentionally has no td_exporter twin."
     )
 
 

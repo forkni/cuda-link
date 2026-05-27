@@ -16,22 +16,9 @@ rewrite_relative  — rewrite ``from .X import`` → ``from DerivedX import`` an
                     TouchDesigner's flat COMP namespace where sibling Text DATs are
                     imported by bare name, not as a package).  See ADR-0002.
 
-Pairs
------
-byte_identical (canonical → derived):
-  cuda_ipc_wrapper.py      → CUDAIPCWrapper.py
-  cuda_runtime_types.py    → CUDARuntimeTypes.py
-  cuda_graphs.py           → CUDAGraphs.py
-  nvml_observer.py         → NVMLObserver.py
-  shm_protocol.py          → SHMProtocol.py
-  activation_barrier.py    → ActivationBarrier.py
-
-rewrite_relative (canonical → derived):
-  _exporter_port.py        → ExporterPort.py
-  _importer_port.py        → ImporterPort.py
-  _cuda_adapters.py        → CUDAAdapters.py
-  exporter.py              → Exporter.py
-  importer.py              → Importer.py
+The authoritative pair list is PAIRS below.  Keep this docstring free of a
+duplicate listing so it cannot drift.  NAMES is derived from PAIRS at module
+load time — do not maintain it separately.
 
 Usage:
     python scripts/sync_td_wrapper.py           # copy/rewrite src → td_exporter (update)
@@ -48,38 +35,19 @@ from typing import Literal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# ---------------------------------------------------------------------------
-# Name mapping: canonical relative-import stem → derived TD module name.
-# Used by _rewrite_relative_imports() for rewrite_relative pairs.
-# Update this table whenever a canonical module gains a new relative-import
-# dependency whose TD counterpart has a different name.
-# ---------------------------------------------------------------------------
-
-NAMES: dict[str, str] = {
-    # Private support modules (drop leading underscore, PascalCase)
-    "_env": "Env",
-    "_nvtx": "NVTXShim",
-    "_exporter_port": "ExporterPort",
-    "_importer_port": "ImporterPort",
-    "_cuda_adapters": "CUDAAdapters",
-    "_profile": "FrameProfile",  # FrameProfile.py already exists (byte_identical)
-    # Public modules that byte_identical pairs already cover
-    "activation_barrier": "ActivationBarrier",
-    "cuda_runtime_types": "CUDARuntimeTypes",
-    "shm_protocol": "SHMProtocol",
-    "cuda_ipc_wrapper": "CUDAIPCWrapper",
-    "cuda_graphs": "CUDAGraphs",
-    "nvml_observer": "NVMLObserver",
-}
-
 _SRC = REPO_ROOT / "src" / "cuda_link"
 _TD = REPO_ROOT / "td_exporter"
 
-# Each entry: (canonical, derived, mode).
-# The pre-commit hook and tests both consume this list.
+# ---------------------------------------------------------------------------
+# Authoritative pair list: (canonical, derived, mode).
+# Consumed by the sync script, the pre-commit hook, and the test suite.
+# To add a new module: add it here; NAMES and the tests update automatically.
+# ---------------------------------------------------------------------------
+
 PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = [
     # ---- byte_identical pairs -----------------------------------------------
     (_SRC / "_env.py", _TD / "Env.py", "byte_identical"),
+    (_SRC / "_profile.py", _TD / "FrameProfile.py", "byte_identical"),
     (_SRC / "cuda_ipc_wrapper.py", _TD / "CUDAIPCWrapper.py", "byte_identical"),
     (_SRC / "cuda_runtime_types.py", _TD / "CUDARuntimeTypes.py", "byte_identical"),
     (_SRC / "cuda_graphs.py", _TD / "CUDAGraphs.py", "byte_identical"),
@@ -95,6 +63,21 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
     (_SRC / "importer.py", _TD / "Importer.py", "rewrite_relative"),
 ]
 
+# Canonical modules that intentionally have no td_exporter twin.
+# tests/test_wrapper_sync.py::test_pairs_cover_all_mirrorable_modules enforces
+# that every other src/cuda_link/*.py is in PAIRS.
+CANONICAL_ONLY: frozenset[str] = frozenset(
+    {
+        "__init__.py",
+        "cuda_ipc_importer.py",  # deprecation shim — TD consumers use Importer.py directly
+    }
+)
+
+# Name mapping derived from PAIRS: relative-import stem → derived TD module name.
+# Used by _rewrite_relative_imports() to resolve stems found inside rewrite_relative sources.
+# Do not edit this dict manually — add pairs to PAIRS instead.
+NAMES: dict[str, str] = {src.stem: dst.stem for src, dst, _ in PAIRS}
+
 
 # ---------------------------------------------------------------------------
 # Relative-import rewriter
@@ -107,7 +90,7 @@ def _resolve_name(stem: str, context_line: str) -> str:
         raise ValueError(
             f"Unknown relative import stem '{stem}' encountered in:\n"
             f"  {context_line!r}\n"
-            "Add it to the NAMES mapping in scripts/sync_td_wrapper.py"
+            "Add it to PAIRS in scripts/sync_td_wrapper.py"
         )
     return NAMES[stem]
 
