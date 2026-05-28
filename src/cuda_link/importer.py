@@ -193,7 +193,12 @@ class Format:
     def from_overrides(cls, shape: tuple, dtype_str: str) -> Format:
         """Build from caller-supplied shape/dtype (no SHM read).
 
-        kind/bits/flags are 0 sentinels — diagnostic fields only.
+        kind/bits/flags are 0 sentinels — diagnostic wire-format fields that
+        cannot be known without reading the SHM metadata block.  These sentinel
+        zeros participate in the auto-generated ``__eq__``, so do NOT use
+        ``fmt_a == fmt_b`` to detect layout changes between an override-derived
+        and an SHM-derived Format — compare ``.shape`` and ``.dtype_str``
+        directly (see ``_resolve_format`` for the established precedent).
         """
         height, width, num_comps = shape
         try:
@@ -941,6 +946,33 @@ class Importer:
     # Frame consumers
     # ------------------------------------------------------------------
 
+    def _begin_frame(self) -> tuple:
+        """Common preamble for all get_frame* methods.
+
+        Returns ``(early_result, read_slot, latency_ms, debug, frame_start)``.
+        When ``early_result`` is not None the caller must return it immediately.
+        All three paths — torch, numpy, cupy — open with::
+
+            early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+            if early is not None:
+                return early
+            self.last_latency = latency_ms
+        """
+        if not self._initialized and (self._retry is None or not self._drive_retry()):
+            return ImportResult(outcome=ImportOutcome.RECONNECTING), -1, 0.0, False, 0.0
+
+        debug = self._policy.debug
+        frame_start = time.perf_counter() if debug else 0.0
+
+        slot_result, outcome = self._try_acquire()
+        if outcome is not ImportOutcome.NEW_FRAME:
+            return ImportResult(outcome=outcome), -1, 0.0, debug, frame_start
+
+        read_slot = slot_result.slot
+        producer_timestamp = slot_result.timestamp
+        latency_ms = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        return None, read_slot, latency_ms, debug, frame_start
+
     def get_frame(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy torch.Tensor on GPU.
 
@@ -957,19 +989,10 @@ class Importer:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        debug = self._policy.debug
-        frame_start = time.perf_counter() if debug else 0.0
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
 
@@ -1008,19 +1031,10 @@ class Importer:
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        debug = self._policy.debug
-        frame_start = time.perf_counter() if debug else 0.0
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
         fmt = self._format
@@ -1095,21 +1109,23 @@ class Importer:
 
         Returns:
             ImportResult[cp.ndarray] with outcome NEW_FRAME, NO_FRAME,
-            SHUTDOWN, RECONNECTING, or TIMEOUT.
+            SHUTDOWN, or RECONNECTING.
+
+        Note:
+            TIMEOUT is not reachable via this path. GPU synchronisation is
+            done with ``cp.cuda.runtime.streamWaitEvent`` which is a
+            non-blocking CPU call (the stream waits on the GPU side, but the
+            CPU returns immediately). There is no Python-level TimeoutError.
+            Use ``get_frame()`` (torch) or ``get_frame_numpy()`` if you need
+            producer-timeout detection.
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
 
@@ -1123,6 +1139,10 @@ class Importer:
             cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
 
         self.frame_count += 1
+        if debug:
+            frame_time = (time.perf_counter() - frame_start) * 1_000_000
+            self.total_get_frame_time += frame_time
+            self._log_frame_stats("cupy", read_slot, conn)
         return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=self._cupy.arrays[read_slot])
 
     # ------------------------------------------------------------------
@@ -1143,7 +1163,11 @@ class Importer:
         # Falls back to current format if SHM metadata is absent or all-zeros.
         new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
 
-        if new_fmt != self._format:
+        # Compare only the load-bearing layout fields — mirroring the precedent
+        # in _resolve_format (line ~722) which also avoids Format.__eq__ here.
+        # The full __eq__ would false-positive when self._format is override-derived
+        # (kind=bits=flags=0 sentinels) vs an SHM-derived new_fmt with real values.
+        if new_fmt.shape != self._format.shape or new_fmt.dtype_str != self._format.dtype_str:
             logger.info(
                 "Format changed on reinit: %s %s → %s %s",
                 self._format.shape,

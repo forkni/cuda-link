@@ -471,3 +471,143 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
     imp._reinitialize()
 
     assert len(calls) >= 1, "_reinitialize must call Format.from_shm"
+
+
+# ---------------------------------------------------------------------------
+# Candidate D — _begin_frame dedup + Format.__eq__ sentinel fix
+# ---------------------------------------------------------------------------
+
+
+def test_get_frame_cupy_logs_stats_when_debug_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_frame_cupy calls _log_frame_stats when debug=True (parity with torch/numpy paths)."""
+    from unittest.mock import MagicMock, patch
+
+    # Build a connected importer via _make_connected_importer with debug=True
+    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1)
+    # Enable debug and attach a cupy buffers mock
+    imp._policy = imp._policy.__class__(
+        **{
+            **imp._policy.__class__.__dataclass_fields__,
+            **{f.name: getattr(imp._policy, f.name) for f in imp._policy.__class__.__dataclass_fields__.values()},
+            "debug": True,
+        }
+    )
+    stats_calls: list = []
+    monkeypatch.setattr(imp, "_log_frame_stats", lambda *a, **kw: stats_calls.append(a))
+
+    # Provide a fake cupy arrays structure
+    mock_array = MagicMock()
+    mock_cupy_buffers = MagicMock()
+    mock_cupy_buffers.arrays = [mock_array]
+    imp._cupy = mock_cupy_buffers
+
+    # Patch cp.cuda.get_current_stream and streamWaitEvent
+    with (
+        patch("cuda_link.importer.cp") as mock_cp,
+        patch("cuda_link.importer.CUPY_AVAILABLE", True),
+    ):
+        mock_stream = MagicMock()
+        mock_stream.ptr = 0
+        mock_cp.cuda.get_current_stream.return_value = mock_stream
+        mock_cp.cuda.runtime.streamWaitEvent = MagicMock()
+        mock_cp.cuda.Stream = type("Stream", (), {})
+
+        result = imp.get_frame_cupy()
+
+    from cuda_link._importer_port import ImportOutcome
+
+    assert result.outcome == ImportOutcome.NEW_FRAME
+    assert len(stats_calls) == 1, "get_frame_cupy must call _log_frame_stats when debug=True"
+    assert stats_calls[0][0] == "cupy"
+
+
+def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_reinitialize must NOT tear down NumpyBuffers when shape+dtype match but kind/bits/flags differ.
+
+    Scenario: _format is override-derived (kind=bits=flags=0 sentinels) but the SHM-derived
+    new_fmt has the same shape+dtype with real non-zero kind/bits/flags.
+    The old full-__eq__ comparison would return False (false positive).
+    The fixed shape+dtype_str comparison must return True (no change detected).
+    """
+    import struct as _struct
+    from unittest.mock import MagicMock
+
+    from cuda_link.shm_protocol import DtypeCodec, Metadata, SHMLayout
+
+    shape = (4, 4, 4)
+    dtype = "float32"
+
+    # Build an importer whose self._format is override-derived (sentinel zeros)
+    imp = _make_connected_importer(shape=shape, dtype=dtype, num_slots=1, write_idx=1)
+    assert imp._format.kind == 0, "from_overrides must produce kind=0 sentinel"
+    assert imp._format.bits == 0, "from_overrides must produce bits=0 sentinel"
+    assert imp._format.flags == 0, "from_overrides must produce flags=0 sentinel"
+
+    # Attach a mock NumpyBuffers so we can detect if close() is called
+    mock_numpy = MagicMock()
+    mock_numpy.needs_rebuild.return_value = False
+    imp._numpy = mock_numpy
+
+    # Write SHM metadata with the SAME shape+dtype but real non-zero kind/bits/flags
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode(dtype)  # real: (2, 32, 0) for float32
+    h, w, c = shape
+    Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * DtypeCodec.itemsize(dtype),
+    ).pack_into(shm_buf, layout)
+
+    # Bump SHM version so _try_acquire returns VERSION_CHANGED and _reinitialize is needed
+    cur_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
+    _struct.pack_into("<Q", shm_buf, 4, cur_ver + 1)
+
+    # Call _reinitialize directly
+    imp._reinitialize()
+
+    mock_numpy.close.assert_not_called(), "NumpyBuffers must NOT be torn down — shape+dtype unchanged"
+
+
+def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_reinitialize tears down NumpyBuffers when the shape genuinely changes."""
+    import struct as _struct
+    from unittest.mock import MagicMock
+
+    from cuda_link.shm_protocol import DtypeCodec, Metadata, SHMLayout
+
+    old_shape = (4, 4, 4)
+    new_shape = (8, 8, 4)
+    dtype = "float32"
+
+    imp = _make_connected_importer(shape=old_shape, dtype=dtype, num_slots=1, write_idx=1)
+
+    mock_numpy = MagicMock()
+    mock_numpy.needs_rebuild.return_value = False
+    imp._numpy = mock_numpy
+
+    # Write SHM metadata with a DIFFERENT shape (8×8 instead of 4×4)
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    h, w, c = new_shape
+    Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * DtypeCodec.itemsize(dtype),
+    ).pack_into(shm_buf, layout)
+
+    cur_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
+    _struct.pack_into("<Q", shm_buf, 4, cur_ver + 1)
+
+    imp._reinitialize()
+
+    mock_numpy.close.assert_called_once(), "NumpyBuffers MUST be torn down when shape changes"
