@@ -54,13 +54,18 @@ FORMAT_KIND_UNSIGNED: int = 1  # cudaChannelFormatKindUnsigned
 FORMAT_KIND_FLOAT: int = 2  # cudaChannelFormatKindFloat
 FLAGS_BFLOAT16: int = 0x0001  # bit0: bfloat16 (kind=Float, bits=16)
 
-# dtype string → (format_kind, bits_per_component, flags)
-_DTYPE_TO_KIND_BITS: dict[str, tuple[int, int, int]] = {
-    "float32": (FORMAT_KIND_FLOAT, 32, 0),
-    "float16": (FORMAT_KIND_FLOAT, 16, 0),
-    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0),
-    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0),
+# dtype string → (format_kind, bits_per_component, flags, itemsize_bytes)
+# Single authoritative registry.  Adding a dtype is one row here; no other file changes.
+_DTYPE_TABLE: dict[str, tuple[int, int, int, int]] = {
+    "float32": (FORMAT_KIND_FLOAT, 32, 0, 4),
+    "float16": (FORMAT_KIND_FLOAT, 16, 0, 2),
+    "bfloat16": (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, 2),
+    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0, 1),
+    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0, 2),
+    "int8": (FORMAT_KIND_SIGNED, 8, 0, 1),
+    "int16": (FORMAT_KIND_SIGNED, 16, 0, 2),
 }
+_DECODE_TABLE: dict[tuple[int, int, int], str] = {(k, b, f): name for name, (k, b, f, _sz) in _DTYPE_TABLE.items()}
 
 # ---------------------------------------------------------------------------
 # Pre-compiled struct codecs (hot-path, saves ~50-100ns per call)
@@ -196,8 +201,8 @@ class Metadata:
 class DtypeCodec:
     """Encode/decode dtype strings to/from (format_kind, bits_per_comp, flags).
 
-    Folds _DTYPE_TO_KIND_BITS (exporter) and _decode_dtype_str (importer).
-    Adding a dtype is a single-file edit here.
+    All dtype knowledge lives in _DTYPE_TABLE above.  Adding a dtype is a
+    single-row edit there; no other file needs to change.
     """
 
     @staticmethod
@@ -205,22 +210,32 @@ class DtypeCodec:
         """dtype string → (format_kind, bits_per_comp, flags).
 
         Raises:
-            KeyError: if dtype is not supported.
+            KeyError: if dtype is not in the supported set.
         """
-        return _DTYPE_TO_KIND_BITS[dtype]
+        k, b, f, _sz = _DTYPE_TABLE[dtype]
+        return (k, b, f)
 
     @staticmethod
     def decode(kind: int, bits: int, flags: int) -> str:
-        """(format_kind, bits_per_comp, flags) → dtype string."""
-        if kind == FORMAT_KIND_FLOAT and bits == 16 and not (flags & FLAGS_BFLOAT16):
-            return "float16"
-        if kind == FORMAT_KIND_FLOAT:
-            return "float32"
-        if bits == 8:
-            return "uint8"
-        if bits == 16:
-            return "uint16"
-        return "float32"  # safe fallback for future extensions
+        """(format_kind, bits_per_comp, flags) → dtype string.
+
+        Returns "float32" for unknown triples (forward-compat fallback).
+        """
+        return _DECODE_TABLE.get((kind, bits, flags), "float32")
+
+    @staticmethod
+    def itemsize(dtype: str) -> int:
+        """Return the byte width of one element of the given dtype.
+
+        Raises:
+            KeyError: if dtype is not in the supported set.
+        """
+        return _DTYPE_TABLE[dtype][3]
+
+    @staticmethod
+    def supported() -> tuple[str, ...]:
+        """Tuple of all supported dtype strings, in registration order."""
+        return tuple(_DTYPE_TABLE)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +288,25 @@ def publish_frame(buf: memoryview, layout: SHMLayout, write_idx: int, timestamp:
     buf[layout.shutdown_offset] = 0
     _release_fence()  # C3 release barrier: shutdown_flag visible before write_idx
     _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, write_idx)
+
+
+def set_shutdown(buf: memoryview, layout: SHMLayout) -> None:
+    """Signal producer exit by writing shutdown_flag = 1.
+
+    Emits a release fence so the flag is visible to consumers before any
+    subsequent write_idx update.  Call once during producer teardown.
+    """
+    buf[layout.shutdown_offset] = 1
+    _release_fence()
+
+
+def clear_shutdown(buf: memoryview, layout: SHMLayout) -> None:
+    """Clear shutdown_flag to 0 at init or barrier-skip time.
+
+    No fence required: callers either immediately follow with publish_frame
+    (which owns the fence), or make no write_idx advance (barrier-skip path).
+    """
+    buf[layout.shutdown_offset] = 0
 
 
 # ---------------------------------------------------------------------------

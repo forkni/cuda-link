@@ -12,6 +12,9 @@ import time
 import pytest
 
 from cuda_link.shm_protocol import (
+    FLAGS_BFLOAT16,
+    FORMAT_KIND_SIGNED,
+    FORMAT_KIND_UNSIGNED,
     METADATA_SIZE,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
@@ -22,10 +25,13 @@ from cuda_link.shm_protocol import (
     SlotState,
     acquire_slot,
     bump_version,
+    clear_shutdown,
     publish_frame,
     read_magic,
+    read_num_slots,
     read_version,
     read_write_idx,
+    set_shutdown,
 )
 
 # ---------------------------------------------------------------------------
@@ -152,8 +158,9 @@ def test_dtype_codec_unknown_decode_fallback() -> None:
 
 
 def test_dtype_codec_unknown_encode_raises() -> None:
+    # "float64" is not in the supported set (bfloat16 is now supported)
     with pytest.raises(KeyError):
-        DtypeCodec.encode("bfloat16")
+        DtypeCodec.encode("float64")
 
 
 # ---------------------------------------------------------------------------
@@ -243,3 +250,153 @@ def test_publish_clears_shutdown_flag() -> None:
     buf[layout.shutdown_offset] = 1
     publish_frame(buf, layout, write_idx=1, timestamp=time.perf_counter())
     assert buf[layout.shutdown_offset] == 0
+
+
+# ---------------------------------------------------------------------------
+# set_shutdown / clear_shutdown — new B1 helpers
+# ---------------------------------------------------------------------------
+
+
+def test_set_shutdown_writes_flag() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    assert buf[layout.shutdown_offset] == 0
+    set_shutdown(buf, layout)
+    assert buf[layout.shutdown_offset] == 1
+
+
+def test_clear_shutdown_clears_flag() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    buf[layout.shutdown_offset] = 1
+    clear_shutdown(buf, layout)
+    assert buf[layout.shutdown_offset] == 0
+
+
+def test_set_shutdown_triggers_acquire_shutdown() -> None:
+    """Consumer sees SHUTDOWN after set_shutdown, not a stale raw write."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    set_shutdown(buf, layout)
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.SHUTDOWN
+
+
+def test_slot_offset_now_consumed_by_protocol() -> None:
+    """slot_offset is the canonical slot-address accessor; verify it against raw formula."""
+    for n in [2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            expected = SHM_HEADER_SIZE + slot * SLOT_SIZE
+            assert layout.slot_offset(slot) == expected
+
+
+# ---------------------------------------------------------------------------
+# DtypeCodec — extended 7-dtype coverage (C1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+)
+def test_dtype_codec_roundtrip_all_dtypes(dtype: str) -> None:
+    """encode then decode is identity for all 7 registered dtypes."""
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    assert DtypeCodec.decode(kind, bits, flags) == dtype
+
+
+def test_dtype_codec_bfloat16_vs_float16_distinct() -> None:
+    """bfloat16 and float16 share (kind=Float, bits=16) but differ by FLAGS_BFLOAT16."""
+    k16, b16, f16 = DtypeCodec.encode("float16")
+    kbf, bbf, fbf = DtypeCodec.encode("bfloat16")
+    assert (k16, b16) == (kbf, bbf)  # same kind+bits
+    assert f16 == 0
+    assert fbf == FLAGS_BFLOAT16
+    # Codec distinguishes them
+    assert DtypeCodec.decode(k16, b16, f16) == "float16"
+    assert DtypeCodec.decode(kbf, bbf, fbf) == "bfloat16"
+
+
+def test_dtype_codec_int_vs_uint_distinct() -> None:
+    """int8 and uint8 have the same bits but different format_kind."""
+    ki, bi, fi = DtypeCodec.encode("int8")
+    ku, bu, fu = DtypeCodec.encode("uint8")
+    assert bi == bu == 8
+    assert ki == FORMAT_KIND_SIGNED
+    assert ku == FORMAT_KIND_UNSIGNED
+    assert DtypeCodec.decode(ki, bi, fi) == "int8"
+    assert DtypeCodec.decode(ku, bu, fu) == "uint8"
+
+
+@pytest.mark.parametrize(
+    "dtype,expected_itemsize",
+    [
+        ("float32", 4),
+        ("float16", 2),
+        ("bfloat16", 2),
+        ("uint8", 1),
+        ("uint16", 2),
+        ("int8", 1),
+        ("int16", 2),
+    ],
+)
+def test_dtype_codec_itemsize(dtype: str, expected_itemsize: int) -> None:
+    assert DtypeCodec.itemsize(dtype) == expected_itemsize
+
+
+def test_dtype_codec_supported_contains_all_seven() -> None:
+    supported = DtypeCodec.supported()
+    assert set(supported) == {"float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"}
+
+
+def test_dtype_codec_itemsize_unknown_raises() -> None:
+    with pytest.raises(KeyError):
+        DtypeCodec.itemsize("float64")
+
+
+# ---------------------------------------------------------------------------
+# read_version / read_num_slots — header helpers now consumed by protocol
+# ---------------------------------------------------------------------------
+
+
+def test_read_version_read_num_slots_helpers() -> None:
+    """read_version and read_num_slots return correct values from a built buffer."""
+    layout = SHMLayout(num_slots=3)
+    buf = bytearray(layout.total_size)
+    buf = layout.build_buffer(version=7, write_idx=0)
+    mv = memoryview(buf)
+    assert read_version(mv) == 7
+    assert read_num_slots(mv) == 3
+
+
+# ---------------------------------------------------------------------------
+# Metadata.read_from now consumed for all 7 dtypes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+)
+def test_metadata_roundtrip_all_dtypes(dtype: str) -> None:
+    """Metadata.read_from correctly recovers every registered dtype."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    itemsize = DtypeCodec.itemsize(dtype)
+    w, h, c = 64, 48, 4
+    meta_in = Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * itemsize,
+    )
+    meta_in.pack_into(buf, layout)
+    meta_out = Metadata.read_from(buf, layout)
+    assert meta_out == meta_in
+    # Verify round-trip through DtypeCodec
+    assert DtypeCodec.decode(meta_out.format_kind, meta_out.bits_per_comp, meta_out.flags) == dtype

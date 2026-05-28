@@ -32,24 +32,39 @@ def _make_bare(shm_name: str = "x", height: int = 64, width: int = 64, **spec_kw
 
 
 def test_kind_bits_mapping() -> None:
-    """dtype strings map to correct (format_kind, bits, flags) wire encoding."""
-    from cuda_link.exporter import _DTYPE_TO_KIND_BITS
-    from cuda_link.shm_protocol import FLAGS_BFLOAT16, FORMAT_KIND_FLOAT, FORMAT_KIND_UNSIGNED
+    """dtype strings map to correct (format_kind, bits, flags) wire encoding.
 
-    assert _DTYPE_TO_KIND_BITS["float32"] == (FORMAT_KIND_FLOAT, 32, 0)
-    assert _DTYPE_TO_KIND_BITS["float16"] == (FORMAT_KIND_FLOAT, 16, 0)
-    assert _DTYPE_TO_KIND_BITS["uint8"] == (FORMAT_KIND_UNSIGNED, 8, 0)
-    assert _DTYPE_TO_KIND_BITS["uint16"] == (FORMAT_KIND_UNSIGNED, 16, 0)
+    The authoritative registry lives in DtypeCodec (shm_protocol) — not in the exporter.
+    """
+    from cuda_link.shm_protocol import (
+        FLAGS_BFLOAT16,
+        FORMAT_KIND_FLOAT,
+        FORMAT_KIND_SIGNED,
+        FORMAT_KIND_UNSIGNED,
+        DtypeCodec,
+    )
+
+    assert DtypeCodec.encode("float32") == (FORMAT_KIND_FLOAT, 32, 0)
+    assert DtypeCodec.encode("float16") == (FORMAT_KIND_FLOAT, 16, 0)
+    assert DtypeCodec.encode("bfloat16") == (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16)
+    assert DtypeCodec.encode("uint8") == (FORMAT_KIND_UNSIGNED, 8, 0)
+    assert DtypeCodec.encode("uint16") == (FORMAT_KIND_UNSIGNED, 16, 0)
+    assert DtypeCodec.encode("int8") == (FORMAT_KIND_SIGNED, 8, 0)
+    assert DtypeCodec.encode("int16") == (FORMAT_KIND_SIGNED, 16, 0)
     assert FLAGS_BFLOAT16 == 0x0001
 
 
 def test_dtype_itemsize_mapping() -> None:
-    """dtype strings map to correct byte sizes."""
-    from cuda_link.exporter import _DTYPE_ITEMSIZE_MAP
+    """dtype strings map to correct byte sizes (via DtypeCodec, not exporter internals)."""
+    from cuda_link.shm_protocol import DtypeCodec
 
-    assert _DTYPE_ITEMSIZE_MAP["float32"] == 4
-    assert _DTYPE_ITEMSIZE_MAP["float16"] == 2
-    assert _DTYPE_ITEMSIZE_MAP["uint8"] == 1
+    assert DtypeCodec.itemsize("float32") == 4
+    assert DtypeCodec.itemsize("float16") == 2
+    assert DtypeCodec.itemsize("bfloat16") == 2
+    assert DtypeCodec.itemsize("uint8") == 1
+    assert DtypeCodec.itemsize("uint16") == 2
+    assert DtypeCodec.itemsize("int8") == 1
+    assert DtypeCodec.itemsize("int16") == 2
 
 
 def test_data_size_calculation_uint8() -> None:

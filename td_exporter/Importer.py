@@ -33,21 +33,17 @@ from ImporterPort import (
     ImportSpec,
 )
 from SHMProtocol import (
-    _ST_BBH,
     MAGIC_OFFSET,
     MAGIC_SIZE,
-    NUM_SLOTS_OFFSET,
-    NUM_SLOTS_SIZE,
     PROTOCOL_MAGIC,
-    SHM_HEADER_SIZE,
-    SLOT_SIZE,
-    VERSION_OFFSET,
-    VERSION_SIZE,
     AcquireResult,
     DtypeCodec,
+    Metadata,
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_num_slots,
+    read_version,
 )
 
 if TYPE_CHECKING:
@@ -59,15 +55,6 @@ logger = logging.getLogger(__name__)
 _NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
 _NVTX_NUMPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame_numpy.slot")
 
-_DTYPE_SIZES: dict[str, int] = {
-    "float32": 4,
-    "float16": 2,
-    "bfloat16": 2,
-    "uint8": 1,
-    "uint16": 2,
-    "int8": 1,
-    "int16": 2,
-}
 
 # Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
 if sys.platform == "win32":
@@ -125,8 +112,23 @@ except ImportError:
     CUPY_AVAILABLE = False
 
 
-def _decode_dtype_str(kind: int, bits: int, flags: int) -> str:
-    return DtypeCodec.decode(kind, bits, flags)
+def _numpy_dtype_for(dtype_str: str) -> object:
+    """Return np.dtype for dtype_str, handling bfloat16 specially.
+
+    Returns None when NumPy is unavailable.  For bfloat16, attempts
+    ml_dtypes.bfloat16 and returns None if that package is absent
+    (NumpyBuffers will raise a clear error rather than silently miscompute).
+    """
+    if not NUMPY_AVAILABLE:
+        return None
+    if dtype_str == "bfloat16":
+        try:
+            import ml_dtypes  # noqa: PLC0415
+
+            return np.dtype(ml_dtypes.bfloat16)
+        except ImportError:
+            return None
+    return np.dtype(dtype_str)
 
 
 # ---------------------------------------------------------------------------
@@ -159,27 +161,25 @@ class Format:
         """Parse extended metadata block from shared memory.
 
         Returns None when the block is absent or contains zeros.
+        Routes through shm_protocol.Metadata.read_from — do not replicate
+        the struct decoding here.
         """
         layout = SHMLayout(num_slots)
-        metadata_offset = layout.metadata_offset
         try:
-            width = struct.unpack("<I", bytes(shm_buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(shm_buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(shm_buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            kind, bits, flags = _ST_BBH.unpack(bytes(shm_buf[metadata_offset + 12 : metadata_offset + 16]))
-            if width > 0 and height > 0 and num_comps > 0:
-                dtype_str = _decode_dtype_str(kind, bits, flags)
-                shape = (height, width, num_comps)
-                itemsize = _DTYPE_SIZES.get(dtype_str, bits // 8 or 4)
-                frame_nbytes = height * width * num_comps * itemsize
-                numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+            md = Metadata.read_from(shm_buf, layout)
+            if md.width > 0 and md.height > 0 and md.num_comps > 0:
+                dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
+                itemsize = DtypeCodec.itemsize(dtype_str)
+                shape = (md.height, md.width, md.num_comps)
+                frame_nbytes = md.height * md.width * md.num_comps * itemsize
+                numpy_dtype = _numpy_dtype_for(dtype_str)
                 return cls(
-                    width=width,
-                    height=height,
-                    num_comps=num_comps,
-                    kind=kind,
-                    bits=bits,
-                    flags=flags,
+                    width=md.width,
+                    height=md.height,
+                    num_comps=md.num_comps,
+                    kind=md.format_kind,
+                    bits=md.bits_per_comp,
+                    flags=md.flags,
                     dtype_str=dtype_str,
                     shape=shape,
                     numpy_dtype=numpy_dtype,
@@ -196,9 +196,12 @@ class Format:
         kind/bits/flags are 0 sentinels — diagnostic fields only.
         """
         height, width, num_comps = shape
-        itemsize = _DTYPE_SIZES.get(dtype_str, 4)
+        try:
+            itemsize = DtypeCodec.itemsize(dtype_str)
+        except KeyError:
+            itemsize = 4  # safe fallback for caller-supplied unknown dtypes
         frame_nbytes = height * width * num_comps * itemsize
-        numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+        numpy_dtype = _numpy_dtype_for(dtype_str)
         return cls(
             width=width,
             height=height,
@@ -273,8 +276,22 @@ class TorchBuffers:
 
     @classmethod
     def build(cls, conn: IPCConnection, fmt: Format) -> TorchBuffers:
-        """Create one zero-copy tensor view per slot via __cuda_array_interface__."""
-        typestr_map = {"float32": "<f4", "float16": "<f2", "uint8": "|u1", "uint16": "<u2"}
+        """Create one zero-copy tensor view per slot via __cuda_array_interface__.
+
+        bfloat16: the CAI protocol has no bfloat16 typestr, so we use a uint16
+        backing view ("<u2") and reinterpret with tensor.view(torch.bfloat16).
+        """
+        # Maps dtype_str → __cuda_array_interface__ typestr.
+        # bfloat16 uses uint16 backing ("<u2"); the tensor is re-viewed after construction.
+        typestr_map = {
+            "float32": "<f4",
+            "float16": "<f2",
+            "uint8": "|u1",
+            "uint16": "<u2",
+            "int8": "|i1",
+            "int16": "<i2",
+            "bfloat16": "<u2",
+        }
         typestr = typestr_map.get(fmt.dtype_str)
         if typestr is None:
             raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}")
@@ -300,6 +317,8 @@ class TorchBuffers:
 
             wrapper = CUDAArrayWrapper(cuda_array_interface)
             tensor = torch.as_tensor(wrapper, device="cuda")
+            if fmt.dtype_str == "bfloat16":
+                tensor = tensor.view(torch.bfloat16)
             wrappers.append(wrapper)
             tensors.append(tensor)
 
@@ -314,8 +333,24 @@ class CupyBuffers:
 
     @classmethod
     def build(cls, conn: IPCConnection, fmt: Format) -> CupyBuffers:
-        """Create one zero-copy CuPy array view per slot via UnownedMemory."""
-        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
+        """Create one zero-copy CuPy array view per slot via UnownedMemory.
+
+        bfloat16 is not supported by CuPy (no cp.bfloat16 dtype); callers
+        should use get_frame() to receive a torch.Tensor for bfloat16 data.
+        """
+        if fmt.dtype_str == "bfloat16":
+            raise ValueError(
+                "bfloat16 is not supported by the CuPy consumer (CuPy has no bfloat16 dtype). "
+                "Use get_frame() to retrieve a torch.Tensor instead."
+            )
+        dtype_map = {
+            "float32": cp.float32,
+            "float16": cp.float16,
+            "uint8": cp.uint8,
+            "uint16": cp.uint16,
+            "int8": cp.int8,
+            "int16": cp.int16,
+        }
         cp_dtype = dtype_map.get(fmt.dtype_str)
         if cp_dtype is None:
             raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}")
@@ -364,7 +399,16 @@ class NumpyBuffers:
 
         Allocation ladder: cudaMallocHost (portable pinned) → cudaHostRegister
         (page-locked) → pageable fallback (when allow_pageable=True).
+
+        Raises ValueError for dtypes with no NumPy representation (bfloat16
+        without ml_dtypes installed).  Use get_frame() for those dtypes.
         """
+        if fmt.numpy_dtype is None:
+            raise ValueError(
+                f"NumPy consumer cannot be used for dtype {fmt.dtype_str!r}: "
+                "no compatible NumPy dtype is available. "
+                "For bfloat16, install ml_dtypes; or use get_frame() (torch) instead."
+            )
         cuda = conn.cuda
         nbytes = fmt.frame_nbytes
 
@@ -646,14 +690,14 @@ class Importer:
                 "Update both TD and Python sides to the same protocol version."
             )
 
-        ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
-        num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
+        ipc_version = read_version(shm.buf)
+        num_slots = read_num_slots(shm.buf)
 
         if num_slots == 0 or num_slots > 10:
             shm.close()
             raise ValueError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
 
-        shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
+        shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
             shutdown_flag = shm.buf[shutdown_offset]
         except (OSError, BufferError, IndexError) as e:
@@ -706,9 +750,10 @@ class Importer:
         ipc_handles: list = [None] * num_slots
         dev_ptrs: list = [None] * num_slots
         ipc_events: list = [None] * num_slots
+        layout = SHMLayout(num_slots)
 
         for slot in range(num_slots):
-            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+            base_offset = layout.slot_offset(slot)
 
             mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
             logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
@@ -731,7 +776,6 @@ class Importer:
             )
 
         logger.info("Opened %d IPC buffer slots", num_slots)
-        layout = SHMLayout(num_slots)
         return IPCConnection(
             cuda=cuda,
             shm_handle=shm,
@@ -1092,35 +1136,12 @@ class Importer:
 
         old_conn.close_ipc_handles()
 
-        new_ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
-        new_num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
+        new_ipc_version = read_version(shm.buf)
+        new_num_slots = read_num_slots(shm.buf)
 
-        new_layout = SHMLayout(new_num_slots)
-        new_fmt = self._format
-        try:
-            metadata_offset = new_layout.metadata_offset
-            width = struct.unpack("<I", bytes(shm.buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(shm.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(shm.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            kind, bits, flags = _ST_BBH.unpack(bytes(shm.buf[metadata_offset + 12 : metadata_offset + 16]))
-            if width > 0 and height > 0 and num_comps > 0:
-                new_dtype_str = _decode_dtype_str(kind, bits, flags)
-                new_shape = (height, width, num_comps)
-                itemsize = _DTYPE_SIZES.get(new_dtype_str, bits // 8 or 4)
-                new_fmt = Format(
-                    width=width,
-                    height=height,
-                    num_comps=num_comps,
-                    kind=kind,
-                    bits=bits,
-                    flags=flags,
-                    dtype_str=new_dtype_str,
-                    shape=new_shape,
-                    numpy_dtype=np.dtype(new_dtype_str) if NUMPY_AVAILABLE else None,
-                    frame_nbytes=height * width * num_comps * itemsize,
-                )
-        except (struct.error, ValueError, IndexError) as e:
-            logger.debug("Could not re-read metadata during reinit: %s", e)
+        # Route through Format.from_shm — same decoder used at connect time.
+        # Falls back to current format if SHM metadata is absent or all-zeros.
+        new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
 
         if new_fmt != self._format:
             logger.info(

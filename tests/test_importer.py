@@ -360,3 +360,114 @@ def test_reconnect_for_testing_policy_has_reconnect_disabled() -> None:
     """ImportPolicy.for_testing() has reconnect_enabled=False so unit tests don't wait."""
     policy = ImportPolicy.for_testing()
     assert policy.reconnect_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Candidate C — new dtype coverage (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+def test_format_from_overrides_new_dtypes() -> None:
+    """Format.from_overrides works for all 7 registered dtypes."""
+    from cuda_link.shm_protocol import DtypeCodec
+
+    for dtype in DtypeCodec.supported():
+        fmt = Format.from_overrides((8, 8, 4), dtype)
+        assert fmt.dtype_str == dtype
+        assert fmt.frame_nbytes == 8 * 8 * 4 * DtypeCodec.itemsize(dtype)
+
+
+def test_format_from_shm_all_dtypes() -> None:
+    """Format.from_shm decodes all 7 dtypes via Metadata.read_from + DtypeCodec."""
+    from cuda_link.shm_protocol import DtypeCodec, Metadata, SHMLayout
+
+    for dtype in DtypeCodec.supported():
+        layout = SHMLayout(num_slots=2)
+        buf = memoryview(bytearray(layout.total_size))
+        kind, bits, flags = DtypeCodec.encode(dtype)
+        itemsize = DtypeCodec.itemsize(dtype)
+        w, h, c = 16, 16, 4
+        Metadata(
+            width=w,
+            height=h,
+            num_comps=c,
+            format_kind=kind,
+            bits_per_comp=bits,
+            flags=flags,
+            data_size=w * h * c * itemsize,
+        ).pack_into(buf, layout)
+
+        fmt = Format.from_shm(buf, 2)
+        assert fmt is not None
+        assert fmt.dtype_str == dtype, f"Mismatch for {dtype}: got {fmt.dtype_str}"
+        assert fmt.frame_nbytes == w * h * c * itemsize
+
+
+def test_torch_buffers_int8_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TorchBuffers.build no longer raises for int8 (previously crashed)."""
+    import torch
+    from fakes import make_fake_ipc_connection
+
+    from cuda_link.importer import Format, TorchBuffers
+
+    conn, _cuda, _shm = make_fake_ipc_connection(num_slots=1, ipc_version=1, write_idx=0)
+    fmt = Format.from_overrides((4, 4, 4), "int8")
+    # Patch out as_tensor to avoid actual GPU call
+    monkeypatch.setattr("cuda_link.importer.torch.as_tensor", lambda *a, **kw: torch.zeros(4, 4, 4, dtype=torch.int8))
+    tb = TorchBuffers.build(conn, fmt)
+    assert tb is not None
+    assert len(tb.tensors) == 1
+
+
+def test_torch_buffers_int16_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TorchBuffers.build works for int16."""
+    import torch
+    from fakes import make_fake_ipc_connection
+
+    from cuda_link.importer import Format, TorchBuffers
+
+    conn, _cuda, _shm = make_fake_ipc_connection(num_slots=1, ipc_version=1, write_idx=0)
+    fmt = Format.from_overrides((4, 4, 4), "int16")
+    monkeypatch.setattr("cuda_link.importer.torch.as_tensor", lambda *a, **kw: torch.zeros(4, 4, 4, dtype=torch.int16))
+    tb = TorchBuffers.build(conn, fmt)
+    assert tb is not None
+
+
+def test_cupy_buffers_bfloat16_raises_clear_error() -> None:
+    """CupyBuffers.build raises a clear ValueError for bfloat16 (CuPy has no bfloat16 dtype)."""
+    from fakes import make_fake_ipc_connection
+
+    from cuda_link.importer import CupyBuffers, Format
+
+    conn, _cuda, _shm = make_fake_ipc_connection(num_slots=1, ipc_version=1, write_idx=0)
+    fmt = Format.from_overrides((4, 4, 4), "bfloat16")
+    with pytest.raises(ValueError, match="bfloat16"):
+        CupyBuffers.build(conn, fmt)
+
+
+def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_reinitialize routes through Format.from_shm, not a hand-written decoder."""
+    import struct as _struct
+
+    from cuda_link.importer import Format
+
+    original_from_shm = Format.from_shm
+    calls: list = []
+
+    def spy_from_shm(shm_buf: object, num_slots: int) -> Format | None:
+        calls.append(num_slots)
+        return original_from_shm(shm_buf, num_slots)
+
+    monkeypatch.setattr(Format, "from_shm", staticmethod(spy_from_shm))
+
+    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1)
+    # Trigger a reinitialize by bumping the SHM version
+    shm_buf = imp._conn.shm_handle.buf
+    # Bump version to trigger VERSION_CHANGED
+    current_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
+    _struct.pack_into("<Q", shm_buf, 4, current_ver + 1)
+
+    # Call _reinitialize directly
+    imp._reinitialize()
+
+    assert len(calls) >= 1, "_reinitialize must call Format.from_shm"
