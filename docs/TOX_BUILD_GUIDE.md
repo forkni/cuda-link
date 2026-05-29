@@ -10,11 +10,53 @@ Step-by-step instructions for building the `CUDAIPCLink_v1.6.0.tox` component in
 
 ## Component Structure
 
+There are two assembly modes. Choose one:
+
+### Library mode (recommended — fewer DATs)
+
+Requires `cuda_link` installed externally (`install_td_library.cmd`) and `CUDALINK_LIB_PATH`
+set before launching TouchDesigner. The bootstrap module loads the package and registers the
+14 mirror names in `sys.modules` — so those mirror Text DATs are not needed.
+
 ```
 CUDAIPCExporter (Base COMP)
+├── cuda_link_bootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/cuda_link_bootstrap.py
+├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
+├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
+├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
+├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
+├── callbacks         (Execute DAT)  ← Copy from td_exporter/callbacks_template.py
+├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
+├── input             (In TOP)       ← User wires their source TOP here
+├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
+├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
+├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
+└── info              (Text DAT)     ← Optional version/author info
+```
+
+### Classic / fallback mode (no install required — all mirror DATs included)
+
+All 14 mirror Text DATs must be present. The bootstrap still silently no-ops if
+`CUDALINK_LIB_PATH` is unset — sibling import resolution works as before.
+
+```
+CUDAIPCExporter (Base COMP)
+├── cuda_link_bootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/cuda_link_bootstrap.py
+├── Env               (Text DAT)     ← Copy from td_exporter/Env.py  (mirror: src/cuda_link/_env.py)
+├── FrameProfile      (Text DAT)     ← Copy from td_exporter/FrameProfile.py
 ├── CUDAIPCWrapper    (Text DAT)     ← Copy from td_exporter/CUDAIPCWrapper.py
-├── ActivationBarrier (Text DAT)     ← Copy from td_exporter/ActivationBarrier.py
+├── CUDARuntimeTypes  (Text DAT)     ← Copy from td_exporter/CUDARuntimeTypes.py
+├── CUDAGraphs        (Text DAT)     ← Copy from td_exporter/CUDAGraphs.py
 ├── NVMLObserver      (Text DAT)     ← Copy from td_exporter/NVMLObserver.py
+├── SHMProtocol       (Text DAT)     ← Copy from td_exporter/SHMProtocol.py
+├── ActivationBarrier (Text DAT)     ← Copy from td_exporter/ActivationBarrier.py
+├── NVTXShim          (Text DAT)     ← Copy from td_exporter/NVTXShim.py
+├── ExporterPort      (Text DAT)     ← Copy from td_exporter/ExporterPort.py
+├── ImporterPort      (Text DAT)     ← Copy from td_exporter/ImporterPort.py
+├── CUDAAdapters      (Text DAT)     ← Copy from td_exporter/CUDAAdapters.py
+├── Exporter          (Text DAT)     ← Copy from td_exporter/Exporter.py
+├── Importer          (Text DAT)     ← Copy from td_exporter/Importer.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
@@ -71,59 +113,100 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 
 ### Step 3: Create Text DATs
 
-Inside the `CUDAIPCExporter` COMP, create eight Text DATs in the order shown below. Imports between them resolve automatically because all Text DATs in the same COMP share a module namespace — `from TDHost import RealTDHost` works because `TDHost` is a sibling Text DAT.
+**Library mode** (with `cuda_link` installed via `install_td_library.cmd`): create the 6 DATs
+in section 3a–3f only — the 14 mirror DATs (3g+) are resolved from the installed package.
 
-**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing. Alternatively, set **File** on the DAT page to the source path and enable **Load on Start**.
+**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3q.
 
-#### 3a. CUDAIPCWrapper Text DAT
+Inside the `CUDAIPCExporter` COMP, create Text DATs in the order shown below. Imports between
+them resolve automatically because all Text DATs in the same COMP share a module namespace.
 
-1. Create a **Text DAT**, rename to `CUDAIPCWrapper`
-2. Paste the entire contents of `td_exporter/CUDAIPCWrapper.py`
+**Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing. Alternatively, set
+**File** on the DAT page to the source path and enable **Load on Start**.
 
-#### 3b. ActivationBarrier Text DAT
+#### 3a. cuda_link_bootstrap Text DAT ← FIRST — required in both modes
 
-1. Create a **Text DAT**, rename to `ActivationBarrier`
-2. Paste the entire contents of `td_exporter/ActivationBarrier.py`
+1. Create a **Text DAT**, rename to `cuda_link_bootstrap`
+2. Paste the entire contents of `td_exporter/cuda_link_bootstrap.py`
 
-#### 3c. NVMLObserver Text DAT
+This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
+appear in the COMP editor). It injects `CUDALINK_LIB_PATH` onto `sys.path` and registers
+`sys.modules` aliases. If `CUDALINK_LIB_PATH` is unset, it silently no-ops and fallback mode
+takes effect automatically.
 
-1. Create a **Text DAT**, rename to `NVMLObserver`
-2. Paste the entire contents of `td_exporter/NVMLObserver.py`
+> **Library mode verify**: After loading, you should see in the Textport:
+> `[cuda_link_bootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
+> **Fallback mode**: `[cuda_link_bootstrap] Fallback mode — using sibling Text DAT mirrors.`
 
-#### 3d. TDHost Text DAT
+#### 3b. TDHost Text DAT
 
 1. Create a **Text DAT**, rename to `TDHost`
 2. Paste the entire contents of `td_exporter/TDHost.py`
 
 This module provides the `RealTDHost` and `RealTOPHandle` adapters that isolate all `ownerComp.par.*` and `top.cudaMemory()` calls from the engine logic.
 
-#### 3e. TDConfig Text DAT
+#### 3c. TDConfig Text DAT
 
 1. Create a **Text DAT**, rename to `TDConfig`
 2. Paste the entire contents of `td_exporter/TDConfig.py`
 
 This module provides the `TDSenderConfig` frozen dataclass that centralises all `CUDALINK_*` environment-variable reads.
 
-#### 3f. TDSender Text DAT
+#### 3d. TDSender Text DAT
 
 1. Create a **Text DAT**, rename to `TDSender`
 2. Paste the entire contents of `td_exporter/TDSender.py`
 
 This module provides `TDSenderEngine` — the Sender-mode engine that owns GPU ring-buffer allocation, IPC handle export, SHM write-back, and CUDA graph capture.
 
-#### 3g. TDReceiver Text DAT
+#### 3e. TDReceiver Text DAT
 
 1. Create a **Text DAT**, rename to `TDReceiver`
 2. Paste the entire contents of `td_exporter/TDReceiver.py`
 
 This module provides `TDReceiverEngine` — the Receiver-mode engine that owns SHM attachment, IPC handle opening, and Script TOP copyCUDAMemory calls.
 
-#### 3h. CUDAIPCExporter Text DAT
+#### 3f. CUDAIPCExporter Text DAT
 
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
-3. Verify the import line reads: `from TDSender import TDSenderEngine`
-   - This works because both Text DATs are in the same COMP namespace
+3. Confirm the first non-stdlib import reads: `import cuda_link_bootstrap  # noqa: F401`
+   This triggers the bootstrap before any sibling imports run.
+
+---
+
+**Classic/fallback mode only — add these 14 mirror DATs (Steps 3g–3q):**
+
+#### 3g. Env / FrameProfile / CUDAIPCWrapper / CUDARuntimeTypes / CUDAGraphs Text DATs
+
+For each, create a **Text DAT** with the name shown and paste the matching file:
+
+| DAT name | Source file |
+|---|---|
+| `Env` | `td_exporter/Env.py` |
+| `FrameProfile` | `td_exporter/FrameProfile.py` |
+| `CUDAIPCWrapper` | `td_exporter/CUDAIPCWrapper.py` |
+| `CUDARuntimeTypes` | `td_exporter/CUDARuntimeTypes.py` |
+| `CUDAGraphs` | `td_exporter/CUDAGraphs.py` |
+
+#### 3h. NVMLObserver / SHMProtocol / ActivationBarrier / NVTXShim Text DATs
+
+| DAT name | Source file |
+|---|---|
+| `NVMLObserver` | `td_exporter/NVMLObserver.py` |
+| `SHMProtocol` | `td_exporter/SHMProtocol.py` |
+| `ActivationBarrier` | `td_exporter/ActivationBarrier.py` |
+| `NVTXShim` | `td_exporter/NVTXShim.py` |
+
+#### 3i. ExporterPort / ImporterPort / CUDAAdapters / Exporter / Importer Text DATs
+
+| DAT name | Source file |
+|---|---|
+| `ExporterPort` | `td_exporter/ExporterPort.py` |
+| `ImporterPort` | `td_exporter/ImporterPort.py` |
+| `CUDAAdapters` | `td_exporter/CUDAAdapters.py` |
+| `Exporter` | `td_exporter/Exporter.py` |
+| `Importer` | `td_exporter/Importer.py` |
 
 ### Step 4: Register Extension
 
@@ -378,11 +461,11 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ## Appendix: File Reference
 
+**Core glue (both modes):**
+
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCWrapper.py` | `td_exporter/` | CUDA runtime ctypes wrapper |
-| `ActivationBarrier.py` | `td_exporter/` | Cross-process activation barrier |
-| `NVMLObserver.py` | `td_exporter/` | NVML GPU telemetry observer |
+| `cuda_link_bootstrap.py` | `td_exporter/` | **NEW** — sys.path injector + sys.modules alias registry; must be first DAT |
 | `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
 | `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
 | `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
@@ -392,7 +475,32 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
+
+**Classic/fallback mode only — mirror DATs (auto-generated by `scripts/sync_td_wrapper.py`):**
+
+| File | Location | Canonical source |
+|------|----------|-----------------|
+| `Env.py` | `td_exporter/` | `src/cuda_link/_env.py` |
+| `FrameProfile.py` | `td_exporter/` | `src/cuda_link/_profile.py` |
+| `CUDAIPCWrapper.py` | `td_exporter/` | `src/cuda_link/cuda_ipc_wrapper.py` |
+| `CUDARuntimeTypes.py` | `td_exporter/` | `src/cuda_link/cuda_runtime_types.py` |
+| `CUDAGraphs.py` | `td_exporter/` | `src/cuda_link/cuda_graphs.py` |
+| `NVMLObserver.py` | `td_exporter/` | `src/cuda_link/nvml_observer.py` |
+| `SHMProtocol.py` | `td_exporter/` | `src/cuda_link/shm_protocol.py` |
+| `ActivationBarrier.py` | `td_exporter/` | `src/cuda_link/activation_barrier.py` |
+| `NVTXShim.py` | `td_exporter/` | `src/cuda_link/_nvtx.py` |
+| `ExporterPort.py` | `td_exporter/` | `src/cuda_link/_exporter_port.py` |
+| `ImporterPort.py` | `td_exporter/` | `src/cuda_link/_importer_port.py` |
+| `CUDAAdapters.py` | `td_exporter/` | `src/cuda_link/_cuda_adapters.py` |
+| `Exporter.py` | `td_exporter/` | `src/cuda_link/exporter.py` |
+| `Importer.py` | `td_exporter/` | `src/cuda_link/importer.py` |
+
+**Build output:**
+
+| File | Location | Purpose |
+|------|----------|---------|
 | `CUDAIPCLink_v1.6.0.tox` | `TOXES/` | Final built .tox component |
+| `install_td_library.cmd` | repo root | Library-mode installer script |
 
 ---
 

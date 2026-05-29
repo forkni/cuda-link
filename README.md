@@ -71,6 +71,27 @@ for per-parameter documentation.
 
 See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assembly.
 
+**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+
+Install `cuda_link` into an external folder and let the bootstrap module load it inside TD,
+so the `.tox` no longer needs to embed the 14 mirror Text DATs:
+
+```bat
+REM Step 1: build wheel + install to external folder (one-time)
+build_wheel.cmd
+install_td_library.cmd --target "D:\cuda_link_lib"
+
+REM Step 2: set env var before launching TouchDesigner
+SET CUDALINK_LIB_PATH=D:\cuda_link_lib
+```
+
+Then set `CUDALINK_LIB_PATH` permanently in Windows environment variables. In the `.tox`,
+remove the 14 mirror Text DATs (Env, SHMProtocol, Exporter, Importer, …) — the
+`cuda_link_bootstrap` DAT loads the package and registers them automatically. The
+`TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs stay in the COMP unchanged. If
+`CUDALINK_LIB_PATH` is unset, the bootstrap no-ops and the classic mirror DATs take over.
+See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions.
+
 ### 2. Python Side (Importer)
 
 #### Install the package
