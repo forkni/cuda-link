@@ -257,8 +257,15 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
             sys.exit(_red("[error] No Python executable specified."))
 
     py_path = Path(python_exe)
+    # If the user pasted a directory (e.g. from Explorer), auto-append the executable name.
+    if py_path.is_dir():
+        exe_name = "python.exe" if sys.platform == "win32" else "python"
+        py_path = py_path / exe_name
+        print(_yellow(f"  (directory given — resolved to: {py_path})"))
     if not py_path.exists():
         sys.exit(_red(f"[error] Python executable not found: {py_path}"))
+    if not py_path.is_file():
+        sys.exit(_red(f"[error] Path is not an executable file: {py_path}"))
 
     pip = [str(py_path), "-m", "pip", "install", str(wheel), "--upgrade"]
     _run_pip(pip, dry_run)
@@ -299,8 +306,15 @@ def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bo
             sys.exit(_red("[error] No TD Python executable specified."))
 
     td_py = Path(td_python_exe)
+    # If the user pasted a directory, auto-append the executable name.
+    if td_py.is_dir():
+        exe_name = "python.exe" if sys.platform == "win32" else "python"
+        td_py = td_py / exe_name
+        print(_yellow(f"  (directory given — resolved to: {td_py})"))
     if not td_py.exists():
         sys.exit(_red(f"[error] TD Python executable not found: {td_py}"))
+    if not td_py.is_file():
+        sys.exit(_red(f"[error] Path is not an executable file: {td_py}"))
 
     pip = [str(td_py), "-m", "pip", "install", str(wheel), "--upgrade"]
 
