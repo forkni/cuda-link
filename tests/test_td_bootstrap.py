@@ -1,5 +1,5 @@
 """
-test_td_bootstrap.py — Structural and functional tests for cuda_link_bootstrap.
+test_td_bootstrap.py — Structural and functional tests for CUDALinkBootstrap.
 
 Tests:
   1. Drift guard: _ALIAS_MAP keys/values must match PAIRS in sync_td_wrapper.py.
@@ -45,9 +45,9 @@ def _load_file_as_module(path: Path, name: str, run: bool = True) -> Any:
 
 
 def _load_bootstrap(capsys=None) -> Any:
-    """Load a fresh copy of cuda_link_bootstrap, discarding any cached version."""
-    sys.modules.pop("cuda_link_bootstrap", None)
-    mod = _load_file_as_module(TD_EXPORTER / "cuda_link_bootstrap.py", "cuda_link_bootstrap")
+    """Load a fresh copy of CUDALinkBootstrap, discarding any cached version."""
+    sys.modules.pop("CUDALinkBootstrap", None)
+    mod = _load_file_as_module(TD_EXPORTER / "CUDALinkBootstrap.py", "CUDALinkBootstrap")
     return mod
 
 
@@ -64,9 +64,9 @@ def _load_sync_script() -> Any:
 
 @pytest.fixture(autouse=True)
 def _isolate_sys_modules():
-    """Remove cuda_link_bootstrap and all alias keys before and after each test."""
+    """Remove CUDALinkBootstrap and all alias keys before and after each test."""
     sync = _load_sync_script()
-    alias_names = {dst.stem for _, dst, _ in sync.PAIRS} | {"cuda_link_bootstrap"}
+    alias_names = {dst.stem for _, dst, _ in sync.PAIRS} | {"CUDALinkBootstrap"}
 
     # Pre-test: capture and remove any existing entries
     saved = {k: sys.modules.pop(k) for k in alias_names if k in sys.modules}
@@ -95,11 +95,11 @@ def test_alias_map_covers_all_pairs():
 
     assert not missing, (
         f"_ALIAS_MAP is missing these PAIRS derived stems: {missing}\n"
-        f"Add them to td_exporter/cuda_link_bootstrap.py::_ALIAS_MAP"
+        f"Add them to td_exporter/CUDALinkBootstrap.py::_ALIAS_MAP"
     )
     assert not extra, (
         f"_ALIAS_MAP has extra keys not in PAIRS: {extra}\n"
-        f"Remove them from td_exporter/cuda_link_bootstrap.py::_ALIAS_MAP "
+        f"Remove them from td_exporter/CUDALinkBootstrap.py::_ALIAS_MAP "
         f"or add corresponding entries to scripts/sync_td_wrapper.py::PAIRS"
     )
 

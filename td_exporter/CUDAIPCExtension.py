@@ -16,7 +16,7 @@ TDReceiverEngine.  Mode switches create a fresh engine instance — zero state l
 
 from __future__ import annotations
 
-import cuda_link_bootstrap  # noqa: F401  -- must be first: registers sys.modules aliases before any mirror import
+import CUDALinkBootstrap  # noqa: F401  -- must be first: registers sys.modules aliases before any mirror import
 
 import contextlib
 
@@ -130,7 +130,7 @@ class CUDAIPCExtension:
         _comp_path = getattr(ownerComp, "path", str(ownerComp))
         if (
             _comp_path not in _banner_shown_for_comps
-            and not cuda_link_bootstrap._active
+            and not CUDALinkBootstrap._active
             and not self._sibling_mirrors_available()
         ):
             _banner_shown_for_comps.add(_comp_path)

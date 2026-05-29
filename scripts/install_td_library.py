@@ -2,7 +2,7 @@
 install_td_library.py — Multi-target installer for cuda-link → TouchDesigner library mode.
 
 Supports five installation targets so the cuda_link package is importable inside
-TouchDesigner's Python environment.  The bootstrap Text DAT (cuda_link_bootstrap.py)
+TouchDesigner's Python environment.  The bootstrap Text DAT (CUDALinkBootstrap.py)
 then uses sys.path injection to make the package available without mirror Text DATs.
 
 Usage (interactive):
@@ -158,7 +158,7 @@ def _print_activation(site_packages: Path | None, label: str) -> None:
         print(f"       Add:  {site_packages}")
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
-        print("    [cuda_link_bootstrap] Library mode active — cuda_link submodules aliased")
+        print("    [CUDALinkBootstrap] Library mode active — cuda_link submodules aliased")
     print()
 
 

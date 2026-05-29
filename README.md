@@ -87,7 +87,7 @@ SET CUDALINK_LIB_PATH=D:\cuda_link_lib
 
 Then set `CUDALINK_LIB_PATH` permanently in Windows environment variables. In the `.tox`,
 remove the 14 mirror Text DATs (Env, SHMProtocol, Exporter, Importer, …) — the
-`cuda_link_bootstrap` DAT loads the package and registers them automatically. The
+`CUDALinkBootstrap` DAT loads the package and registers them automatically. The
 `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs stay in the COMP unchanged. If
 `CUDALINK_LIB_PATH` is unset, the bootstrap no-ops and the classic mirror DATs take over.
 See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions.

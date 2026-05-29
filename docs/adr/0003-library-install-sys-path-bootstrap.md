@@ -3,7 +3,7 @@
 **Status**: Accepted (implemented 2026-05-29)
 **Date**: 2026-05-29
 **Supersedes**: The "1C — TD path-shim" rejected alternative in ADR-0002 (now adopted).
-**Applies to**: `td_exporter/cuda_link_bootstrap.py`, `td_exporter/CUDAIPCExtension.py`,
+**Applies to**: `td_exporter/CUDALinkBootstrap.py`, `td_exporter/CUDAIPCExtension.py`,
 `install_td_library.cmd`, `tests/test_td_bootstrap.py`, `docs/TOX_BUILD_GUIDE.md`.
 
 ---
@@ -31,7 +31,7 @@ install `cuda_link` into a stable external folder using `install_td_library.cmd`
 Adopt alternative 1C as an **additive library mode** alongside the existing classic/fallback
 mode (ADR-0002 mirrors retained):
 
-1. A new `td_exporter/cuda_link_bootstrap.py` Text DAT is added to the COMP.
+1. A new `td_exporter/CUDALinkBootstrap.py` Text DAT is added to the COMP.
 2. It is the **first import** in `CUDAIPCExtension.py` (line 18, before `import contextlib`).
 3. At COMP init it:
    a. Reads `CUDALINK_LIB_PATH` from the environment and injects it onto `sys.path`.
@@ -104,7 +104,7 @@ out-of-process design is architecturally incompatible with these operations.
   deployment just works.
 
 **Negative / trade-offs:**
-- One new file in the COMP (`cuda_link_bootstrap`) and one new import line in
+- One new file in the COMP (`CUDALinkBootstrap`) and one new import line in
   `CUDAIPCExtension.py`.
 - The bootstrap's alias map must be kept in sync with `PAIRS`; the drift-guard test enforces
   this.

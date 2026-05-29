@@ -20,7 +20,7 @@ set before launching TouchDesigner. The bootstrap module loads the package and r
 
 ```
 CUDAIPCExporter (Base COMP)
-├── cuda_link_bootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/cuda_link_bootstrap.py
+├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
@@ -42,7 +42,7 @@ All 14 mirror Text DATs must be present. The bootstrap still silently no-ops if
 
 ```
 CUDAIPCExporter (Base COMP)
-├── cuda_link_bootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/cuda_link_bootstrap.py
+├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── Env               (Text DAT)     ← Copy from td_exporter/Env.py  (mirror: src/cuda_link/_env.py)
 ├── FrameProfile      (Text DAT)     ← Copy from td_exporter/FrameProfile.py
 ├── CUDAIPCWrapper    (Text DAT)     ← Copy from td_exporter/CUDAIPCWrapper.py
@@ -124,10 +124,10 @@ them resolve automatically because all Text DATs in the same COMP share a module
 **Tip**: If pasting, use **Text Port** mode (Alt+T) for easier editing. Alternatively, set
 **File** on the DAT page to the source path and enable **Load on Start**.
 
-#### 3a. cuda_link_bootstrap Text DAT ← FIRST — required in both modes
+#### 3a. CUDALinkBootstrap Text DAT ← FIRST — required in both modes
 
-1. Create a **Text DAT**, rename to `cuda_link_bootstrap`
-2. Paste the entire contents of `td_exporter/cuda_link_bootstrap.py`
+1. Create a **Text DAT**, rename to `CUDALinkBootstrap`
+2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
 appear in the COMP editor). It injects `CUDALINK_LIB_PATH` onto `sys.path` and registers
@@ -135,8 +135,8 @@ appear in the COMP editor). It injects `CUDALINK_LIB_PATH` onto `sys.path` and r
 takes effect automatically.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[cuda_link_bootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
-> **Fallback mode**: `[cuda_link_bootstrap] Fallback mode — using sibling Text DAT mirrors.`
+> `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
+> **Fallback mode**: `[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors.`
 
 #### 3b. TDHost Text DAT
 
@@ -170,7 +170,7 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
-3. Confirm the first non-stdlib import reads: `import cuda_link_bootstrap  # noqa: F401`
+3. Confirm the first non-stdlib import reads: `import CUDALinkBootstrap  # noqa: F401`
    This triggers the bootstrap before any sibling imports run.
 
 ---
@@ -465,7 +465,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `cuda_link_bootstrap.py` | `td_exporter/` | **NEW** — sys.path injector + sys.modules alias registry; must be first DAT |
+| `CUDALinkBootstrap.py` | `td_exporter/` | **NEW** — sys.path injector + sys.modules alias registry; must be first DAT |
 | `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
 | `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
 | `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |

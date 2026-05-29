@@ -1,7 +1,7 @@
 """
-cuda_link_bootstrap.py — Library-mode sys.path injector + bare-name alias registry.
+CUDALinkBootstrap.py — Library-mode sys.path injector + bare-name alias registry.
 
-TEXT DAT NAME: cuda_link_bootstrap
+TEXT DAT NAME: CUDALinkBootstrap
 
 This module must be the **first import** in CUDAIPCExtension.py.  It runs before
 any sibling Text DAT is imported by bare name, so the aliases it registers in
@@ -95,7 +95,7 @@ def _bootstrap() -> bool:
         # Partial bootstrap — warn without crashing.  Missing names fall through to
         # sibling Text DATs if present; absent Text DATs will raise ImportError later
         # at the glue-file level, which gives a clear error message.
-        print(f"[cuda_link_bootstrap] WARNING: could not alias: {', '.join(failed)}")
+        print(f"[CUDALinkBootstrap] WARNING: could not alias: {', '.join(failed)}")
         return False
 
     return True
@@ -105,9 +105,9 @@ def _bootstrap() -> bool:
 _active = _bootstrap()
 
 if _active:
-    print("[cuda_link_bootstrap] Library mode active — cuda_link submodules aliased as bare module names.")
+    print("[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.")
 else:
     print(
-        "[cuda_link_bootstrap] Fallback mode — using sibling Text DAT mirrors. "
+        "[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors. "
         "Set CUDALINK_LIB_PATH to enable library mode."
     )

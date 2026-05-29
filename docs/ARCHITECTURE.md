@@ -115,7 +115,7 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCLink` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
 
-**Two deployment modes** — `cuda_link_bootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
+**Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
 - **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 14 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 14 mirror Text DATs can be removed from the `.tox` entirely.
 - **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 14 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
