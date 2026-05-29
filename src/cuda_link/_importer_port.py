@@ -13,18 +13,12 @@ as a structural type, plus the four value objects that form the public interface
 
 from __future__ import annotations
 
-from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Generic, Protocol, TypeVar, runtime_checkable
+from typing import Generic, TypeVar
 
 from ._env import env_bool, env_int, env_str
-from .cuda_runtime_types import (
-    CUDAEvent_t,
-    CUDAStream_t,
-    cudaIpcEventHandle_t,
-    cudaIpcMemHandle_t,
-)
+from ._exporter_port import CudaPort as ImporterCudaPort  # noqa: F401 — re-exported for callers
 
 T = TypeVar("T")
 
@@ -147,128 +141,13 @@ class ImportResult(Generic[T]):
 
 
 # ---------------------------------------------------------------------------
-# ImporterCudaPort Protocol
+# ImporterCudaPort — alias for CudaPort
 # ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ImporterCudaPort(Protocol):
-    """Structural interface that Importer requires from the CUDA runtime.
-
-    Production adapter: CTypesCudaAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
-    Test adapter:       FakeCudaAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
-
-    CTypesCudaAdapter and FakeCudaAdapter from _cuda_adapters.py satisfy both
-    CudaPort (exporter) and ImporterCudaPort (importer) structurally — the same
-    adapter classes serve both sides without code duplication.
-
-    All methods raise RuntimeError on CUDA failure.
-    """
-
-    # --- Device ------------------------------------------------------------
-
-    def get_device(self) -> int:
-        """Return the CUDA device index currently bound to this context."""
-        ...
-
-    def peek_last_error(self) -> int:
-        """Non-destructively read the thread-local sticky CUDA error code.
-
-        Returns 0 (SUCCESS) when no error is latched. Does NOT clear the error.
-        """
-        ...
-
-    # --- IPC memory --------------------------------------------------------
-
-    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
-        """Open an IPC memory handle exported by the producer process.
-
-        flags=1 = cudaIpcMemLazyEnablePeerAccess.
-        """
-        ...
-
-    def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
-        """Close an IPC memory handle opened with ipc_open_mem_handle()."""
-        ...
-
-    def ipc_open_event_handle(self, handle: cudaIpcEventHandle_t) -> CUDAEvent_t:
-        """Open an IPC event handle exported by the producer process."""
-        ...
-
-    # --- Events ------------------------------------------------------------
-
-    def query_event(self, event: CUDAEvent_t) -> bool:
-        """Non-blocking: True if the event has been recorded and completed."""
-        ...
-
-    def create_sync_event(self) -> CUDAEvent_t:
-        """Create a timing-disabled event for stream-ordering use."""
-        ...
-
-    def destroy_event(self, event: CUDAEvent_t) -> None:
-        """Destroy a CUDA event."""
-        ...
-
-    # --- Streams -----------------------------------------------------------
-
-    def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
-        """Create a CUDA stream. flags=0x01 = cudaStreamNonBlocking."""
-        ...
-
-    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
-        """Create a high-priority stream. None → highest priority on this device."""
-        ...
-
-    def destroy_stream(self, stream: CUDAStream_t) -> None:
-        """Destroy a CUDA stream."""
-        ...
-
-    def stream_wait_event(self, stream: CUDAStream_t, event: CUDAEvent_t, flags: int = 0) -> None:
-        """GPU-side: make stream wait until event has been recorded (non-blocking CPU)."""
-        ...
-
-    def stream_synchronize(self, stream: CUDAStream_t) -> None:
-        """CPU-blocking wait until all operations on stream have completed."""
-        ...
-
-    def synchronize(self) -> None:
-        """CPU-blocking wait until all operations on the current device have completed."""
-        ...
-
-    # --- Memory (D2H) ------------------------------------------------------
-
-    def memcpy_async(
-        self,
-        dst: c_void_p,
-        src: c_void_p,
-        count: int,
-        kind: int,
-        stream: CUDAStream_t,
-    ) -> None:
-        """Enqueue an async memory copy on stream. kind=2 for device-to-host."""
-        ...
-
-    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
-        """Allocate portable pinned host memory via cudaHostAlloc.
-
-        flags=0x01 = cudaHostAllocPortable (accessible from any CUDA context).
-        """
-        ...
-
-    def free_host(self, ptr: c_void_p) -> None:
-        """Free pinned host memory allocated with malloc_host_alloc()."""
-        ...
-
-    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
-        """Page-lock an existing host allocation via cudaHostRegister."""
-        ...
-
-    def host_unregister(self, ptr: int) -> None:
-        """Unregister a page-locked host allocation."""
-        ...
-
-    # --- Error checking ----------------------------------------------------
-
-    def check_sticky_error(self, context: str) -> None:
-        """Warn and raise if a sticky CUDA error is latched. No-op when all is well."""
-        ...
+# CudaPort (in _exporter_port.py) is the unified CUDA Protocol covering both
+# exporter and importer operations.  ImporterCudaPort is kept as an explicit
+# alias so existing callers (importer.py, __init__.py, tests) need no changes.
+#
+# The alias was imported above:
+#   from ._exporter_port import CudaPort as ImporterCudaPort
+#
+# Both CTypesCudaAdapter and FakeCudaAdapter satisfy it structurally.

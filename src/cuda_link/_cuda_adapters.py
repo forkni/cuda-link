@@ -16,15 +16,6 @@ from ctypes import c_void_p
 from typing import Any
 
 from .cuda_ipc_wrapper import CUDARuntimeAPI
-from .cuda_runtime_types import (
-    CUDAEvent_t,
-    CUDAGraph_t,
-    CUDAGraphExec_t,
-    CUDAGraphNode_t,
-    CUDAStream_t,
-    cudaIpcEventHandle_t,
-    cudaIpcMemHandle_t,
-)
 
 # ---------------------------------------------------------------------------
 # Production adapter
@@ -32,12 +23,11 @@ from .cuda_runtime_types import (
 
 
 class CTypesCudaAdapter:
-    """CudaPort / ImporterCudaPort backed by a real CUDARuntimeAPI instance.
+    """CudaPort adapter backed by a real CUDARuntimeAPI instance.
 
-    This adapter is a one-to-one delegation layer — every method calls the
-    identically-named method on the underlying CUDARuntimeAPI. Its value is that
-    it satisfies the CudaPort and ImporterCudaPort Protocols without exposing the
-    full CUDARuntimeAPI surface (which includes methods neither side needs).
+    Delegates all CUDA operations to the underlying CUDARuntimeAPI via
+    ``__getattr__``, satisfying ``CudaPort`` (and its alias ``ImporterCudaPort``)
+    structurally without maintaining a mechanical list of one-line forwarders.
 
     Construction:
         adapter = CTypesCudaAdapter.for_device(device=0)
@@ -56,155 +46,14 @@ class CTypesCudaAdapter:
 
         return cls(get_cuda_runtime(device=device))
 
-    # --- Device ------------------------------------------------------------
+    def __getattr__(self, name: str) -> Any:
+        """Delegate any attribute lookup to the underlying CUDARuntimeAPI.
 
-    def get_device(self) -> int:
-        return self._api.get_device()
-
-    def set_device(self, device: int) -> int:
-        return self._api.set_device(device)
-
-    def restore_context(self, token: int) -> None:
-        self._api.restore_context(token)
-
-    def peek_last_error(self) -> int:
-        return self._api.peek_at_last_error()
-
-    # --- Memory (device) ---------------------------------------------------
-
-    def malloc(self, size: int) -> c_void_p:
-        return self._api.malloc(size)
-
-    def free(self, dev_ptr: c_void_p) -> None:
-        self._api.free(dev_ptr)
-
-    def memcpy_async(
-        self,
-        dst: c_void_p,
-        src: c_void_p,
-        count: int,
-        kind: int,
-        stream: CUDAStream_t,
-    ) -> None:
-        self._api.memcpy_async(dst, src, count, kind, stream)
-
-    # --- Memory (host / pinned) --------------------------------------------
-
-    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
-        return self._api.malloc_host_alloc(size, flags)
-
-    def free_host(self, ptr: c_void_p) -> None:
-        self._api.free_host(ptr)
-
-    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
-        self._api.host_register(ptr, size, flags)
-
-    def host_unregister(self, ptr: int) -> None:
-        self._api.host_unregister(ptr)
-
-    # --- Streams -----------------------------------------------------------
-
-    def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
-        return self._api.create_stream(flags)
-
-    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
-        return self._api.create_stream_with_priority(flags, priority)
-
-    def destroy_stream(self, stream: CUDAStream_t) -> None:
-        self._api.destroy_stream(stream)
-
-    def stream_wait_event(self, stream: CUDAStream_t, event: CUDAEvent_t, flags: int = 0) -> None:
-        self._api.stream_wait_event(stream, event, flags)
-
-    def stream_synchronize(self, stream: CUDAStream_t) -> None:
-        self._api.stream_synchronize(stream)
-
-    def stream_query(self, stream: CUDAStream_t) -> bool:
-        return self._api.stream_query(stream)
-
-    def synchronize(self) -> None:
-        self._api.synchronize()
-
-    # --- Events ------------------------------------------------------------
-
-    def create_ipc_event(self) -> CUDAEvent_t:
-        return self._api.create_ipc_event()
-
-    def create_sync_event(self) -> CUDAEvent_t:
-        return self._api.create_sync_event()
-
-    def ipc_get_event_handle(self, event: CUDAEvent_t) -> cudaIpcEventHandle_t:
-        return self._api.ipc_get_event_handle(event)
-
-    def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
-        self._api.record_event(event, stream)
-
-    def destroy_event(self, event: CUDAEvent_t) -> None:
-        self._api.destroy_event(event)
-
-    def query_event(self, event: CUDAEvent_t) -> bool:
-        return self._api.query_event(event)
-
-    # --- IPC memory --------------------------------------------------------
-
-    def ipc_get_mem_handle(self, dev_ptr: c_void_p) -> cudaIpcMemHandle_t:
-        return self._api.ipc_get_mem_handle(dev_ptr)
-
-    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
-        return self._api.ipc_open_mem_handle(handle, flags)
-
-    def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
-        self._api.ipc_close_mem_handle(dev_ptr)
-
-    def ipc_open_event_handle(self, handle: cudaIpcEventHandle_t) -> CUDAEvent_t:
-        return self._api.ipc_open_event_handle(handle)
-
-    # --- Pointer attributes ------------------------------------------------
-
-    def pointer_get_attributes(self, ptr: int) -> Any:
-        return self._api.pointer_get_attributes(ptr)
-
-    # --- Error checking ----------------------------------------------------
-
-    def check_sticky_error(self, context: str) -> None:
-        self._api.check_sticky_error(context)
-
-    # --- CUDA Graphs -------------------------------------------------------
-
-    def get_runtime_version(self) -> int:
-        return self._api.get_runtime_version()
-
-    def stream_begin_capture(self, stream: CUDAStream_t, mode: int = 0) -> None:
-        self._api.stream_begin_capture(stream, mode)
-
-    def stream_end_capture(self, stream: CUDAStream_t) -> CUDAGraph_t:
-        return self._api.stream_end_capture(stream)
-
-    def graph_instantiate(self, graph: CUDAGraph_t, flags: int = 0) -> CUDAGraphExec_t:
-        return self._api.graph_instantiate(graph, flags)
-
-    def graph_launch(self, graph_exec: CUDAGraphExec_t, stream: CUDAStream_t) -> None:
-        self._api.graph_launch(graph_exec, stream)
-
-    def graph_destroy(self, graph: CUDAGraph_t) -> None:
-        self._api.graph_destroy(graph)
-
-    def graph_exec_destroy(self, graph_exec: CUDAGraphExec_t) -> None:
-        self._api.graph_exec_destroy(graph_exec)
-
-    def graph_get_nodes(self, graph: CUDAGraph_t) -> list[CUDAGraphNode_t]:
-        return self._api.graph_get_nodes(graph)
-
-    def graph_exec_memcpy_node_set_params_1d(
-        self,
-        graph_exec: CUDAGraphExec_t,
-        node: CUDAGraphNode_t,
-        dst: c_void_p,
-        src: c_void_p,
-        count: int,
-        kind: int,
-    ) -> None:
-        self._api.graph_exec_memcpy_node_set_params_1d(graph_exec, node, dst, src, count, kind)
+        Called only when normal instance/class lookup fails — i.e., for any
+        CUDARuntimeAPI method not explicitly defined here.  FakeCudaAdapter is
+        unaffected: it still satisfies CudaPort with its own explicit methods.
+        """
+        return getattr(self._api, name)
 
 
 # ---------------------------------------------------------------------------
