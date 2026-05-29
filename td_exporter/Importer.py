@@ -653,6 +653,7 @@ class Importer:
         torch: Any | None = None,
         cupy: Any | None = None,
         numpy: Any | None = None,
+        last_write_idx: int = 0,
     ) -> Importer:
         """Wrap an already-open IPCConnection into a connected Importer.
 
@@ -661,23 +662,30 @@ class Importer:
         connection out-of-band.  Production code uses ``Importer.open()`` instead.
 
         Args:
-            spec:   Channel geometry, SHM routing, and timeout (must match conn).
-            policy: Behavioural knobs (spin-wait, D2H streams, etc.).
-            conn:   A live IPCConnection (dev_ptrs already opened). The Importer
-                    takes ownership — ``conn.close()`` is called by ``Importer.close()``.
-            fmt:    Format describing the frame geometry and dtype.
-            cuda:   CUDA adapter used for operations *after* the connection (e.g.
-                    ``_reinitialize``). Defaults to ``conn.cuda`` if not given, which
-                    is always correct in production. Tests may pass ``FakeCudaAdapter()``
-                    explicitly so that ``_reinitialize`` uses a proper fake rather than
-                    the MagicMock stored on the connection.
-            torch:  Pre-built TorchBuffers, or None (skips torch frame returns).
-            cupy:   Pre-built CupyBuffers, or None (skips cupy frame returns).
-            numpy:  Pre-built NumpyBuffers, or None (built lazily on first
-                    ``get_frame_numpy()`` call).
+            spec:           Channel geometry, SHM routing, and timeout (must match conn).
+            policy:         Behavioural knobs (spin-wait, D2H streams, etc.).
+            conn:           A live IPCConnection (dev_ptrs already opened). The Importer
+                            takes ownership — ``conn.close()`` is called by
+                            ``Importer.close()``.
+            fmt:            Format describing the frame geometry and dtype.
+            cuda:           CUDA adapter used for operations *after* the connection (e.g.
+                            ``_reinitialize``). Defaults to ``conn.cuda`` if not given,
+                            which is always correct in production. Tests may pass
+                            ``FakeCudaAdapter()`` explicitly so that ``_reinitialize``
+                            uses a proper fake rather than the MagicMock stored on the
+                            connection.
+            torch:          Pre-built TorchBuffers, or None (skips torch frame returns).
+            cupy:           Pre-built CupyBuffers, or None (skips cupy frame returns).
+            numpy:          Pre-built NumpyBuffers, or None (built lazily on first
+                            ``get_frame_numpy()`` call).
+            last_write_idx: The write-index this Importer should treat as already-consumed
+                            at connect time (default 0). Pass a non-zero value to simulate
+                            an Importer that has already seen some frames — useful in tests
+                            that verify NO_FRAME / new-frame edge cases without private
+                            attribute injection.
         """
         imp = cls(spec, policy, conn.cuda if cuda is None else cuda)
-        imp._adopt_connection(conn, fmt, torch=torch, cupy=cupy, numpy=numpy)
+        imp._adopt_connection(conn, fmt, torch=torch, cupy=cupy, numpy=numpy, last_write_idx=last_write_idx)
         return imp
 
     # ------------------------------------------------------------------
@@ -692,6 +700,7 @@ class Importer:
         torch: Any | None = None,
         cupy: Any | None = None,
         numpy: Any | None = None,
+        last_write_idx: int = 0,
     ) -> None:
         """Wire an already-open IPCConnection into this Importer's connected state.
 
@@ -700,13 +709,19 @@ class Importer:
         test path). Callers build TorchBuffers / CupyBuffers and pass them in; numpy
         stays None by default and is built lazily on the first ``get_frame_numpy()``
         call.
+
+        Args:
+            last_write_idx: Initial value of ``_last_write_idx`` (default 0, meaning
+                            "no frames consumed yet"). The production path always uses 0;
+                            ``from_connection`` forwards this to support tests that need
+                            an importer that has already consumed some frames.
         """
         self._conn = conn
         self._format = fmt
         self._torch = torch
         self._cupy = cupy
         self._numpy = numpy
-        self._last_write_idx = 0
+        self._last_write_idx = last_write_idx
         self._initialized = True
 
     def _connect(self) -> None:

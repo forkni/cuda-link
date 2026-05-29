@@ -92,10 +92,14 @@ def make_connected_importer(
     timeout_ms: float = 5000.0,
     spin_us: int = 0,
     allow_pageable_fallback: bool = True,
+    debug: bool = False,
     dev_ptr_style: str = "c_void_p",
     with_shm_handle: bool = True,
     with_events: bool = False,
     with_numpy: bool = True,
+    last_write_idx: int = 0,
+    cupy: object | None = None,
+    numpy: object | None = None,
 ) -> object:
     """Build a connected Importer via ``Importer.from_connection()`` — no GPU or SHM required.
 
@@ -112,12 +116,22 @@ def make_connected_importer(
         timeout_ms:            ImportSpec timeout.
         spin_us:               ImportPolicy spin budget.
         allow_pageable_fallback: ImportPolicy flag for numpy D2H fallback.
+        debug:                 ImportPolicy debug flag; enables per-frame stats logging.
         dev_ptr_style:         Passed to ``make_fake_ipc_connection`` — "c_void_p" for
                                most tests, "mock" for tests that patch cuda methods
                                on the connection (e.g. stream_wait_event).
         with_shm_handle:       False to omit the SHM handle (busywait tests).
         with_events:           True to populate ipc_events with MagicMocks.
-        with_numpy:            False to skip pre-building NumpyBuffers (busywait tests).
+        with_numpy:            True (default) to auto-build a NumpyBuffers from ``shape``
+                               and ``dtype``. Ignored when ``numpy`` is given explicitly.
+        last_write_idx:        Forwarded to ``Importer.from_connection`` — lets tests
+                               simulate an Importer that has already consumed some frames
+                               without touching ``imp._last_write_idx`` directly.
+        cupy:                  Explicit CupyBuffers (or a MagicMock) to pass to
+                               ``from_connection`` — skips the auto-build and avoids
+                               ``imp._cupy = …`` injection in tests.
+        numpy:                 Explicit NumpyBuffers (or a MagicMock) to pass to
+                               ``from_connection`` — overrides ``with_numpy``.
 
     Returns:
         A connected ``Importer`` instance ready for ``get_frame*()`` calls.
@@ -140,10 +154,10 @@ def make_connected_importer(
     )
     fmt = Format.from_overrides(shape, dtype)
 
-    nb = None
-    if with_numpy:
+    # Resolve the numpy backend: explicit arg wins, then with_numpy auto-build.
+    if numpy is None and with_numpy:
         mock_stream = MagicMock()
-        nb = NumpyBuffers(
+        numpy = NumpyBuffers(
             cuda=mock_cuda,
             fmt=fmt,
             buffer=np.zeros(shape, dtype=np.dtype(dtype)),
@@ -157,7 +171,16 @@ def make_connected_importer(
         )
 
     spec = ImportSpec(shm_name="fake", device=0, timeout_ms=timeout_ms, shape=shape, dtype=dtype)
-    policy = ImportPolicy(wait_spin_us=spin_us, allow_pageable_fallback=allow_pageable_fallback)
+    policy = ImportPolicy(wait_spin_us=spin_us, allow_pageable_fallback=allow_pageable_fallback, debug=debug)
     # Pass FakeCudaAdapter explicitly so that _reinitialize (which calls _open_ipc_slots via
     # self._cuda) uses a proper fake rather than the MagicMock stored on conn.cuda.
-    return Importer.from_connection(spec, policy, conn, fmt, cuda=FakeCudaAdapter(), numpy=nb)
+    return Importer.from_connection(
+        spec,
+        policy,
+        conn,
+        fmt,
+        cuda=FakeCudaAdapter(),
+        numpy=numpy,
+        cupy=cupy,
+        last_write_idx=last_write_idx,
+    )

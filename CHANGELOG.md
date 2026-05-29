@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Importer.from_connection` `last_write_idx` parameter** — advanced/test callers can
+  now pass `last_write_idx=N` to `Importer.from_connection()` (and to
+  `fakes.make_connected_importer`) to construct an Importer that treats frame index `N`
+  as already-consumed, without touching private attributes.
+
+- **`cuda_link._console` module** — new private helper (`src/cuda_link/_console.py`)
+  with `install_console_ctrl_handler(prefix, on_cleanup, *, defer_close)` and
+  `run_with_watchdog(fn, timeout_s, label, prefix)`. Centralises the Windows
+  `SetConsoleCtrlHandler` setup and daemon-thread cleanup watchdog pattern used by both
+  example subprocess scripts. The sender and receiver examples are updated to use it;
+  the sender now carries the correct typed `c_void_p` argtype that was already in the
+  receiver (fixing latent drift).
+
+- **`fakes.make_connected_importer` new params** — `debug`, `cupy`, `numpy`,
+  `last_write_idx` allow tests to set up scenario state at factory time instead of via
+  `imp._policy =` / `imp._cupy =` / `imp._numpy =` private injection.
+
+### Fixed
+
+- **`SetConsoleCtrlHandler` argtype drift in sender** — `example_sender_python.py` was
+  using the raw untyped `ctypes.windll.kernel32.SetConsoleCtrlHandler` call (missing the
+  `argtypes = [c_void_p, BOOL]` declaration introduced in v1.5.1 for the receiver).
+  Unified via the shared `_console` helper.
+
 ## [1.5.1] — 2026-05-22
 
 ### Added

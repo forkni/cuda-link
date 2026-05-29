@@ -30,6 +30,10 @@ def _make_connected_importer(
     ipc_version: int = 1,
     timeout_ms: float = 5000.0,
     spin_us: int = 0,
+    last_write_idx: int = 0,
+    debug: bool = False,
+    cupy: object | None = None,
+    numpy: object | None = None,
 ) -> Importer:
     """Build an Importer with a fully-wired IPCConnection (no real SHM / CUDA).
 
@@ -44,6 +48,10 @@ def _make_connected_importer(
         ipc_version=ipc_version,
         timeout_ms=timeout_ms,
         spin_us=spin_us,
+        last_write_idx=last_write_idx,
+        debug=debug,
+        cupy=cupy,
+        numpy=numpy,
     )
 
 
@@ -54,8 +62,7 @@ def _make_connected_importer(
 
 def test_outcome_no_frame_when_write_idx_unchanged() -> None:
     """write_idx == last_write_idx → NO_FRAME."""
-    imp = _make_connected_importer(write_idx=1)
-    imp._last_write_idx = 1  # already seen this idx
+    imp = _make_connected_importer(write_idx=1, last_write_idx=1)
 
     result = imp.get_frame_numpy()
     assert result.outcome is ImportOutcome.NO_FRAME
@@ -69,9 +76,6 @@ def test_outcome_shutdown_closes_importer() -> None:
     shutdown_offset = imp._conn.layout.shutdown_offset
     imp._conn.shm_handle.buf[shutdown_offset] = 1
 
-    # write_idx must advance so acquire_slot reads the slot
-    imp._last_write_idx = 0
-
     result = imp.get_frame_numpy()
     assert result.outcome is ImportOutcome.SHUTDOWN
     assert not imp._initialized
@@ -83,7 +87,6 @@ def test_outcome_new_frame_numpy() -> None:
 
     shape = (4, 4, 4)
     imp = _make_connected_importer(shape=shape, dtype="uint8", write_idx=1)
-    imp._last_write_idx = 0
     imp._conn.ipc_events[0] = None  # no event → cuda.synchronize() path
 
     result = imp.get_frame_numpy()
@@ -95,7 +98,6 @@ def test_outcome_new_frame_numpy() -> None:
 def test_outcome_reconnecting_on_version_bump() -> None:
     """VERSION_CHANGED in SHM → RECONNECTING outcome (single-tick stall)."""
     imp = _make_connected_importer(write_idx=2, ipc_version=1)
-    imp._last_write_idx = 0
 
     # Bump ipc_version in SHM buffer to simulate producer restart
     struct.pack_into("<Q", imp._conn.shm_handle.buf, 4, 2)
@@ -108,7 +110,6 @@ def test_outcome_reconnecting_on_version_bump() -> None:
 def test_outcome_timeout_raises_no_exception_returns_result() -> None:
     """TimeoutError inside _wait_for_slot → TIMEOUT outcome (no exception propagated)."""
     imp = _make_connected_importer(write_idx=1, timeout_ms=1.0)
-    imp._last_write_idx = 0
     # Give slot an event that we can make timeout
     mock_event = MagicMock()
     imp._conn.ipc_events[0] = mock_event
@@ -459,24 +460,17 @@ def test_get_frame_cupy_logs_stats_when_debug_enabled(monkeypatch: pytest.Monkey
     """get_frame_cupy calls _log_frame_stats when debug=True (parity with torch/numpy paths)."""
     from unittest.mock import MagicMock, patch
 
-    # Build a connected importer via _make_connected_importer with debug=True
-    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1)
-    # Enable debug and attach a cupy buffers mock
-    imp._policy = imp._policy.__class__(
-        **{
-            **imp._policy.__class__.__dataclass_fields__,
-            **{f.name: getattr(imp._policy, f.name) for f in imp._policy.__class__.__dataclass_fields__.values()},
-            "debug": True,
-        }
-    )
-    stats_calls: list = []
-    monkeypatch.setattr(imp, "_log_frame_stats", lambda *a, **kw: stats_calls.append(a))
-
     # Provide a fake cupy arrays structure
     mock_array = MagicMock()
     mock_cupy_buffers = MagicMock()
     mock_cupy_buffers.arrays = [mock_array]
-    imp._cupy = mock_cupy_buffers
+
+    # Build a connected importer with debug=True and the mock cupy backend injected at factory time.
+    imp = _make_connected_importer(
+        shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1, debug=True, cupy=mock_cupy_buffers
+    )
+    stats_calls: list = []
+    monkeypatch.setattr(imp, "_log_frame_stats", lambda *a, **kw: stats_calls.append(a))
 
     # Patch cp.cuda.get_current_stream and streamWaitEvent
     with (
@@ -514,16 +508,14 @@ def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest
     shape = (4, 4, 4)
     dtype = "float32"
 
-    # Build an importer whose self._format is override-derived (sentinel zeros)
-    imp = _make_connected_importer(shape=shape, dtype=dtype, num_slots=1, write_idx=1)
+    # Build an importer whose self._format is override-derived (sentinel zeros),
+    # injecting a mock NumpyBuffers at factory time to detect if close() is called.
+    mock_numpy = MagicMock()
+    mock_numpy.needs_rebuild.return_value = False
+    imp = _make_connected_importer(shape=shape, dtype=dtype, num_slots=1, write_idx=1, numpy=mock_numpy)
     assert imp._format.kind == 0, "from_overrides must produce kind=0 sentinel"
     assert imp._format.bits == 0, "from_overrides must produce bits=0 sentinel"
     assert imp._format.flags == 0, "from_overrides must produce flags=0 sentinel"
-
-    # Attach a mock NumpyBuffers so we can detect if close() is called
-    mock_numpy = MagicMock()
-    mock_numpy.needs_rebuild.return_value = False
-    imp._numpy = mock_numpy
 
     # Write SHM metadata with the SAME shape+dtype but real non-zero kind/bits/flags
     shm_buf = imp._conn.shm_handle.buf
@@ -561,11 +553,9 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
     new_shape = (8, 8, 4)
     dtype = "float32"
 
-    imp = _make_connected_importer(shape=old_shape, dtype=dtype, num_slots=1, write_idx=1)
-
     mock_numpy = MagicMock()
     mock_numpy.needs_rebuild.return_value = False
-    imp._numpy = mock_numpy
+    imp = _make_connected_importer(shape=old_shape, dtype=dtype, num_slots=1, write_idx=1, numpy=mock_numpy)
 
     # Write SHM metadata with a DIFFERENT shape (8×8 instead of 4×4)
     shm_buf = imp._conn.shm_handle.buf
