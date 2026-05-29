@@ -1,11 +1,10 @@
 """
-CUDAIPCImporter — deprecation shim for v1.6-era API.
+CUDAIPCImporter — deprecation shim for the pre-v1.5.x API.
 
 New code should use Importer.open() from cuda_link.importer.
-This shim keeps existing callers working through the v1.7 release cycle.
-It will be removed in v1.8.
+This shim keeps existing callers working until removal in v1.8.
 
-Migration guide: docs/MIGRATION_v1.7.md
+Migration guide: docs/MIGRATION_v1.5.md
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ def _warn_once() -> None:
         warnings.warn(
             "CUDAIPCImporter is deprecated and will be removed in v1.8. "
             "Migrate to Importer.open() from cuda_link.importer. "
-            "See docs/MIGRATION_v1.7.md for a step-by-step guide.",
+            "See docs/MIGRATION_v1.5.md for migration guides.",
             DeprecationWarning,
             stacklevel=3,
         )
@@ -66,7 +65,7 @@ def _warn_once() -> None:
 class CUDAIPCImporter:
     """Deprecated. Use Importer.open() instead.
 
-    This class preserves the pre-v1.7 API surface:
+    This class preserves the pre-v1.5.x API surface:
         CUDAIPCImporter(shm_name, shape, dtype, ...)
         importer.connect()
         CUDAIPCImporter.from_connected(shm_name, ...)

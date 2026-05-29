@@ -13,16 +13,18 @@ out="benchmarks/results/ncu/$ts"
 mkdir -p "$out"
 
 export CUDALINK_NVTX=1
+export FOR_DISABLE_CONSOLE_CTRL_HANDLER=1  # suppress forrtl error 200 on WM_CLOSE
 
 echo "==> ncu (sender path) → $out/sender.ncu-rep"
 
 ncu \
-    --section SpeedOfLight,MemoryWorkloadAnalysis \
+    --section SpeedOfLight --section MemoryWorkloadAnalysis \
     --clock-control base \
     --launch-skip 5 --launch-count 5 \
     --replay-mode kernel \
     --target-processes all \
-    --nvtx-include "cudalink.sender.export_frame@*" \
+    --nvtx \
+    --nvtx-include "cudalink.exporter.slot*@*" \
     -o "$out/sender" \
     python benchmarks/bench_sweep.py --quick
 

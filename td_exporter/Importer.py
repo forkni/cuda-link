@@ -33,21 +33,17 @@ from ImporterPort import (
     ImportSpec,
 )
 from SHMProtocol import (
-    _ST_BBH,
     MAGIC_OFFSET,
     MAGIC_SIZE,
-    NUM_SLOTS_OFFSET,
-    NUM_SLOTS_SIZE,
     PROTOCOL_MAGIC,
-    SHM_HEADER_SIZE,
-    SLOT_SIZE,
-    VERSION_OFFSET,
-    VERSION_SIZE,
     AcquireResult,
     DtypeCodec,
+    Metadata,
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_num_slots,
+    read_version,
 )
 
 if TYPE_CHECKING:
@@ -59,15 +55,6 @@ logger = logging.getLogger(__name__)
 _NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
 _NVTX_NUMPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame_numpy.slot")
 
-_DTYPE_SIZES: dict[str, int] = {
-    "float32": 4,
-    "float16": 2,
-    "bfloat16": 2,
-    "uint8": 1,
-    "uint16": 2,
-    "int8": 1,
-    "int16": 2,
-}
 
 # Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
 if sys.platform == "win32":
@@ -125,8 +112,24 @@ except ImportError:
     CUPY_AVAILABLE = False
 
 
-def _decode_dtype_str(kind: int, bits: int, flags: int) -> str:
-    return DtypeCodec.decode(kind, bits, flags)
+def _numpy_dtype_for(dtype_str: str) -> object:
+    """Return np.dtype for dtype_str, handling bfloat16 specially.
+
+    Returns None when NumPy is unavailable.  For bfloat16 (DtypeCodec.numpy_name
+    returns None), attempts ml_dtypes.bfloat16 and returns None if that package is
+    absent (NumpyBuffers will raise a clear error rather than silently miscompute).
+    """
+    if not NUMPY_AVAILABLE:
+        return None
+    name = DtypeCodec.numpy_name(dtype_str)
+    if name is None:  # bfloat16 — needs ml_dtypes
+        try:
+            import ml_dtypes  # noqa: PLC0415
+
+            return np.dtype(ml_dtypes.bfloat16)
+        except ImportError:
+            return None
+    return np.dtype(name)
 
 
 # ---------------------------------------------------------------------------
@@ -159,27 +162,25 @@ class Format:
         """Parse extended metadata block from shared memory.
 
         Returns None when the block is absent or contains zeros.
+        Routes through shm_protocol.Metadata.read_from — do not replicate
+        the struct decoding here.
         """
         layout = SHMLayout(num_slots)
-        metadata_offset = layout.metadata_offset
         try:
-            width = struct.unpack("<I", bytes(shm_buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(shm_buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(shm_buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            kind, bits, flags = _ST_BBH.unpack(bytes(shm_buf[metadata_offset + 12 : metadata_offset + 16]))
-            if width > 0 and height > 0 and num_comps > 0:
-                dtype_str = _decode_dtype_str(kind, bits, flags)
-                shape = (height, width, num_comps)
-                itemsize = _DTYPE_SIZES.get(dtype_str, bits // 8 or 4)
-                frame_nbytes = height * width * num_comps * itemsize
-                numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+            md = Metadata.read_from(shm_buf, layout)
+            if md.width > 0 and md.height > 0 and md.num_comps > 0:
+                dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
+                itemsize = DtypeCodec.itemsize(dtype_str)
+                shape = (md.height, md.width, md.num_comps)
+                frame_nbytes = md.height * md.width * md.num_comps * itemsize
+                numpy_dtype = _numpy_dtype_for(dtype_str)
                 return cls(
-                    width=width,
-                    height=height,
-                    num_comps=num_comps,
-                    kind=kind,
-                    bits=bits,
-                    flags=flags,
+                    width=md.width,
+                    height=md.height,
+                    num_comps=md.num_comps,
+                    kind=md.format_kind,
+                    bits=md.bits_per_comp,
+                    flags=md.flags,
                     dtype_str=dtype_str,
                     shape=shape,
                     numpy_dtype=numpy_dtype,
@@ -193,12 +194,20 @@ class Format:
     def from_overrides(cls, shape: tuple, dtype_str: str) -> Format:
         """Build from caller-supplied shape/dtype (no SHM read).
 
-        kind/bits/flags are 0 sentinels — diagnostic fields only.
+        kind/bits/flags are 0 sentinels — diagnostic wire-format fields that
+        cannot be known without reading the SHM metadata block.  These sentinel
+        zeros participate in the auto-generated ``__eq__``, so do NOT use
+        ``fmt_a == fmt_b`` to detect layout changes between an override-derived
+        and an SHM-derived Format — compare ``.shape`` and ``.dtype_str``
+        directly (see ``_resolve_format`` for the established precedent).
         """
         height, width, num_comps = shape
-        itemsize = _DTYPE_SIZES.get(dtype_str, 4)
+        try:
+            itemsize = DtypeCodec.itemsize(dtype_str)
+        except KeyError:
+            itemsize = 4  # safe fallback for caller-supplied unknown dtypes
         frame_nbytes = height * width * num_comps * itemsize
-        numpy_dtype = np.dtype(dtype_str) if NUMPY_AVAILABLE else None
+        numpy_dtype = _numpy_dtype_for(dtype_str)
         return cls(
             width=width,
             height=height,
@@ -273,11 +282,16 @@ class TorchBuffers:
 
     @classmethod
     def build(cls, conn: IPCConnection, fmt: Format) -> TorchBuffers:
-        """Create one zero-copy tensor view per slot via __cuda_array_interface__."""
-        typestr_map = {"float32": "<f4", "float16": "<f2", "uint8": "|u1", "uint16": "<u2"}
-        typestr = typestr_map.get(fmt.dtype_str)
-        if typestr is None:
-            raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}")
+        """Create one zero-copy tensor view per slot via __cuda_array_interface__.
+
+        bfloat16: the CAI protocol has no bfloat16 typestr, so we use a uint16
+        backing view ("<u2") and reinterpret with tensor.view(torch.bfloat16).
+        DtypeCodec.typestr() returns "<u2" for bfloat16 exactly for this reason.
+        """
+        try:
+            typestr = DtypeCodec.typestr(fmt.dtype_str)
+        except KeyError:
+            raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}") from None
 
         tensors = []
         wrappers = []
@@ -300,6 +314,8 @@ class TorchBuffers:
 
             wrapper = CUDAArrayWrapper(cuda_array_interface)
             tensor = torch.as_tensor(wrapper, device="cuda")
+            if fmt.dtype_str == "bfloat16":
+                tensor = tensor.view(torch.bfloat16)
             wrappers.append(wrapper)
             tensors.append(tensor)
 
@@ -314,11 +330,23 @@ class CupyBuffers:
 
     @classmethod
     def build(cls, conn: IPCConnection, fmt: Format) -> CupyBuffers:
-        """Create one zero-copy CuPy array view per slot via UnownedMemory."""
-        dtype_map = {"float32": cp.float32, "float16": cp.float16, "uint8": cp.uint8, "uint16": cp.uint16}
-        cp_dtype = dtype_map.get(fmt.dtype_str)
-        if cp_dtype is None:
-            raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}")
+        """Create one zero-copy CuPy array view per slot via UnownedMemory.
+
+        bfloat16 is not supported by CuPy (no cp.bfloat16 dtype); callers
+        should use get_frame() to receive a torch.Tensor for bfloat16 data.
+        DtypeCodec.cupy_name() returns None for bfloat16 to signal this.
+        """
+        cupy_name = DtypeCodec.cupy_name(fmt.dtype_str)
+        if cupy_name is None:
+            raise ValueError(
+                f"{fmt.dtype_str} is not supported by the CuPy consumer "
+                f"(CuPy has no {fmt.dtype_str} dtype). "
+                "Use get_frame() to retrieve a torch.Tensor instead."
+            )
+        try:
+            cp_dtype = cp.dtype(cupy_name)
+        except (TypeError, AttributeError):
+            raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}") from None
 
         arrays = []
         for slot in range(conn.num_slots):
@@ -364,7 +392,16 @@ class NumpyBuffers:
 
         Allocation ladder: cudaMallocHost (portable pinned) → cudaHostRegister
         (page-locked) → pageable fallback (when allow_pageable=True).
+
+        Raises ValueError for dtypes with no NumPy representation (bfloat16
+        without ml_dtypes installed).  Use get_frame() for those dtypes.
         """
+        if fmt.numpy_dtype is None:
+            raise ValueError(
+                f"NumPy consumer cannot be used for dtype {fmt.dtype_str!r}: "
+                "no compatible NumPy dtype is available. "
+                "For bfloat16, install ml_dtypes; or use get_frame() (torch) instead."
+            )
         cuda = conn.cuda
         nbytes = fmt.frame_nbytes
 
@@ -604,23 +641,100 @@ class Importer:
             imp._connect()
         return imp
 
+    @classmethod
+    def from_connection(
+        cls,
+        spec: ImportSpec,
+        policy: ImportPolicy,
+        conn: IPCConnection,
+        fmt: Format,
+        *,
+        cuda: Any | None = None,
+        torch: Any | None = None,
+        cupy: Any | None = None,
+        numpy: Any | None = None,
+        last_write_idx: int = 0,
+    ) -> Importer:
+        """Wrap an already-open IPCConnection into a connected Importer.
+
+        Intended for GPU-free tests (pass a FakeCudaAdapter-backed IPCConnection via
+        ``fakes.make_connected_importer``) and for advanced callers that open a
+        connection out-of-band.  Production code uses ``Importer.open()`` instead.
+
+        Args:
+            spec:           Channel geometry, SHM routing, and timeout (must match conn).
+            policy:         Behavioural knobs (spin-wait, D2H streams, etc.).
+            conn:           A live IPCConnection (dev_ptrs already opened). The Importer
+                            takes ownership — ``conn.close()`` is called by
+                            ``Importer.close()``.
+            fmt:            Format describing the frame geometry and dtype.
+            cuda:           CUDA adapter used for operations *after* the connection (e.g.
+                            ``_reinitialize``). Defaults to ``conn.cuda`` if not given,
+                            which is always correct in production. Tests may pass
+                            ``FakeCudaAdapter()`` explicitly so that ``_reinitialize``
+                            uses a proper fake rather than the MagicMock stored on the
+                            connection.
+            torch:          Pre-built TorchBuffers, or None (skips torch frame returns).
+            cupy:           Pre-built CupyBuffers, or None (skips cupy frame returns).
+            numpy:          Pre-built NumpyBuffers, or None (built lazily on first
+                            ``get_frame_numpy()`` call).
+            last_write_idx: The write-index this Importer should treat as already-consumed
+                            at connect time (default 0). Pass a non-zero value to simulate
+                            an Importer that has already seen some frames — useful in tests
+                            that verify NO_FRAME / new-frame edge cases without private
+                            attribute injection.
+        """
+        imp = cls(spec, policy, conn.cuda if cuda is None else cuda)
+        imp._adopt_connection(conn, fmt, torch=torch, cupy=cupy, numpy=numpy, last_write_idx=last_write_idx)
+        return imp
+
     # ------------------------------------------------------------------
     # Connection internals
     # ------------------------------------------------------------------
+
+    def _adopt_connection(
+        self,
+        conn: IPCConnection,
+        fmt: Format,
+        *,
+        torch: Any | None = None,
+        cupy: Any | None = None,
+        numpy: Any | None = None,
+        last_write_idx: int = 0,
+    ) -> None:
+        """Wire an already-open IPCConnection into this Importer's connected state.
+
+        Single authoritative definition of 'entered connected state'. Called by
+        ``_connect()`` (normal production path) and ``from_connection()`` (advanced /
+        test path). Callers build TorchBuffers / CupyBuffers and pass them in; numpy
+        stays None by default and is built lazily on the first ``get_frame_numpy()``
+        call.
+
+        Args:
+            last_write_idx: Initial value of ``_last_write_idx`` (default 0, meaning
+                            "no frames consumed yet"). The production path always uses 0;
+                            ``from_connection`` forwards this to support tests that need
+                            an importer that has already consumed some frames.
+        """
+        self._conn = conn
+        self._format = fmt
+        self._torch = torch
+        self._cupy = cupy
+        self._numpy = numpy
+        self._last_write_idx = last_write_idx
+        self._initialized = True
 
     def _connect(self) -> None:
         """Open SHM, read IPC handles, build buffer views. Called once by open()."""
         shm, num_slots, ipc_version = self._open_and_validate_shm()
         fmt = self._resolve_format(shm, num_slots)
         conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
-
-        self._conn = conn
-        self._format = fmt
-        self._torch = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
-        self._cupy = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
-        self._numpy = None  # built lazily on first get_frame_numpy()
-        self._last_write_idx = 0
-        self._initialized = True
+        self._adopt_connection(
+            conn,
+            fmt,
+            torch=TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None,
+            cupy=CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None,
+        )
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
     def _open_and_validate_shm(self) -> tuple[SharedMemory, int, int]:
@@ -646,14 +760,14 @@ class Importer:
                 "Update both TD and Python sides to the same protocol version."
             )
 
-        ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
-        num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
+        ipc_version = read_version(shm.buf)
+        num_slots = read_num_slots(shm.buf)
 
         if num_slots == 0 or num_slots > 10:
             shm.close()
             raise ValueError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
 
-        shutdown_offset = SHM_HEADER_SIZE + num_slots * SLOT_SIZE
+        shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
             shutdown_flag = shm.buf[shutdown_offset]
         except (OSError, BufferError, IndexError) as e:
@@ -706,9 +820,10 @@ class Importer:
         ipc_handles: list = [None] * num_slots
         dev_ptrs: list = [None] * num_slots
         ipc_events: list = [None] * num_slots
+        layout = SHMLayout(num_slots)
 
         for slot in range(num_slots):
-            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+            base_offset = layout.slot_offset(slot)
 
             mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
             logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
@@ -731,7 +846,6 @@ class Importer:
             )
 
         logger.info("Opened %d IPC buffer slots", num_slots)
-        layout = SHMLayout(num_slots)
         return IPCConnection(
             cuda=cuda,
             shm_handle=shm,
@@ -897,6 +1011,33 @@ class Importer:
     # Frame consumers
     # ------------------------------------------------------------------
 
+    def _begin_frame(self) -> tuple:
+        """Common preamble for all get_frame* methods.
+
+        Returns ``(early_result, read_slot, latency_ms, debug, frame_start)``.
+        When ``early_result`` is not None the caller must return it immediately.
+        All three paths — torch, numpy, cupy — open with::
+
+            early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+            if early is not None:
+                return early
+            self.last_latency = latency_ms
+        """
+        if not self._initialized and (self._retry is None or not self._drive_retry()):
+            return ImportResult(outcome=ImportOutcome.RECONNECTING), -1, 0.0, False, 0.0
+
+        debug = self._policy.debug
+        frame_start = time.perf_counter() if debug else 0.0
+
+        slot_result, outcome = self._try_acquire()
+        if outcome is not ImportOutcome.NEW_FRAME:
+            return ImportResult(outcome=outcome), -1, 0.0, debug, frame_start
+
+        read_slot = slot_result.slot
+        producer_timestamp = slot_result.timestamp
+        latency_ms = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        return None, read_slot, latency_ms, debug, frame_start
+
     def get_frame(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy torch.Tensor on GPU.
 
@@ -913,19 +1054,10 @@ class Importer:
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        debug = self._policy.debug
-        frame_start = time.perf_counter() if debug else 0.0
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
 
@@ -964,19 +1096,10 @@ class Importer:
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        debug = self._policy.debug
-        frame_start = time.perf_counter() if debug else 0.0
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
         fmt = self._format
@@ -1051,21 +1174,23 @@ class Importer:
 
         Returns:
             ImportResult[cp.ndarray] with outcome NEW_FRAME, NO_FRAME,
-            SHUTDOWN, RECONNECTING, or TIMEOUT.
+            SHUTDOWN, or RECONNECTING.
+
+        Note:
+            TIMEOUT is not reachable via this path. GPU synchronisation is
+            done with ``cp.cuda.runtime.streamWaitEvent`` which is a
+            non-blocking CPU call (the stream waits on the GPU side, but the
+            CPU returns immediately). There is no Python-level TimeoutError.
+            Use ``get_frame()`` (torch) or ``get_frame_numpy()`` if you need
+            producer-timeout detection.
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
 
-        if not self._initialized and (self._retry is None or not self._drive_retry()):
-            return ImportResult(outcome=ImportOutcome.RECONNECTING)
-
-        slot_result, outcome = self._try_acquire()
-        if outcome is not ImportOutcome.NEW_FRAME:
-            return ImportResult(outcome=outcome)
-
-        read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
-        self.last_latency = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
 
         conn = self._conn
 
@@ -1079,6 +1204,10 @@ class Importer:
             cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
 
         self.frame_count += 1
+        if debug:
+            frame_time = (time.perf_counter() - frame_start) * 1_000_000
+            self.total_get_frame_time += frame_time
+            self._log_frame_stats("cupy", read_slot, conn)
         return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=self._cupy.arrays[read_slot])
 
     # ------------------------------------------------------------------
@@ -1092,37 +1221,18 @@ class Importer:
 
         old_conn.close_ipc_handles()
 
-        new_ipc_version = struct.unpack("<Q", bytes(shm.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]))[0]
-        new_num_slots = struct.unpack("<I", bytes(shm.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]))[0]
+        new_ipc_version = read_version(shm.buf)
+        new_num_slots = read_num_slots(shm.buf)
 
-        new_layout = SHMLayout(new_num_slots)
-        new_fmt = self._format
-        try:
-            metadata_offset = new_layout.metadata_offset
-            width = struct.unpack("<I", bytes(shm.buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(shm.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(shm.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            kind, bits, flags = _ST_BBH.unpack(bytes(shm.buf[metadata_offset + 12 : metadata_offset + 16]))
-            if width > 0 and height > 0 and num_comps > 0:
-                new_dtype_str = _decode_dtype_str(kind, bits, flags)
-                new_shape = (height, width, num_comps)
-                itemsize = _DTYPE_SIZES.get(new_dtype_str, bits // 8 or 4)
-                new_fmt = Format(
-                    width=width,
-                    height=height,
-                    num_comps=num_comps,
-                    kind=kind,
-                    bits=bits,
-                    flags=flags,
-                    dtype_str=new_dtype_str,
-                    shape=new_shape,
-                    numpy_dtype=np.dtype(new_dtype_str) if NUMPY_AVAILABLE else None,
-                    frame_nbytes=height * width * num_comps * itemsize,
-                )
-        except (struct.error, ValueError, IndexError) as e:
-            logger.debug("Could not re-read metadata during reinit: %s", e)
+        # Route through Format.from_shm — same decoder used at connect time.
+        # Falls back to current format if SHM metadata is absent or all-zeros.
+        new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
 
-        if new_fmt != self._format:
+        # Compare only the load-bearing layout fields — mirroring the precedent
+        # in _resolve_format (line ~722) which also avoids Format.__eq__ here.
+        # The full __eq__ would false-positive when self._format is override-derived
+        # (kind=bits=flags=0 sentinels) vs an SHM-derived new_fmt with real values.
+        if new_fmt.shape != self._format.shape or new_fmt.dtype_str != self._format.dtype_str:
             logger.info(
                 "Format changed on reinit: %s %s → %s %s",
                 self._format.shape,

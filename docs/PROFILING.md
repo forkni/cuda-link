@@ -489,17 +489,20 @@ update earlier and calls `cudaStreamWaitEvent` to wait for the event itself, whi
 increases consumer `event_wait` by ~19 µs on average. The wait is redistributed,
 not eliminated.
 
-### Why `EXPORT_SYNC=1` remains the global default
+### `EXPORT_SYNC` defaults by deployment path
 
-`EXPORT_SYNC=1` (blocking) is load-bearing for **shared-process topologies** where
-a TD-Sender and TD-Receiver coexist in the same TouchDesigner process. In that
-topology, the blocking sync provides a hard ordering guarantee between the sender's
-D2D write and the receiver's next import. Switching to the async path without
-full cycle-2 regression testing (TD Sender + TD Receiver in the same TD instance,
-sustained for multiple session reconnect cycles) risks subtle TDR-cascade failures.
+The default differs between the two producer implementations:
 
-Do **not** change `TDConfig.py` defaults. Set `EXPORT_SYNC=0` per-session via env
-var for standalone Python-sender deployments only.
+| Producer | Default | Rationale |
+|---|---|---|
+| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (sync-free) | Python senders are standalone; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
+| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking) | Shared-process topologies — TD Sender and TD Receiver in the same TouchDesigner process — require the blocking sync as a hard ordering guarantee. Switching to async without full cycle-2 regression testing risks subtle TDR-cascade failures. |
+
+Do **not** change `TDConfig.py` defaults. TD users running a standalone Python-side
+sender (i.e. not using TDSender at all) benefit automatically from the library
+default. TD Sender users who want the async path must set `EXPORT_SYNC=0` per-session
+via env var after validating with cycle-2 regression testing (TD Sender + TD Receiver
+in the same TD instance, sustained for multiple session reconnect cycles).
 
 ### Prerequisites
 

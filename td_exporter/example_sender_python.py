@@ -45,40 +45,33 @@ if _probe_log_file:
             _root_logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
+# Ensure cuda_link is importable for the console helper (may need sys.path
+# patch when run without a pip install, same pattern as main() below).
+# ---------------------------------------------------------------------------
+
+try:
+    from cuda_link._console import install_console_ctrl_handler, run_with_watchdog
+except ImportError:
+    _src = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from cuda_link._console import install_console_ctrl_handler, run_with_watchdog
+
+# ---------------------------------------------------------------------------
 # Windows console control handler — ensures GPU IPC cleanup runs even when
 # the user closes the console window via the X button (CTRL_CLOSE_EVENT),
 # which does NOT raise KeyboardInterrupt in Python by default.
+#
+# defer_close=True: CTRL_CLOSE_EVENT sets _shutdown.stop_requested so the main
+# loop breaks and runs _do_cleanup() from the main thread.  This avoids the race
+# between the handler thread and an in-flight cudaMemcpy in _fill_ctypes.
 # ---------------------------------------------------------------------------
 
-if sys.platform == "win32":
-    from ctypes import wintypes as _wintypes
-
-    CTRL_C_EVENT = 0
-    CTRL_BREAK_EVENT = 1
-    CTRL_CLOSE_EVENT = 2
-    CTRL_LOGOFF_EVENT = 5
-    CTRL_SHUTDOWN_EVENT = 6
-
-    _HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
-
-    _k32 = ctypes.windll.kernel32
-    # arg 0 is PHANDLER_ROUTINE — a Win32 function pointer. We use c_void_p (not
-    # WINFUNCTYPE) because the documented "restore default Ctrl+C" call passes NULL
-    # there, and ctypes refuses None for a strict WINFUNCTYPE argtype. c_void_p
-    # accepts both None (== NULL) and WINFUNCTYPE instances (same pointer ABI).
-    _k32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, _wintypes.BOOL]
-    _k32.SetConsoleCtrlHandler.restype = _wintypes.BOOL
-
-# Module-level refs so the handler thread can access them regardless of stack.
+# Module-level refs so _do_cleanup can access them regardless of call stack.
 _cuda_ref = None
 _exporter_ref = None
 _staging_ptr_ref = None
 _cleaned_up = False
-# Track which event triggered shutdown — controls end-of-main "Press Enter" pause:
-#   "ctrl_c" → user pressed Ctrl+C in console → pause (let user read messages).
-#   "ctrl_break" → launcher sent CTRL_BREAK_EVENT (graceful .toe close) → no pause.
-#   None → main loop exited some other way → pause as a safety net.
-_shutdown_via: str | None = None
 
 
 def _do_cleanup() -> None:
@@ -87,52 +80,39 @@ def _do_cleanup() -> None:
     if _cleaned_up:
         return
     _cleaned_up = True
-    try:
-        if _staging_ptr_ref is not None and _cuda_ref is not None:
-            _cuda_ref.free(_staging_ptr_ref)
-    except Exception as exc:
-        print(f"[sender] cleanup: cuda.free error: {exc}")
-    try:
-        if _exporter_ref is not None:
-            _exporter_ref.close()
-    except Exception as exc:
-        print(f"[sender] cleanup: exporter.close error: {exc}")
+
+    # Under ncu kernel-replay the GPU command queue is paused inside ncu's replay
+    # state. cudaFree on the staging buffer implicitly synchronises the device and
+    # blocks until the queue drains — which never happens in that state, causing a
+    # 30+ s hang. The 1 MB staging buffer is reclaimed by the OS on process exit.
+    if _staging_ptr_ref is not None and _cuda_ref is not None:
+
+        def _free_staging() -> None:
+            try:
+                _cuda_ref.free(_staging_ptr_ref)
+            except Exception as exc:
+                print(f"[sender] cleanup: cuda.free(staging) error: {exc}", flush=True)
+
+        run_with_watchdog(_free_staging, timeout_s=0.5, label="cudaFree(staging)", prefix="[sender]")
+
+    # Under ncu kernel-replay, Steps 1c/2/3 of Exporter.close()
+    # (graph_exec_destroy, destroy_event, destroy_stream) can block on a
+    # paused command queue.  Bound total cleanup time so main returns and ncu finalizes.
+    if _exporter_ref is not None:
+
+        def _do_exporter_cleanup() -> None:
+            try:
+                _exporter_ref.close()
+            except Exception as exc:
+                print(f"[sender] cleanup: exporter.close error: {exc}", flush=True)
+
+        run_with_watchdog(_do_exporter_cleanup, timeout_s=3.0, label="exporter.close()", prefix="[sender]")
 
 
-if sys.platform == "win32":
-
-    def _ctrl_handler(ctrl_type: int) -> bool:
-        global _shutdown_via
-        if ctrl_type == CTRL_C_EVENT:
-            _shutdown_via = "ctrl_c"
-            print("\n[sender] Ctrl+C — stopping ...", flush=True)
-            return False  # Chain to Python's default → raises KeyboardInterrupt in main.
-        if ctrl_type == CTRL_BREAK_EVENT:
-            _shutdown_via = "ctrl_break"
-            print("\n[sender] Ctrl+Break / launcher shutdown — stopping ...", flush=True)
-            return False  # Chain to Python's default → raises KeyboardInterrupt in main.
-        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
-            # Console X-button, user logoff, or system shutdown.
-            # OS allows ~5 s (CLOSE) or ~20 s (LOGOFF/SHUTDOWN) before forced termination.
-            # The main loop's finally: won't run for these — we MUST clean up here.
-            print(
-                f"\n[sender] Console control event {ctrl_type} (close/logoff/shutdown) — running cleanup ...",
-                flush=True,
-            )
-            _do_cleanup()
-            print("[sender] Cleanup complete.", flush=True)
-            return True  # Handled — OS still terminates after return.
-        return False
-
-    # The launcher uses CREATE_NEW_PROCESS_GROUP, which DISABLES Ctrl+C delivery to the
-    # child process by default. SetConsoleCtrlHandler(NULL, FALSE) re-enables it before
-    # we install our own handler.
-    _k32.SetConsoleCtrlHandler(None, False)
-
-    # MUST be module-level; a local variable would be GC'd and Windows would call freed memory.
-    _ctrl_handler_ref = _HandlerRoutine(_ctrl_handler)
-    if not _k32.SetConsoleCtrlHandler(_ctrl_handler_ref, True):
-        print("[sender] WARNING: SetConsoleCtrlHandler failed — console-close cleanup unavailable")
+# _shutdown.shutdown_via tracks which event triggered shutdown (controls the
+# end-of-main "Press Enter" pause). _shutdown.stop_requested is polled by the
+# main loop instead of a raw global bool.
+_shutdown = install_console_ctrl_handler("[sender]", _do_cleanup, defer_close=True)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -269,7 +249,7 @@ def main() -> None:
     last_report = start_time
 
     try:
-        while True:
+        while not _shutdown.stop_requested:
             t0 = time.perf_counter()
             color_idx = (frame_count // FRAMES_PER_COLOR) % len(_COLORS)
             color = _COLORS[color_idx]
@@ -329,7 +309,7 @@ def main() -> None:
         # Hold the console window open so the user can read the cleanup output —
         # but ONLY for user-initiated shutdowns. CTRL_BREAK_EVENT is also how the
         # launcher signals graceful .toe-close, so we skip the pause in that case.
-        if _shutdown_via != "ctrl_break":
+        if _shutdown.shutdown_via not in ("ctrl_break", "ctrl_close"):
             with contextlib.suppress(EOFError, KeyboardInterrupt):
                 input("\n[sender] Press Enter to close this window ...")
 

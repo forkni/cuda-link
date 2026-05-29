@@ -29,7 +29,7 @@ byte_identical (canonical → derived):
 rewrite_relative (canonical → derived):
   _exporter_port.py        → ExporterPort.py
   _importer_port.py        → ImporterPort.py
-  _cuda_adapters.py        → CudaAdapters.py
+  _cuda_adapters.py        → CUDAAdapters.py
   exporter.py              → Exporter.py
   importer.py              → Importer.py
 
@@ -61,7 +61,7 @@ NAMES: dict[str, str] = {
     "_nvtx": "NVTXShim",
     "_exporter_port": "ExporterPort",
     "_importer_port": "ImporterPort",
-    "_cuda_adapters": "CudaAdapters",
+    "_cuda_adapters": "CUDAAdapters",
     "_profile": "FrameProfile",  # FrameProfile.py already exists (byte_identical)
     # Public modules that byte_identical pairs already cover
     "activation_barrier": "ActivationBarrier",
@@ -90,7 +90,7 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
     (_SRC / "_nvtx.py", _TD / "NVTXShim.py", "rewrite_relative"),
     (_SRC / "_exporter_port.py", _TD / "ExporterPort.py", "rewrite_relative"),
     (_SRC / "_importer_port.py", _TD / "ImporterPort.py", "rewrite_relative"),
-    (_SRC / "_cuda_adapters.py", _TD / "CudaAdapters.py", "rewrite_relative"),
+    (_SRC / "_cuda_adapters.py", _TD / "CUDAAdapters.py", "rewrite_relative"),
     (_SRC / "exporter.py", _TD / "Exporter.py", "rewrite_relative"),
     (_SRC / "importer.py", _TD / "Importer.py", "rewrite_relative"),
 ]

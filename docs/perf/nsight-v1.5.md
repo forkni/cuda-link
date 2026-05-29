@@ -1,7 +1,7 @@
 # Nsight Profiling + Per-Region Timing — cuda-link v1.5
 
 **Date:** 2026-05-21
-**Branch:** release/cuda-link-v1.6.0
+**Branch:** release/cuda-link-v1.6.0 *(internal dev branch; work shipped in v1.5.x)*
 **Commit:** 2384b40 (latest on branch)
 **Companion:** [graphs-benchmark-v1.5.md](graphs-benchmark-v1.5.md) — wall-clock-only A/B cells; this doc adds timeline + per-region.
 
@@ -18,7 +18,7 @@
 | Driver | 596.36 |
 | nsys version | 2026.2.1.210-262137639646v0 |
 | compute-sanitizer | bundled with nsys 2026.2.1 |
-| Branch | release/cuda-link-v1.6.0 |
+| Branch | release/cuda-link-v1.6.0 *(internal dev; shipped in v1.5.x)* |
 | Commit | 2384b40 |
 
 **Note:** WDDM mode — admin privileges not available during profiling. CUDA timeline captured; CPU sampling, WDDM batching lanes, and NVTX annotation ranges disabled. All CUDA API overhead numbers are wall-clock from CPU side (Python `time.perf_counter` via FrameProfile), not GPU-hardware timestamps except where nsys timeline data is available.

@@ -28,7 +28,6 @@ Environment variables (all optional):
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import logging
 import os
 import sys
@@ -48,34 +47,27 @@ if _probe_log_file:
             _root_logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
+# Ensure cuda_link is importable for the console helper (may need sys.path
+# patch when run without a pip install, same pattern as main() below).
+# ---------------------------------------------------------------------------
+
+try:
+    from cuda_link._console import install_console_ctrl_handler
+except ImportError:
+    _src = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from cuda_link._console import install_console_ctrl_handler
+
+# ---------------------------------------------------------------------------
 # Windows console control handler — ensures CUDA IPC cleanup runs on
 # console X-button close (CTRL_CLOSE_EVENT), which does NOT raise
 # KeyboardInterrupt in Python by default.
 # ---------------------------------------------------------------------------
 
-if sys.platform == "win32":
-    from ctypes import wintypes as _wintypes
-
-    CTRL_C_EVENT = 0
-    CTRL_BREAK_EVENT = 1
-    CTRL_CLOSE_EVENT = 2
-    CTRL_LOGOFF_EVENT = 5
-    CTRL_SHUTDOWN_EVENT = 6
-
-    _HandlerRoutine = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
-
-    _k32 = ctypes.windll.kernel32
-    # arg 0 is PHANDLER_ROUTINE — a Win32 function pointer. We use c_void_p (not
-    # WINFUNCTYPE) because the documented "restore default Ctrl+C" call passes NULL
-    # there, and ctypes refuses None for a strict WINFUNCTYPE argtype. c_void_p
-    # accepts both None (== NULL) and WINFUNCTYPE instances (same pointer ABI).
-    _k32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, _wintypes.BOOL]
-    _k32.SetConsoleCtrlHandler.restype = _wintypes.BOOL
-
-# Module-level refs so the handler thread can access them regardless of stack.
+# Module-level ref so _do_cleanup can access the importer regardless of call stack.
 _importer_ref = None
 _cleaned_up = False
-_shutdown_via: str | None = None
 
 
 def _do_cleanup() -> None:
@@ -91,33 +83,9 @@ def _do_cleanup() -> None:
         print(f"[receiver] cleanup: importer.close error: {exc}")
 
 
-if sys.platform == "win32":
-
-    def _ctrl_handler(ctrl_type: int) -> bool:
-        global _shutdown_via
-        if ctrl_type == CTRL_C_EVENT:
-            _shutdown_via = "ctrl_c"
-            print("\n[receiver] Ctrl+C — stopping ...", flush=True)
-            return False
-        if ctrl_type == CTRL_BREAK_EVENT:
-            _shutdown_via = "ctrl_break"
-            print("\n[receiver] Ctrl+Break / launcher shutdown — stopping ...", flush=True)
-            return False
-        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
-            print(
-                f"\n[receiver] Console control event {ctrl_type} (close/logoff/shutdown) — running cleanup ...",
-                flush=True,
-            )
-            _do_cleanup()
-            print("[receiver] Cleanup complete.", flush=True)
-            return True
-        return False
-
-    _k32.SetConsoleCtrlHandler(None, False)
-
-    _ctrl_handler_ref = _HandlerRoutine(_ctrl_handler)
-    if not _k32.SetConsoleCtrlHandler(_ctrl_handler_ref, True):
-        print("[receiver] WARNING: SetConsoleCtrlHandler failed — console-close cleanup unavailable")
+# _shutdown.shutdown_via tracks which event triggered shutdown (controls the
+# end-of-main "Press Enter" pause).
+_shutdown = install_console_ctrl_handler("[receiver]", _do_cleanup)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -166,8 +134,8 @@ def main() -> None:
     spec = ImportSpec(
         shm_name=SHM_NAME,
         device=DEVICE,
-        shape=None,   # auto-detected from TD sender
-        dtype=None,   # auto-detected from TD sender
+        shape=None,  # auto-detected from TD sender
+        dtype=None,  # auto-detected from TD sender
         timeout_ms=TIMEOUT_MS,
     )
 
@@ -226,8 +194,7 @@ def main() -> None:
                 result = get_frame()
             except RuntimeError as exc:
                 print(
-                    f"[receiver] ERROR: get_frame() raised RuntimeError — "
-                    f"is the {effective_mode!r} library installed?"
+                    f"[receiver] ERROR: get_frame() raised RuntimeError — is the {effective_mode!r} library installed?"
                 )
                 print(f"  {exc}")
                 sys.exit(1)
@@ -310,7 +277,7 @@ def main() -> None:
             )
         print("[receiver] TD Sender will detect consumer disconnect on next cook.", flush=True)
 
-        if _shutdown_via != "ctrl_break":
+        if _shutdown.shutdown_via != "ctrl_break":
             with contextlib.suppress(EOFError, KeyboardInterrupt):
                 input("\n[receiver] Press Enter to close this window ...")
 

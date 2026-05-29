@@ -138,9 +138,7 @@ def onFrameStart(frame: int) -> None:
     if _process is not None and _process.poll() is not None:
         code = _process.returncode
         if code != 0:
-            print(
-                f"[CUDA-Link Receiver Launcher] WARNING: receiver subprocess exited unexpectedly (code={code})."
-            )
+            print(f"[CUDA-Link Receiver Launcher] WARNING: receiver subprocess exited unexpectedly (code={code}).")
 
 
 def onFrameEnd(frame: int) -> None:

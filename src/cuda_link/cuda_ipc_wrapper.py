@@ -493,27 +493,50 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             return result
 
         _strict_funcs = (
-            "cudaMalloc", "cudaFree", "cudaMallocHost", "cudaFreeHost", "cudaMemcpy",
-            "cudaIpcGetMemHandle", "cudaIpcOpenMemHandle", "cudaIpcCloseMemHandle",
-            "cudaIpcGetEventHandle", "cudaIpcOpenEventHandle",
-            "cudaEventCreateWithFlags", "cudaEventRecord", "cudaEventSynchronize",
-            "cudaEventDestroy", "cudaEventElapsedTime",
+            "cudaMalloc",
+            "cudaFree",
+            "cudaMallocHost",
+            "cudaFreeHost",
+            "cudaMemcpy",
+            "cudaIpcGetMemHandle",
+            "cudaIpcOpenMemHandle",
+            "cudaIpcCloseMemHandle",
+            "cudaIpcGetEventHandle",
+            "cudaIpcOpenEventHandle",
+            "cudaEventCreateWithFlags",
+            "cudaEventRecord",
+            "cudaEventSynchronize",
+            "cudaEventDestroy",
+            "cudaEventElapsedTime",
             "cudaDeviceSynchronize",
-            "cudaHostRegister", "cudaHostUnregister",
-            "cudaStreamCreateWithFlags", "cudaStreamDestroy",
-            "cudaStreamWaitEvent", "cudaStreamSynchronize",
-            "cudaMemcpyAsync", "cudaMemGetInfo",
-            "cudaSetDevice", "cudaGetDevice",
-            "cudaDeviceCanAccessPeer", "cudaDeviceGetStreamPriorityRange",
+            "cudaHostRegister",
+            "cudaHostUnregister",
+            "cudaStreamCreateWithFlags",
+            "cudaStreamDestroy",
+            "cudaStreamWaitEvent",
+            "cudaStreamSynchronize",
+            "cudaMemcpyAsync",
+            "cudaMemGetInfo",
+            "cudaSetDevice",
+            "cudaGetDevice",
+            "cudaDeviceCanAccessPeer",
+            "cudaDeviceGetStreamPriorityRange",
             "cudaStreamCreateWithPriority",
             "cudaPointerGetAttributes",
-            "cudaHostAlloc", "cudaDeviceGetAttribute",
-            "cudaStreamBeginCapture", "cudaStreamEndCapture",
-            "cudaGraphInstantiateWithFlags", "cudaGraphLaunch",
-            "cudaGraphDestroy", "cudaGraphExecDestroy",
-            "cudaGraphGetNodes", "cudaRuntimeGetVersion",
-            "cudaGraphExecMemcpyNodeSetParams", "cudaGraphExecMemcpyNodeSetParams1D",
-            "cudaGraphExecEventRecordNodeSetEvent", "cudaGraphExecEventWaitNodeSetEvent",
+            "cudaHostAlloc",
+            "cudaDeviceGetAttribute",
+            "cudaStreamBeginCapture",
+            "cudaStreamEndCapture",
+            "cudaGraphInstantiateWithFlags",
+            "cudaGraphLaunch",
+            "cudaGraphDestroy",
+            "cudaGraphExecDestroy",
+            "cudaGraphGetNodes",
+            "cudaRuntimeGetVersion",
+            "cudaGraphExecMemcpyNodeSetParams",
+            "cudaGraphExecMemcpyNodeSetParams1D",
+            "cudaGraphExecEventRecordNodeSetEvent",
+            "cudaGraphExecEventWaitNodeSetEvent",
         )
         for fname in _strict_funcs:
             getattr(cudart, fname).errcheck = _strict_errcheck
@@ -534,7 +557,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             error_name = CUDAError.get_name(result)
             raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
 
-    def peek_at_last_error(self) -> int:
+    def peek_last_error(self) -> int:
         """Non-destructively read the thread-local sticky CUDA error.
 
         Returns SUCCESS (0) normally. A non-zero value means a prior async
@@ -547,7 +570,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """Warn and raise if a sticky CUDA error is latched from a prior async op.
 
         No-op when CUDALINK_STICKY_ERROR_CHECK=0. Enabled by default.
-        Use peek_at_last_error() directly for the raw value without raising.
+        Use peek_last_error() directly for the raw value without raising.
         """
         if not self._sticky_check_enabled:
             return

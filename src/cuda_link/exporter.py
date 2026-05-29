@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import struct
 import threading
 import time
 import traceback
@@ -46,19 +45,17 @@ from .cuda_runtime_types import (
 from .shm_protocol import (
     _ST_U32,
     MAGIC_OFFSET,
-    METADATA_SIZE,
     NUM_SLOTS_OFFSET,
     PROTOCOL_MAGIC,
-    SHM_HEADER_SIZE,
-    SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
-    TIMESTAMP_SIZE,
     WRITE_IDX_OFFSET,
     DtypeCodec,
     Metadata,
     SHMLayout,
     bump_version,
+    clear_shutdown,
     publish_frame,
+    set_shutdown,
 )
 
 if TYPE_CHECKING:
@@ -79,14 +76,6 @@ _EXPORTER_PROFILE_REGIONS: tuple[str, ...] = (
     "flush_probe",
     "ptr_cache_miss",
 )
-
-_DTYPE_ITEMSIZE_MAP = {
-    "float32": 4,
-    "float16": 2,
-    "uint8": 1,
-    "uint16": 2,
-}
-_DTYPE_TO_KIND_BITS = {k: DtypeCodec.encode(k) for k in ("float32", "float16", "uint8", "uint16")}
 
 
 def _read_hws_mode() -> str:
@@ -120,8 +109,8 @@ class Exporter:
     """
 
     def __init__(self, spec: FrameSpec, policy: ExportPolicy, cuda: CudaPort) -> None:
-        if spec.dtype not in _DTYPE_TO_KIND_BITS:
-            raise ValueError(f"Unsupported dtype: {spec.dtype!r}. Must be one of {list(_DTYPE_TO_KIND_BITS)}")
+        if spec.dtype not in DtypeCodec.supported():
+            raise ValueError(f"Unsupported dtype: {spec.dtype!r}. Must be one of {list(DtypeCodec.supported())}")
         if not (0 < spec.num_slots <= 10):
             raise ValueError(f"num_slots must be 1-10, got {spec.num_slots}")
 
@@ -150,7 +139,7 @@ class Exporter:
 
         # SharedMemory
         self.shm_handle: SharedMemory | None = None
-        itemsize = _DTYPE_ITEMSIZE_MAP[spec.dtype]
+        itemsize = DtypeCodec.itemsize(spec.dtype)
         self.data_size: int = spec.height * spec.width * spec.channels * itemsize
         self.buffer_size: int = self.data_size  # 2 MiB-aligned in _initialize
 
@@ -281,9 +270,7 @@ class Exporter:
         self._cuda.restore_context(_ctx_token)
         logger.info("Created %d IPC buffer slots with GPU-side sync", self._spec.num_slots)
 
-        shm_size = (
-            SHM_HEADER_SIZE + (self._spec.num_slots * SLOT_SIZE) + SHUTDOWN_FLAG_SIZE + METADATA_SIZE + TIMESTAMP_SIZE
-        )
+        shm_size = self._layout.total_size
         try:
             self.shm_handle = SharedMemory(name=self._spec.shm_name)
             logger.info("Opened existing SharedMemory: %s", self._spec.shm_name)
@@ -328,15 +315,13 @@ class Exporter:
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
-            base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+            base_offset = self._layout.slot_offset(slot)
             _mem_bytes = bytes(self.ipc_handles[slot].internal)
             logger.debug("Slot %d IPC mem handle prefix: %s...", slot, _mem_bytes[:16].hex())
             self.shm_handle.buf[base_offset : base_offset + 64] = _mem_bytes
             if self.ipc_event_handles[slot]:
                 self.shm_handle.buf[base_offset + 64 : base_offset + 128] = bytes(self.ipc_event_handles[slot].reserved)
-        self._layout = SHMLayout(self._spec.num_slots)
-        self._shutdown_offset = self._layout.shutdown_offset
-        self.shm_handle.buf[self._shutdown_offset] = 0
+        clear_shutdown(self.shm_handle.buf, self._layout)
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
     def _write_metadata_to_shm(self) -> None:
@@ -475,9 +460,9 @@ class Exporter:
 
         # Activation-barrier check
         if self._barrier.evaluate().should_skip:
-            if self.shm_handle is not None and self._shutdown_offset:
+            if self.shm_handle is not None:
                 with contextlib.suppress(OSError, BufferError):
-                    self.shm_handle.buf[self._shutdown_offset] = 0
+                    clear_shutdown(self.shm_handle.buf, self._layout)
             return FrameOutcome.SKIPPED_BARRIER
 
         profile = self._policy.export_profile
@@ -576,7 +561,7 @@ class Exporter:
                 if profile:
                     self._profile.record("record_event", (time.perf_counter() - _t) * 1_000_000)
 
-            if self._policy.export_sync:
+            if self._policy.export_sync or not self.ipc_events[slot]:
                 if profile:
                     _t_sync = time.perf_counter()
                 _cuda.stream_synchronize(self.ipc_stream)
@@ -673,14 +658,13 @@ class Exporter:
         # STEP 1: Signal shutdown + zero IPC handles in SHM
         if self.shm_handle:
             try:
-                shutdown_offset = SHM_HEADER_SIZE + (self._spec.num_slots * SLOT_SIZE)
-                struct.pack_into("<B", self.shm_handle.buf, shutdown_offset, 1)
+                set_shutdown(self.shm_handle.buf, self._layout)
                 logger.info("Shutdown signal sent to consumer")
             except (OSError, BufferError) as e:
                 logger.warning("Could not write shutdown signal: %s", e)
             try:
                 for slot in range(self._spec.num_slots):
-                    base = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+                    base = self._layout.slot_offset(slot)
                     self.shm_handle.buf[base : base + SLOT_SIZE] = b"\x00" * SLOT_SIZE
             except (OSError, BufferError) as e:
                 logger.warning("Could not zero IPC handles: %s", e)

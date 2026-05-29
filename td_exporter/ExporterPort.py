@@ -61,7 +61,7 @@ class ExportPolicy:
     on the per-frame hot path.
     """
 
-    export_sync: bool = True
+    export_sync: bool = False
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
@@ -74,7 +74,7 @@ class ExportPolicy:
     def from_env(cls) -> ExportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
-            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=True),
+            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=False),
             use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
@@ -306,4 +306,54 @@ class CudaPort(Protocol):
         kind: int,
     ) -> None:
         """Update a 1D memcpy node's src/dst per ring slot. CUDA 11.3+."""
+        ...
+
+    # --- IPC memory (consumer / Importer side) ----------------------------
+
+    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
+        """Open an IPC memory handle exported by the producer process.
+
+        flags=1 = cudaIpcMemLazyEnablePeerAccess.
+        """
+        ...
+
+    def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
+        """Close an IPC memory handle opened with ipc_open_mem_handle()."""
+        ...
+
+    def ipc_open_event_handle(self, handle: cudaIpcEventHandle_t) -> CUDAEvent_t:
+        """Open an IPC event handle exported by the producer process."""
+        ...
+
+    # --- Events (consumer) ------------------------------------------------
+
+    def query_event(self, event: CUDAEvent_t) -> bool:
+        """Non-blocking: True if the event has been recorded and completed."""
+        ...
+
+    # --- Device sync -------------------------------------------------------
+
+    def synchronize(self) -> None:
+        """CPU-blocking wait until all operations on the current device have completed."""
+        ...
+
+    # --- Pinned host memory (Importer side) --------------------------------
+
+    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
+        """Allocate portable pinned host memory via cudaHostAlloc.
+
+        flags=0x01 = cudaHostAllocPortable (accessible from any CUDA context).
+        """
+        ...
+
+    def free_host(self, ptr: c_void_p) -> None:
+        """Free pinned host memory allocated with malloc_host_alloc()."""
+        ...
+
+    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
+        """Page-lock an existing host allocation via cudaHostRegister."""
+        ...
+
+    def host_unregister(self, ptr: int) -> None:
+        """Unregister a page-locked host allocation."""
         ...

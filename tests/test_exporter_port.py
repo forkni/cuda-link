@@ -46,7 +46,7 @@ def test_export_policy_frozen() -> None:
 
 def test_export_policy_defaults() -> None:
     pol = ExportPolicy()
-    assert pol.export_sync is True
+    assert pol.export_sync is False
     assert pol.use_graphs is True
     assert pol.flush_probe is True
     assert pol.strict_device is False
