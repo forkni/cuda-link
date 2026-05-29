@@ -140,7 +140,7 @@ def make_connected_importer(
 
     import numpy as np
 
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link._importer_port import ImportPolicy, ImportSpec
     from cuda_link.importer import Format, Importer, NumpyBuffers
 
@@ -172,14 +172,14 @@ def make_connected_importer(
 
     spec = ImportSpec(shm_name="fake", device=0, timeout_ms=timeout_ms, shape=shape, dtype=dtype)
     policy = ImportPolicy(wait_spin_us=spin_us, allow_pageable_fallback=allow_pageable_fallback, debug=debug)
-    # Pass FakeCudaAdapter explicitly so that _reinitialize (which calls _open_ipc_slots via
+    # Pass FakeCUDAAdapter explicitly so that _reinitialize (which calls _open_ipc_slots via
     # self._cuda) uses a proper fake rather than the MagicMock stored on conn.cuda.
     return Importer.from_connection(
         spec,
         policy,
         conn,
         fmt,
-        cuda=FakeCudaAdapter(),
+        cuda=FakeCUDAAdapter(),
         numpy=numpy,
         cupy=cupy,
         last_write_idx=last_write_idx,

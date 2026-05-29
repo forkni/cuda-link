@@ -8,7 +8,7 @@ as a structural type, plus the four value objects that form the public interface
   ExportPolicy  — immutable behavioural knobs (env-readable, preset constructors)
   GpuFrame      — a single frame to export
   FrameOutcome  — result of Exporter.export()
-  CudaPort      — Protocol satisfied by CTypesCudaAdapter (prod) and FakeCudaAdapter (test)
+  CudaPort      — Protocol satisfied by CTypesCUDAAdapter (prod) and FakeCUDAAdapter (test)
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ class ExportPolicy:
 
         Disables CUDA Graphs (require cudart 11.4+), export sync, flush probe,
         activation barrier, profiling, and device-affinity checking so tests can
-        run with a FakeCudaAdapter without touching any GPU resource.
+        run with a FakeCUDAAdapter without touching any GPU resource.
         """
         return cls(
             export_sync=False,
@@ -154,8 +154,8 @@ class FrameOutcome(Enum):
 class CudaPort(Protocol):
     """Structural interface that Exporter requires from the CUDA runtime.
 
-    Production adapter: CTypesCudaAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
-    Test adapter:       FakeCudaAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
+    Production adapter: CTypesCUDAAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
+    Test adapter:       FakeCUDAAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
 
     All methods raise RuntimeError on CUDA failure (mirrors CUDARuntimeAPI.check_error).
     """

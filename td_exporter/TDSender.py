@@ -98,7 +98,7 @@ class TDSenderEngine:
         self,
         host: TDHost,
         config: TDSenderConfig,
-        cuda: Any,  # ignored — Exporter.open(cuda=None) creates its own CTypesCudaAdapter
+        cuda: Any,  # ignored — Exporter.open(cuda=None) creates its own CTypesCUDAAdapter
         log_fn: Callable,
         num_slots: int,
         device: int,
@@ -274,7 +274,7 @@ class TDSenderEngine:
                 barrier_enabled=False,
             )
 
-            # Exporter.open() with cuda=None creates CTypesCudaAdapter.for_device(spec.device).
+            # Exporter.open() with cuda=None creates CTypesCUDAAdapter.for_device(spec.device).
             self._exporter = Exporter.open(spec, policy=policy, cuda=None)
             self._current_spec = spec
             self._policy = policy

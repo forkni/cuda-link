@@ -10,7 +10,7 @@ Public surface:
 Context manager: ``with Exporter.open(...) as exp: ...``
 
 See _exporter_port.py for FrameSpec, ExportPolicy, GpuFrame, FrameOutcome, CudaPort.
-See _cuda_adapters.py for CTypesCudaAdapter (production) and FakeCudaAdapter (tests).
+See _cuda_adapters.py for CTypesCUDAAdapter (production) and FakeCUDAAdapter (tests).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 import NVTXShim as _nvtx
-from CUDAAdapters import CTypesCudaAdapter
+from CUDAAdapters import CTypesCUDAAdapter
 from ExporterPort import (
     CudaPort,
     ExportPolicy,
@@ -177,8 +177,8 @@ class Exporter:
         Args:
             spec:    Frame geometry + SHM routing (FrameSpec).
             policy:  Behavioural knobs. None → ExportPolicy.from_env().
-            cuda:    CudaPort adapter. None → CTypesCudaAdapter.for_device(spec.device).
-                     Pass a FakeCudaAdapter() for unit tests.
+            cuda:    CudaPort adapter. None → CTypesCUDAAdapter.for_device(spec.device).
+                     Pass a FakeCUDAAdapter() for unit tests.
             barrier: CheckerBarrier to use. None → construct from policy.
                      Pass CheckerBarrier(shm=FakeShmAdapter(...)) for unit tests.
 
@@ -193,7 +193,7 @@ class Exporter:
         if policy is None:
             policy = ExportPolicy.from_env()
         if cuda is None:
-            cuda = CTypesCudaAdapter.for_device(spec.device)
+            cuda = CTypesCUDAAdapter.for_device(spec.device)
 
         exp = cls(spec, policy, cuda)
         if barrier is not None:

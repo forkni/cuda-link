@@ -1,7 +1,7 @@
 """
 Lifecycle integration tests for Importer — no GPU required.
 
-These tests use FakeCudaAdapter and a synthetic SHM buffer to exercise the
+These tests use FakeCUDAAdapter and a synthetic SHM buffer to exercise the
 full open→get_frame→close lifecycle without a real CUDA device.
 """
 
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fakes import make_connected_importer, make_fake_ipc_connection
 
-from cuda_link._cuda_adapters import FakeCudaAdapter
+from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
 from cuda_link.importer import Format, Importer
 
@@ -174,7 +174,7 @@ def test_open_raises_on_missing_shm() -> None:
     """open() raises FileNotFoundError when SHM does not exist."""
     spec = ImportSpec(shm_name="definitely_does_not_exist_xyzzy_12345")
     policy = ImportPolicy.for_testing()
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     with pytest.raises(FileNotFoundError):
         Importer.open(spec, policy=policy, cuda=fake)
 
@@ -265,7 +265,7 @@ def test_reconnect_open_returns_waiting_importer_on_missing_shm() -> None:
 
     spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_test_abc")
     policy = _reconnect_policy()
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
 
     imp = Importer.open(spec, policy=policy, cuda=fake)
 
@@ -278,7 +278,7 @@ def test_reconnect_disabled_preserves_old_raise_behavior() -> None:
     """With reconnect_enabled=False, open() raises FileNotFoundError on missing SHM."""
     spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_disabled_test")
     policy = ImportPolicy.for_testing()  # reconnect_enabled=False
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
 
     with pytest.raises(FileNotFoundError):
         Importer.open(spec, policy=policy, cuda=fake)
@@ -288,7 +288,7 @@ def test_reconnect_get_frame_numpy_returns_reconnecting_when_not_initialized() -
     """get_frame_numpy() returns RECONNECTING while waiting for producer."""
     spec = ImportSpec(shm_name="definitely_does_not_exist_reconnect_numpy_test")
     policy = _reconnect_policy()
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
 
     imp = Importer.open(spec, policy=policy, cuda=fake)
     assert not imp._initialized
@@ -302,7 +302,7 @@ def test_reconnect_backoff_caps_at_max_attempts() -> None:
     """After max_attempts, get_frame_numpy() still returns RECONNECTING (no crash)."""
     spec = ImportSpec(shm_name="definitely_does_not_exist_backoff_test_xyzzy")
     policy = _reconnect_policy(reconnect_max_attempts=3, reconnect_backoff_frames=(1, 1, 1))
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
 
     imp = Importer.open(spec, policy=policy, cuda=fake)
 
@@ -321,7 +321,7 @@ def test_reconnect_request_immediate_skips_backoff() -> None:
     spec = ImportSpec(shm_name="definitely_does_not_exist_immediate_test_xyzzy")
     # Use a large backoff so we can confirm immediate override
     policy = _reconnect_policy(reconnect_backoff_frames=(100, 200, 400))
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
 
     imp = Importer.open(spec, policy=policy, cuda=fake)
     # Drive one frame to get past the first attempt and into backoff

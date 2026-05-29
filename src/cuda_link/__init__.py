@@ -6,7 +6,7 @@ Communication for zero-copy GPU texture transfer. Supports PyTorch (GPU tensors)
 CuPy (GPU arrays), and NumPy (CPU arrays) output modes.
 """
 
-from ._cuda_adapters import CTypesCudaAdapter, FakeCudaAdapter
+from ._cuda_adapters import CTypesCUDAAdapter, FakeCUDAAdapter
 from ._exporter_port import CudaPort, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from ._importer_port import ImporterCudaPort, ImportOutcome, ImportPolicy, ImportResult, ImportSpec
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
@@ -43,8 +43,8 @@ __all__ = [
     "ImportOutcome",
     "ImporterCudaPort",
     # Adapters (satisfies both CudaPort and ImporterCudaPort)
-    "CTypesCudaAdapter",
-    "FakeCudaAdapter",
+    "CTypesCUDAAdapter",
+    "FakeCUDAAdapter",
     # deprecated — CUDAIPCImporter removed in v1.8.0; migrate to Importer.open(ImportSpec(...))
     "CUDAIPCImporter",
     # infrastructure / low-level symbols

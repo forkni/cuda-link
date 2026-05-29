@@ -782,15 +782,15 @@ class Importer:
             spec:   Channel geometry, SHM routing, and timeout.
             policy: Behavioural knobs (spin-wait, D2H streams, etc.).
                     Defaults to ImportPolicy.from_env().
-            cuda:   CUDA Port adapter. Defaults to CTypesCudaAdapter (production).
-                    Pass FakeCudaAdapter() in tests to avoid requiring a GPU.
+            cuda:   CUDA Port adapter. Defaults to CTypesCUDAAdapter (production).
+                    Pass FakeCUDAAdapter() in tests to avoid requiring a GPU.
         """
         if policy is None:
             policy = ImportPolicy.from_env()
         if cuda is None:
-            from ._cuda_adapters import CTypesCudaAdapter
+            from ._cuda_adapters import CTypesCUDAAdapter
 
-            cuda = CTypesCudaAdapter.for_device(device=spec.device)
+            cuda = CTypesCUDAAdapter.for_device(device=spec.device)
 
         imp = cls(spec, policy, cuda)
         if policy.reconnect_enabled:
@@ -818,7 +818,7 @@ class Importer:
     ) -> Importer:
         """Wrap an already-open IPCConnection into a connected Importer.
 
-        Intended for GPU-free tests (pass a FakeCudaAdapter-backed IPCConnection via
+        Intended for GPU-free tests (pass a FakeCUDAAdapter-backed IPCConnection via
         ``fakes.make_connected_importer``) and for advanced callers that open a
         connection out-of-band.  Production code uses ``Importer.open()`` instead.
 
@@ -832,7 +832,7 @@ class Importer:
             cuda:           CUDA adapter used for operations *after* the connection (e.g.
                             ``_reinitialize``). Defaults to ``conn.cuda`` if not given,
                             which is always correct in production. Tests may pass
-                            ``FakeCudaAdapter()`` explicitly so that ``_reinitialize``
+                            ``FakeCUDAAdapter()`` explicitly so that ``_reinitialize``
                             uses a proper fake rather than the MagicMock stored on the
                             connection.
             torch:          Pre-built TorchBuffers, or None (skips torch frame returns).

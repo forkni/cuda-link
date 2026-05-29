@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`CudaPort` / `ImporterCudaPort` unified** — `ImporterCudaPort` is now a public
   `CudaPort` alias (the full union of importer-exclusive methods was added to `CudaPort`
-  in v1.6). `CTypesCudaAdapter` body replaced with `__getattr__` delegation — no more
+  in v1.6). `CTypesCUDAAdapter` body replaced with `__getattr__` delegation — no more
   explicit one-line forwarder list, so name drift becomes structurally impossible.
 
 - **`_DTYPE_TABLE` consolidated via `_DtypeEntry` NamedTuple** — the three inline dtype
@@ -221,8 +221,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Exporter` and the CUDA runtime. Enables injecting a test double at the
   one-seam boundary without touching SHM, time, or logging.
 
-- **`CTypesCudaAdapter`** and **`FakeCudaAdapter`** (`_cuda_adapters.py`) — production
-  and in-memory test adapters satisfying `CudaPort`. `FakeCudaAdapter` requires no GPU
+- **`CTypesCUDAAdapter`** and **`FakeCUDAAdapter`** (`_cuda_adapters.py`) — production
+  and in-memory test adapters satisfying `CudaPort`. `FakeCUDAAdapter` requires no GPU
   or ctypes DLL; tracks allocations and supports failure injection. Both symbols now
   import directly from `_cuda_adapters` — the `_exporter_adapters` re-export shim has
   been removed.
@@ -327,7 +327,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **`_exporter_adapters.py` re-export shim** — `CTypesCudaAdapter` and `FakeCudaAdapter`
+- **`_exporter_adapters.py` re-export shim** — `CTypesCUDAAdapter` and `FakeCUDAAdapter`
   now import directly from `_cuda_adapters`. The `_exporter_adapters.py ↔ ExporterAdapters.py`
   sync pair removed from `scripts/sync_td_wrapper.py`.
 
@@ -347,7 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - Rewrote `tests/test_device_affinity.py` and the write-ordering section of
-  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCudaAdapter())`
+  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCUDAAdapter())`
   instead of `object.__new__(CUDAIPCExporter)` followed by ~25 hand-populated private
   attributes. Both files now run without a GPU.
 

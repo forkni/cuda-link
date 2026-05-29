@@ -8,7 +8,7 @@ as a structural type, plus the four value objects that form the public interface
   ImportPolicy      — immutable behavioural knobs (env-readable, preset constructors)
   ImportResult      — result of Importer.get_frame*() (generic over frame type)
   ImportOutcome     — NEW_FRAME / NO_FRAME / SHUTDOWN / RECONNECTING / TIMEOUT
-  ImporterCudaPort  — Protocol satisfied by CTypesCudaAdapter and FakeCudaAdapter
+  ImporterCudaPort  — Protocol satisfied by CTypesCUDAAdapter and FakeCUDAAdapter
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class ImportPolicy:
         """Preset safe for unit tests without a real GPU.
 
         Disables spin-wait, multi-stream D2H, stream priority, and enables
-        pageable fallback so tests can run with FakeCudaAdapter without any GPU.
+        pageable fallback so tests can run with FakeCUDAAdapter without any GPU.
         reconnect_enabled=False so unit tests don't incur reconnect-wait delays.
         """
         return cls(
@@ -150,4 +150,4 @@ class ImportResult(Generic[T]):
 # The alias was imported above:
 #   from ._exporter_port import CudaPort as ImporterCudaPort
 #
-# Both CTypesCudaAdapter and FakeCudaAdapter satisfy it structurally.
+# Both CTypesCUDAAdapter and FakeCUDAAdapter satisfy it structurally.

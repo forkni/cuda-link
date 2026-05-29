@@ -19,11 +19,11 @@ import pytest
 def _make_bare(shm_name: str = "x", height: int = 64, width: int = 64, **spec_kwargs):
     """Construct an Exporter without calling _initialize() — safe for pure unit tests."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     spec = FrameSpec(shm_name=shm_name, height=height, width=width, **spec_kwargs)
-    return Exporter(spec, ExportPolicy.for_testing(), FakeCudaAdapter())
+    return Exporter(spec, ExportPolicy.for_testing(), FakeCUDAAdapter())
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +108,13 @@ def test_num_slots_max_valid() -> None:
 def test_double_close_no_crash() -> None:
     """Calling close() twice does not raise."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
         policy=ExportPolicy.for_testing(),
-        cuda=FakeCudaAdapter(),
+        cuda=FakeCUDAAdapter(),
     )
     exp.close()
     exp.close()  # Double-close must not raise
@@ -125,10 +125,10 @@ def test_export_sync_false_no_stream_sync_when_event_present() -> None:
     from unittest.mock import patch
 
     from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
-    fake_cuda = FakeCudaAdapter()
+    fake_cuda = FakeCUDAAdapter()
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
         policy=ExportPolicy.for_testing(),
@@ -147,10 +147,10 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
     from unittest.mock import patch
 
     from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
-    fake_cuda = FakeCudaAdapter()
+    fake_cuda = FakeCUDAAdapter()
     with patch.object(fake_cuda, "create_ipc_event", return_value=None):
         exp = Exporter.open(
             FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
@@ -339,19 +339,19 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
 
 # ---------------------------------------------------------------------------
 # Improvement 2: SharedMemory write ordering (atomicity)
-# — rewritten in v1.6 to use Exporter.open() + FakeCudaAdapter instead of
+# — rewritten in v1.6 to use Exporter.open() + FakeCUDAAdapter instead of
 #   object.__new__(CUDAIPCExporter) with 25 hand-wired private attributes.
 # ---------------------------------------------------------------------------
 
 
 def _make_write_order_exporter():
-    """Open a real Exporter backed by FakeCudaAdapter for write-ordering tests."""
+    """Open a real Exporter backed by FakeCUDAAdapter for write-ordering tests."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     shm_name = f"test_shm_write_{uuid.uuid4().hex[:8]}"
-    fake = FakeCudaAdapter(device=0)
+    fake = FakeCUDAAdapter(device=0)
     policy = ExportPolicy.for_testing()
     return Exporter.open(
         FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2, device=0),

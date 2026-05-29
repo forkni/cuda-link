@@ -136,15 +136,15 @@ elif outcome == FrameOutcome.FAILED:
 
 ## Unit testing without a GPU
 
-The `FakeCudaAdapter` lets you test export logic without hardware:
+The `FakeCUDAAdapter` lets you test export logic without hardware:
 
 ```python
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame, FrameOutcome
-from cuda_link._cuda_adapters import FakeCudaAdapter
+from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.exporter import Exporter
 
 def test_my_export_logic():
-    fake = FakeCudaAdapter(device=0)
+    fake = FakeCUDAAdapter(device=0)
     exp = Exporter.open(
         FrameSpec(shm_name="test_shm", height=8, width=8, channels=4,
                   dtype="uint8", num_slots=2, device=0),
