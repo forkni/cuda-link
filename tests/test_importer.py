@@ -11,11 +11,11 @@ import struct
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fakes import make_fake_ipc_connection
+from fakes import make_connected_importer, make_fake_ipc_connection
 
 from cuda_link._cuda_adapters import FakeCudaAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
-from cuda_link.importer import Format, Importer, NumpyBuffers
+from cuda_link.importer import Format, Importer
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -31,40 +31,20 @@ def _make_connected_importer(
     timeout_ms: float = 5000.0,
     spin_us: int = 0,
 ) -> Importer:
-    """Build an Importer with a fully-wired IPCConnection (no real SHM / CUDA)."""
-    import numpy as np
+    """Build an Importer with a fully-wired IPCConnection (no real SHM / CUDA).
 
-    conn, mock_cuda, _ = make_fake_ipc_connection(
+    Delegates to ``fakes.make_connected_importer`` — a thin wrapper kept for
+    call-site readability within this file.
+    """
+    return make_connected_importer(
+        shape=shape,
+        dtype=dtype,
         num_slots=num_slots,
-        ipc_version=ipc_version,
         write_idx=write_idx,
+        ipc_version=ipc_version,
+        timeout_ms=timeout_ms,
+        spin_us=spin_us,
     )
-    fmt = Format.from_overrides(shape, dtype)
-
-    # Pre-build NumpyBuffers so get_frame_numpy() skips the lazy allocation
-    # path (which would call mock_cuda.malloc_host_alloc → MagicMock, not c_void_p).
-    mock_stream = MagicMock()
-    nb = NumpyBuffers(
-        cuda=mock_cuda,
-        fmt=fmt,
-        buffer=np.zeros(shape, dtype=np.dtype(dtype)),
-        pinned_ptr=None,
-        host_registered_arr=None,
-        pinned_memory_available=False,
-        primary_stream=mock_stream,
-        d2h_streams=[mock_stream],
-        num_streams=1,
-        chunk_plan=[],
-    )
-
-    spec = ImportSpec(shm_name="fake", device=0, timeout_ms=timeout_ms, shape=shape, dtype=dtype)
-    policy = ImportPolicy(wait_spin_us=spin_us, allow_pageable_fallback=True)
-    imp = Importer(spec, policy, FakeCudaAdapter())
-    imp._conn = conn
-    imp._format = fmt
-    imp._numpy = nb
-    imp._initialized = True
-    return imp
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +386,6 @@ def test_format_from_shm_all_dtypes() -> None:
 def test_torch_buffers_int8_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """TorchBuffers.build no longer raises for int8 (previously crashed)."""
     import torch
-    from fakes import make_fake_ipc_connection
 
     from cuda_link.importer import Format, TorchBuffers
 
@@ -422,7 +401,6 @@ def test_torch_buffers_int8_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_torch_buffers_int16_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """TorchBuffers.build works for int16."""
     import torch
-    from fakes import make_fake_ipc_connection
 
     from cuda_link.importer import Format, TorchBuffers
 
@@ -435,7 +413,6 @@ def test_torch_buffers_int16_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cupy_buffers_bfloat16_raises_clear_error() -> None:
     """CupyBuffers.build raises a clear ValueError for bfloat16 (CuPy has no bfloat16 dtype)."""
-    from fakes import make_fake_ipc_connection
 
     from cuda_link.importer import CupyBuffers, Format
 

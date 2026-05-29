@@ -12,7 +12,7 @@ from ._importer_port import ImporterCudaPort, ImportOutcome, ImportPolicy, Impor
 from .cuda_ipc_importer import CUPY_AVAILABLE, NUMPY_AVAILABLE, TORCH_AVAILABLE, CUDAIPCImporter
 from .cuda_ipc_wrapper import CUDARuntimeAPI, get_cuda_runtime
 from .exporter import Exporter
-from .importer import Importer
+from .importer import Format, Importer, IPCConnection
 from .nvml_observer import NVML_AVAILABLE, NVMLObserver
 from .shm_protocol import (
     AcquireResult,
@@ -35,6 +35,8 @@ __all__ = [
     "CudaPort",
     # Importer API (v1.5.x)
     "Importer",
+    "IPCConnection",
+    "Format",
     "ImportSpec",
     "ImportPolicy",
     "ImportResult",

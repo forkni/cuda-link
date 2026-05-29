@@ -653,23 +653,85 @@ class Importer:
             imp._connect()
         return imp
 
+    @classmethod
+    def from_connection(
+        cls,
+        spec: ImportSpec,
+        policy: ImportPolicy,
+        conn: IPCConnection,
+        fmt: Format,
+        *,
+        cuda: Any | None = None,
+        torch: Any | None = None,
+        cupy: Any | None = None,
+        numpy: Any | None = None,
+    ) -> Importer:
+        """Wrap an already-open IPCConnection into a connected Importer.
+
+        Intended for GPU-free tests (pass a FakeCudaAdapter-backed IPCConnection via
+        ``fakes.make_connected_importer``) and for advanced callers that open a
+        connection out-of-band.  Production code uses ``Importer.open()`` instead.
+
+        Args:
+            spec:   Channel geometry, SHM routing, and timeout (must match conn).
+            policy: Behavioural knobs (spin-wait, D2H streams, etc.).
+            conn:   A live IPCConnection (dev_ptrs already opened). The Importer
+                    takes ownership — ``conn.close()`` is called by ``Importer.close()``.
+            fmt:    Format describing the frame geometry and dtype.
+            cuda:   CUDA adapter used for operations *after* the connection (e.g.
+                    ``_reinitialize``). Defaults to ``conn.cuda`` if not given, which
+                    is always correct in production. Tests may pass ``FakeCudaAdapter()``
+                    explicitly so that ``_reinitialize`` uses a proper fake rather than
+                    the MagicMock stored on the connection.
+            torch:  Pre-built TorchBuffers, or None (skips torch frame returns).
+            cupy:   Pre-built CupyBuffers, or None (skips cupy frame returns).
+            numpy:  Pre-built NumpyBuffers, or None (built lazily on first
+                    ``get_frame_numpy()`` call).
+        """
+        imp = cls(spec, policy, conn.cuda if cuda is None else cuda)
+        imp._adopt_connection(conn, fmt, torch=torch, cupy=cupy, numpy=numpy)
+        return imp
+
     # ------------------------------------------------------------------
     # Connection internals
     # ------------------------------------------------------------------
+
+    def _adopt_connection(
+        self,
+        conn: IPCConnection,
+        fmt: Format,
+        *,
+        torch: Any | None = None,
+        cupy: Any | None = None,
+        numpy: Any | None = None,
+    ) -> None:
+        """Wire an already-open IPCConnection into this Importer's connected state.
+
+        Single authoritative definition of 'entered connected state'. Called by
+        ``_connect()`` (normal production path) and ``from_connection()`` (advanced /
+        test path). Callers build TorchBuffers / CupyBuffers and pass them in; numpy
+        stays None by default and is built lazily on the first ``get_frame_numpy()``
+        call.
+        """
+        self._conn = conn
+        self._format = fmt
+        self._torch = torch
+        self._cupy = cupy
+        self._numpy = numpy
+        self._last_write_idx = 0
+        self._initialized = True
 
     def _connect(self) -> None:
         """Open SHM, read IPC handles, build buffer views. Called once by open()."""
         shm, num_slots, ipc_version = self._open_and_validate_shm()
         fmt = self._resolve_format(shm, num_slots)
         conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
-
-        self._conn = conn
-        self._format = fmt
-        self._torch = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
-        self._cupy = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
-        self._numpy = None  # built lazily on first get_frame_numpy()
-        self._last_write_idx = 0
-        self._initialized = True
+        self._adopt_connection(
+            conn,
+            fmt,
+            torch=TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None,
+            cupy=CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None,
+        )
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
     def _open_and_validate_shm(self) -> tuple[SharedMemory, int, int]:
