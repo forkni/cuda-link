@@ -7,31 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-05-29
+
+### Changed
+
+- **`CUDALINK_EXPORT_SYNC` default `1` → `0` (sync-free by default)** — The per-frame
+  `cudaStreamSynchronize` on the IPC stream was redundant: the CUDA IPC event recorded
+  at export time already provides correct cross-process GPU ordering on the consumer.
+  The CPU-blocking sync is no longer imposed by default, reducing per-frame latency on
+  the producer side. Set `CUDALINK_EXPORT_SYNC=1` to restore the old behaviour if you
+  need it (recommended for concurrent TD Sender+Receiver topologies and when
+  `CUDALINK_USE_GRAPHS=0`). `TDConfig` default is **unchanged** (TD Sender still
+  defaults to sync-blocking for TDR-cascade safety in shared-process topologies).
+
 ### Added
 
-- **`Importer.from_connection` `last_write_idx` parameter** — advanced/test callers can
-  now pass `last_write_idx=N` to `Importer.from_connection()` (and to
-  `fakes.make_connected_importer`) to construct an Importer that treats frame index `N`
-  as already-consumed, without touching private attributes.
+- **`DtypeCodec` backend accessors** — `DtypeCodec.typestr(dtype)`,
+  `DtypeCodec.numpy_name(dtype)`, and `DtypeCodec.cupy_name(dtype)` expose the
+  per-dtype backend representations (CAI typestr, NumPy dtype name, CuPy dtype name)
+  through a single sealed codec. Adding a new dtype is now one row in `_DtypeEntry` —
+  no other file changes. `numpy_name` returns `None` for bfloat16 (use `ml_dtypes`);
+  `cupy_name` returns `None` for unsupported types.
 
-- **`cuda_link._console` module** — new private helper (`src/cuda_link/_console.py`)
-  with `install_console_ctrl_handler(prefix, on_cleanup, *, defer_close)` and
+- **`Importer.from_connection` public seam** — `Importer.from_connection(spec, policy,
+  conn, fmt, *, cuda=None, …)` is now a documented public API that wraps an
+  already-open `IPCConnection` into a connected `Importer`. Intended for GPU-free tests
+  and callers that build a connection out-of-band.
+
+- **`fakes.make_connected_importer` canonical test factory** — `tests/fakes/__init__.py`
+  provides `make_connected_importer(…)` and `make_fake_ipc_connection(…)` as shared
+  test fixtures, eliminating the scattered `object.__new__` / private-attribute
+  injection patterns across the three Importer test files. Accepts `last_write_idx`,
+  `debug`, `cupy`, and `numpy` parameters for scenario setup without private poking.
+
+- **`Importer.from_connection` `last_write_idx` parameter** — pass `last_write_idx=N`
+  to construct an Importer that treats frame index `N` as already-consumed.
+
+- **`cuda_link._console` module** — private helper with
+  `install_console_ctrl_handler(prefix, on_cleanup, *, defer_close)` and
   `run_with_watchdog(fn, timeout_s, label, prefix)`. Centralises the Windows
   `SetConsoleCtrlHandler` setup and daemon-thread cleanup watchdog pattern used by both
-  example subprocess scripts. The sender and receiver examples are updated to use it;
-  the sender now carries the correct typed `c_void_p` argtype that was already in the
-  receiver (fixing latent drift).
+  example subprocess scripts.
 
-- **`fakes.make_connected_importer` new params** — `debug`, `cupy`, `numpy`,
-  `last_write_idx` allow tests to set up scenario state at factory time instead of via
-  `imp._policy =` / `imp._cupy =` / `imp._numpy =` private injection.
+- **Profiling scripts** — `scripts/profiling/` gains `ncu_pipeline.py` (ncu capture
+  pipeline for per-region kernel analysis) and `analyze_td_pipeline.py` (A/B Nsight
+  Systems capture analysis), both used in the Phase G profiling campaign that confirmed
+  the default-SYNC-off decision.
+
+### Refactored
+
+- **`TDSenderEngine` collapsed onto canonical `Exporter`** (ADR-0001 step 7) —
+  `td_exporter/TDSender.py` shrinks from ~1 280 lines to ~415 lines. All GPU ring-buffer
+  management, graph capture, SHM writes, and publish logic are now delegated to the
+  auto-derived `td_exporter/Exporter.py` mirror. `TDSenderEngine` retains only what is
+  genuinely TD-specific: pixel-format rejection, the `cuda_memory()`→`GpuFrame` bridge,
+  dynamic geometry reopen, and `HolderBarrier` lifecycle.
+
+- **`CudaPort` / `ImporterCudaPort` unified** — `ImporterCudaPort` is now a public
+  `CudaPort` alias (the full union of importer-exclusive methods was added to `CudaPort`
+  in v1.6). `CTypesCudaAdapter` body replaced with `__getattr__` delegation — no more
+  explicit one-line forwarder list, so name drift becomes structurally impossible.
+
+- **`_DTYPE_TABLE` consolidated via `_DtypeEntry` NamedTuple** — the three inline dtype
+  maps (`TorchBuffers.typestr_map`, `CupyBuffers.dtype_map`, `_numpy_dtype_for` if-chain)
+  that were previously spread across the codebase were deleted; all dtype lookups now
+  route through the single `DtypeCodec` codec backed by `_DtypeEntry` rows.
+
+- **`acquire_slot` / `publish_frame` ownership sealed** — all SHM-read/write operations
+  outside `shm_protocol.py` were eliminated; the C3 ordering guarantee (shutdown flag
+  visible before write_idx) is now exclusively enforced in one place.
 
 ### Fixed
 
+- **`example_sender_python.py` migrated to `Exporter.open/export/close` API** — the
+  example script was still using the removed `CUDAIPCExporter` class. It now uses the
+  v1.5.0 `Exporter.open()` / `exporter.export(GpuFrame(...))` / `exporter.close()` API.
+
+- **`Format.__eq__` sentinel comparison in `_reinitialize`** — the old full-field
+  `__eq__` returned `False` when an override-derived `Format` (all-zero `kind`/`bits`/
+  `flags` sentinels) was compared with a SHM-derived one carrying real non-zero values
+  for the same `shape` + `dtype`. This triggered a spurious `NumpyBuffers` teardown on
+  the first `_reinitialize` even when the shape and dtype were unchanged. Fixed by
+  comparing only `shape` + `dtype_str` in `_reinitialize`.
+
 - **`SetConsoleCtrlHandler` argtype drift in sender** — `example_sender_python.py` was
-  using the raw untyped `ctypes.windll.kernel32.SetConsoleCtrlHandler` call (missing the
-  `argtypes = [c_void_p, BOOL]` declaration introduced in v1.5.1 for the receiver).
-  Unified via the shared `_console` helper.
+  using a raw untyped `ctypes.windll.kernel32` call (missing the `argtypes = [c_void_p,
+  BOOL]` declaration present in the receiver since v1.5.1). Unified via the shared
+  `_console` helper.
 
 ## [1.5.1] — 2026-05-22
 
@@ -710,6 +772,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.6.0]: https://github.com/forkni/cuda-link/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2

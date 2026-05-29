@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.5.1.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.6.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -78,12 +78,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-1.5.1-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-1.6.0-py3-none-any.whl
 
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -168,10 +168,10 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
 CUDAIPCExtension facade
-  └── TDSenderEngine               Importer
-        │ export_frame(top_op)       │ get_frame() / get_frame_numpy()
-        │ cudaMemcpy D2D → ring buf  │ Waits on IPC event
-        └─→ SharedMemory ←───────────┘
+  └── TDSenderEngine (thin TD adapter)   Importer
+        │ cuda_memory() → GpuFrame         │ get_frame() / get_frame_numpy()
+        │ delegates to Exporter            │ Waits on IPC event
+        └─→ SharedMemory ←─────────────────┘
 
 Direction B: Python (Producer) → TD (Consumer)
 ───────────────────────────────────────────────
@@ -183,7 +183,7 @@ Exporter                           CUDAIPCExtension facade
 Both directions share the same v0.5.0 binary protocol.
 ```
 
-The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
+The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter (~415 LOC) over the canonical `Exporter` — it owns pixel-format bridging, the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
 
 ### Ring Buffer (3 Slots)
 
@@ -261,7 +261,7 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 | `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export()` (Python-side `Exporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. With EXPORT_SYNC=1 (default) the GPU D2D copy dominates wall-clock time and the net savings are small (<5% at 1080p on PCIe 4.0); see [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measured A/B. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
 | `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender. Same mechanism as `CUDALINK_USE_GRAPHS`, gated independently because TD ships `cudart64_110.dll` and the per-frame `cudaGraphExecMemcpyNodeSetParams1D` API requires CUDA 11.3+. Auto-disabled on older runtimes (probed via `cudaRuntimeGetVersion` at `initialize()`). Disabled by default. Set to `1` to opt in; falls back to the legacy `cudaMemcpyAsync` stream path automatically on any capture or launch failure. |
 | `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
-| `CUDALINK_EXPORT_SYNC` | `1` | Block CPU on the IPC stream after each `export_frame()`. Default on — load-bearing for concurrent topologies (prevents cycle-2 first-settle TDR cascade when a TD Sender shares a process with a TD Receiver, Phase 3.6 confirmed). Cost equals GPU D2D copy time: ~42 µs (512×512) → ~400 µs (4K) float32 RGBA on PCIe 4.0 (see `bench_graphs.py`). Set to `0` to opt out for low-latency single-producer async scenarios. |
+| `CUDALINK_EXPORT_SYNC` | `0` | Block CPU on the IPC stream after each `export_frame()`. Default off — the CUDA IPC event already provides correct cross-process GPU ordering. Set to `1` to restore synchronous behaviour (recommended for concurrent TD Sender+Receiver topologies and when `CUDALINK_USE_GRAPHS=0`). Note: `TDConfig` (`td_exporter/TDConfig.py`) still defaults to `True` for TDR-cascade safety in shared-process topologies. |
 | `CUDALINK_ACTIVATION_BARRIER` | `1` | Python-lib side of the cross-process activation barrier (F9). Reads a tiny SHM counter each `export_frame()` and skips publishing while a TD Sender is in its WDDM-saturating init window. No-op in single-pair topologies (counter stays at 0); gracefully skipped if the SHM segment is absent. Set to `0` to opt out. |
 | `CUDALINK_TD_ACTIVATION_BARRIER` | `1` | TD-side counterpart of `CUDALINK_ACTIVATION_BARRIER` — increments the same SHM counter around Sender `initialize()` so the Python producer backs off. Same no-op / graceful-absence behaviour. Set to `0` to opt out. |
 | `CUDALINK_TD_PERSIST_STREAM` | `1` | Skip `stream_destroy` in TD Sender `cleanup()` so the IPC CUDA stream survives `deactivate`→`reactivate` cycles (F8). Free in single-pair (no deactivation ever happens); load-bearing in concurrent — without it, stream recreate on each reactivation collides with in-flight Receiver work, doubling first-settle `post=` latency (Phase 3.6 confirmed). Set to `0` to opt out. |
@@ -334,16 +334,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-1.5.1-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.6.0-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.5.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.6.0-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.5.1-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -380,7 +380,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.5.1.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.6.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
