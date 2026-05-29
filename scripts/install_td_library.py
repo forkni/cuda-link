@@ -83,7 +83,9 @@ def _build_wheel(dry_run: bool) -> Path:
         print(_yellow(f"  [dry-run] Would run: {cmd_path}"))
         return REPO_ROOT / "dist" / "cuda_link-DRY_RUN.whl"
     # Use ["cmd.exe", "/c", path] instead of shell=True to avoid shell injection.
-    result = subprocess.run(["cmd.exe", "/c", str(cmd_path)], cwd=REPO_ROOT)
+    # stdin=DEVNULL prevents build_wheel.cmd's `pause` from blocking mid-flow;
+    # `pause` reads EOF immediately and passes through without waiting.
+    result = subprocess.run(["cmd.exe", "/c", str(cmd_path)], cwd=REPO_ROOT, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         sys.exit(_red("[error] build_wheel.cmd failed — see output above."))
     wheel = _find_wheel()
