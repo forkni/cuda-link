@@ -59,7 +59,7 @@ from SHMProtocol import (
 )
 
 if TYPE_CHECKING:
-    from .nvml_observer import NVMLObserver
+    from NVMLObserver import NVMLObserver
 
 logger = logging.getLogger(__name__)
 

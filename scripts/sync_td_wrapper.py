@@ -126,28 +126,30 @@ def rewrite_relative_imports(source: str) -> str:
     lines = source.splitlines(keepends=True)
     out: list[str] = []
     for line in lines:
-        # Upward relative import — not supported
-        if re.match(r"^from \.\.", line):
+        # Upward relative import — not supported (at any indentation)
+        if re.match(r"^\s*from \.\.", line):
             raise ValueError(f"Unsupported upward relative import: {line!r}")
 
-        # ``from . import stem`` — bare module import
-        m = re.match(r"^(from \. import )([\w]+)(.*)", line)
+        # ``from . import stem`` — bare module import (possibly indented, e.g. inside a method)
+        m = re.match(r"^(\s*)(from \. import )([\w]+)(.*)", line)
         if m:
+            indent = m.group(1)
+            stem = m.group(3)
+            tail = m.group(4)
+            derived = _resolve_name(stem, line)
+            eol = "\n" if line.endswith("\n") else ""
+            out.append(f"{indent}import {derived} as {stem}{tail}{eol}")
+            continue
+
+        # ``from .stem import ...`` — attribute import (possibly indented; single or multi-line opener)
+        m = re.match(r"^(\s*)from \.([\w]+)( import .*)", line)
+        if m:
+            indent = m.group(1)
             stem = m.group(2)
             tail = m.group(3)
             derived = _resolve_name(stem, line)
             eol = "\n" if line.endswith("\n") else ""
-            out.append(f"import {derived} as {stem}{tail}{eol}")
-            continue
-
-        # ``from .stem import ...`` — attribute import (single or multi-line opener)
-        m = re.match(r"^from \.([\w]+)( import .*)", line)
-        if m:
-            stem = m.group(1)
-            tail = m.group(2)
-            derived = _resolve_name(stem, line)
-            eol = "\n" if line.endswith("\n") else ""
-            out.append(f"from {derived}{tail}{eol}")
+            out.append(f"{indent}from {derived}{tail}{eol}")
             continue
 
         out.append(line)

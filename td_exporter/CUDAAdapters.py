@@ -42,7 +42,7 @@ class CTypesCUDAAdapter:
     @classmethod
     def for_device(cls, device: int = 0) -> CTypesCUDAAdapter:
         """Construct a production adapter bound to the given CUDA device."""
-        from .cuda_ipc_wrapper import get_cuda_runtime
+        from CUDAIPCWrapper import get_cuda_runtime
 
         return cls(get_cuda_runtime(device=device))
 

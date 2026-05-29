@@ -788,7 +788,7 @@ class Importer:
         if policy is None:
             policy = ImportPolicy.from_env()
         if cuda is None:
-            from ._cuda_adapters import CTypesCUDAAdapter
+            from CUDAAdapters import CTypesCUDAAdapter
 
             cuda = CTypesCUDAAdapter.for_device(device=spec.device)
 
@@ -975,7 +975,7 @@ class Importer:
         fmt: Format,
     ) -> IPCConnection:
         """Open all IPC mem + event handles; return a live IPCConnection."""
-        from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
+        from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t
 
         cuda = self._cuda
         ipc_handles: list = [None] * num_slots
