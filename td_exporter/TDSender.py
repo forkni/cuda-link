@@ -334,8 +334,15 @@ class TDSenderEngine:
             self._warned_format = False
 
         if self._exporter is None or not self._initialized:
-            self._log("Exporter not initialized — skipping frame", force=True)
-            return False
+            # Lazy init: probe geometry from the first available frame, then skip this
+            # cook.  The Exporter opens here; the actual export starts on the next cook.
+            try:
+                cm_probe = top_op.cuda_memory()  # stream=None → default stream, safe for probe
+            except Exception as e:
+                self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
+                return False
+            self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
+            return False  # skip this frame; next cook exports normally
 
         _nvtx_push(_NVTX_SENDER_SLOT_NAMES[self._exporter.write_idx % self.num_slots], "green")
         try:
