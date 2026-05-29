@@ -69,6 +69,7 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
 CANONICAL_ONLY: frozenset[str] = frozenset(
     {
         "__init__.py",
+        "_console.py",  # imported from cuda_link package directly by example scripts; no TD twin
         "cuda_ipc_importer.py",  # deprecation shim — TD consumers use Importer.py directly
     }
 )
