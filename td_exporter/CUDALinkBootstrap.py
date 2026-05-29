@@ -49,10 +49,13 @@ import sys
 # ---------------------------------------------------------------------------
 _ALIAS_MAP: dict[str, str] = {
     # byte_identical pairs (no relative imports in canonical source)
+    # CUDARuntimeTypes MUST come before CUDAIPCWrapper: cuda_ipc_wrapper.py imports from
+    # CUDARuntimeTypes at module load time, so the alias must be registered first to ensure
+    # all ctypes argtypes use the same cudaIpcMemHandle_t class in all modes.
     "Env": "cuda_link._env",
     "FrameProfile": "cuda_link._profile",
-    "CUDAIPCWrapper": "cuda_link.cuda_ipc_wrapper",
     "CUDARuntimeTypes": "cuda_link.cuda_runtime_types",
+    "CUDAIPCWrapper": "cuda_link.cuda_ipc_wrapper",
     "CUDAGraphs": "cuda_link.cuda_graphs",
     "NVMLObserver": "cuda_link.nvml_observer",
     "SHMProtocol": "cuda_link.shm_protocol",

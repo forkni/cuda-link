@@ -33,7 +33,13 @@ else:
     _kernel32 = None
 
 try:
-    from cuda_link.cuda_runtime_types import (  # noqa: E402
+    # Prefer the bare name so all callers (CUDAIPCWrapper Text DAT and TDReceiver) share
+    # the same cudaIpcMemHandle_t / cudaIpcEventHandle_t class objects — critical for ctypes
+    # argtypes checking which uses class identity, not structural equivalence.
+    # In library mode the bootstrap pre-sets sys.modules["CUDARuntimeTypes"] to
+    # cuda_link.cuda_runtime_types before this module is imported, so this succeeds.
+    # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
+    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,
@@ -45,8 +51,10 @@ try:
         cudaMemcpy3DParms,
         cudaPointerAttributes,
     )
-except ImportError:
-    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
+except (ImportError, ModuleNotFoundError):
+    # Fallback: pure package context where CUDARuntimeTypes is not yet in sys.modules
+    # (e.g. imported before the bootstrap runs, or in a standalone test environment).
+    from cuda_link.cuda_runtime_types import (  # noqa: E402
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,

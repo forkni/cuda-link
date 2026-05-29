@@ -16,9 +16,10 @@ TDReceiverEngine.  Mode switches create a fresh engine instance — zero state l
 
 from __future__ import annotations
 
-import CUDALinkBootstrap  # noqa: F401  -- must be first: registers sys.modules aliases before any mirror import
-
 import contextlib
+
+with contextlib.suppress(ImportError):
+    import CUDALinkBootstrap  # noqa: F401  -- registers sys.modules aliases when present
 
 try:
     from td import COMP, TOP, CUDAMemoryShape
