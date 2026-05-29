@@ -64,7 +64,7 @@ Private canonical modules use a leading underscore (`_exporter_port.py`). Their 
 | `importer.py` | `Importer.py` |
 | `_exporter_port.py` | `ExporterPort.py` |
 | `_importer_port.py` | `ImporterPort.py` |
-| `_cuda_adapters.py` | `CudaAdapters.py` |
+| `_cuda_adapters.py` | `CUDAAdapters.py` |
 | `_profile.py` | `FrameProfile.py` (already exists) |
 | `_nvtx.py` | `NVTXShim.py` (already exists, irregular) |
 

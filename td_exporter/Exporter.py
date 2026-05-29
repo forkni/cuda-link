@@ -25,7 +25,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 import NVTXShim as _nvtx
-from CudaAdapters import CTypesCudaAdapter
+from CUDAAdapters import CTypesCudaAdapter
 from ExporterPort import (
     CudaPort,
     ExportPolicy,
