@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -134,6 +135,80 @@ def _find_site_packages_in(base: Path) -> Path | None:
         if c.is_dir():
             return c
     return None
+
+
+def _discover_system_pythons() -> list[tuple[str, Path]]:
+    """Return registered Python installations via the Windows `py` launcher.
+
+    Uses `py --list-paths` which outputs lines like:
+        -V:3.11 *        C:\\...\\Python311\\python.exe
+    Returns [(version_label, exe_path), ...], newest/default first.
+    Falls back to [] if the launcher is unavailable (non-Windows or py not installed).
+    """
+    try:
+        out = subprocess.run(["py", "--list-paths"], capture_output=True, text=True, timeout=5)
+        results: list[tuple[str, Path]] = []
+        for line in out.stdout.splitlines():
+            m = re.match(r"\s*-V:([\d.]+)\s*(\*)?\s+(.*python(?:\.exe)?)", line, re.IGNORECASE)
+            if m:
+                ver = m.group(1) + (" (default)" if m.group(2) else "")
+                exe = Path(m.group(3).strip())
+                if exe.is_file():
+                    results.append((ver, exe))
+        return results
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def _discover_td_pythons() -> list[tuple[str, Path]]:
+    """Return python.exe paths found inside TouchDesigner installations.
+
+    Globs C:/Program Files/Derivative/TouchDesigner*/bin/python.exe.
+    Returns [(td_dir_name, exe_path), ...] sorted newest-first by directory mtime.
+    Falls back to [] if the Derivative directory does not exist.
+    """
+    base = Path("C:/Program Files/Derivative")
+    if not base.is_dir():
+        return []
+    results: list[tuple[str, Path]] = []
+    for td_dir in sorted(base.glob("TouchDesigner*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        py = td_dir / "bin" / "python.exe"
+        if py.is_file():
+            results.append((td_dir.name, py))
+    return results
+
+
+def _pick_from_list(
+    items: list[tuple[str, Path]],
+    prompt_header: str,
+    item_label: str,
+) -> Path | None:
+    """Print a numbered list and return the chosen Path, or None to enter manually.
+
+    Returns None if the list is empty or if the user picks option 0 (manual entry).
+    Auto-selects without prompting when exactly one item is found.
+    """
+    if not items:
+        return None
+    print(f"\n  {prompt_header}")
+    for i, (label, exe) in enumerate(items, start=1):
+        print(f"    {i}) {label:<30}  {exe}")
+    print(f"    0) Enter {item_label} path manually")
+
+    if len(items) == 1:
+        print(f"\n  (only one found — auto-selecting: {items[0][1]})")
+        return items[0][1]
+
+    while True:
+        try:
+            choice = input("\n  Select (default 1): ").strip() or "1"
+        except EOFError:
+            choice = "1"
+        if choice == "0":
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(items):
+            return items[int(choice) - 1][1]
+        print(_red(f"  Invalid — enter a number from 0 to {len(items)}."))
 
 
 # Python one-liner that reliably returns the site-packages directory.
@@ -269,10 +344,14 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
     if not python_exe:
         if non_interactive:
             sys.exit(_red("[error] --mode 4 requires --python <python_exe>"))
-        print("\n  Install into a parallel Python 3.11 installation.")
-        print("  This is the method documented by Derivative.")
-        print("  Install Python 3.11 from https://www.python.org and use its path here.")
-        python_exe = input("\n  Path to python.exe (e.g. C:\\Python311\\python.exe): ").strip()
+        print("\n  Install into a system / parallel Python installation.")
+        print("  This is the method documented by Derivative (TD uses Python 3.11).")
+        discovered = _discover_system_pythons()
+        picked = _pick_from_list(discovered, "Found Python installations:", "Python")
+        if picked is not None:
+            python_exe = str(picked)
+        else:
+            python_exe = input("\n  Path to python.exe (e.g. C:\\Python311\\python.exe): ").strip()
         if not python_exe:
             sys.exit(_red("[error] No Python executable specified."))
 
@@ -320,9 +399,14 @@ def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bo
         print()
         print(_bold("  Install into TouchDesigner's own Python."))
         print(_yellow("  WARNING: This modifies TD's bundled Python environment."))
-        print("  Get the executable path from TD's Textport: print(app.pythonExecutable)")
-        print("  Default location: C:\\Program Files\\Derivative\\TouchDesigner\\bin\\python.exe")
-        td_python_exe = input("\n  TD Python executable path: ").strip()
+        print("  (Re-run this after upgrading TouchDesigner.)")
+        discovered = _discover_td_pythons()
+        picked = _pick_from_list(discovered, "Found TouchDesigner installations:", "TD Python")
+        if picked is not None:
+            td_python_exe = str(picked)
+        else:
+            print("  Tip: get the exact path from TD's Textport: print(app.pythonExecutable)")
+            td_python_exe = input("\n  TD Python executable path: ").strip()
         if not td_python_exe:
             sys.exit(_red("[error] No TD Python executable specified."))
 
