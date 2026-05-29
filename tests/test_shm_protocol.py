@@ -355,6 +355,52 @@ def test_dtype_codec_itemsize_unknown_raises() -> None:
         DtypeCodec.itemsize("float64")
 
 
+# DtypeCodec — backend leg (typestr / numpy_name / cupy_name)
+
+_EXPECTED_TYPESTR = {
+    "float32": "<f4",
+    "float16": "<f2",
+    "bfloat16": "<u2",  # uint16 backing view for CAI; caller does tensor.view(bfloat16)
+    "uint8": "|u1",
+    "uint16": "<u2",
+    "int8": "|i1",
+    "int16": "<i2",
+}
+
+
+@pytest.mark.parametrize("dtype,expected", list(_EXPECTED_TYPESTR.items()))
+def test_dtype_codec_typestr(dtype: str, expected: str) -> None:
+    """DtypeCodec.typestr() returns the correct CAI typestr for every registered dtype."""
+    assert DtypeCodec.typestr(dtype) == expected
+
+
+def test_dtype_codec_typestr_unknown_raises() -> None:
+    with pytest.raises(KeyError):
+        DtypeCodec.typestr("float64")
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+def test_dtype_codec_numpy_name_standard_dtypes(dtype: str) -> None:
+    """numpy_name() returns the dtype string itself for all standard dtypes (np.dtype(name) works)."""
+    assert DtypeCodec.numpy_name(dtype) == dtype
+
+
+def test_dtype_codec_numpy_name_bfloat16_is_none() -> None:
+    """numpy_name() returns None for bfloat16 — signals that ml_dtypes is needed."""
+    assert DtypeCodec.numpy_name("bfloat16") is None
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+def test_dtype_codec_cupy_name_standard_dtypes(dtype: str) -> None:
+    """cupy_name() returns the dtype string itself for all standard dtypes (cp.dtype(name) works)."""
+    assert DtypeCodec.cupy_name(dtype) == dtype
+
+
+def test_dtype_codec_cupy_name_bfloat16_is_none() -> None:
+    """cupy_name() returns None for bfloat16 — CuPy has no bfloat16 dtype."""
+    assert DtypeCodec.cupy_name("bfloat16") is None
+
+
 # ---------------------------------------------------------------------------
 # read_version / read_num_slots — header helpers now consumed by protocol
 # ---------------------------------------------------------------------------

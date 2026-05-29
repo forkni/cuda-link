@@ -22,6 +22,7 @@ import struct
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # Protocol constants
@@ -54,18 +55,31 @@ FORMAT_KIND_UNSIGNED: int = 1  # cudaChannelFormatKindUnsigned
 FORMAT_KIND_FLOAT: int = 2  # cudaChannelFormatKindFloat
 FLAGS_BFLOAT16: int = 0x0001  # bit0: bfloat16 (kind=Float, bits=16)
 
-# dtype string → (format_kind, bits_per_component, flags, itemsize_bytes)
+
+class _DtypeEntry(NamedTuple):
+    """Single row of the dtype registry — wire encoding + backend representations."""
+
+    kind: int
+    bits: int
+    flags: int
+    itemsize: int
+    typestr: str  # __cuda_array_interface__ typestr, e.g. "<f4"
+    numpy_name: str | None  # np.dtype(name) works; None = needs ml_dtypes (bfloat16)
+    cupy_name: str | None  # cp.dtype(name) works; None = unsupported (bfloat16)
+
+
+# dtype string → all backend representations.
 # Single authoritative registry.  Adding a dtype is one row here; no other file changes.
-_DTYPE_TABLE: dict[str, tuple[int, int, int, int]] = {
-    "float32": (FORMAT_KIND_FLOAT, 32, 0, 4),
-    "float16": (FORMAT_KIND_FLOAT, 16, 0, 2),
-    "bfloat16": (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, 2),
-    "uint8": (FORMAT_KIND_UNSIGNED, 8, 0, 1),
-    "uint16": (FORMAT_KIND_UNSIGNED, 16, 0, 2),
-    "int8": (FORMAT_KIND_SIGNED, 8, 0, 1),
-    "int16": (FORMAT_KIND_SIGNED, 16, 0, 2),
+_DTYPE_TABLE: dict[str, _DtypeEntry] = {
+    "float32": _DtypeEntry(FORMAT_KIND_FLOAT, 32, 0, 4, "<f4", "float32", "float32"),
+    "float16": _DtypeEntry(FORMAT_KIND_FLOAT, 16, 0, 2, "<f2", "float16", "float16"),
+    "bfloat16": _DtypeEntry(FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, 2, "<u2", None, None),
+    "uint8": _DtypeEntry(FORMAT_KIND_UNSIGNED, 8, 0, 1, "|u1", "uint8", "uint8"),
+    "uint16": _DtypeEntry(FORMAT_KIND_UNSIGNED, 16, 0, 2, "<u2", "uint16", "uint16"),
+    "int8": _DtypeEntry(FORMAT_KIND_SIGNED, 8, 0, 1, "|i1", "int8", "int8"),
+    "int16": _DtypeEntry(FORMAT_KIND_SIGNED, 16, 0, 2, "<i2", "int16", "int16"),
 }
-_DECODE_TABLE: dict[tuple[int, int, int], str] = {(k, b, f): name for name, (k, b, f, _sz) in _DTYPE_TABLE.items()}
+_DECODE_TABLE: dict[tuple[int, int, int], str] = {(e.kind, e.bits, e.flags): name for name, e in _DTYPE_TABLE.items()}
 
 # ---------------------------------------------------------------------------
 # Pre-compiled struct codecs (hot-path, saves ~50-100ns per call)
@@ -199,10 +213,13 @@ class Metadata:
 
 
 class DtypeCodec:
-    """Encode/decode dtype strings to/from (format_kind, bits_per_comp, flags).
+    """Encode/decode dtype strings across all backend representations.
 
     All dtype knowledge lives in _DTYPE_TABLE above.  Adding a dtype is a
     single-row edit there; no other file needs to change.
+
+    Wire leg:  encode() / decode() / itemsize()
+    Backend:   typestr() / numpy_name() / cupy_name()
     """
 
     @staticmethod
@@ -212,8 +229,8 @@ class DtypeCodec:
         Raises:
             KeyError: if dtype is not in the supported set.
         """
-        k, b, f, _sz = _DTYPE_TABLE[dtype]
-        return (k, b, f)
+        e = _DTYPE_TABLE[dtype]
+        return (e.kind, e.bits, e.flags)
 
     @staticmethod
     def decode(kind: int, bits: int, flags: int) -> str:
@@ -230,12 +247,48 @@ class DtypeCodec:
         Raises:
             KeyError: if dtype is not in the supported set.
         """
-        return _DTYPE_TABLE[dtype][3]
+        return _DTYPE_TABLE[dtype].itemsize
 
     @staticmethod
     def supported() -> tuple[str, ...]:
         """Tuple of all supported dtype strings, in registration order."""
         return tuple(_DTYPE_TABLE)
+
+    @staticmethod
+    def typestr(dtype: str) -> str:
+        """Return the __cuda_array_interface__ typestr for dtype (e.g. "<f4").
+
+        For bfloat16 this is "<u2" — a uint16 backing view; callers that build
+        torch tensors must follow up with tensor.view(torch.bfloat16).
+
+        Raises:
+            KeyError: if dtype is not in the supported set.
+        """
+        return _DTYPE_TABLE[dtype].typestr
+
+    @staticmethod
+    def numpy_name(dtype: str) -> str | None:
+        """Return the numpy dtype name string for dtype (e.g. "float32").
+
+        Returns None for bfloat16 — the caller must use ml_dtypes.bfloat16
+        instead of np.dtype(name).
+
+        Raises:
+            KeyError: if dtype is not in the supported set.
+        """
+        return _DTYPE_TABLE[dtype].numpy_name
+
+    @staticmethod
+    def cupy_name(dtype: str) -> str | None:
+        """Return the cupy dtype name string for dtype (e.g. "float32").
+
+        Returns None for bfloat16 — CuPy has no bfloat16 dtype; callers should
+        raise a clear ValueError rather than proceeding.
+
+        Raises:
+            KeyError: if dtype is not in the supported set.
+        """
+        return _DTYPE_TABLE[dtype].cupy_name
 
 
 # ---------------------------------------------------------------------------

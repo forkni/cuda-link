@@ -115,20 +115,21 @@ except ImportError:
 def _numpy_dtype_for(dtype_str: str) -> object:
     """Return np.dtype for dtype_str, handling bfloat16 specially.
 
-    Returns None when NumPy is unavailable.  For bfloat16, attempts
-    ml_dtypes.bfloat16 and returns None if that package is absent
-    (NumpyBuffers will raise a clear error rather than silently miscompute).
+    Returns None when NumPy is unavailable.  For bfloat16 (DtypeCodec.numpy_name
+    returns None), attempts ml_dtypes.bfloat16 and returns None if that package is
+    absent (NumpyBuffers will raise a clear error rather than silently miscompute).
     """
     if not NUMPY_AVAILABLE:
         return None
-    if dtype_str == "bfloat16":
+    name = DtypeCodec.numpy_name(dtype_str)
+    if name is None:  # bfloat16 — needs ml_dtypes
         try:
             import ml_dtypes  # noqa: PLC0415
 
             return np.dtype(ml_dtypes.bfloat16)
         except ImportError:
             return None
-    return np.dtype(dtype_str)
+    return np.dtype(name)
 
 
 # ---------------------------------------------------------------------------
@@ -285,21 +286,12 @@ class TorchBuffers:
 
         bfloat16: the CAI protocol has no bfloat16 typestr, so we use a uint16
         backing view ("<u2") and reinterpret with tensor.view(torch.bfloat16).
+        DtypeCodec.typestr() returns "<u2" for bfloat16 exactly for this reason.
         """
-        # Maps dtype_str → __cuda_array_interface__ typestr.
-        # bfloat16 uses uint16 backing ("<u2"); the tensor is re-viewed after construction.
-        typestr_map = {
-            "float32": "<f4",
-            "float16": "<f2",
-            "uint8": "|u1",
-            "uint16": "<u2",
-            "int8": "|i1",
-            "int16": "<i2",
-            "bfloat16": "<u2",
-        }
-        typestr = typestr_map.get(fmt.dtype_str)
-        if typestr is None:
-            raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}")
+        try:
+            typestr = DtypeCodec.typestr(fmt.dtype_str)
+        except KeyError:
+            raise ValueError(f"Unsupported dtype for torch: {fmt.dtype_str}") from None
 
         tensors = []
         wrappers = []
@@ -342,23 +334,19 @@ class CupyBuffers:
 
         bfloat16 is not supported by CuPy (no cp.bfloat16 dtype); callers
         should use get_frame() to receive a torch.Tensor for bfloat16 data.
+        DtypeCodec.cupy_name() returns None for bfloat16 to signal this.
         """
-        if fmt.dtype_str == "bfloat16":
+        cupy_name = DtypeCodec.cupy_name(fmt.dtype_str)
+        if cupy_name is None:
             raise ValueError(
-                "bfloat16 is not supported by the CuPy consumer (CuPy has no bfloat16 dtype). "
+                f"{fmt.dtype_str} is not supported by the CuPy consumer "
+                f"(CuPy has no {fmt.dtype_str} dtype). "
                 "Use get_frame() to retrieve a torch.Tensor instead."
             )
-        dtype_map = {
-            "float32": cp.float32,
-            "float16": cp.float16,
-            "uint8": cp.uint8,
-            "uint16": cp.uint16,
-            "int8": cp.int8,
-            "int16": cp.int16,
-        }
-        cp_dtype = dtype_map.get(fmt.dtype_str)
-        if cp_dtype is None:
-            raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}")
+        try:
+            cp_dtype = cp.dtype(cupy_name)
+        except (TypeError, AttributeError):
+            raise ValueError(f"Unsupported dtype for CuPy: {fmt.dtype_str}") from None
 
         arrays = []
         for slot in range(conn.num_slots):
