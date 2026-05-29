@@ -23,7 +23,7 @@ import sys
 import time
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import NVTXShim as _nvtx
 from ImporterPort import (
@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 # Pre-built NVTX strings eliminate f-string allocation on the hot path.
 _NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
 _NVTX_NUMPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame_numpy.slot")
+_NVTX_CUPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame_cupy.slot")
 
 
 # Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
@@ -198,8 +199,8 @@ class Format:
         cannot be known without reading the SHM metadata block.  These sentinel
         zeros participate in the auto-generated ``__eq__``, so do NOT use
         ``fmt_a == fmt_b`` to detect layout changes between an override-derived
-        and an SHM-derived Format — compare ``.shape`` and ``.dtype_str``
-        directly (see ``_resolve_format`` for the established precedent).
+        and an SHM-derived Format — use ``fmt_a.layout_differs_from(fmt_b)``
+        instead (see ``_reinitialize`` for the established precedent).
         """
         height, width, num_comps = shape
         try:
@@ -220,6 +221,15 @@ class Format:
             numpy_dtype=numpy_dtype,
             frame_nbytes=frame_nbytes,
         )
+
+    def layout_differs_from(self, other: Format) -> bool:
+        """True when shape or dtype changed between two Formats.
+
+        Do NOT use == (Format.__eq__) for layout-change detection — kind/bits/flags
+        sentinel zeros in from_overrides() would false-positive against SHM-derived
+        real values. Compare only the load-bearing layout fields.
+        """
+        return self.shape != other.shape or self.dtype_str != other.dtype_str
 
 
 @dataclass
@@ -541,6 +551,157 @@ class _RetryState:
     def request_immediate_reconnect(self) -> None:
         """Force the next get_frame*() call to attempt reconnection without waiting."""
         self.frames_since_last_retry = self.retry_interval_frames
+
+
+# ---------------------------------------------------------------------------
+# Frame-consume backends (private, one instance per get_frame* call)
+# ---------------------------------------------------------------------------
+
+
+class _FrameBackend(Protocol):
+    """Private per-call backend for Importer._consume_frame. One instance per call.
+
+    Concrete implementations: _TorchBackend, _NumpyBackend, _CupyBackend.
+    The interface is the test surface — each backend is independently verifiable.
+    """
+
+    nvtx_slot_names: tuple[str, ...]
+    nvtx_color: str
+    backend_name: str  # passed to _log_frame_stats
+
+    def prepare(self, importer: Importer) -> None:
+        """Pre-NVTX setup. Called before the outer NVTX range is pushed.
+
+        NumpyBuffers lazy rebuild goes here. Torch and CuPy are no-ops.
+        May mutate importer state (e.g. importer._numpy).
+        """
+
+    def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        """Wait for the producer event for *read_slot*.
+
+        Returns microseconds waited (for debug telemetry via total_wait_event_time).
+        CPU-spin backends raise TimeoutError on timeout.
+        GPU-side backends (cupy) return 0.0 immediately — the stream waits on the GPU.
+        """
+
+    def materialize(self, conn: IPCConnection, read_slot: int) -> Any:
+        """Return the frame after wait(). Called inside the outer NVTX range.
+
+        May add inner NVTX sub-ranges (e.g. numpy adds a d2h_copy range).
+        """
+
+
+class _TorchBackend:
+    """Zero-copy torch.Tensor backend. CPU-spin or GPU-side wait depending on stream."""
+
+    nvtx_slot_names = _NVTX_GET_NAMES
+    nvtx_color = "purple"
+    backend_name = "torch"
+
+    def __init__(self, importer: Importer, stream: object | None) -> None:
+        self._imp = importer
+        self._stream = stream
+
+    def prepare(self, importer: Importer) -> None:  # noqa: ARG002
+        pass
+
+    def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        if self._stream is not None:
+            cs = self._imp._resolve_stream(self._stream)
+            if conn.ipc_events[read_slot]:
+                conn.cuda.stream_wait_event(cs, conn.ipc_events[read_slot], 0)
+            return 0.0
+        return self._imp._wait_for_slot(read_slot)  # may raise TimeoutError
+
+    def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
+        return self._imp._torch.tensors[read_slot]
+
+
+class _NumpyBackend:
+    """D2H-copy numpy ndarray backend. CPU-spin wait; lazy NumpyBuffers build."""
+
+    nvtx_slot_names = _NVTX_NUMPY_NAMES
+    nvtx_color = "orange"
+    backend_name = "numpy"
+
+    def __init__(self, importer: Importer) -> None:
+        self._imp = importer
+
+    def prepare(self, importer: Importer) -> None:
+        fmt = importer._format
+        if importer._numpy is None or importer._numpy.needs_rebuild(fmt):
+            if importer._numpy is not None:
+                importer._numpy.close()
+            importer._numpy = NumpyBuffers.build(
+                importer._conn,
+                fmt,
+                num_streams=importer._policy.d2h_num_streams,
+                high_priority=importer._policy.d2h_stream_high_priority,
+                allow_pageable=importer._policy.allow_pageable_fallback,
+            )
+
+    def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        return self._imp._wait_for_slot(read_slot)  # may raise TimeoutError
+
+    def materialize(self, conn: IPCConnection, read_slot: int) -> Any:
+        nb = self._imp._numpy
+        fmt = self._imp._format
+        nbytes = fmt.frame_nbytes
+        with _nvtx.verbose_range("cudalink.importer.d2h_copy", self.nvtx_color):
+            n_streams = nb.num_streams
+            if n_streams <= 1:
+                conn.cuda.memcpy_async(
+                    dst=nb.buffer.ctypes.data_as(ctypes.c_void_p),
+                    src=conn.dev_ptrs[read_slot],
+                    count=nbytes,
+                    kind=2,  # cudaMemcpyDeviceToHost
+                    stream=nb.primary_stream,
+                )
+                conn.cuda.stream_synchronize(nb.primary_stream)
+            else:
+                dst_base = nb.buffer.ctypes.data
+                src_base = conn.dev_ptrs[read_slot].value
+                for i, (offset, size) in enumerate(nb.chunk_plan):
+                    conn.cuda.memcpy_async(
+                        dst=ctypes.c_void_p(dst_base + offset),
+                        src=ctypes.c_void_p(src_base + offset),
+                        count=size,
+                        kind=2,
+                        stream=nb.d2h_streams[i],
+                    )
+                for stream in nb.d2h_streams[: len(nb.chunk_plan)]:
+                    conn.cuda.stream_synchronize(stream)
+        conn.cuda.check_sticky_error("get_frame_numpy")
+        return nb.buffer
+
+
+class _CupyBackend:
+    """Zero-copy CuPy ndarray backend. GPU-side streamWaitEvent; TIMEOUT unreachable."""
+
+    nvtx_slot_names = _NVTX_CUPY_NAMES
+    nvtx_color = "green"
+    backend_name = "cupy"
+
+    def __init__(self, importer: Importer, stream: object | None) -> None:
+        self._imp = importer
+        self._stream = stream
+
+    def prepare(self, importer: Importer) -> None:  # noqa: ARG002
+        pass
+
+    def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        stream = self._stream
+        if stream is None:
+            stream = cp.cuda.get_current_stream()
+        elif not isinstance(stream, cp.cuda.Stream):
+            cuda_stream_ptr = self._imp._resolve_stream(stream)
+            stream = cp.cuda.ExternalStream(cuda_stream_ptr)
+        if conn.ipc_events[read_slot]:
+            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
+        return 0.0  # GPU-side wait — CPU returns immediately; TimeoutError unreachable
+
+    def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
+        return self._imp._cupy.arrays[read_slot]
 
 
 # ---------------------------------------------------------------------------
@@ -1011,6 +1172,44 @@ class Importer:
     # Frame consumers
     # ------------------------------------------------------------------
 
+    def _consume_frame(self, backend: _FrameBackend) -> ImportResult:
+        """Shared frame-consume core used by all get_frame* methods.
+
+        Owns: _begin_frame preamble, backend.prepare(), outer NVTX push/pop,
+        event_wait verbose_range, TimeoutError handling, frame_count increment,
+        and debug telemetry. Backend owns: pre-NVTX buffer setup (prepare),
+        event wait (wait), and frame materialisation (materialize).
+        """
+        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
+        if early is not None:
+            return early
+        self.last_latency = latency_ms
+        conn = self._conn
+
+        backend.prepare(self)
+
+        _nvtx.push_range(backend.nvtx_slot_names[read_slot], backend.nvtx_color)
+        with _nvtx.verbose_range("cudalink.importer.event_wait", backend.nvtx_color):
+            try:
+                wait_us = backend.wait(conn, read_slot)
+                if debug:
+                    self.total_wait_event_time += wait_us
+            except TimeoutError:
+                logger.error("Producer timeout — slot %d", read_slot)
+                _nvtx.pop_range()
+                return ImportResult(outcome=ImportOutcome.TIMEOUT)
+
+        frame = backend.materialize(conn, read_slot)
+
+        self.frame_count += 1
+        if debug:
+            frame_time = (time.perf_counter() - frame_start) * 1_000_000
+            self.total_get_frame_time += frame_time
+            self._log_frame_stats(backend.backend_name, read_slot, conn)
+
+        _nvtx.pop_range()
+        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=frame)
+
     def _begin_frame(self) -> tuple:
         """Common preamble for all get_frame* methods.
 
@@ -1053,38 +1252,7 @@ class Importer:
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
-
-        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
-        if early is not None:
-            return early
-        self.last_latency = latency_ms
-
-        conn = self._conn
-
-        _nvtx.push_range(_NVTX_GET_NAMES[read_slot], "purple")
-        with _nvtx.verbose_range("cudalink.importer.event_wait", "purple"):
-            if stream is not None:
-                cuda_stream = self._resolve_stream(stream)
-                if conn.ipc_events[read_slot]:
-                    conn.cuda.stream_wait_event(cuda_stream, conn.ipc_events[read_slot], 0)
-            else:
-                try:
-                    wait_us = self._wait_for_slot(read_slot)
-                    if debug:
-                        self.total_wait_event_time += wait_us
-                except TimeoutError:
-                    logger.error("Producer timeout — slot %d", read_slot)
-                    _nvtx.pop_range()
-                    return ImportResult(outcome=ImportOutcome.TIMEOUT)
-
-        self.frame_count += 1
-        if debug:
-            frame_time = (time.perf_counter() - frame_start) * 1_000_000
-            self.total_get_frame_time += frame_time
-            self._log_frame_stats("torch", read_slot, conn)
-
-        _nvtx.pop_range()
-        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=self._torch.tensors[read_slot])
+        return self._consume_frame(_TorchBackend(self, stream))
 
     def get_frame_numpy(self) -> ImportResult:
         """Get current frame as a numpy ndarray (CPU; involves D2H copy).
@@ -1095,75 +1263,7 @@ class Importer:
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
-
-        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
-        if early is not None:
-            return early
-        self.last_latency = latency_ms
-
-        conn = self._conn
-        fmt = self._format
-        nbytes = fmt.frame_nbytes
-
-        if self._numpy is None or self._numpy.needs_rebuild(fmt):
-            if self._numpy is not None:
-                self._numpy.close()
-            self._numpy = NumpyBuffers.build(
-                conn,
-                fmt,
-                num_streams=self._policy.d2h_num_streams,
-                high_priority=self._policy.d2h_stream_high_priority,
-                allow_pageable=self._policy.allow_pageable_fallback,
-            )
-
-        nb = self._numpy
-
-        _nvtx.push_range(_NVTX_NUMPY_NAMES[read_slot], "orange")
-        with _nvtx.verbose_range("cudalink.importer.event_wait", "orange"):
-            try:
-                wait_us = self._wait_for_slot(read_slot)
-                if debug:
-                    self.total_wait_event_time += wait_us
-            except TimeoutError:
-                logger.error("Producer timeout — slot %d", read_slot)
-                _nvtx.pop_range()
-                return ImportResult(outcome=ImportOutcome.TIMEOUT)
-
-        with _nvtx.verbose_range("cudalink.importer.d2h_copy", "orange"):
-            n_streams = nb.num_streams
-            if n_streams <= 1:
-                conn.cuda.memcpy_async(
-                    dst=nb.buffer.ctypes.data_as(ctypes.c_void_p),
-                    src=conn.dev_ptrs[read_slot],
-                    count=nbytes,
-                    kind=2,  # cudaMemcpyDeviceToHost
-                    stream=nb.primary_stream,
-                )
-                conn.cuda.stream_synchronize(nb.primary_stream)
-            else:
-                dst_base = nb.buffer.ctypes.data
-                src_base = conn.dev_ptrs[read_slot].value
-                for i, (offset, size) in enumerate(nb.chunk_plan):
-                    conn.cuda.memcpy_async(
-                        dst=ctypes.c_void_p(dst_base + offset),
-                        src=ctypes.c_void_p(src_base + offset),
-                        count=size,
-                        kind=2,
-                        stream=nb.d2h_streams[i],
-                    )
-                for stream in nb.d2h_streams[: len(nb.chunk_plan)]:
-                    conn.cuda.stream_synchronize(stream)
-
-        conn.cuda.check_sticky_error("get_frame_numpy")
-        self.frame_count += 1
-
-        if debug:
-            frame_time = (time.perf_counter() - frame_start) * 1_000_000
-            self.total_get_frame_time += frame_time
-            self._log_frame_stats("numpy", read_slot, conn)
-
-        _nvtx.pop_range()
-        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=nb.buffer)
+        return self._consume_frame(_NumpyBackend(self))
 
     def get_frame_cupy(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy CuPy ndarray on GPU.
@@ -1177,38 +1277,14 @@ class Importer:
             SHUTDOWN, or RECONNECTING.
 
         Note:
-            TIMEOUT is not reachable via this path. GPU synchronisation is
-            done with ``cp.cuda.runtime.streamWaitEvent`` which is a
-            non-blocking CPU call (the stream waits on the GPU side, but the
-            CPU returns immediately). There is no Python-level TimeoutError.
-            Use ``get_frame()`` (torch) or ``get_frame_numpy()`` if you need
-            producer-timeout detection.
+            TIMEOUT is not reachable via this path — streamWaitEvent is a
+            non-blocking CPU call; the stream waits on the GPU side. See
+            _CupyBackend.wait() for details. Use get_frame() or
+            get_frame_numpy() if producer-timeout detection is required.
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
-
-        early, read_slot, latency_ms, debug, frame_start = self._begin_frame()
-        if early is not None:
-            return early
-        self.last_latency = latency_ms
-
-        conn = self._conn
-
-        if stream is None:
-            stream = cp.cuda.get_current_stream()
-        elif not isinstance(stream, cp.cuda.Stream):
-            cuda_stream_ptr = self._resolve_stream(stream)
-            stream = cp.cuda.ExternalStream(cuda_stream_ptr)
-
-        if conn.ipc_events[read_slot]:
-            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
-
-        self.frame_count += 1
-        if debug:
-            frame_time = (time.perf_counter() - frame_start) * 1_000_000
-            self.total_get_frame_time += frame_time
-            self._log_frame_stats("cupy", read_slot, conn)
-        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=self._cupy.arrays[read_slot])
+        return self._consume_frame(_CupyBackend(self, stream))
 
     # ------------------------------------------------------------------
     # Re-initialization (producer restarted with new IPC handles)
@@ -1228,11 +1304,10 @@ class Importer:
         # Falls back to current format if SHM metadata is absent or all-zeros.
         new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
 
-        # Compare only the load-bearing layout fields — mirroring the precedent
-        # in _resolve_format (line ~722) which also avoids Format.__eq__ here.
-        # The full __eq__ would false-positive when self._format is override-derived
+        # Compare only the load-bearing layout fields via layout_differs_from —
+        # Format.__eq__ would false-positive when self._format is override-derived
         # (kind=bits=flags=0 sentinels) vs an SHM-derived new_fmt with real values.
-        if new_fmt.shape != self._format.shape or new_fmt.dtype_str != self._format.dtype_str:
+        if new_fmt.layout_differs_from(self._format):
             logger.info(
                 "Format changed on reinit: %s %s → %s %s",
                 self._format.shape,
