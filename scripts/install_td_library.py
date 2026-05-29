@@ -136,28 +136,48 @@ def _find_site_packages_in(base: Path) -> Path | None:
     return None
 
 
-def _print_activation(site_packages: Path | None, label: str) -> None:
-    """Print the CUDALINK_LIB_PATH value and TD Preferences path."""
+# Python one-liner that reliably returns the site-packages directory.
+# Filters site.getsitepackages() for an entry ending in 'site-packages' because some
+# Windows Python 3.11 installations return the root directory as the first element instead.
+_SITE_PKGS_QUERY = (
+    "import site; "
+    "all_paths = site.getsitepackages(); "
+    "sp = next((p for p in all_paths if p.lower().endswith('site-packages')), all_paths[0]); "
+    "print(sp)"
+)
+
+
+def _print_activation(site_packages: Path | None, label: str, td_preferences_only: bool = False) -> None:
+    """Print installation confirmation and path-activation instructions.
+
+    td_preferences_only=True (modes 2/3/4): show only the TD Preferences path instruction.
+    td_preferences_only=False (mode 1 default): show CUDALINK_LIB_PATH + TD Preferences.
+    """
     print()
     print(_bold("─" * 60))
     print(_bold("  INSTALL COMPLETE"))
     print(_bold("─" * 60))
     if site_packages:
-        print(f"\n  {label} path:")
+        print(f"\n  {label}:")
         print(f"    {site_packages}")
         print()
-        print(_bold("  Activate — choose one method:"))
-        print()
-        print("  1. Environment variable (quickest, per-session):")
-        print(_green(f"       SET CUDALINK_LIB_PATH={site_packages}"))
-        print()
-        print("  2. Permanent (Windows Environment Variables):")
-        print("       Variable:  CUDALINK_LIB_PATH")
-        print(f"       Value:     {site_packages}")
-        print()
-        print("  3. TD Preferences (persists per TD install, no env var needed):")
-        print("       Edit → Preferences → Python 32/64 bit Module Path")
-        print(f"       Add:  {site_packages}")
+        if td_preferences_only:
+            print(_bold("  Add to TouchDesigner Preferences:"))
+            print("       Edit → Preferences → Python 32/64 bit Module Path")
+            print(_green(f"       Add:  {site_packages}"))
+        else:
+            print(_bold("  Activate — choose one method:"))
+            print()
+            print("  1. Environment variable (quickest, per-session):")
+            print(_green(f"       SET CUDALINK_LIB_PATH={site_packages}"))
+            print()
+            print("  2. Permanent (Windows Environment Variables):")
+            print("       Variable:  CUDALINK_LIB_PATH")
+            print(f"       Value:     {site_packages}")
+            print()
+            print("  3. TD Preferences (persists per TD install, no env var needed):")
+            print("       Edit → Preferences → Python 32/64 bit Module Path")
+            print(f"       Add:  {site_packages}")
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
         print("    [CUDALinkBootstrap] Library mode active — cuda_link submodules aliased")
@@ -207,7 +227,7 @@ def mode_2_venv(wheel: Path, venv_dir: str | None, non_interactive: bool, dry_ru
     pip = [str(pip_exe), "install", str(wheel), "--upgrade"]
     _run_pip(pip, dry_run)
     site_pkgs = _find_site_packages_in(venv)
-    _print_activation(site_pkgs, "venv site-packages")
+    _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True)
 
 
 def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
@@ -227,7 +247,7 @@ def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_
     if not dry_run:
         try:
             info = subprocess.run(
-                ["conda", "run", "-n", conda_env, "python", "-c", "import site; print(site.getsitepackages()[0])"],
+                ["conda", "run", "-n", conda_env, "python", "-c", _SITE_PKGS_QUERY],
                 capture_output=True,
                 text=True,
                 cwd=REPO_ROOT,
@@ -237,11 +257,11 @@ def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_
         except FileNotFoundError:
             pass
 
-    _print_activation(site_pkgs, "conda env site-packages")
+    _print_activation(site_pkgs, "conda env site-packages", td_preferences_only=True)
     if site_pkgs is None:
         print(_yellow("  Could not auto-detect conda site-packages path."))
-        print('  Run `conda run -n <env> python -c "import site; print(site.getsitepackages()[0])"`')
-        print("  to find it manually.")
+        print('  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"')
+        print("  then add the 'site-packages' entry to TD Preferences.")
 
 
 def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
@@ -270,12 +290,13 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
     pip = [str(py_path), "-m", "pip", "install", str(wheel), "--upgrade"]
     _run_pip(pip, dry_run)
 
-    # Detect site-packages
+    # Detect site-packages — use _SITE_PKGS_QUERY to filter for the actual site-packages
+    # directory; getsitepackages()[0] can return the Python root on some installations.
     site_pkgs: Path | None = None
     if not dry_run:
         try:
             info = subprocess.run(
-                [str(py_path), "-c", "import site; print(site.getsitepackages()[0])"],
+                [str(py_path), "-c", _SITE_PKGS_QUERY],
                 capture_output=True,
                 text=True,
             )
@@ -284,7 +305,7 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
         except (FileNotFoundError, OSError):
             pass
 
-    _print_activation(site_pkgs, "Python site-packages")
+    _print_activation(site_pkgs, "Python site-packages", td_preferences_only=True)
 
 
 def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
