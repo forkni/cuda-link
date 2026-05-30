@@ -283,4 +283,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback as _tb
+
+        _err = _tb.format_exc()
+        _log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "receiver_error.log")
+        try:
+            with open(_log, "w", encoding="utf-8") as _f:
+                _f.write(_err)
+        except OSError:
+            pass
+        print(f"\n[receiver] FATAL — unhandled exception (log: {_log})\n{_err}", flush=True)
+        with contextlib.suppress(EOFError, KeyboardInterrupt):
+            input("[receiver] Press Enter to close this window ...")
+        sys.exit(1)

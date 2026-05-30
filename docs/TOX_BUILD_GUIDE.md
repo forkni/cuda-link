@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.6.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.7.0.tox` component in TouchDesigner.
 
-> **Previous release**: `TOXES/CUDAIPCLink_v1.5.1.tox` is available as a GitHub Release asset.
+> **Previous release**: `TOXES/CUDAIPCLink_v1.7.0.tox` is available as a GitHub Release asset.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -30,8 +30,8 @@ CUDAIPCExporter (Base COMP)
 ├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
-├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
-├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
+├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -66,8 +66,8 @@ CUDAIPCExporter (Base COMP)
 ├── parexecute        (Par Execute DAT) ← Copy from td_exporter/parexecute_callbacks.py
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
-├── ImportBuffer      (Script TOP)   ← Receiver mode only; copy from td_exporter/script_top_callbacks.py
-├── warning_emitter   (Script TOP)   ← Status badge; copy from td_exporter/warning_emitter_callbacks.py
+├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -170,8 +170,13 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
-3. Confirm the first non-stdlib import reads: `import CUDALinkBootstrap  # noqa: F401`
-   This triggers the bootstrap before any sibling imports run.
+3. Confirm the import block reads:
+   ```python
+   with contextlib.suppress(ImportError):
+       import CUDALinkBootstrap  # noqa: F401
+   ```
+   The `contextlib.suppress` guard ensures the extension loads cleanly in classic mode
+   (no bootstrap DAT present).
 
 ---
 
@@ -269,9 +274,10 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 ### Step 6c: Create warning_emitter Script TOP
 
 1. Inside the `CUDAIPCExporter` COMP, create a **Script TOP**, rename to `warning_emitter`.
-2. Paste the contents of `td_exporter/warning_emitter_callbacks.py` into the auto-generated
-   callbacks DAT (accessible via the Script TOP's **Callbacks DAT** parameter).
-3. Open the Script TOP parameter page and set **Cook Type** → **Off (Pulse to Cook)**.
+2. Open the Script TOP parameter page, locate **Callbacks DAT** and set it to
+   `op('script_top_callbacks')` — the same DAT already used by `ImportBuffer`.
+   The shared `onCook` dispatches by `scriptOp.name`; no extra DAT is needed.
+3. Set **Cook Type** → **Off (Pulse to Cook)**.
    The operator cooks only when `RealTDHost` force-cooks it on status transitions — there
    is no need for continuous cooking.
 4. Leave it unwired: `warning_emitter` has no inputs and no outputs connected to the
@@ -287,11 +293,11 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```
-CUDA IPC Exporter v1.6.0
+CUDA IPC Exporter v1.7.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-05-22
+Date: 2026-05-29
 License: MIT
 ```
 
@@ -301,9 +307,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.6.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.7.0.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.6.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.7.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -311,7 +317,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.6.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.7.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -401,7 +407,7 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 **Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
 
-**Solution**: The extension loads `cudart64_110.dll` (CUDA 11.0, bundled with TouchDesigner) first, then falls back to `cudart64_12.dll`. If TD is installed correctly this error should not occur. If it does, verify your TouchDesigner installation is intact or reinstall CUDA Toolkit 12.x from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
+**Solution**: The extension probes full CUDA Toolkit install paths (`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin\cudart64_12.dll`) first, then falls back to bare DLL names already loaded in the process. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit 12.x installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
 ### SharedMemory already exists
 
@@ -473,7 +479,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
-| `script_top_callbacks.py` | `td_exporter/` | Script TOP onCook callback (Receiver mode ImportBuffer) |
+| `script_top_callbacks.py` | `td_exporter/` | Shared Script TOP onCook — ImportBuffer frame import (Receiver mode) **and** warning_emitter status badge (both Script TOPs point their Callbacks DAT here) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
 
 **Classic/fallback mode only — mirror DATs (auto-generated by `scripts/sync_td_wrapper.py`):**
@@ -499,8 +505,9 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.6.0.tox` | `TOXES/` | Final built .tox component |
-| `install_td_library.cmd` | repo root | Library-mode installer script |
+| `CUDAIPCLink_v1.7.0.tox` | `TOXES/` | Final built .tox component |
+| `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
+| `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
 ---
 
@@ -512,6 +519,6 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-05-22
-**Component Version**: 1.6.0
-**TouchDesigner Version**: 2022.x or later
+**Build Date**: 2026-05-29
+**Component Version**: 1.7.0
+**TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)
