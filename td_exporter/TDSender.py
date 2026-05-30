@@ -435,7 +435,29 @@ class TDSenderEngine:
             except Exception as e:
                 self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
                 return False
-            self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
+            # Use pixelFormatName as authoritative dtype/channel source at init time.
+            # cm.size may still reflect a stale allocation from the previous session
+            # (TD holds the old CUDA memory until ExportBuffer is explicitly re-cooked).
+            # pixelFormatName updates immediately when the source format changes, so it
+            # gives the correct dtype even before cm.size has caught up.
+            _pf_init = str(getattr(top_op, "pixel_format_name", "") or "")
+            _pf_init_mapped = (
+                _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_init) if _pf_init and _pf_init not in ("useinput",) else None
+            )
+            if _pf_init_mapped is not None:
+                _init_dtype, _init_ch = _pf_init_mapped
+                # Compute the buffer_size that should correspond to the declared format.
+                # _guess_dtype_from_buffer_size will then derive the same dtype from it,
+                # ensuring _current_spec uses the correct dtype from the start.
+                _init_size = cm_probe.width * cm_probe.height * _init_ch * DtypeCodec.itemsize(_init_dtype)
+                self._last_pixel_fmt_name = _pf_init  # seed cache — first export frame won't re-override
+                self._log(
+                    f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
+                    force=True,
+                )
+                self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size)
+            else:
+                self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
             return False  # skip this frame; next cook exports normally
 
         _nvtx_push(_NVTX_SENDER_SLOT_NAMES[self._exporter.write_idx % self.num_slots], "green")
@@ -646,6 +668,15 @@ class TDSenderEngine:
 
         self._initialized = False
         self._export_buffer = None
+
+        # Reset per-session state so the next activation starts completely clean.
+        # Without this, _last_pixel_fmt_name, _warned_* etc. carry over from the
+        # previous session and cause wrong-dtype initialization or stale overrides.
+        self._last_pixel_fmt_name = ""
+        self._last_pixel_fmt = ""
+        self._last_fmt_needs_conv = False
+        self._warned_dtype_size = False
+        self._warned_format = False
 
         self._host.clear_status()
         self._host.set_param_enabled("Numslots", True)
