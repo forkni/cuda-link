@@ -418,14 +418,19 @@ class TDSenderEngine:
             # format mid-stream.  Without this, a uint8→float32 flip produces 4× the
             # expected byte count but _cm_dtype_to_str still returns "uint8", the guard
             # sees "no change", and Exporter.export spams "Size mismatch" forever.
-            channels = self._current_spec.channels
+            #
+            # cm.channels is the LIVE channel count from the CUDAMemoryRef — using the
+            # cached spec value would cause stale `px` computation when the TD source
+            # switches channel count (e.g. 4ch RGBA → 1ch mono), causing _resolve_frame_dtype
+            # to compute the wrong bytes-per-pixel and misidentify the dtype.
+            cm_channels = cm.channels
             resolved_dtype = _resolve_frame_dtype(
-                cm.width, cm.height, channels, cm.size, cm.data_type, self._current_spec.dtype
+                cm.width, cm.height, cm_channels, cm.size, cm.data_type, self._current_spec.dtype
             )
 
             # Defensive: if the byte count doesn't correspond to any supported dtype,
             # emit a one-shot warning and skip this frame rather than looping forever.
-            px = cm.width * cm.height * channels
+            px = cm.width * cm.height * cm_channels
             if px > 0 and cm.size and DtypeCodec.itemsize(resolved_dtype) * px != cm.size:
                 if not self._warned_dtype_size:
                     self._log(
@@ -441,13 +446,15 @@ class TDSenderEngine:
             size_changed = cm.size != self._exporter.data_size
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
+                or cm_channels != self._current_spec.channels
                 or resolved_dtype != self._current_spec.dtype
                 or size_changed
             ):
                 self._log(
                     f"Geometry/dtype change: "
-                    f"{self._current_spec.width}x{self._current_spec.height} {self._current_spec.dtype}"
-                    f" → {cm.width}x{cm.height} {resolved_dtype}",
+                    f"{self._current_spec.width}x{self._current_spec.height}"
+                    f"x{self._current_spec.channels} {self._current_spec.dtype}"
+                    f" → {cm.width}x{cm.height}x{cm_channels} {resolved_dtype}",
                     force=True,
                 )
                 with contextlib.suppress(Exception):
@@ -456,7 +463,7 @@ class TDSenderEngine:
                     shm_name=self.shm_name,
                     height=cm.height,
                     width=cm.width,
-                    channels=channels,
+                    channels=cm_channels,
                     dtype=resolved_dtype,
                     num_slots=self.num_slots,
                     device=self.device,

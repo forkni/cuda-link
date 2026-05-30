@@ -325,3 +325,191 @@ def test_receiver_refresh_invalid_invariant_returns_false(shm_cleanup: SharedMem
     result = engine._refresh_on_version_change(2)
 
     assert result is False, "Corrupt metadata must cause refresh to return False (fallback to cleanup)"
+
+
+# ---------------------------------------------------------------------------
+# _to_td_pixel_format — par.format string mapping (Bug A fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "format_kind,bits,num_comps,expected",
+    [
+        (2, 32, 4, "rgba32float"),  # float32 RGBA — canonical streaming format
+        (2, 32, 1, "r32float"),  # float32 mono
+        (1, 16, 4, "rgba16fixed"),  # uint16 RGBA — "16-bit fixed (RGBA)" in TD
+        (1, 16, 1, "r16fixed"),  # uint16 mono — "16-bit fixed (R)" in TD
+        (1, 8, 4, "rgba8fixed"),  # uint8 RGBA
+        (1, 8, 1, "r8fixed"),  # uint8 mono
+        (1, 16, 2, "rg16fixed"),  # uint16 RG
+        (2, 32, 2, "rg32float"),  # float32 RG
+    ],
+)
+def test_to_td_pixel_format(format_kind, bits, num_comps, expected):
+    """_to_td_pixel_format must produce the correct par.format string for every dtype/channel combo."""
+    from TDReceiver import _to_td_pixel_format
+
+    result = _to_td_pixel_format(format_kind, bits, num_comps)
+    assert result == expected, (
+        f"_to_td_pixel_format({format_kind},{bits},{num_comps}) = {result!r}, expected {expected!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# needs_format_update flag (Bug A) — set on dtype change, clear on same dtype
+# ---------------------------------------------------------------------------
+
+
+def test_needs_format_update_set_on_bits_change(shm_cleanup: SharedMemory) -> None:
+    """_refresh_on_version_change must set needs_format_update when bits_per_comp changes."""
+    from cuda_link.shm_protocol import FORMAT_KIND_FLOAT, FORMAT_KIND_UNSIGNED
+
+    shm = shm_cleanup
+    engine = _make_receiver(f"test_rdr_fmtflag_{uuid.uuid4().hex[:8]}")
+
+    W, H, C = 1920, 1080, 4
+    _write_shm_frame(
+        shm,
+        version=1,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits=32,
+        flags=0,
+        data_size=W * H * C * 4,
+    )
+    _inject_receiver_connection(
+        engine,
+        shm,
+        ipc_version=1,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        width=W,
+        height=H,
+        channels=C,
+        buffer_size=W * H * C * 4,
+    )
+
+    # Write new metadata: float32 → uint16
+    _write_shm_frame(
+        shm,
+        version=2,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * C * 2,
+    )
+
+    result = engine._refresh_on_version_change(2)
+
+    assert result is True
+    assert engine._retry.needs_format_update is True, (
+        "needs_format_update must be True when bits_per_comp changes (float32→uint16)"
+    )
+
+
+def test_needs_format_update_set_on_num_comps_change(shm_cleanup: SharedMemory) -> None:
+    """needs_format_update must be set when num_comps changes (e.g. RGBA→mono)."""
+    from cuda_link.shm_protocol import FORMAT_KIND_UNSIGNED
+
+    shm = shm_cleanup
+    engine = _make_receiver(f"test_rdr_numcomps_{uuid.uuid4().hex[:8]}")
+
+    W, H = 1920, 1080
+    _write_shm_frame(
+        shm,
+        version=1,
+        width=W,
+        height=H,
+        channels=4,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * 4 * 2,
+    )
+    _inject_receiver_connection(
+        engine,
+        shm,
+        ipc_version=1,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits_per_comp=16,
+        width=W,
+        height=H,
+        channels=4,
+        buffer_size=W * H * 4 * 2,
+    )
+
+    # Change from 4ch → 1ch (RGBA → mono)
+    _write_shm_frame(
+        shm,
+        version=2,
+        width=W,
+        height=H,
+        channels=1,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * 1 * 2,
+    )
+
+    result = engine._refresh_on_version_change(2)
+
+    assert result is True
+    assert engine._retry.needs_format_update is True, (
+        "needs_format_update must be True when num_comps changes (4ch RGBA → 1ch mono)"
+    )
+
+
+def test_needs_format_update_not_set_on_identical_format(shm_cleanup: SharedMemory) -> None:
+    """needs_format_update must NOT be set when the format is unchanged (e.g. resolution-only bump)."""
+    from cuda_link.shm_protocol import FORMAT_KIND_FLOAT
+
+    shm = shm_cleanup
+    engine = _make_receiver(f"test_rdr_nofmt_{uuid.uuid4().hex[:8]}")
+
+    W, H, C = 1920, 1080, 4
+    _write_shm_frame(
+        shm,
+        version=1,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits=32,
+        flags=0,
+        data_size=W * H * C * 4,
+    )
+    _inject_receiver_connection(
+        engine,
+        shm,
+        ipc_version=1,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        width=W,
+        height=H,
+        channels=C,
+        buffer_size=W * H * C * 4,
+    )
+
+    # Same format (float32 RGBA) — only version bumped
+    _write_shm_frame(
+        shm,
+        version=2,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits=32,
+        flags=0,
+        data_size=W * H * C * 4,
+    )
+
+    engine._retry.needs_format_update = False  # ensure it starts clear
+    result = engine._refresh_on_version_change(2)
+
+    assert result is True
+    assert engine._retry.needs_format_update is False, "needs_format_update must stay False when format is unchanged"

@@ -176,3 +176,28 @@ class TestResolveFrameDtype:
         result = _resolve_frame_dtype(_W, _H, _C, None, _dt("float32"), "uint8")
         # name="float32" is returned directly because px > 0 but cm_size is falsy
         assert result == "uint8"  # falls through to fallback_dtype because cm_size is None
+
+    # ------- Mono (1-channel) path — Bug B regression -------
+
+    def test_mono_uint16_correct_channels(self):
+        """1ch uint16 must resolve correctly when channels=1 is passed (not stale 4)."""
+        # 1ch uint16: size = 1920*1080*1*2 = 4,147,200
+        mono_size = _W * _H * 1 * 2
+        result = _resolve_frame_dtype(_W, _H, 1, mono_size, None, "float32")
+        assert result == "uint16", f"1ch uint16 with correct channels=1 must resolve to 'uint16', got {result!r}"
+
+    def test_mono_uint16_stale_channels_4_fails_detection(self):
+        """Demonstrate Bug B: with stale channels=4, mono uint16 CANNOT be resolved.
+        This test documents the failure mode (passes BEFORE the fix, captures the bug).
+        With stale channels=4, px=8,294,400 but cm.size=4,147,200 → bpp=0.5 → fallback.
+        After Bug B fix (cm_channels used instead of spec.channels), export_frame calls
+        _resolve_frame_dtype with channels=1 (see test above), not 4.
+        """
+        mono_size = _W * _H * 1 * 2  # 4,147,200 bytes
+        # Using stale channels=4 → cannot match any supported dtype → fallback
+        result = _resolve_frame_dtype(_W, _H, 4, mono_size, None, "float32")
+        # With stale channels=4: bpp = 4,147,200 / (1920*1080*4) = 0.5 → not in map → fallback
+        assert result == "float32", (
+            "With stale channels=4, mono uint16 falls back to float32 (Bug B)."
+            "This test documents the bug — export_frame must use cm.channels instead."
+        )

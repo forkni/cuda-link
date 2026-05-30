@@ -55,6 +55,25 @@ from TDHost import TDHost  # noqa: E402
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
 
+
+def _to_td_pixel_format(format_kind: int, bits_per_comp: int, num_comps: int) -> str:
+    """Map SHM metadata → TouchDesigner Script TOP par.format string.
+
+    Produces strings matching TD's internal par.format menu values, e.g.:
+      FORMAT_KIND_FLOAT,    32, 4  → "rgba32float"
+      FORMAT_KIND_UNSIGNED, 16, 4  → "rgba16fixed"
+      FORMAT_KIND_UNSIGNED,  8, 1  → "r8fixed"
+      FORMAT_KIND_UNSIGNED, 16, 1  → "r16fixed"
+
+    TD uses these to allocate the Script TOP's output texture. Setting
+    par.format before copyCUDAMemory ensures the texture is the right size
+    for the incoming dtype, preventing partial writes into an oversized buffer.
+    """
+    ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
+    suffix = "float" if format_kind == FORMAT_KIND_FLOAT else "fixed"
+    return f"{ch}{bits_per_comp}{suffix}"
+
+
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
 cp = None
@@ -180,6 +199,7 @@ class RetryState:
     retry_interval_frames: int = 1
     frames_since_last_retry: int = 0
     needs_resolution_update: bool = False
+    needs_format_update: bool = False  # set when bits_per_comp/format_kind/num_comps changes
 
     def request_immediate_reconnect(self) -> None:
         """Force the next import_frame call to attempt reconnection."""
@@ -519,6 +539,32 @@ class TDReceiverEngine:
             self._log(f"Could not set ImportBuffer resolution: {e}", force=True)
             return False
 
+    def update_receiver_format(self, handle: object) -> bool:
+        """Update ImportBuffer pixel format from outside the cook cycle.
+
+        Safe to call from Execute DAT (alongside update_receiver_resolution).
+        Sets par.format on the Script TOP so copyCUDAMemory allocates an output
+        texture of the correct pixel depth — preventing partial writes when dtype
+        changes (e.g. float32→uint16 would only fill half a float32-sized texture).
+
+        Args:
+            handle: TOPHandle wrapping the ImportBuffer Script TOP.
+
+        Returns:
+            True if the format was updated, False if no update needed or not applicable.
+        """
+        if not self._retry.needs_format_update:
+            return False
+        try:
+            fmt = _to_td_pixel_format(self._format.format_kind, self._format.bits_per_comp, self._format.num_comps)
+            handle.set_format(fmt)
+            self._retry.needs_format_update = False
+            self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
+            return True
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"Could not set ImportBuffer pixel format: {e}", force=True)
+            return False
+
     def initialize_receiver(self) -> bool:
         """Initialize receiver: open SharedMemory, read handles, open IPC handles.
 
@@ -760,8 +806,10 @@ class TDReceiverEngine:
                 buffer_size=buffer_size,
             )
 
-            # Flag that Script TOP resolution needs to be updated (will be done outside cook cycle)
+            # Flag that Script TOP resolution AND pixel format need to be updated
+            # (will be applied outside cook cycle via update_receiver_resolution / update_receiver_format)
             self._retry.needs_resolution_update = True
+            self._retry.needs_format_update = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
@@ -1053,10 +1101,18 @@ class TDReceiverEngine:
             except NameError:
                 pass  # CUDAMemoryShape not available outside TD runtime (e.g. unit tests)
 
-        # Advance version counter and signal resolution update if dims changed
+        # Advance version counter; signal resolution and/or pixel-format update if needed.
         conn.ipc_version = new_version
         if width != prev_format.width or height != prev_format.height:
             self._retry.needs_resolution_update = True
+        if (
+            bits_per_comp != prev_format.bits_per_comp
+            or format_kind != prev_format.format_kind
+            or num_comps != prev_format.num_comps
+        ):
+            # Script TOP's par.format must be updated so the next copyCUDAMemory writes
+            # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
+            self._retry.needs_format_update = True
 
         self._log(
             f"Format refreshed in-place: {width}x{height}x{num_comps}, "

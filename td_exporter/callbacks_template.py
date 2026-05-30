@@ -35,10 +35,12 @@ def onFrameStart(frame: int) -> None:
         # TD 2025+: modoutsidecook enables copyCUDAMemory from Execute DAT
         # This eliminates force-cook overhead and fixes resolution delay
         if hasattr(import_buffer.par, "modoutsidecook") and import_buffer.par.modoutsidecook.eval():
-            # Import frame first: initialize_receiver() sets resolution flag
+            # Import frame first: initialize_receiver() sets resolution + format flags
             ext.import_frame(import_buffer)
-            # Resolution update after: catches flag set during initialization
+            # Resolution and pixel-format updates after: catch flags set during
+            # initialization or mid-stream dtype/geometry changes.
             ext.update_receiver_resolution(import_buffer)
+            ext.update_receiver_format(import_buffer)
         else:
             # TD 2023 fallback: force-cook triggers Script TOP onCook
             # Resolution update happens inside onCook (1-frame delay for changes)
