@@ -825,13 +825,19 @@ class TDReceiverEngine:
                 buffer_size=buffer_size,
             )
 
-            # Flag that Script TOP resolution needs to be updated.
-            # NOTE: needs_format_update is NOT set here — initial copyCUDAMemory correctly
-            # infers the output format from _cached_shape.numComps/.dataType. Setting
-            # par.format at init time would break RG/Mono/Alpha channel variants whose
-            # format strings may differ from what TD expects. Format is only set on
-            # mid-stream dtype/channel changes (see _refresh_on_version_change).
+            # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
+
+            # Flag pixel-format update when the sender's bit depth is NOT float32.
+            # copyCUDAMemory auto-adapts channel count (numComps) from _cached_shape but does
+            # NOT auto-adapt bit depth — par.format controls the output texture allocation.
+            # The Script TOP's default/saved format is rgba32float, so float32 sources work
+            # without any explicit set_format call.  uint8/uint16 sources would write into an
+            # oversized float32 buffer (e.g. 8 MB into 32 MB → quarter-frame) without this.
+            # Scoped to bit-depth-non-float32 only to avoid touching channel-variant formats
+            # (rg32float, r32float etc.) that TD may not expose as par.format menu values.
+            if not (format_kind == FORMAT_KIND_FLOAT and bits_per_comp == 32):
+                self._retry.needs_format_update = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:

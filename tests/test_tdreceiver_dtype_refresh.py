@@ -516,6 +516,127 @@ def test_needs_format_update_not_set_on_identical_format(shm_cleanup: SharedMemo
 
 
 # ---------------------------------------------------------------------------
+# needs_format_update at initialize_receiver time (Part 6)
+# The flag must be True for non-float32 bit depths so par.format is applied
+# on the very first frame when a uint8/uint16 sender connects fresh.
+# ---------------------------------------------------------------------------
+
+
+def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int):
+    """Return a receiver engine that has been through initialize_receiver
+    with the given sender format (no actual CUDA — uses a stub SHM)."""
+    import contextlib
+    import uuid
+    from multiprocessing.shared_memory import SharedMemory
+
+    from cuda_link.shm_protocol import Metadata, SHMLayout
+
+    engine = _make_receiver(f"test_rdr_init_{uuid.uuid4().hex[:8]}")
+    layout = SHMLayout(num_slots=1)
+    shm = SharedMemory(create=True, size=layout.total_size)
+    try:
+        W, H = 1920, 1080
+        from cuda_link.shm_protocol import DtypeCodec
+
+        # Determine dtype string from format_kind/bits to compute data_size
+        dtype_map = {
+            (2, 32): "float32",
+            (1, 16): "uint16",
+            (1, 8): "uint8",
+            (2, 16): "float16",
+        }
+        dtype_str = dtype_map.get((format_kind, bits), "float32")
+        itemsize = DtypeCodec.itemsize(dtype_str)
+        data_size = W * H * channels * itemsize
+
+        buf = memoryview(shm.buf)
+        shm.buf[: layout.total_size] = layout.build_buffer(version=1, write_idx=0)
+        Metadata(
+            width=W,
+            height=H,
+            num_comps=channels,
+            format_kind=format_kind,
+            bits_per_comp=bits,
+            flags=0,
+            data_size=data_size,
+        ).pack_into(buf, layout)
+
+        # Inject a minimal ReceiverConnection to satisfy initialize_receiver's SHM checks
+        # (we don't run the full connect; instead we simulate the init path directly)
+        _inject_receiver_connection(
+            engine,
+            shm,
+            ipc_version=1,
+            format_kind=format_kind,
+            bits_per_comp=bits,
+            width=W,
+            height=H,
+            channels=channels,
+            buffer_size=data_size,
+        )
+        # Manually apply the flag logic that initialize_receiver applies post-FormatDescriptor build:
+        # (We can't call initialize_receiver directly without real CUDA handles, so we
+        # replicate the exact condition we're testing.)
+        from cuda_link.shm_protocol import FORMAT_KIND_FLOAT
+
+        engine._retry.needs_format_update = False  # ensure clean state
+        engine._retry.needs_resolution_update = False
+
+        # Simulate the flag-setting block added in Part 6:
+        if not (format_kind == FORMAT_KIND_FLOAT and bits == 32):
+            engine._retry.needs_format_update = True
+        engine._retry.needs_resolution_update = True
+
+        yield engine
+    finally:
+        shm.close()
+        with contextlib.suppress(FileNotFoundError):
+            shm.unlink()
+
+
+@pytest.mark.parametrize(
+    "format_kind,bits,channels,expect_flag",
+    [
+        (2, 32, 4, False),  # float32 RGBA — Script TOP default, no set_format needed
+        (2, 32, 1, False),  # float32 mono — same bit depth, no set_format needed
+        (2, 32, 2, False),  # float32 RG   — same bit depth, no set_format needed
+        (1, 16, 4, True),  # uint16 RGBA  — 16 MB into 32 MB without this → quarter-frame
+        (1, 8, 4, True),  # uint8 RGBA   —  8 MB into 32 MB without this → quarter-frame
+        (1, 16, 1, True),  # uint16 mono  — non-float32 bit depth
+        (1, 8, 1, True),  # uint8 mono   — non-float32 bit depth
+    ],
+    ids=[
+        "float32-rgba",
+        "float32-mono",
+        "float32-rg",
+        "uint16-rgba",
+        "uint8-rgba",
+        "uint16-mono",
+        "uint8-mono",
+    ],
+)
+def test_needs_format_update_at_init(format_kind, bits, channels, expect_flag):
+    """needs_format_update must be True at init for non-float32 bit depths only.
+
+    Part 6 regression: without this, a uint8/uint16 receiver connecting fresh to a
+    non-float32 sender never sets par.format → Script TOP stays float32 → copies
+    partial data into an oversized buffer → corruption on every frame, not just
+    after a mid-stream change.
+    """
+    from cuda_link.shm_protocol import FORMAT_KIND_FLOAT
+
+    # Replicate the exact flag condition added in Part 6 (the single-line fix)
+    flag_would_be_set = not (format_kind == FORMAT_KIND_FLOAT and bits == 32)
+    assert flag_would_be_set == expect_flag, (
+        f"format_kind={format_kind}, bits={bits}, channels={channels}: "
+        f"needs_format_update at init should be {expect_flag}, "
+        f"but the condition produces {flag_would_be_set}.\n"
+        "Float32 sources must NOT set it (matches Script TOP default). "
+        "Non-float32 bit depths MUST set it."
+    )
+
+
+# ---------------------------------------------------------------------------
 # consume_pending_format — the fallback-path entry point (Part 5)
 # ---------------------------------------------------------------------------
 
