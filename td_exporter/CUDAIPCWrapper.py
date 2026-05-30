@@ -140,23 +140,10 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If CUDA runtime cannot be loaded
         """
-        # Try by name FIRST: if cudart is already loaded in this process (e.g., by
-        # torch), Windows returns the cached handle — ensuring we share the same
-        # runtime instance and CUDA context. Loading by full path can create a second
-        # independent instance with its own state, breaking cross-process IPC.
-        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
-        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
-        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
-        for name in dll_names:
-            try:
-                dll = ctypes.CDLL(name)
-                self._log_dll_path(dll, name)
-                return dll
-            except OSError as e:
-                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
-                continue
-
-        # Fallback: try full toolkit paths when not already in PATH
+        # Try full CUDA Toolkit paths FIRST: these are deterministic and immune to
+        # DLL search-order side-effects (e.g. os.add_dll_directory calls from torch
+        # or other venvs added to sys.path via sitecustomize.py).  If the Toolkit is
+        # installed, we always prefer its cudart over a bundled copy.
         dll_paths = [
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\cudart64_12.dll",
@@ -173,10 +160,24 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
                     continue
 
+        # Fallback: try by bare name — if cudart is already loaded in this process
+        # (e.g., by torch), Windows returns the cached handle, sharing the same runtime
+        # instance and CUDA context.  Probed in this order: prefer CUDA 12.x; fall back
+        # to 11.x for systems that haven't migrated (TouchDesigner ships cudart64_110.dll).
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
+        for name in dll_names:
+            try:
+                dll = ctypes.CDLL(name)
+                self._log_dll_path(dll, name)
+                return dll
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
+                continue
+
         raise RuntimeError(
             "Could not load CUDA runtime. Please ensure CUDA 12.x is installed.\n"
-            f"Tried names: {dll_names}\n"
-            f"Tried paths: {dll_paths}"
+            f"Tried paths: {dll_paths}\n"
+            f"Tried names: {dll_names}"
         )
 
     @staticmethod
@@ -768,6 +769,14 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If opening fails
         """
+        # Guard against ctypes class-identity mismatch: in TD's bare-name import namespace
+        # the caller's cudaIpcMemHandle_t may be a *different* class object than the one bound
+        # into argtypes (two independent imports of cuda_link.cuda_runtime_types, e.g. a
+        # CUDARuntimeTypes mirror Text DAT loaded alongside the library-mode package).
+        # ctypes validates by class identity, not structural equivalence, so the call would
+        # raise ArgumentError. Rebuild from raw bytes into THIS module's class — POD, 64 bytes.
+        if not isinstance(handle, cudaIpcMemHandle_t):
+            handle = cudaIpcMemHandle_t.from_buffer_copy(bytes(handle))
         dev_ptr = c_void_p()
         self.cudart.cudaIpcOpenMemHandle(byref(dev_ptr), handle, flags)
         return dev_ptr
@@ -882,6 +891,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If opening fails
         """
+        # Same class-identity guard as ipc_open_mem_handle — see note there.
+        if not isinstance(handle, cudaIpcEventHandle_t):
+            handle = cudaIpcEventHandle_t.from_buffer_copy(bytes(handle))
         event = CUDAEvent_t()
         self.cudart.cudaIpcOpenEventHandle(byref(event), handle)
         return event
