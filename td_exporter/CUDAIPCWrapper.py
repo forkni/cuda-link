@@ -164,6 +164,10 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # (e.g., by torch), Windows returns the cached handle, sharing the same runtime
         # instance and CUDA context.  Probed in this order: prefer CUDA 12.x; fall back
         # to 11.x for systems that haven't migrated (TouchDesigner ships cudart64_110.dll).
+        # Note: winmode is intentionally omitted here (unlike the absolute-path tier above
+        # which uses winmode=0).  For bare-name loads we rely on Windows returning the
+        # already-loaded handle from the process DLL cache — not a new DLL search — so
+        # the winmode DLL-search-path flags are irrelevant.
         dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         for name in dll_names:
             try:
@@ -191,11 +195,23 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         if _kernel32 is None:
             print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
             return
+        # dll._handle is an undocumented ctypes internal — guard it defensively so a
+        # future ctypes change degrades the log line gracefully instead of raising.
+        handle = getattr(dll, "_handle", None)
+        if not isinstance(handle, int):
+            print(f"[CUDAIPC] cudart loaded: {hint} (handle not available)", flush=True)
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
-        except (OSError, AttributeError) as e:
+            n = _kernel32.GetModuleFileNameW(ctypes.c_void_p(handle), buf, 260)
+            if n == 0:
+                # use_last_error=True on the WinDLL means ctypes captured the thread-local
+                # error code before restoring it — surface it via WinError for diagnosis.
+                err = ctypes.WinError(ctypes.get_last_error())
+                print(f"[CUDAIPC] cudart loaded: {hint} (GetModuleFileNameW failed: {err})", flush=True)
+            else:
+                print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
+        except OSError as e:
             print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
 
     def _load_driver_api(self) -> ctypes.CDLL | None:
@@ -311,11 +327,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceSynchronize.argtypes = []
         self.cudart.cudaDeviceSynchronize.restype = c_int
 
-        # cudaGetLastError()
-        self.cudart.cudaGetLastError.argtypes = []
-        self.cudart.cudaGetLastError.restype = c_int
-
         # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
+        # cudaGetLastError() is intentionally NOT bound: it destructively clears the sticky
+        # error, making it unsafe to call in poll paths. Use cudaPeekAtLastError exclusively.
         self.cudart.cudaPeekAtLastError.argtypes = []
         self.cudart.cudaPeekAtLastError.restype = c_int
 

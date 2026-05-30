@@ -113,6 +113,16 @@ assert ctypes.sizeof(cudaIpcEventHandle_t) == 64, (
 assert ctypes.sizeof(cudaPointerAttributes) == 24, (
     f"cudaPointerAttributes ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPointerAttributes)}"
 )
+# Graph param struct ABI guards — cudaMemcpy3DParms is the largest and most alignment-sensitive.
+# All four values were verified against Python ctypes on a 64-bit Windows host (sizeof c_size_t=8).
+assert ctypes.sizeof(cudaPos) == 24, f"cudaPos ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPos)}"
+assert ctypes.sizeof(cudaPitchedPtr) == 32, (
+    f"cudaPitchedPtr ABI mismatch: expected 32 bytes, got {ctypes.sizeof(cudaPitchedPtr)}"
+)
+assert ctypes.sizeof(cudaExtent) == 24, f"cudaExtent ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaExtent)}"
+assert ctypes.sizeof(cudaMemcpy3DParms) == 160, (
+    f"cudaMemcpy3DParms ABI mismatch: expected 160 bytes, got {ctypes.sizeof(cudaMemcpy3DParms)}"
+)
 
 
 # CUDA Error codes (subset)
