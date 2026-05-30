@@ -58,9 +58,12 @@ _NVTX_CUPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_fram
 
 
 # Windows timer-resolution helper — reduces time.sleep floor from ~15ms to ~1ms.
+# timeBeginPeriod/timeEndPeriod return their status directly (TIMERR_NOERROR=0,
+# TIMERR_NOCANDO=97); they do NOT use GetLastError, so use_last_error is omitted.
+_TIMERR_NOCANDO = 97  # mmsystem.h TIMERR_NOCANDO — period granularity unsupported
 if sys.platform == "win32":
     try:
-        _winmm = ctypes.WinDLL("winmm", use_last_error=True)
+        _winmm = ctypes.WinDLL("winmm")
         _winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
         _winmm.timeBeginPeriod.restype = ctypes.c_uint
         _winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
@@ -79,7 +82,14 @@ class _HighResTimer:
     def __enter__(self) -> _HighResTimer:
         self._active = _winmm is not None
         if self._active:
-            _winmm.timeBeginPeriod(1)
+            r = _winmm.timeBeginPeriod(1)
+            if r != 0:
+                logger.debug(
+                    "timeBeginPeriod(1) returned %d (TIMERR_NOCANDO=%d); "
+                    "high-resolution timer unavailable — sleep floor stays at ~15ms",
+                    r,
+                    _TIMERR_NOCANDO,
+                )
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -505,6 +515,11 @@ class NumpyBuffers:
             except (RuntimeError, OSError) as e:
                 logger.debug("free_host skipped (context gone): %s", e)
             self.pinned_ptr = None
+            # Drop the numpy view that aliases the now-freed CUDA-pinned allocation.
+            # ctypes docs: a ctypes buffer's Python owner must outlive every view into it.
+            # Clearing here ensures post-close access fails loudly (AttributeError on None)
+            # instead of silently touching freed GPU memory.
+            self.buffer = None
 
         if self.host_registered_arr is not None:
             try:

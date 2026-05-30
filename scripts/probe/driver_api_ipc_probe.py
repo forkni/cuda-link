@@ -235,7 +235,8 @@ def probe_producer(device: int = 0, size: int = 2 * 1024 * 1024) -> None:
     r = rt.cudaMalloc(byref(dev_ptr), size)
     if r != 0:
         _restore_context(drv, saved)
-        err = rt.cudaGetErrorString(r)
+        cstr = rt.cudaGetErrorString(r)
+        err = cstr.decode("utf-8") if cstr is not None else f"unknown error {r}"
         raise RuntimeError(f"[PROBE] cudaMalloc({size}) failed: {err} (error {r})")
     print(f"[PROBE PRODUCER] cudaMalloc OK: 0x{dev_ptr.value:016x}", flush=True)
 
@@ -244,7 +245,8 @@ def probe_producer(device: int = 0, size: int = 2 * 1024 * 1024) -> None:
     if r != 0:
         rt.cudaFree(dev_ptr)
         _restore_context(drv, saved)
-        err = rt.cudaGetErrorString(r)
+        cstr = rt.cudaGetErrorString(r)
+        err = cstr.decode("utf-8") if cstr is not None else f"unknown error {r}"
         raise RuntimeError(f"[PROBE] cudaIpcGetMemHandle failed: {err} (error {r})")
 
     raw_bytes = bytes(handle.internal)

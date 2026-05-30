@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-05-30
+
+### Refactored
+
+- **ctypes robustness sweep** (`a2baea9`) — eight correctness and safeguard
+  improvements cross-checked against the Python ctypes reference documentation:
+  - ABI size asserts for all graph param structs (`cudaPos==24`,
+    `cudaPitchedPtr==32`, `cudaExtent==24`, `cudaMemcpy3DParms==160`) catch
+    layout drift at import time.
+  - `NumpyBuffers.close()`: null `self.buffer` after `free_host` to prevent
+    use-after-free on the CUDA-pinned host-memory alias.
+  - `_log_dll_path`: consume `ctypes.get_last_error()` on `GetModuleFileNameW`
+    failure; guard `dll._handle` with `getattr` for forward-compatibility.
+  - `_HighResTimer.__enter__`: check `timeBeginPeriod(1)` return code; log on
+    `TIMERR_NOCANDO`.
+  - `_winmm` loader: removed unused `use_last_error=True` (winmm timer APIs
+    return status directly, not via `GetLastError`).
+  - Removed dead `cudaGetLastError` argtypes binding; `cudaPeekAtLastError` is
+    the correct non-destructive sticky-error read.
+  - `probe_producer`: decode `cudaGetErrorString` bytes → str (was embedding
+    `b'...'` repr in error messages).
+  - `_load_cuda_runtime`: documented `winmode` asymmetry between absolute-path
+    and bare-name DLL-load tiers.
+
+### Tests
+
+- **`tests/test_errcheck_coverage.py`** (`a2baea9`, 3 tests): drift-prevention
+  guard — every `c_int`-restype cudart function has `errcheck` installed;
+  `cudaGetLastError` asserted unbound.
+- **`tests/test_numpybuffers_close.py`** (`8b74ab0`, 5 tests): `NumpyBuffers.close()`
+  UAF guard — pinned path nulls `buffer`, pageable path preserves it, idempotency,
+  and `host_unregister` branch.
+- **`tests/test_probe_error_decode.py`** (`8b74ab0`, 2 tests): `probe_producer`
+  error-string decode — verifies str in message and `None` guard for NULL returns.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.7.0` → `1.7.1`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.7.1.tox` to be built separately.
+  `v1.7.0` retained per versioned-binary tracking policy.
+
 ## [1.7.0] — 2026-05-29
 
 ### Added
@@ -896,6 +937,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.7.1]: https://github.com/forkni/cuda-link/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/forkni/cuda-link/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/forkni/cuda-link/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
