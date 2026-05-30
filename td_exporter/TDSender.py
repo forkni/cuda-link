@@ -74,12 +74,53 @@ def _cm_dtype_to_str(cm_data_type: object) -> str:
 def _guess_dtype_from_buffer_size(width: int, height: int, channels: int, buffer_size: int | None) -> str:
     """Estimate dtype from bytes-per-pixel ratio when data_type is not yet known.
 
-    Used at initialize() time before the first cuda_memory() call reveals the actual dtype.
+    Used at initialize() time before the first cuda_memory() call reveals the actual dtype,
+    and as a size-authoritative fallback when cm.data_type is stale or None.
+
+    Maps to TD-shareable (non-rejected) dtypes only:
+      1 byte/component → uint8   ("8-bit fixed")
+      2 bytes/component → uint16  ("16-bit fixed") — NOT float16 (TD rejects float16)
+      4 bytes/component → float32 ("32-bit float")
     """
     if buffer_size is None or width <= 0 or height <= 0 or channels <= 0:
         return "uint8"
     bpp = round(buffer_size / (width * height * channels), 1)
-    return {1.0: "uint8", 2.0: "float16", 4.0: "float32"}.get(bpp, "uint8")
+    return {1.0: "uint8", 2.0: "uint16", 4.0: "float32"}.get(bpp, "uint8")
+
+
+def _resolve_frame_dtype(
+    width: int,
+    height: int,
+    channels: int,
+    cm_size: int | None,
+    cm_data_type: object,
+    fallback_dtype: str,
+) -> str:
+    """Return the authoritative dtype for an incoming frame.
+
+    cm.size is the ground truth because it is exactly what Exporter.export validates.
+    cm.data_type.name can be None or stale on the transition frame when TD switches
+    texture format — so we cross-check name and size and fall back to the size-derived
+    dtype when they disagree.
+
+    Resolution order:
+      1. If cm.data_type.name is in DtypeCodec.supported() AND its itemsize matches
+         the real byte count → name is correct, return it.
+      2. Else derive dtype from bytes-per-pixel via _guess_dtype_from_buffer_size and
+         return that if it matches the size.
+      3. Otherwise return fallback_dtype (typically the current spec's dtype).
+    """
+    name = _cm_dtype_to_str(cm_data_type)  # "uint8" on None/unknown
+    px = width * height * channels
+    if px > 0 and cm_size:
+        # Path 1: explicit name is consistent with the byte count — trust it.
+        if name in DtypeCodec.supported() and DtypeCodec.itemsize(name) * px == cm_size:
+            return name
+        # Path 2: name is stale/wrong — derive from bytes.
+        guessed = _guess_dtype_from_buffer_size(width, height, channels, cm_size)
+        if DtypeCodec.itemsize(guessed) * px == cm_size:
+            return guessed
+    return fallback_dtype
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +169,7 @@ class TDSenderEngine:
 
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
+        self._warned_dtype_size: bool = False  # one-shot: unresolvable bytes-per-pixel
         self._export_buffer: object = None
         self._last_pixel_fmt: str = ""
         self._last_fmt_needs_conv: bool = False
@@ -356,16 +398,42 @@ class TDSenderEngine:
                 return False
 
             # Dynamic geometry / dtype correction — close+reopen Exporter if needed.
-            detected_dtype = _cm_dtype_to_str(cm.data_type)
-            if (cm.height, cm.width, detected_dtype) != (
-                self._current_spec.height,
-                self._current_spec.width,
-                self._current_spec.dtype,
+            #
+            # We use cm.size as the authoritative dtype signal because cm.data_type can be
+            # None or stale on the transition frame when the TD source switches texture
+            # format mid-stream.  Without this, a uint8→float32 flip produces 4× the
+            # expected byte count but _cm_dtype_to_str still returns "uint8", the guard
+            # sees "no change", and Exporter.export spams "Size mismatch" forever.
+            channels = self._current_spec.channels
+            resolved_dtype = _resolve_frame_dtype(
+                cm.width, cm.height, channels, cm.size, cm.data_type, self._current_spec.dtype
+            )
+
+            # Defensive: if the byte count doesn't correspond to any supported dtype,
+            # emit a one-shot warning and skip this frame rather than looping forever.
+            px = cm.width * cm.height * channels
+            if px > 0 and cm.size and DtypeCodec.itemsize(resolved_dtype) * px != cm.size:
+                if not self._warned_dtype_size:
+                    self._log(
+                        f"Unsupported bytes-per-pixel "
+                        f"({cm.size}/{px}={cm.size / px:.2f}); skipping frame. "
+                        "Supported: 1 (uint8), 2 (uint16), 4 (float32).",
+                        force=True,
+                    )
+                    self._warned_dtype_size = True
+                return False
+            self._warned_dtype_size = False  # reset once a valid size is seen
+
+            size_changed = cm.size != self._exporter.data_size
+            if (
+                (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
+                or resolved_dtype != self._current_spec.dtype
+                or size_changed
             ):
                 self._log(
                     f"Geometry/dtype change: "
                     f"{self._current_spec.width}x{self._current_spec.height} {self._current_spec.dtype}"
-                    f" → {cm.width}x{cm.height} {detected_dtype}",
+                    f" → {cm.width}x{cm.height} {resolved_dtype}",
                     force=True,
                 )
                 with contextlib.suppress(Exception):
@@ -374,8 +442,8 @@ class TDSenderEngine:
                     shm_name=self.shm_name,
                     height=cm.height,
                     width=cm.width,
-                    channels=self._current_spec.channels,
-                    dtype=detected_dtype,
+                    channels=channels,
+                    dtype=resolved_dtype,
                     num_slots=self.num_slots,
                     device=self.device,
                 )
