@@ -124,16 +124,15 @@ def test_cleanup_closes_handles() -> None:
 
 def test_shutdown_detection() -> None:
     """get_frame_numpy() returns None and wrapper becomes not-ready when producer sets shutdown flag."""
-    from fakes import make_fake_ipc_connection
+    from fakes import make_connected_importer
 
     from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
-    fake_importer = _make_importer_with_mock_state(shape=(8, 8, 4), dtype="float32", num_slots=3)
-    # Swap in a connection whose SHM buffer has the shutdown flag set.
-    # acquire_slot() checks this flag first, before reading any frame.
-    conn, _, mock_shm = make_fake_ipc_connection(num_slots=3, write_idx=1, with_shm_handle=True)
-    mock_shm.buf[SHMLayout(3).shutdown_offset] = 1
-    fake_importer._conn = conn
+    # Build a connected importer with write_idx=1 so acquire_slot reads the slot,
+    # then set the shutdown flag in the existing SHM buffer.  acquire_slot() checks
+    # the flag before returning any frame data, so SHUTDOWN is returned.
+    fake_importer = make_connected_importer(shape=(8, 8, 4), dtype="float32", num_slots=3, write_idx=1)
+    fake_importer._conn.shm_handle.buf[SHMLayout(3).shutdown_offset] = 1
 
     imp = CUDAIPCImporter(shm_name="test_shm", shape=(8, 8, 4), dtype="float32")
     imp._importer = fake_importer
@@ -149,50 +148,21 @@ def test_shutdown_detection() -> None:
 
 
 def _make_importer_with_mock_state(shape: tuple, dtype: str, num_slots: int = 1) -> object:
-    """Build an Importer with manually-injected value-object state (no real CUDA IPC handles).
+    """Build an Importer with a fully-wired IPCConnection (no real CUDA IPC handles).
 
-    CUDA IPC handles cannot be opened in the same process that created them, so tests
-    that check routing logic inject all state via value objects and a bytearray SHM buffer.
+    CUDA IPC handles cannot be opened in the same process that created them; this
+    helper uses ``fakes.make_connected_importer`` with mock dev-ptrs so that tests
+    which patch ``imp._conn.cuda`` methods (e.g. ``stream_wait_event``) work correctly.
     """
-    from unittest.mock import MagicMock
+    from fakes import make_connected_importer
 
-    import numpy as np
-    from fakes import make_fake_ipc_connection
-
-    from cuda_link._cuda_adapters import FakeCudaAdapter
-    from cuda_link._importer_port import ImportPolicy, ImportSpec
-    from cuda_link.importer import Format, Importer, NumpyBuffers
-
-    conn, mock_cuda, _ = make_fake_ipc_connection(
+    return make_connected_importer(
+        shape=shape,
+        dtype=dtype,
         num_slots=num_slots,
         dev_ptr_style="mock",
+        allow_pageable_fallback=False,
     )
-    fmt = Format.from_overrides(shape, dtype)
-
-    # Pre-build NumpyBuffers with a real numpy buffer so get_frame_numpy() skips
-    # reallocation and memcpy_async receives a valid ctypes pointer.
-    mock_stream = MagicMock()
-    nb = NumpyBuffers(
-        cuda=mock_cuda,
-        fmt=fmt,
-        buffer=np.zeros(shape, dtype=np.dtype(dtype)),
-        pinned_ptr=None,
-        host_registered_arr=None,
-        pinned_memory_available=False,
-        primary_stream=mock_stream,
-        d2h_streams=[mock_stream],
-        num_streams=1,
-        chunk_plan=[],
-    )
-
-    spec = ImportSpec(shm_name="mock_shm", device=0, timeout_ms=5000.0, shape=shape, dtype=dtype)
-    policy = ImportPolicy(wait_spin_us=0)
-    imp = Importer(spec, policy, FakeCudaAdapter())
-    imp._conn = conn
-    imp._format = fmt
-    imp._numpy = nb
-    imp._initialized = True
-    return imp
 
 
 def test_get_frame_numpy_always_uses_cpu_poll() -> None:

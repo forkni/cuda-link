@@ -199,13 +199,13 @@ def test_exporter_get_stats_no_observer() -> None:
     import uuid
 
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=8, width=8),
         policy=ExportPolicy.for_testing(),
-        cuda=FakeCudaAdapter(),
+        cuda=FakeCUDAAdapter(),
     )
     try:
         stats = exp.get_stats()
@@ -219,7 +219,7 @@ def test_exporter_get_stats_with_observer() -> None:
     import uuid
 
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
     from cuda_link.nvml_observer import NVMLObserver
 
@@ -229,7 +229,7 @@ def test_exporter_get_stats_with_observer() -> None:
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=8, width=8),
         policy=ExportPolicy.for_testing(),
-        cuda=FakeCudaAdapter(),
+        cuda=FakeCUDAAdapter(),
     )
     try:
         exp.attach_nvml_observer(obs)
@@ -242,7 +242,7 @@ def test_exporter_get_stats_with_observer() -> None:
 
 def test_importer_get_stats_with_observer() -> None:
     """Importer.get_stats() includes 'nvml' sub-dict when observer attached."""
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link._importer_port import ImportPolicy, ImportSpec
     from cuda_link.importer import Importer
     from cuda_link.nvml_observer import NVMLObserver
@@ -250,7 +250,7 @@ def test_importer_get_stats_with_observer() -> None:
     obs = MagicMock(spec=NVMLObserver)
     obs.snapshot.return_value = {"nvml_available": True, "temp_c": 72}
 
-    imp = Importer(ImportSpec(shm_name="test"), ImportPolicy(), FakeCudaAdapter())
+    imp = Importer(ImportSpec(shm_name="test"), ImportPolicy(), FakeCUDAAdapter())
     imp._nvml_observer = obs
     stats = imp.get_stats()
     assert "nvml" in stats

@@ -1,9 +1,9 @@
 """
 Tests for C2: source-stream and src-ptr device-affinity validation.
 
-All tests are pure unit tests (no CUDA required) — they use FakeCudaAdapter.
+All tests are pure unit tests (no CUDA required) — they use FakeCUDAAdapter.
 Rewritten in v1.6 to replace object.__new__(CUDAIPCExporter) with
-Exporter.open(spec, policy=ExportPolicy(...), cuda=FakeCudaAdapter(device=device)).
+Exporter.open(spec, policy=ExportPolicy(...), cuda=FakeCUDAAdapter(device=device)).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from conftest import FakeShmAdapter
 
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-from cuda_link._cuda_adapters import FakeCudaAdapter
+from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.exporter import Exporter
 
@@ -28,14 +28,14 @@ _DATA_SIZE = 8 * 8 * 4  # H=8, W=8, C=4, uint8
 
 def _make_exporter(
     device: int = 0, strict: bool = False, barrier: CheckerBarrier | None = None
-) -> tuple[Exporter, FakeCudaAdapter]:
-    """Open a real Exporter backed by FakeCudaAdapter (no GPU required).
+) -> tuple[Exporter, FakeCUDAAdapter]:
+    """Open a real Exporter backed by FakeCUDAAdapter (no GPU required).
 
     Returns (exporter, fake_cuda) so tests can configure the fake directly.
     Always call exporter.close() in a finally block.
     """
     shm_name = f"test_affinity_{uuid.uuid4().hex[:8]}"
-    fake = FakeCudaAdapter(device=device)
+    fake = FakeCUDAAdapter(device=device)
     policy = ExportPolicy(
         strict_device=strict,
         export_sync=False,

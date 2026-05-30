@@ -17,25 +17,16 @@ import pytest
 
 def _make_importer(spin_us: int = 200, timeout_ms: float = 5000.0) -> object:
     """Build an Importer with mocked IPCConnection state (no real CUDA/SHM required)."""
-    from fakes import make_fake_ipc_connection
+    from fakes import make_connected_importer
 
-    from cuda_link._cuda_adapters import FakeCudaAdapter
-    from cuda_link._importer_port import ImportPolicy, ImportSpec
-    from cuda_link.importer import Importer
-
-    spec = ImportSpec(shm_name="mock", device=0, timeout_ms=timeout_ms)
-    policy = ImportPolicy(wait_spin_us=spin_us)
-
-    conn, _, _ = make_fake_ipc_connection(
+    return make_connected_importer(
+        spin_us=spin_us,
+        timeout_ms=timeout_ms,
         num_slots=2,
         with_shm_handle=False,
         with_events=True,
+        with_numpy=False,
     )
-
-    imp = Importer(spec, policy, FakeCudaAdapter())
-    imp._conn = conn
-    imp._initialized = True
-    return imp
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Port contract tests for ImporterCudaPort Protocol, value objects, and FakeCudaAdapter.
+Port contract tests for ImporterCudaPort Protocol, value objects, and FakeCUDAAdapter.
 
 These tests run entirely without a GPU. Mirrors tests/test_exporter_port.py.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from cuda_link._cuda_adapters import CTypesCudaAdapter, FakeCudaAdapter
+from cuda_link._cuda_adapters import CTypesCUDAAdapter, FakeCUDAAdapter
 from cuda_link._importer_port import (
     ImporterCudaPort,
     ImportOutcome,
@@ -146,24 +146,24 @@ def test_import_result_new_frame_carries_payload() -> None:
 
 
 # ---------------------------------------------------------------------------
-# FakeCudaAdapter — Protocol conformance
+# FakeCUDAAdapter — Protocol conformance
 # ---------------------------------------------------------------------------
 
 
 def test_fake_adapter_satisfies_importer_protocol() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     assert isinstance(fake, ImporterCudaPort)
 
 
 # ---------------------------------------------------------------------------
-# FakeCudaAdapter — importer-side IPC memory
+# FakeCUDAAdapter — importer-side IPC memory
 # ---------------------------------------------------------------------------
 
 
 def test_fake_adapter_ipc_open_mem_handle_tracks_handle() -> None:
     from cuda_link._cuda_adapters import _FakeIpcHandle
 
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     handle = _FakeIpcHandle("test_mem")
     ptr = fake.ipc_open_mem_handle(handle, flags=1)
     assert ptr is not None
@@ -173,7 +173,7 @@ def test_fake_adapter_ipc_open_mem_handle_tracks_handle() -> None:
 def test_fake_adapter_ipc_close_mem_handle_removes_entry() -> None:
     from cuda_link._cuda_adapters import _FakeIpcHandle
 
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     handle = _FakeIpcHandle("test_close")
     ptr = fake.ipc_open_mem_handle(handle)
     fake.ipc_close_mem_handle(ptr)
@@ -183,37 +183,37 @@ def test_fake_adapter_ipc_close_mem_handle_removes_entry() -> None:
 def test_fake_adapter_ipc_open_event_handle_returns_handle() -> None:
     from cuda_link._cuda_adapters import _FakeIpcHandle
 
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     event_handle = _FakeIpcHandle("test_evt")
     evt = fake.ipc_open_event_handle(event_handle)
     assert evt is not None
 
 
 def test_fake_adapter_query_event_always_true() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     evt = fake.create_sync_event()
     assert fake.query_event(evt) is True
 
 
 def test_fake_adapter_synchronize_noop() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     fake.synchronize()  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# FakeCudaAdapter — importer-side host memory
+# FakeCUDAAdapter — importer-side host memory
 # ---------------------------------------------------------------------------
 
 
 def test_fake_adapter_malloc_host_alloc_returns_valid_ptr() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     ptr = fake.malloc_host_alloc(1024, flags=0x01)
     assert ptr is not None
     assert ptr.value != 0
 
 
 def test_fake_adapter_free_host_releases_allocation() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     ptr = fake.malloc_host_alloc(256)
     fake.free_host(ptr)
     # After free, the ptr should not be in _host_allocs
@@ -226,7 +226,7 @@ def test_fake_adapter_malloc_host_alloc_backed_by_real_buffer() -> None:
 
     import numpy as np
 
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     nbytes = 128
     ptr = fake.malloc_host_alloc(nbytes)
     # The allocation is a real ctypes buffer — np.frombuffer must succeed
@@ -236,21 +236,21 @@ def test_fake_adapter_malloc_host_alloc_backed_by_real_buffer() -> None:
 
 
 def test_fake_adapter_host_register_noop() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     fake.host_register(0x1000, 4096)  # must not raise
 
 
 def test_fake_adapter_host_unregister_noop() -> None:
-    fake = FakeCudaAdapter()
+    fake = FakeCUDAAdapter()
     fake.host_unregister(0x1000)  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# CTypesCudaAdapter — Protocol conformance (requires GPU)
+# CTypesCUDAAdapter — Protocol conformance (requires GPU)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.requires_cuda
 def test_ctypes_adapter_satisfies_importer_protocol() -> None:
-    adapter = CTypesCudaAdapter.for_device(device=0)
+    adapter = CTypesCUDAAdapter.for_device(device=0)
     assert isinstance(adapter, ImporterCudaPort)

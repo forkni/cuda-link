@@ -38,7 +38,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 │   Python Process (Consumer)            │
 │                                         │
 │  ┌───────────────────────────────────┐ │
-│  │ CUDAIPCImporter                   │ │
+│  │ Importer                          │ │
 │  │                                   │ │
 │  │  get_frame() or get_frame_numpy()│ │
 │  │    ↓                              │ │
@@ -60,9 +60,9 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 │   Python Process (Producer)            │
 │                                         │
 │  ┌───────────────────────────────────┐ │
-│  │ CUDAIPCExporter                   │ │
+│  │ Exporter                          │ │
 │  │                                   │ │
-│  │  export_frame(gpu_ptr, size)     │ │
+│  │  export(GpuFrame(ptr, size))     │ │
 │  │    ↓                              │ │
 │  │  cudaMemcpy D2D to ring buffer   │ │
 │  │    ↓                              │ │
@@ -104,15 +104,21 @@ CUDAIPCExtension  (~300 LOC facade)
 ├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
 ├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
 └── _engine: TDSenderEngine | TDReceiverEngine
-      ├── TDSenderEngine (~1300 LOC)   ← owns GPU alloc, IPC export, SHM write, CUDA graphs
-      └── TDReceiverEngine (~800 LOC) ← owns SHM attach, IPC open, copyCUDAMemory calls
+      ├── TDSenderEngine (~415 LOC thin adapter) ← TD pixel-format bridging + GpuFrame bridge;
+      │     delegates GPU alloc / SHM write / IPC export / CUDA graphs to Exporter
+      └── TDReceiverEngine (~1070 LOC) ← owns SHM attach, IPC open, copyCUDAMemory calls
 ```
 
 **Mode switching** tears down the current engine and constructs a fresh one — guaranteeing zero cross-mode state leak. The old engine's `cleanup()` is called first, which frees all CUDA resources before the new engine is constructed.
 
 **TDHost seam**: all `ownerComp.par.*`, `ownerComp.op("ExportBuffer")`, `top.cudaMemory()`, and `scriptTOP.copyCUDAMemory()` calls go through `TDHost`/`TOPHandle` protocols. Tests inject `FakeTDHost`/`FakeTOPHandle` — no TD runtime required.
 
-**textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCExporter` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
+**textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCLink` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
+
+**Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
+
+- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 14 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 14 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 14 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
 
 ---
 
@@ -588,5 +594,5 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 ---
 
-**Last Updated**: 2026-05-09
-**Version**: 1.5.1
+**Last Updated**: 2026-05-29
+**Version**: 1.6.0

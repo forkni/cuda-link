@@ -1,7 +1,7 @@
 # ADR-0002: Byte-identical TD mirror + sync-script rewrite mode
 
-**Status**: Accepted (implemented 2026-05-20)  
-**Date**: 2026-05-20  
+**Status**: Accepted (implemented 2026-05-20) — see ADR-0003 for the v2.0 adoption of alternative 1C.
+**Date**: 2026-05-20
 **Applies to**: `scripts/sync_td_wrapper.py`, `td_exporter/`, `tests/test_wrapper_sync.py`.
 
 ---
@@ -40,7 +40,7 @@ Extend `sync_td_wrapper.py` with a **rewrite mode** for pairs where the canonica
 
 **1B — dual-import `try/except` preamble in canonical source**: Each relative import becomes `try: from ._foo import X; except ImportError: from Foo import X`. Rejected because it leaks TD-environment awareness into canonical source; 8+ try/except blocks per file obscure the module's actual dependencies.
 
-**1C — TD path-shim (no derived files for exporter/importer)**: A loader Text DAT adds `cuda_link` to `sys.path`, eliminating the need for `td_exporter/Exporter.py` entirely. Rejected because it changes the deployment story (TD users currently drop Text DATs into their COMP without any external `cuda_link` installation). May be revisited when v2.0 drops the drop-in-Text-DAT guarantee.
+**1C — TD path-shim (no derived files for exporter/importer)**: A loader Text DAT adds `cuda_link` to `sys.path`, eliminating the need for `td_exporter/Exporter.py` entirely. **Adopted in ADR-0003 (2026-05-29)** as `CUDALinkBootstrap.py`, which injects `CUDALINK_LIB_PATH` onto `sys.path` and registers `sys.modules` aliases for all 14 mirror names. The drop-in-Text-DAT fallback is preserved alongside it.
 
 ## Consequences
 
@@ -64,7 +64,7 @@ Private canonical modules use a leading underscore (`_exporter_port.py`). Their 
 | `importer.py` | `Importer.py` |
 | `_exporter_port.py` | `ExporterPort.py` |
 | `_importer_port.py` | `ImporterPort.py` |
-| `_cuda_adapters.py` | `CudaAdapters.py` |
+| `_cuda_adapters.py` | `CUDAAdapters.py` |
 | `_profile.py` | `FrameProfile.py` (already exists) |
 | `_nvtx.py` | `NVTXShim.py` (already exists, irregular) |
 

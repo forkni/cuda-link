@@ -27,12 +27,12 @@ Apply the **Port + Adapters + value-object** template to every module that owns 
 3. **Write a deep module** (`exporter.py`, `importer.py`) whose `open(spec, policy, cuda=<Port>)` factory constructs the module fully or raises — no half-initialised state. The module is a context manager; `close()` is idempotent.
 
 4. **Provide two adapters** in `_cuda_adapters.py`:
-   - `CTypesCudaAdapter` — satisfies the Port using the real `CUDARuntimeAPI` ctypes wrapper. Used in production.
-   - `FakeCudaAdapter` — satisfies the Port with in-process fakes (no GPU required). Used in all no-GPU tests. Returns `_FakeIpcHandle` objects with `.internal` / `.reserved` attributes matching the 64-byte `cudaIpcMemHandle_t` / `cudaIpcEventHandle_t` shape.
+   - `CTypesCUDAAdapter` — satisfies the Port using the real `CUDARuntimeAPI` ctypes wrapper. Used in production.
+   - `FakeCUDAAdapter` — satisfies the Port with in-process fakes (no GPU required). Used in all no-GPU tests. Returns `_FakeIpcHandle` objects with `.internal` / `.reserved` attributes matching the 64-byte `cudaIpcMemHandle_t` / `cudaIpcEventHandle_t` shape.
 
 5. **Collapse the legacy class to a deprecation shim** (`cuda_ipc_exporter.py`, `cuda_ipc_importer.py`) that re-exports the new API and emits a `DeprecationWarning` once per process via a `_warn_once()` helper.
 
-6. **Write tests against the seam**, not the implementation. Tests call `Exporter.open(FrameSpec(…), policy=ExportPolicy.for_testing(), cuda=FakeCudaAdapter())`. This exercises real construction, the real context-manager lifecycle, and the real per-frame path — without a GPU.
+6. **Write tests against the seam**, not the implementation. Tests call `Exporter.open(FrameSpec(…), policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter())`. This exercises real construction, the real context-manager lifecycle, and the real per-frame path — without a GPU.
 
 ## Consequences
 
@@ -57,11 +57,11 @@ When applying this template to a new module `foo`:
 
 - [ ] `src/cuda_link/_foo_port.py` — `FooSpec`, `FooPolicy`, `FooOutcome`, `FooResult[T]`, `FooPort` Protocol
 - [ ] `src/cuda_link/foo.py` — `Foo` class; `Foo.open(spec, policy, cuda=…)` factory; context manager
-- [ ] `src/cuda_link/_cuda_adapters.py` — extend `FakeCudaAdapter` if new CUDA methods are needed
+- [ ] `src/cuda_link/_cuda_adapters.py` — extend `FakeCUDAAdapter` if new CUDA methods are needed
 - [ ] `src/cuda_link/cuda_ipc_foo.py` — deprecation shim with re-exports + `_warn_once()`
 - [ ] `src/cuda_link/__init__.py` — export new symbols
-- [ ] `tests/test_foo_port.py` — contract tests for `FooPort` against `FakeCudaAdapter`
-- [ ] `tests/test_foo.py` — construction + lifecycle + per-frame tests via `FakeCudaAdapter`
+- [ ] `tests/test_foo_port.py` — contract tests for `FooPort` against `FakeCUDAAdapter`
+- [ ] `tests/test_foo.py` — construction + lifecycle + per-frame tests via `FakeCUDAAdapter`
 - [ ] `tests/test_foo_deprecation.py` — shim emits warning exactly once
 - [ ] `docs/MIGRATION_v<N>.md` — before/after migration guide
 - [ ] `CHANGELOG.md` — entry under `[Unreleased]`

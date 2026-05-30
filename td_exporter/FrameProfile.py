@@ -1,8 +1,4 @@
-"""Per-frame profiling accumulator for cuda-link TD hot paths.
-
-Standalone copy for the td_exporter context (TouchDesigner flat-import path).
-Authoritative source lives in src/cuda_link/_profile.py.
-"""
+"""Per-frame profiling accumulator for cuda-link hot paths."""
 
 from __future__ import annotations
 

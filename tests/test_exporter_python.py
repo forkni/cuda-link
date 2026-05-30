@@ -19,11 +19,11 @@ import pytest
 def _make_bare(shm_name: str = "x", height: int = 64, width: int = 64, **spec_kwargs):
     """Construct an Exporter without calling _initialize() — safe for pure unit tests."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     spec = FrameSpec(shm_name=shm_name, height=height, width=width, **spec_kwargs)
-    return Exporter(spec, ExportPolicy.for_testing(), FakeCudaAdapter())
+    return Exporter(spec, ExportPolicy.for_testing(), FakeCUDAAdapter())
 
 
 # ---------------------------------------------------------------------------
@@ -32,24 +32,39 @@ def _make_bare(shm_name: str = "x", height: int = 64, width: int = 64, **spec_kw
 
 
 def test_kind_bits_mapping() -> None:
-    """dtype strings map to correct (format_kind, bits, flags) wire encoding."""
-    from cuda_link.exporter import _DTYPE_TO_KIND_BITS
-    from cuda_link.shm_protocol import FLAGS_BFLOAT16, FORMAT_KIND_FLOAT, FORMAT_KIND_UNSIGNED
+    """dtype strings map to correct (format_kind, bits, flags) wire encoding.
 
-    assert _DTYPE_TO_KIND_BITS["float32"] == (FORMAT_KIND_FLOAT, 32, 0)
-    assert _DTYPE_TO_KIND_BITS["float16"] == (FORMAT_KIND_FLOAT, 16, 0)
-    assert _DTYPE_TO_KIND_BITS["uint8"] == (FORMAT_KIND_UNSIGNED, 8, 0)
-    assert _DTYPE_TO_KIND_BITS["uint16"] == (FORMAT_KIND_UNSIGNED, 16, 0)
+    The authoritative registry lives in DtypeCodec (shm_protocol) — not in the exporter.
+    """
+    from cuda_link.shm_protocol import (
+        FLAGS_BFLOAT16,
+        FORMAT_KIND_FLOAT,
+        FORMAT_KIND_SIGNED,
+        FORMAT_KIND_UNSIGNED,
+        DtypeCodec,
+    )
+
+    assert DtypeCodec.encode("float32") == (FORMAT_KIND_FLOAT, 32, 0)
+    assert DtypeCodec.encode("float16") == (FORMAT_KIND_FLOAT, 16, 0)
+    assert DtypeCodec.encode("bfloat16") == (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16)
+    assert DtypeCodec.encode("uint8") == (FORMAT_KIND_UNSIGNED, 8, 0)
+    assert DtypeCodec.encode("uint16") == (FORMAT_KIND_UNSIGNED, 16, 0)
+    assert DtypeCodec.encode("int8") == (FORMAT_KIND_SIGNED, 8, 0)
+    assert DtypeCodec.encode("int16") == (FORMAT_KIND_SIGNED, 16, 0)
     assert FLAGS_BFLOAT16 == 0x0001
 
 
 def test_dtype_itemsize_mapping() -> None:
-    """dtype strings map to correct byte sizes."""
-    from cuda_link.exporter import _DTYPE_ITEMSIZE_MAP
+    """dtype strings map to correct byte sizes (via DtypeCodec, not exporter internals)."""
+    from cuda_link.shm_protocol import DtypeCodec
 
-    assert _DTYPE_ITEMSIZE_MAP["float32"] == 4
-    assert _DTYPE_ITEMSIZE_MAP["float16"] == 2
-    assert _DTYPE_ITEMSIZE_MAP["uint8"] == 1
+    assert DtypeCodec.itemsize("float32") == 4
+    assert DtypeCodec.itemsize("float16") == 2
+    assert DtypeCodec.itemsize("bfloat16") == 2
+    assert DtypeCodec.itemsize("uint8") == 1
+    assert DtypeCodec.itemsize("uint16") == 2
+    assert DtypeCodec.itemsize("int8") == 1
+    assert DtypeCodec.itemsize("int16") == 2
 
 
 def test_data_size_calculation_uint8() -> None:
@@ -93,13 +108,13 @@ def test_num_slots_max_valid() -> None:
 def test_double_close_no_crash() -> None:
     """Calling close() twice does not raise."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
         policy=ExportPolicy.for_testing(),
-        cuda=FakeCudaAdapter(),
+        cuda=FakeCUDAAdapter(),
     )
     exp.close()
     exp.close()  # Double-close must not raise
@@ -110,10 +125,10 @@ def test_export_sync_false_no_stream_sync_when_event_present() -> None:
     from unittest.mock import patch
 
     from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
-    fake_cuda = FakeCudaAdapter()
+    fake_cuda = FakeCUDAAdapter()
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
         policy=ExportPolicy.for_testing(),
@@ -132,10 +147,10 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
     from unittest.mock import patch
 
     from cuda_link import ExportPolicy, FrameSpec, GpuFrame
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
-    fake_cuda = FakeCudaAdapter()
+    fake_cuda = FakeCUDAAdapter()
     with patch.object(fake_cuda, "create_ipc_event", return_value=None):
         exp = Exporter.open(
             FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
@@ -324,19 +339,19 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
 
 # ---------------------------------------------------------------------------
 # Improvement 2: SharedMemory write ordering (atomicity)
-# — rewritten in v1.6 to use Exporter.open() + FakeCudaAdapter instead of
+# — rewritten in v1.6 to use Exporter.open() + FakeCUDAAdapter instead of
 #   object.__new__(CUDAIPCExporter) with 25 hand-wired private attributes.
 # ---------------------------------------------------------------------------
 
 
 def _make_write_order_exporter():
-    """Open a real Exporter backed by FakeCudaAdapter for write-ordering tests."""
+    """Open a real Exporter backed by FakeCUDAAdapter for write-ordering tests."""
     from cuda_link import ExportPolicy, FrameSpec
-    from cuda_link._cuda_adapters import FakeCudaAdapter
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     shm_name = f"test_shm_write_{uuid.uuid4().hex[:8]}"
-    fake = FakeCudaAdapter(device=0)
+    fake = FakeCUDAAdapter(device=0)
     policy = ExportPolicy.for_testing()
     return Exporter.open(
         FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2, device=0),

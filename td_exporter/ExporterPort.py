@@ -8,7 +8,7 @@ as a structural type, plus the four value objects that form the public interface
   ExportPolicy  — immutable behavioural knobs (env-readable, preset constructors)
   GpuFrame      — a single frame to export
   FrameOutcome  — result of Exporter.export()
-  CudaPort      — Protocol satisfied by CTypesCudaAdapter (prod) and FakeCudaAdapter (test)
+  CudaPort      — Protocol satisfied by CTypesCUDAAdapter (prod) and FakeCUDAAdapter (test)
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ class ExportPolicy:
 
         Disables CUDA Graphs (require cudart 11.4+), export sync, flush probe,
         activation barrier, profiling, and device-affinity checking so tests can
-        run with a FakeCudaAdapter without touching any GPU resource.
+        run with a FakeCUDAAdapter without touching any GPU resource.
         """
         return cls(
             export_sync=False,
@@ -154,8 +154,8 @@ class FrameOutcome(Enum):
 class CudaPort(Protocol):
     """Structural interface that Exporter requires from the CUDA runtime.
 
-    Production adapter: CTypesCudaAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
-    Test adapter:       FakeCudaAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
+    Production adapter: CTypesCUDAAdapter  (wraps CUDARuntimeAPI; in _cuda_adapters.py)
+    Test adapter:       FakeCUDAAdapter    (in-memory, no GPU needed; in _cuda_adapters.py)
 
     All methods raise RuntimeError on CUDA failure (mirrors CUDARuntimeAPI.check_error).
     """
@@ -306,4 +306,54 @@ class CudaPort(Protocol):
         kind: int,
     ) -> None:
         """Update a 1D memcpy node's src/dst per ring slot. CUDA 11.3+."""
+        ...
+
+    # --- IPC memory (consumer / Importer side) ----------------------------
+
+    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
+        """Open an IPC memory handle exported by the producer process.
+
+        flags=1 = cudaIpcMemLazyEnablePeerAccess.
+        """
+        ...
+
+    def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
+        """Close an IPC memory handle opened with ipc_open_mem_handle()."""
+        ...
+
+    def ipc_open_event_handle(self, handle: cudaIpcEventHandle_t) -> CUDAEvent_t:
+        """Open an IPC event handle exported by the producer process."""
+        ...
+
+    # --- Events (consumer) ------------------------------------------------
+
+    def query_event(self, event: CUDAEvent_t) -> bool:
+        """Non-blocking: True if the event has been recorded and completed."""
+        ...
+
+    # --- Device sync -------------------------------------------------------
+
+    def synchronize(self) -> None:
+        """CPU-blocking wait until all operations on the current device have completed."""
+        ...
+
+    # --- Pinned host memory (Importer side) --------------------------------
+
+    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
+        """Allocate portable pinned host memory via cudaHostAlloc.
+
+        flags=0x01 = cudaHostAllocPortable (accessible from any CUDA context).
+        """
+        ...
+
+    def free_host(self, ptr: c_void_p) -> None:
+        """Free pinned host memory allocated with malloc_host_alloc()."""
+        ...
+
+    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
+        """Page-lock an existing host allocation via cudaHostRegister."""
+        ...
+
+    def host_unregister(self, ptr: int) -> None:
+        """Unregister a page-locked host allocation."""
         ...
