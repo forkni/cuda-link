@@ -77,6 +77,15 @@ class TOPHandle(Protocol):
         """Set Script TOP to custom resolution: outputresolution=9, resolutionw, resolutionh."""
         ...
 
+    def cook(self, force: bool = False) -> None:
+        """Request a cook on this TOP. force=True marks it dirty unconditionally.
+
+        Used to break stale-allocation deadlocks: after a format change, calling
+        cook(force=True) ensures TD reallocates the TOP's texture to the new format
+        so cuda_memory() returns the correct size on the next frame.
+        """
+        ...
+
     def is_valid(self) -> bool:
         """Return True if the underlying TD operator is still present in the network."""
         ...
@@ -178,6 +187,13 @@ class RealTOPHandle(TOPHandle):
     @property
     def pixel_format_name(self) -> str:
         return str(getattr(self._top, "pixelFormatName", ""))
+
+    def cook(self, force: bool = False) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            if force:
+                self._top.cook(force=True)
+            else:
+                self._top.cook()
 
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError, RuntimeError, Exception):

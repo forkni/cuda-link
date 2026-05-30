@@ -592,8 +592,11 @@ class TDSenderEngine:
                 # Stale-buffer path: pixelFormatName signalled a dtype-shrink but cm.size
                 # hasn't caught up yet (TD is still holding the old larger allocation).
                 # The reopen + VERSION_CHANGED are already done; skip exporting this frame.
-                # Next frame: TD will have freed the old allocation and cm.size is correct.
+                # Force-cook ExportBuffer so TD reallocates its texture to the new format —
+                # without this, TD may hold the old allocation indefinitely because reading
+                # via cuda_memory() alone does not trigger a cook or texture reallocation.
                 if _pf_name_override and not _size_matches:
+                    top_op.cook(force=True)
                     return False
 
                 # Re-fetch texture memory on the new Exporter's stream.
@@ -608,7 +611,10 @@ class TDSenderEngine:
             # The same check inside the reopen block catches the first stale frame;
             # this catches all subsequent stale frames where no reopen fires because
             # _pf_confirms_spec suppresses size_changed in the reopen guard above.
+            # Force-cook ExportBuffer on each stale frame to break the deadlock: without
+            # an explicit cook request, TD may hold the old allocation indefinitely.
             if _pf_name_override and not _size_matches:
+                top_op.cook(force=True)
                 return False
 
             # Bridge step 2: wrap raw GPU pointer into GpuFrame and hand to Exporter.

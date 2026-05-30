@@ -84,6 +84,9 @@ class FakeTOPHandle(TOPHandle):
     def pixel_format_name(self) -> str:
         return self._pixel_format_name
 
+    def cook(self, force: bool = False) -> None:
+        pass  # no-op in tests; use cook_calls list to assert if needed
+
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
 
