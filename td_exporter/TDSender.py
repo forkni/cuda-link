@@ -603,6 +603,14 @@ class TDSenderEngine:
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
 
+            # Skip export while TD's CUDA allocation is still stale after a
+            # pixelFormatName-triggered reopen (hasn't caught up to the new format yet).
+            # The same check inside the reopen block catches the first stale frame;
+            # this catches all subsequent stale frames where no reopen fires because
+            # _pf_confirms_spec suppresses size_changed in the reopen guard above.
+            if _pf_name_override and not _size_matches:
+                return False
+
             # Bridge step 2: wrap raw GPU pointer into GpuFrame and hand to Exporter.
             frame = GpuFrame(ptr=cm.ptr, size=cm.size)
             outcome = self._exporter.export(frame)
