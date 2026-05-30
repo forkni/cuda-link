@@ -26,7 +26,7 @@ from ActivationBarrier import HolderBarrier  # noqa: E402, I001
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
-from SHMProtocol import DtypeCodec  # noqa: E402
+from SHMProtocol import DtypeCodec, read_version, set_version  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
@@ -166,6 +166,13 @@ class TDSenderEngine:
             enabled=config.activation_barrier,
             settle_frames=config.barrier_settle_frames,
         )
+
+        # Engine-held monotonic version counter — used to seed set_version() after
+        # close()+open() so the receiver always sees a strictly-greater version and
+        # triggers _refresh_on_version_change. Without this, Exporter.close() unlinks
+        # the SHM, the fresh segment starts at version 1 again, and the receiver's
+        # `version != last_version` check silently passes (1 != 1 → False).
+        self._ipc_version: int = 0
 
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
@@ -321,6 +328,13 @@ class TDSenderEngine:
             self._current_spec = spec
             self._policy = policy
 
+            # Seed the monotonic version counter from the freshly-opened SHM segment.
+            # The receiver will cache this value (ipc_version) on first connect; any
+            # subsequent reopen must produce a strictly-greater value so the receiver's
+            # `version != last_version` check fires. See export_frame() for the bump.
+            if self._exporter.shm_handle is not None:
+                self._ipc_version = read_version(self._exporter.shm_handle.buf)
+
             # Cache ExportBuffer handle — eliminates per-frame ownerComp.op() lookup.
             self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
@@ -449,6 +463,17 @@ class TDSenderEngine:
                 )
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
+
+                # Force a monotonically-greater version in the new (fresh, zeroed) SHM
+                # segment so the receiver's `version != last_version` guard always fires.
+                # Without this, Exporter.close() unlinks and the new open() creates a
+                # segment with version=1 every time — which the receiver already saw on
+                # first connect, so VERSION_CHANGED is never signalled.
+                self._ipc_version += 1
+                with contextlib.suppress(Exception):
+                    if self._exporter.shm_handle is not None:
+                        set_version(self._exporter.shm_handle.buf, self._ipc_version)
+
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
                     cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))

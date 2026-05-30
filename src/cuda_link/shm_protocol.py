@@ -323,6 +323,19 @@ def bump_version(buf: memoryview) -> int:
     return new_version
 
 
+def set_version(buf: memoryview, version: int) -> None:
+    """Write an explicit version value, overriding the counter.
+
+    Used by the sender engine to maintain a monotonic version counter across
+    close()+open() cycles: Exporter.close() unlinks the SHM segment, so the
+    next open() creates a fresh region where bump_version would reset to 1.
+    Calling set_version() immediately after open() injects the engine-held
+    monotonic value, guaranteeing the receiver's `version != last_version`
+    check fires even when a dtype-change reopen produces a fresh segment.
+    """
+    _ST_U64.pack_into(buf, VERSION_OFFSET, version)
+
+
 # ---------------------------------------------------------------------------
 # publish_frame — the only place that encodes the C3 ordering guarantee
 # ---------------------------------------------------------------------------
