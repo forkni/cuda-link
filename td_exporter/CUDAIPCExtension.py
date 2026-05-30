@@ -367,3 +367,14 @@ class CUDAIPCExtension:
         if self._mode == "Receiver":
             return self._engine.consume_pending_resolution()
         return None
+
+    def consume_pending_format(self) -> str | None:
+        """Return the TD par.format string if a pixel-format update is pending, else None.
+
+        Called from script_top_callbacks.onCook (fallback path) to apply par.format changes
+        that were triggered mid-stream by _refresh_on_version_change.  Mirrors
+        consume_pending_resolution — same consume-and-clear semantics.
+        """
+        if self._mode == "Receiver":
+            return self._engine.consume_pending_format()
+        return None

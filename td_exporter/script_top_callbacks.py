@@ -63,6 +63,20 @@ def onCook(scriptOp: object) -> None:
 
     ext.import_frame(scriptOp)
 
+    # Handle pixel-format update (mirrors the resolution block above).
+    # _refresh_on_version_change sets needs_format_update = True when dtype/channels change.
+    # consume_pending_format() clears the flag and returns the par.format string to apply.
+    # Setting par.format from inside onCook mirrors how resolution is handled above
+    # (scriptOp.par.outputresolution etc.) — it takes effect on the next cook, which is
+    # the NEW_FRAME tick where copy_cuda_memory writes into the correctly-sized texture.
+    fmt = ext.consume_pending_format()
+    if fmt is not None:
+        try:
+            scriptOp.par.format = fmt
+            ext._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
+        except (AttributeError, RuntimeError) as e:
+            ext._log(f"Could not set ImportBuffer pixel format in onCook: {e}", force=True)
+
 
 def onSetupParameters(scriptOp: object, page: object) -> None:
     """Called when Setup Parameters is pressed."""

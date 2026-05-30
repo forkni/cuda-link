@@ -42,9 +42,14 @@ def onFrameStart(frame: int) -> None:
             ext.update_receiver_resolution(import_buffer)
             ext.update_receiver_format(import_buffer)
         else:
-            # TD 2023 fallback: force-cook triggers Script TOP onCook
-            # Resolution update happens inside onCook (1-frame delay for changes)
+            # TD 2023 fallback: force-cook triggers Script TOP onCook.
+            # Resolution and pixel-format updates happen inside onCook via
+            # consume_pending_resolution / consume_pending_format (1-frame delay).
+            # update_receiver_format after cook() is belt-and-suspenders: it's a
+            # no-op when needs_format_update is already False (cleared in onCook),
+            # but catches any residual flag if onCook couldn't apply the par write.
             import_buffer.cook(force=True)
+            ext.update_receiver_format(import_buffer)
 
 
 def onFrameEnd(frame: int) -> None:

@@ -513,3 +513,125 @@ def test_needs_format_update_not_set_on_identical_format(shm_cleanup: SharedMemo
 
     assert result is True
     assert engine._retry.needs_format_update is False, "needs_format_update must stay False when format is unchanged"
+
+
+# ---------------------------------------------------------------------------
+# consume_pending_format — the fallback-path entry point (Part 5)
+# ---------------------------------------------------------------------------
+
+
+def test_consume_pending_format_returns_none_when_clear(shm_cleanup: SharedMemory) -> None:
+    """consume_pending_format() returns None when no format update is pending."""
+    engine = _make_receiver(f"test_rdr_cpf_none_{uuid.uuid4().hex[:8]}")
+    # Flag starts False by default
+    result = engine.consume_pending_format()
+    assert result is None
+
+
+def test_consume_pending_format_returns_format_and_clears_flag(shm_cleanup: SharedMemory) -> None:
+    """After dtype change, consume_pending_format() returns the correct par.format string
+    and clears needs_format_update (so the next call returns None — idempotent)."""
+    from cuda_link.shm_protocol import FORMAT_KIND_FLOAT, FORMAT_KIND_UNSIGNED
+
+    shm = shm_cleanup
+    engine = _make_receiver(f"test_rdr_cpf_{uuid.uuid4().hex[:8]}")
+
+    W, H, C = 1920, 1080, 4
+    # Initial state: float32 RGBA
+    _write_shm_frame(
+        shm,
+        version=1,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits=32,
+        flags=0,
+        data_size=W * H * C * 4,
+    )
+    _inject_receiver_connection(
+        engine,
+        shm,
+        ipc_version=1,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        width=W,
+        height=H,
+        channels=C,
+        buffer_size=W * H * C * 4,
+    )
+
+    # Version change: float32 → uint16
+    _write_shm_frame(
+        shm,
+        version=2,
+        width=W,
+        height=H,
+        channels=C,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * C * 2,
+    )
+    engine._refresh_on_version_change(2)
+
+    assert engine._retry.needs_format_update is True  # flag set by refresh
+
+    fmt = engine.consume_pending_format()
+    assert fmt == "rgba16fixed", (
+        f"Expected 'rgba16fixed' for uint16 RGBA, got {fmt!r}. "
+        "This is the par.format string the Script TOP must receive."
+    )
+    # Flag must be cleared — second call returns None
+    assert engine.consume_pending_format() is None, (
+        "consume_pending_format() must be idempotent: returns None after first consume"
+    )
+    assert engine._retry.needs_format_update is False
+
+
+def test_consume_pending_format_mono_uint16(shm_cleanup: SharedMemory) -> None:
+    """1ch uint16 (mono) → consume_pending_format() returns 'r16fixed'."""
+    from cuda_link.shm_protocol import FORMAT_KIND_UNSIGNED
+
+    shm = shm_cleanup
+    engine = _make_receiver(f"test_rdr_cpf_mono_{uuid.uuid4().hex[:8]}")
+
+    W, H = 1920, 1080
+    _write_shm_frame(
+        shm,
+        version=1,
+        width=W,
+        height=H,
+        channels=4,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * 4 * 2,
+    )
+    _inject_receiver_connection(
+        engine,
+        shm,
+        ipc_version=1,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits_per_comp=16,
+        width=W,
+        height=H,
+        channels=4,
+        buffer_size=W * H * 4 * 2,
+    )
+
+    _write_shm_frame(
+        shm,
+        version=2,
+        width=W,
+        height=H,
+        channels=1,
+        format_kind=FORMAT_KIND_UNSIGNED,
+        bits=16,
+        flags=0,
+        data_size=W * H * 1 * 2,
+    )
+    engine._refresh_on_version_change(2)
+
+    fmt = engine.consume_pending_format()
+    assert fmt == "r16fixed", f"Expected 'r16fixed' for 1ch uint16, got {fmt!r}"

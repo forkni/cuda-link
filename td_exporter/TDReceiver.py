@@ -212,6 +212,13 @@ class RetryState:
             return True
         return False
 
+    def consume_format_update(self) -> bool:
+        """Return True and clear the flag if a pixel-format update is pending."""
+        if self.needs_format_update:
+            self.needs_format_update = False
+            return True
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -302,6 +309,18 @@ class TDReceiverEngine:
         """
         if self._retry.consume_resolution_update():
             return (self._format.width, self._format.height)
+        return None
+
+    def consume_pending_format(self) -> str | None:
+        """Return the TD par.format string if a pixel-format update is pending, else None.
+
+        Called from script_top_callbacks.onCook to drive ImportBuffer par.format updates in
+        the fallback path (modoutsidecook disabled). Mirrors consume_pending_resolution.
+
+        Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
+        """
+        if self._retry.consume_format_update():
+            return _to_td_pixel_format(self._format.format_kind, self._format.bits_per_comp, self._format.num_comps)
         return None
 
     # --- Core API ---
