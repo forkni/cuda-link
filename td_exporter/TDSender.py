@@ -46,6 +46,43 @@ _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
     "11-bit",
     "11bit",
 }
+# Map TD pixelFormatName values (op.pixelFormatName) → (dtype_str, num_channels).
+# Used in export_frame to detect dtype changes that are invisible to cm.size/cm.data_type —
+# specifically dtype-shrink transitions (e.g. float32→uint8) where TD keeps the old
+# (larger) CUDA allocation unchanged, so neither cm.size nor cm.data_type reflects the change.
+# pixelFormatName updates immediately on any format change (grow or shrink).
+# Built from the TD Script TOP par.format menu names (Section 1 of pixel_format_probe.py).
+# Float16 variants are included for completeness but are caught first by _is_unsupported_format.
+_PIXEL_FMT_NAME_TO_DTYPE: dict[str, tuple[str, int]] = {
+    # RGBA
+    "rgba32float": ("float32", 4),
+    "rgba16fixed": ("uint16", 4),
+    "rgba8fixed": ("uint8", 4),
+    # RG
+    "rg32float": ("float32", 2),
+    "rg16fixed": ("uint16", 2),
+    "rg8fixed": ("uint8", 2),
+    # Mono (1 component)
+    "mono32float": ("float32", 1),
+    "mono16fixed": ("uint16", 1),
+    "mono8fixed": ("uint8", 1),
+    # Alpha-only (1 component)
+    "a32float": ("float32", 1),
+    "a16fixed": ("uint16", 1),
+    "a8fixed": ("uint8", 1),
+    # Mono+Alpha (2 components)
+    "monoalpha32float": ("float32", 2),
+    "monoalpha16fixed": ("uint16", 2),
+    "monoalpha8fixed": ("uint8", 2),
+    # Float16 variants (unsupported by cudaMemory; present so the map is complete)
+    "rgba16float": ("float16", 4),
+    "rg16float": ("float16", 2),
+    "mono16float": ("float16", 1),
+    "a16float": ("float16", 1),
+    "monoalpha16float": ("float16", 2),
+    # "useinput", "rgb10a2fixed", "rgba11float" → NOT mapped (no reliable dtype/channel count)
+}
+
 _EXPORT_BUFFER_NAME = "ExportBuffer"
 
 # Pre-built NVTX range name strings per slot — eliminates f-string allocation on every export_frame call.
@@ -180,6 +217,7 @@ class TDSenderEngine:
         self._export_buffer: object = None
         self._last_pixel_fmt: str = ""
         self._last_fmt_needs_conv: bool = False
+        self._last_pixel_fmt_name: str = ""  # last seen pixelFormatName; change → override dtype
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -428,19 +466,75 @@ class TDSenderEngine:
                 cm.width, cm.height, cm_channels, cm.size, cm.data_type, self._current_spec.dtype
             )
 
-            # Defensive: if the byte count doesn't correspond to any supported dtype,
-            # emit a one-shot warning and skip this frame rather than looping forever.
+            # pixelFormatName override — detects dtype/channel changes that are invisible
+            # to cm.size / cm.data_type.  On dtype-shrink transitions (e.g. float32→uint8)
+            # TD reuses the old (larger) CUDA allocation, so cm.size and cm.data_type stay
+            # unchanged.  pixelFormatName (op.pixelFormatName) is the only property that
+            # updates immediately on ANY format change, in both directions.
+            # We cache the last seen value and override resolved_dtype/cm_channels when it
+            # changes, then let the existing reopen guard detect the dtype change.
+            _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
+            _pf_name_override = False
+            if _pf_name and _pf_name not in ("useinput",) and _pf_name != self._last_pixel_fmt_name:
+                self._last_pixel_fmt_name = _pf_name
+                _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
+                if _pf_mapped is not None:
+                    _pf_dtype, _pf_ch = _pf_mapped
+                    if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
+                        self._log(
+                            f"pixelFormatName={_pf_name!r}: overriding cm-derived "
+                            f"{resolved_dtype}/{cm_channels}ch → {_pf_dtype}/{_pf_ch}ch",
+                            force=True,
+                        )
+                        resolved_dtype = _pf_dtype
+                        cm_channels = _pf_ch
+                        _pf_name_override = True
+
+            # Defensive: if the byte count doesn't correspond to any supported dtype with
+            # the resolved channel count, handle two cases:
+            #   A. _pf_name_override=True → dtype-shrink transition; TD has not yet freed the
+            #      old (larger) allocation.  Fall through to the reopen guard — the dtype
+            #      change IS detected there — then skip export on this frame.
+            #   B. No override → try physical-channel inference (H2: RGBA-padded mono source
+            #      where cm.channels=1 but the GPU allocation is 4-channel RGBA).
             px = cm.width * cm.height * cm_channels
-            if px > 0 and cm.size and DtypeCodec.itemsize(resolved_dtype) * px != cm.size:
-                if not self._warned_dtype_size:
-                    self._log(
-                        f"Unsupported bytes-per-pixel "
-                        f"({cm.size}/{px}={cm.size / px:.2f}); skipping frame. "
-                        "Supported: 1 (uint8), 2 (uint16), 4 (float32).",
-                        force=True,
-                    )
-                    self._warned_dtype_size = True
-                return False
+            _size_matches = px > 0 and bool(cm.size) and DtypeCodec.itemsize(resolved_dtype) * px == cm.size
+            if not _size_matches and not _pf_name_override:
+                # H2: try to infer physical channel count from the buffer size.
+                # TD may report cm.channels=1 (logical) for a mono TOP while allocating
+                # RGBA-padded CUDA memory — e.g. mono float32 TOP: cm.channels=1 but
+                # cm.size = W×H×4 comps×4 bytes.
+                _wh = cm.width * cm.height
+                _phys_dtype_map = {1: "uint8", 2: "uint16", 4: "float32"}
+                _inferred = False
+                for phys_ch in (4, 2):
+                    if _wh > 0 and phys_ch != cm_channels:
+                        phys_bytes = cm.size // (phys_ch * _wh) if (_wh * phys_ch) > 0 else 0
+                        phys_dtype = _phys_dtype_map.get(phys_bytes)
+                        if phys_dtype and phys_bytes * phys_ch * _wh == cm.size:
+                            if not self._warned_dtype_size:
+                                self._log(
+                                    f"cm.channels={cm.channels} inconsistent with "
+                                    f"cm.size={cm.size} (bpp={cm.size / px:.2f}); "
+                                    f"inferring {phys_ch}ch {phys_dtype} from physical "
+                                    "CUDA allocation (RGBA-padded mono source).",
+                                    force=True,
+                                )
+                            cm_channels = phys_ch
+                            resolved_dtype = phys_dtype
+                            px = _wh * phys_ch
+                            _inferred = True
+                            break
+                if not _inferred:
+                    if not self._warned_dtype_size:
+                        self._log(
+                            f"Unsupported bytes-per-pixel "
+                            f"({cm.size}/{px}={cm.size / px:.2f}); skipping frame. "
+                            "Supported: 1 (uint8), 2 (uint16), 4 (float32).",
+                            force=True,
+                        )
+                        self._warned_dtype_size = True
+                    return False
             self._warned_dtype_size = False  # reset once a valid size is seen
 
             size_changed = cm.size != self._exporter.data_size
@@ -471,15 +565,23 @@ class TDSenderEngine:
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
 
-                # Force a monotonically-greater version in the new (fresh, zeroed) SHM
-                # segment so the receiver's `version != last_version` guard always fires.
-                # Without this, Exporter.close() unlinks and the new open() creates a
-                # segment with version=1 every time — which the receiver already saw on
-                # first connect, so VERSION_CHANGED is never signalled.
+                # Force a monotonically-greater version in the SHM segment so the
+                # receiver's `version != last_version` guard always fires.
+                # On Windows the receiver's open handle keeps the old segment alive after
+                # close()+unlink(), so Exporter.open() re-attaches to the same segment
+                # (open-first logic, exporter.py:274-279).  set_version writes into that
+                # shared mapping — the receiver will see VERSION_CHANGED on the next tick.
                 self._ipc_version += 1
                 with contextlib.suppress(Exception):
                     if self._exporter.shm_handle is not None:
                         set_version(self._exporter.shm_handle.buf, self._ipc_version)
+
+                # Stale-buffer path: pixelFormatName signalled a dtype-shrink but cm.size
+                # hasn't caught up yet (TD is still holding the old larger allocation).
+                # The reopen + VERSION_CHANGED are already done; skip exporting this frame.
+                # Next frame: TD will have freed the old allocation and cm.size is correct.
+                if _pf_name_override and not _size_matches:
+                    return False
 
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
@@ -494,6 +596,7 @@ class TDSenderEngine:
 
             if outcome is FrameOutcome.PUBLISHED:
                 self._barrier.tick_and_maybe_release(os.getpid(), log_fn=self._log)
+                self._host.set_info_status(f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch")
                 return True
             return False
 

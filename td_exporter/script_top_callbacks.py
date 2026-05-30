@@ -14,9 +14,9 @@ The warning_emitter Script TOP must have Cook Type set to 'Off' (Pulse to Cook).
 RealTDHost force-cooks it on every status transition so the badge stays in sync
 without relying on continuous cooking.
 
-The ImportBuffer Script TOP handles receiver-mode frame import.  In TD 2025+ with
-modoutsidecook enabled, import_frame() is driven from the Execute DAT instead; this
-onCook still handles the one-time resolution update as a safety net.
+The ImportBuffer Script TOP handles receiver-mode frame import, driven from the Execute DAT
+force-cook on every frame. onCook calls import_frame() directly and applies any pending
+resolution or pixel-format updates.
 """
 
 _STATUS_EMITTER_NAME = "warning_emitter"
@@ -37,7 +37,6 @@ def onCook(scriptOp: object) -> None:
         return
 
     # Handle resolution update (one-time, after initialize_receiver)
-    # With modoutsidecook, this may already be handled by Execute DAT
     pending = ext.consume_pending_resolution()
     if pending is not None:
         width, height = pending
@@ -51,15 +50,6 @@ def onCook(scriptOp: object) -> None:
             )
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not set ImportBuffer resolution: {e}", force=True)
-
-    # TD 2023 path: Import frame from CUDA IPC into this Script TOP
-    # With modoutsidecook (TD 2025+), import_frame() is called from Execute DAT instead
-    # Check if modoutsidecook is active; if so, skip to avoid double-import
-    try:
-        if hasattr(scriptOp.par, "modoutsidecook") and scriptOp.par.modoutsidecook.eval():
-            return  # Import handled by Execute DAT
-    except (AttributeError, RuntimeError):
-        pass  # Parameter doesn't exist or can't be read, proceed with import
 
     ext.import_frame(scriptOp)
 

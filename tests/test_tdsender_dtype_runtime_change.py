@@ -201,3 +201,74 @@ class TestResolveFrameDtype:
             "With stale channels=4, mono uint16 falls back to float32 (Bug B)."
             "This test documents the bug — export_frame must use cm.channels instead."
         )
+
+
+# ---------------------------------------------------------------------------
+# _PIXEL_FMT_NAME_TO_DTYPE — mapping table completeness
+# ---------------------------------------------------------------------------
+
+
+def test_pixel_fmt_name_map_covers_probe_results():
+    """All pixelFormatName values returned by TD's Script TOP par.format menu must be mapped
+    (or explicitly excluded). Probe output 2026-05-30 gave 23 entries; we expect all
+    supported ones in the table and the unsupported/special ones absent."""
+    from TDSender import _PIXEL_FMT_NAME_TO_DTYPE
+
+    # Supported formats confirmed by probe (Section 1 of pixel_format_probe.py):
+    _should_be_mapped = [
+        "rgba32float",
+        "rgba16fixed",
+        "rgba8fixed",
+        "rg32float",
+        "rg16fixed",
+        "rg8fixed",
+        "mono32float",
+        "mono16fixed",
+        "mono8fixed",
+        "a32float",
+        "a16fixed",
+        "a8fixed",
+        "monoalpha32float",
+        "monoalpha16fixed",
+        "monoalpha8fixed",
+        # float16 variants (unsupported by cudaMemory but still in the map)
+        "rgba16float",
+        "rg16float",
+        "mono16float",
+        "a16float",
+        "monoalpha16float",
+    ]
+    for name in _should_be_mapped:
+        assert name in _PIXEL_FMT_NAME_TO_DTYPE, (
+            f"{name!r} must be in _PIXEL_FMT_NAME_TO_DTYPE (returned by TD par.format menu, probe 2026-05-30)"
+        )
+
+    # Special/unsupported entries must NOT be mapped (no reliable dtype/channels):
+    _should_not_be_mapped = ["useinput", "rgb10a2fixed", "rgba11float"]
+    for name in _should_not_be_mapped:
+        assert name not in _PIXEL_FMT_NAME_TO_DTYPE, (
+            f"{name!r} must NOT be in _PIXEL_FMT_NAME_TO_DTYPE (no reliable dtype or channel mapping for this format)"
+        )
+
+
+@pytest.mark.parametrize(
+    "fmt_name,expected_dtype,expected_ch",
+    [
+        ("rgba32float", "float32", 4),
+        ("rgba16fixed", "uint16", 4),
+        ("rgba8fixed", "uint8", 4),
+        ("rg32float", "float32", 2),
+        ("mono32float", "float32", 1),
+        ("mono8fixed", "uint8", 1),
+        ("a8fixed", "uint8", 1),
+        ("monoalpha32float", "float32", 2),
+    ],
+)
+def test_pixel_fmt_name_to_dtype_values(fmt_name, expected_dtype, expected_ch):
+    """Spot-check key _PIXEL_FMT_NAME_TO_DTYPE entries match expected dtype + channels."""
+    from TDSender import _PIXEL_FMT_NAME_TO_DTYPE
+
+    assert fmt_name in _PIXEL_FMT_NAME_TO_DTYPE, f"{fmt_name!r} missing from map"
+    dtype, ch = _PIXEL_FMT_NAME_TO_DTYPE[fmt_name]
+    assert dtype == expected_dtype, f"{fmt_name!r}: dtype={dtype!r} expected {expected_dtype!r}"
+    assert ch == expected_ch, f"{fmt_name!r}: channels={ch} expected {expected_ch}"

@@ -52,7 +52,13 @@ class TOPHandle(Protocol):
 
     @property
     def pixel_format(self) -> str:
-        """top.pixelFormat as a string."""
+        """top.pixelFormat as a string (display-only, not for Python comparisons)."""
+        ...
+
+    @property
+    def pixel_format_name(self) -> str:
+        """top.pixelFormatName — the par.format menu name (e.g. 'rgba8fixed', 'rgba32float').
+        Updates immediately on format change; use for dtype detection, not pixelFormat."""
         ...
 
     def set_format(self, fmt: str) -> None:
@@ -168,6 +174,10 @@ class RealTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return str(getattr(self._top, "pixelFormat", ""))
+
+    @property
+    def pixel_format_name(self) -> str:
+        return str(getattr(self._top, "pixelFormatName", ""))
 
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError, RuntimeError, Exception):

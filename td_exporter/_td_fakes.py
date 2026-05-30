@@ -49,12 +49,14 @@ class FakeTOPHandle(TOPHandle):
     def __init__(
         self,
         pixel_format: str = "rgba32float",
+        pixel_format_name: str = "rgba32float",
         width: int = 64,
         height: int = 64,
         channels: int = 4,
         gpu_ptr: int = 0xDEADBEEF,
     ) -> None:
         self._pixel_format = pixel_format
+        self._pixel_format_name = pixel_format_name
         self._width = width
         self._height = height
         self._channels = channels
@@ -77,6 +79,10 @@ class FakeTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return self._pixel_format
+
+    @property
+    def pixel_format_name(self) -> str:
+        return self._pixel_format_name
 
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
