@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.7.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.7.1.tox` component in TouchDesigner.
 
-> **Previous release**: `TOXES/CUDAIPCLink_v1.7.0.tox` is available as a GitHub Release asset.
+> **Previous release**: `TOXES/CUDAIPCLink_v1.7.1.tox` is available as a GitHub Release asset.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -293,7 +293,7 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```
-CUDA IPC Exporter v1.7.0
+CUDA IPC Exporter v1.7.1
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
@@ -307,9 +307,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.7.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.7.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.7.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.7.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -317,7 +317,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.7.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.7.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -505,7 +505,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.7.0.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.7.1.tox` | `TOXES/` | Final built .tox component |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -520,5 +520,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.7.0
+**Component Version**: 1.7.1
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)
