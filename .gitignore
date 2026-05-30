@@ -141,6 +141,8 @@ Backup/
 # TOXES/ binary policy: only the LATEST CUDAIPCLink_vX.Y.Z.tox lives on main.
 # Older versions are removed via `git rm` at release time and preserved as
 # GitHub Release assets attached to their version tag (see release.yml).
+TOXES/CUDAIPCLink_v1.5.0.tox
+TOXES/CUDAIPCLink_v1.5.1.tox
 
 # AI assistant config (Gemini)
 GEMINI.md

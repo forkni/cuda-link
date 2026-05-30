@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.6.0.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.7.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -73,24 +73,42 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 
 **Option C: Library mode (cleaner .tox — fewer Text DATs)**
 
-Install `cuda_link` into an external folder and let the bootstrap module load it inside TD,
-so the `.tox` no longer needs to embed the 14 mirror Text DATs:
+Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
+DAT then loads the package automatically — the 14 mirror Text DATs (Env, SHMProtocol,
+Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-target installer
+(one-time):
 
 ```bat
-REM Step 1: build wheel + install to external folder (one-time)
-build_wheel.cmd
-install_td_library.cmd --target "D:\cuda_link_lib"
-
-REM Step 2: set env var before launching TouchDesigner
-SET CUDALINK_LIB_PATH=D:\cuda_link_lib
+build_wheel.cmd                    REM build dist\cuda_link-1.7.0-py3-none-any.whl
+install_td_library.cmd             REM interactive menu — choose one of 5 install modes
 ```
 
-Then set `CUDALINK_LIB_PATH` permanently in Windows environment variables. In the `.tox`,
-remove the 14 mirror Text DATs (Env, SHMProtocol, Exporter, Importer, …) — the
-`CUDALinkBootstrap` DAT loads the package and registers them automatically. The
-`TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs stay in the COMP unchanged. If
-`CUDALINK_LIB_PATH` is unset, the bootstrap no-ops and the classic mirror DATs take over.
-See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions.
+**Install modes** (`python scripts/install_td_library.py --help`):
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| 1 | `--target DIR` | Install into a custom folder; set `CUDALINK_LIB_PATH=DIR` before launching TD |
+| 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
+| 3 | `--conda ENV` | Install into a conda environment |
+| 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
+| 5 | `--td-python EXE` | Install directly into TD's bundled Python (`app.pythonExecutable`) |
+
+**Mode 4 (recommended for most setups):** auto-discovers both the registered system Python
+(`py -3`) and the TouchDesigner install path; sets `Python64 Path` in TD Preferences so
+library mode activates on the next TD launch with zero env-var configuration.
+
+```bat
+REM Non-interactive mode 4 (auto-discover Python + TD):
+install_td_library.cmd --mode 4 --non-interactive
+
+REM Dry-run to preview what would be written:
+install_td_library.cmd --mode 4 --dry-run
+```
+
+The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
+If `CUDALINK_LIB_PATH` is unset and mode 4 was not used, the bootstrap no-ops and the
+classic mirror DATs take over silently. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
+for full instructions.
 
 ### 2. Python Side (Importer)
 
@@ -99,12 +117,12 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions.
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-1.6.0-py3-none-any.whl
+build_wheel.cmd                             # Builds dist\cuda_link-1.7.0-py3-none-any.whl
 
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -355,16 +373,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 build_wheel.cmd
-# Output: dist\cuda_link-1.6.0-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.7.0-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.6.0-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.7.0-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.6.0-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.7.0-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -401,7 +419,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.6.0.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.7.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag

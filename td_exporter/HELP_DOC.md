@@ -136,6 +136,20 @@ Changing this parameter while active is silently ignored. Changing it while inac
 
 ---
 
+### Status
+**Type:** String (read-only) | **Default:** `Idle`
+
+Live status display — updated every frame while the component is active. Cannot be edited.
+
+| Value | Meaning |
+|-------|---------|
+| `Idle` | Component is inactive (`Active = Off`) or no transfer in progress. |
+| `<W>x<H> <dtype> <ch>ch` | Active transfer — e.g. `1920x1080 uint8 4ch`. Updated after each successful frame. |
+| `WARNING: <msg>` | Non-fatal issue — e.g. `WARNING: unsupported pixel format '11:11:10'`. Frames are skipped until resolved. The COMP node body tints yellow and `warning_emitter` shows a local badge. |
+| `ERROR: <msg>` | Fatal engine error (GPU/IPC init failure). The COMP node body tints red. Toggle `Active` Off → On to recover after fixing the underlying cause. |
+
+---
+
 ### Debug
 **Type:** Toggle | **Default:** Off
 
@@ -174,7 +188,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.6.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.7.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -186,6 +200,12 @@ Use this when distributing the component to end-users who should not need to int
    result = importer.get_frame()          # ImportResult; .frame is torch.Tensor (zero-copy)
    result_np = importer.get_frame_numpy() # ImportResult; .frame is numpy array (CPU copy)
    ```
+
+**Library mode (fewer Text DATs in the .tox):** run `install_td_library.cmd` once to install
+`cuda_link` into a Python environment that TouchDesigner can see. The `CUDALinkBootstrap` DAT
+inside the component will then load the package automatically — no `CUDALINK_LIB_PATH` setup
+required when using TD Preferences mode (mode 4). Run `python scripts/install_td_library.py --help`
+to see all five install modes.
 
 ### Python → TD (Receiver mode)
 
@@ -243,7 +263,7 @@ Use this when distributing the component to end-users who should not need to int
 ## Requirements
 
 - **OS:** Windows 10 / 11 (CUDA IPC handle sharing is Windows-only)
-- **CUDA:** 12.x (tested with 12.4)
+- **CUDA:** 12.x (tested with 12.4 and 12.8)
 - **GPU:** NVIDIA, CUDA compute capability 3.5 or higher
 - **TouchDesigner:** 2022.x or later
 - **Python (consumer side):** 3.9+, `cuda-link` package (`pip install cuda-link`)
