@@ -469,26 +469,31 @@ class TDSenderEngine:
             # pixelFormatName override — detects dtype/channel changes that are invisible
             # to cm.size / cm.data_type.  On dtype-shrink transitions (e.g. float32→uint8)
             # TD reuses the old (larger) CUDA allocation, so cm.size and cm.data_type stay
-            # unchanged.  pixelFormatName (op.pixelFormatName) is the only property that
-            # updates immediately on ANY format change, in both directions.
-            # We cache the last seen value and override resolved_dtype/cm_channels when it
-            # changes, then let the existing reopen guard detect the dtype change.
+            # unchanged for multiple frames.  pixelFormatName updates immediately on ANY
+            # format change, in both directions.
+            #
+            # Applied on EVERY frame (not just when the name changes) so that stale cm.size
+            # frames after a reopen don't re-derive the old dtype from buffer size and
+            # trigger an oscillating reopen back in the opposite direction.
             _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
             _pf_name_override = False
-            if _pf_name and _pf_name not in ("useinput",) and _pf_name != self._last_pixel_fmt_name:
-                self._last_pixel_fmt_name = _pf_name
+            if _pf_name and _pf_name not in ("useinput",):
                 _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
                 if _pf_mapped is not None:
                     _pf_dtype, _pf_ch = _pf_mapped
-                    if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
-                        self._log(
-                            f"pixelFormatName={_pf_name!r}: overriding cm-derived "
-                            f"{resolved_dtype}/{cm_channels}ch → {_pf_dtype}/{_pf_ch}ch",
-                            force=True,
-                        )
-                        resolved_dtype = _pf_dtype
-                        cm_channels = _pf_ch
-                        _pf_name_override = True
+                    if _pf_name != self._last_pixel_fmt_name:
+                        # Format name changed — log the override once.
+                        if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
+                            self._log(
+                                f"pixelFormatName={_pf_name!r}: overriding cm-derived "
+                                f"{resolved_dtype}/{cm_channels}ch → {_pf_dtype}/{_pf_ch}ch",
+                                force=True,
+                            )
+                        self._last_pixel_fmt_name = _pf_name
+                    # Always apply — prevents cm.size-stale frames from reverting dtype.
+                    resolved_dtype = _pf_dtype
+                    cm_channels = _pf_ch
+                    _pf_name_override = True
 
             # Defensive: if the byte count doesn't correspond to any supported dtype with
             # the resolved channel count, handle two cases:
@@ -538,11 +543,19 @@ class TDSenderEngine:
             self._warned_dtype_size = False  # reset once a valid size is seen
 
             size_changed = cm.size != self._exporter.data_size
+            # When pixelFormatName confirms the current dtype+channels, suppress size_changed.
+            # TD's CUDA allocation may lag a format change by several frames; without this,
+            # the stale cm.size triggers an oscillating reopen back to the old dtype every frame.
+            _pf_confirms_spec = (
+                _pf_name_override
+                and resolved_dtype == self._current_spec.dtype
+                and cm_channels == self._current_spec.channels
+            )
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
                 or cm_channels != self._current_spec.channels
                 or resolved_dtype != self._current_spec.dtype
-                or size_changed
+                or (size_changed and not _pf_confirms_spec)
             ):
                 self._log(
                     f"Geometry/dtype change: "
