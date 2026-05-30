@@ -806,10 +806,13 @@ class TDReceiverEngine:
                 buffer_size=buffer_size,
             )
 
-            # Flag that Script TOP resolution AND pixel format need to be updated
-            # (will be applied outside cook cycle via update_receiver_resolution / update_receiver_format)
+            # Flag that Script TOP resolution needs to be updated.
+            # NOTE: needs_format_update is NOT set here — initial copyCUDAMemory correctly
+            # infers the output format from _cached_shape.numComps/.dataType. Setting
+            # par.format at init time would break RG/Mono/Alpha channel variants whose
+            # format strings may differ from what TD expects. Format is only set on
+            # mid-stream dtype/channel changes (see _refresh_on_version_change).
             self._retry.needs_resolution_update = True
-            self._retry.needs_format_update = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
