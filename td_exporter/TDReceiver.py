@@ -844,15 +844,16 @@ class TDReceiverEngine:
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
 
-            # Flag pixel-format update when the sender's bit depth is NOT float32.
-            # copyCUDAMemory auto-adapts channel count (numComps) from _cached_shape but does
-            # NOT auto-adapt bit depth — par.format controls the output texture allocation.
-            # The Script TOP's default/saved format is rgba32float, so float32 sources work
-            # without any explicit set_format call.  uint8/uint16 sources would write into an
-            # oversized float32 buffer (e.g. 8 MB into 32 MB → quarter-frame) without this.
-            # Scoped to bit-depth-non-float32 only to avoid touching channel-variant formats
-            # (rg32float, r32float etc.) that TD may not expose as par.format menu values.
-            if not (format_kind == FORMAT_KIND_FLOAT and bits_per_comp == 32):
+            # Flag pixel-format update when the resolved format is anything other than the
+            # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
+            # _cached_shape, but par.format controls the output texture allocation (bit depth
+            # AND channel layout).  Only rgba32float matches the saved/default Script TOP
+            # format and therefore needs no explicit set_format call.  All other formats —
+            # uint8, uint16, AND float32 variants with non-RGBA channel layout (monoalpha32float,
+            # rg32float, r32float, etc.) — must be set explicitly so copyCUDAMemory writes into
+            # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
+            # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
+            if _to_td_pixel_format(format_kind, bits_per_comp, num_comps, flags) != "rgba32float":
                 self._retry.needs_format_update = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
