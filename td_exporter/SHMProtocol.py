@@ -41,6 +41,7 @@ WRITE_IDX_SIZE: int = 4
 SHM_HEADER_SIZE: int = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
 
 SLOT_SIZE: int = 128  # 64B cudaIpcMemHandle_t + 64B cudaIpcEventHandle_t
+IPC_HANDLE_SIZE: int = 64  # cudaIpc{Mem,Event}Handle_t are each 64 bytes
 
 SHUTDOWN_FLAG_SIZE: int = 1
 METADATA_SIZE: int = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
@@ -133,6 +134,14 @@ class SHMLayout:
 
     def slot_offset(self, i: int) -> int:
         return SHM_HEADER_SIZE + i * SLOT_SIZE
+
+    def mem_handle_offset(self, slot: int) -> int:
+        """Byte offset of the 64-byte cudaIpcMemHandle_t within slot *slot*."""
+        return self.slot_offset(slot)
+
+    def event_handle_offset(self, slot: int) -> int:
+        """Byte offset of the 64-byte cudaIpcEventHandle_t within slot *slot*."""
+        return self.slot_offset(slot) + IPC_HANDLE_SIZE
 
     @property
     def shutdown_offset(self) -> int:

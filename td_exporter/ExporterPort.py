@@ -20,11 +20,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from Env import env_bool, env_int, env_str
 from CUDARuntimeTypes import (
+    HOST_ALLOC_PORTABLE,
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
     CUDAEvent_t,
     CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
     CUDAStream_t,
+    StreamCaptureMode,
+    StreamFlags,
     cudaIpcEventHandle_t,
     cudaIpcMemHandle_t,
 )
@@ -176,6 +180,20 @@ class CudaPort(Protocol):
         """
         ...
 
+    def set_device(self, device: int) -> Any:
+        """Switch to the CUDA primary context for *device*; return an opaque restore token.
+
+        Must be paired with restore_context() — call it after the device-context
+        operations are complete.  The Exporter uses this to ensure IPC handles are
+        created in the primary context (not TD's interop context), preventing
+        cudaIpcOpenMemHandle error 400 in the receiving process.
+        """
+        ...
+
+    def restore_context(self, token: Any) -> None:
+        """Restore the CUDA context captured by a prior set_device() call."""
+        ...
+
     # --- Memory ------------------------------------------------------------
 
     def malloc(self, size: int) -> c_void_p:
@@ -194,16 +212,18 @@ class CudaPort(Protocol):
         kind: int,
         stream: CUDAStream_t,
     ) -> None:
-        """Enqueue an async memory copy on stream. kind=3 for device-to-device."""
+        """Enqueue an async memory copy on stream. Use MemcpyKind.DEVICE_TO_DEVICE for D2D."""
         ...
 
     # --- Streams -----------------------------------------------------------
 
-    def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
-        """Create a CUDA stream. flags=0x01 = cudaStreamNonBlocking."""
+    def create_stream(self, flags: int = StreamFlags.NON_BLOCKING) -> CUDAStream_t:
+        """Create a CUDA stream. Default: StreamFlags.NON_BLOCKING (cudaStreamNonBlocking)."""
         ...
 
-    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
+    def create_stream_with_priority(
+        self, flags: int = StreamFlags.NON_BLOCKING, priority: int | None = None
+    ) -> CUDAStream_t:
         """Create a high-priority stream. None → highest priority on this device."""
         ...
 
@@ -269,8 +289,8 @@ class CudaPort(Protocol):
         """Return the cudart version integer (e.g., 12080 = CUDA 12.8)."""
         ...
 
-    def stream_begin_capture(self, stream: CUDAStream_t, mode: int = 0) -> None:
-        """Begin capturing stream into a graph. mode=2 = relaxed."""
+    def stream_begin_capture(self, stream: CUDAStream_t, mode: int = StreamCaptureMode.GLOBAL) -> None:
+        """Begin capturing stream into a graph. Use StreamCaptureMode.RELAXED (2) for relaxed."""
         ...
 
     def stream_end_capture(self, stream: CUDAStream_t) -> CUDAGraph_t:
@@ -311,10 +331,10 @@ class CudaPort(Protocol):
 
     # --- IPC memory (consumer / Importer side) ----------------------------
 
-    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
+    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = IPC_MEM_LAZY_ENABLE_PEER_ACCESS) -> c_void_p:
         """Open an IPC memory handle exported by the producer process.
 
-        flags=1 = cudaIpcMemLazyEnablePeerAccess.
+        Default flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS (cudaIpcMemLazyEnablePeerAccess).
         """
         ...
 
@@ -340,10 +360,10 @@ class CudaPort(Protocol):
 
     # --- Pinned host memory (Importer side) --------------------------------
 
-    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
+    def malloc_host_alloc(self, size: int, flags: int = HOST_ALLOC_PORTABLE) -> c_void_p:
         """Allocate portable pinned host memory via cudaHostAlloc.
 
-        flags=0x01 = cudaHostAllocPortable (accessible from any CUDA context).
+        Default flags=HOST_ALLOC_PORTABLE (cudaHostAllocPortable — accessible from any CUDA context).
         """
         ...
 

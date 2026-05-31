@@ -9,6 +9,7 @@ is available, ensuring both adapters satisfy the same behavioural contract.
 from __future__ import annotations
 
 import pytest
+from typing_extensions import get_protocol_members
 
 from cuda_link._cuda_adapters import CTypesCUDAAdapter, FakeCUDAAdapter
 from cuda_link._exporter_port import (
@@ -17,6 +18,13 @@ from cuda_link._exporter_port import (
     FrameOutcome,
     FrameSpec,
     GpuFrame,
+)
+from cuda_link.cuda_runtime_types import (
+    HOST_ALLOC_PORTABLE,
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+    MemcpyKind,
+    StreamCaptureMode,
+    StreamFlags,
 )
 
 # ---------------------------------------------------------------------------
@@ -384,3 +392,90 @@ def test_ctypes_adapter_runtime_version() -> None:
     adapter = CTypesCUDAAdapter.for_device(device=0)
     version = adapter.get_runtime_version()
     assert version >= 11_040
+
+
+# ---------------------------------------------------------------------------
+# C3a — CudaPort Protocol honesty: set_device / restore_context declared
+# ---------------------------------------------------------------------------
+
+
+def test_cuda_port_declares_set_device() -> None:
+    """set_device must be a declared member of the CudaPort Protocol."""
+    assert "set_device" in get_protocol_members(CudaPort)
+
+
+def test_cuda_port_declares_restore_context() -> None:
+    """restore_context must be a declared member of the CudaPort Protocol."""
+    assert "restore_context" in get_protocol_members(CudaPort)
+
+
+def test_fake_adapter_satisfies_protocol_with_new_methods() -> None:
+    """FakeCUDAAdapter must satisfy isinstance(fake, CudaPort) after C3a additions."""
+    fake = FakeCUDAAdapter()
+    assert isinstance(fake, CudaPort)
+
+
+def test_fake_adapter_set_device_returns_token() -> None:
+    """set_device() on FakeCUDAAdapter returns a token (not None)."""
+    fake = FakeCUDAAdapter(device=0)
+    token = fake.set_device(0)
+    assert token is not None
+
+
+def test_fake_adapter_restore_context_is_callable() -> None:
+    """restore_context() on FakeCUDAAdapter accepts a token and does not raise."""
+    fake = FakeCUDAAdapter(device=0)
+    token = fake.set_device(0)
+    fake.restore_context(token)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# C3b — Named CUDA enum constants: values must match the documented integers
+# ---------------------------------------------------------------------------
+
+
+def test_memcpy_kind_device_to_device_value() -> None:
+    assert MemcpyKind.DEVICE_TO_DEVICE == 3
+
+
+def test_memcpy_kind_host_to_device_value() -> None:
+    assert MemcpyKind.HOST_TO_DEVICE == 1
+
+
+def test_memcpy_kind_device_to_host_value() -> None:
+    assert MemcpyKind.DEVICE_TO_HOST == 2
+
+
+def test_memcpy_kind_host_to_host_value() -> None:
+    assert MemcpyKind.HOST_TO_HOST == 0
+
+
+def test_stream_flags_non_blocking_value() -> None:
+    assert StreamFlags.NON_BLOCKING == 0x01
+
+
+def test_stream_flags_default_value() -> None:
+    assert StreamFlags.DEFAULT == 0
+
+
+def test_stream_capture_mode_global_value() -> None:
+    assert StreamCaptureMode.GLOBAL == 0
+
+
+def test_stream_capture_mode_relaxed_value() -> None:
+    assert StreamCaptureMode.RELAXED == 2
+
+
+def test_ipc_mem_lazy_enable_peer_access_value() -> None:
+    assert IPC_MEM_LAZY_ENABLE_PEER_ACCESS == 1
+
+
+def test_host_alloc_portable_value() -> None:
+    assert HOST_ALLOC_PORTABLE == 0x01
+
+
+def test_enum_values_are_int_compatible() -> None:
+    """IntEnum values must be usable wherever int is expected (no type breakage)."""
+    assert int(MemcpyKind.DEVICE_TO_DEVICE) == 3
+    assert int(StreamFlags.NON_BLOCKING) == 1
+    assert int(StreamCaptureMode.RELAXED) == 2

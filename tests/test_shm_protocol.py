@@ -17,6 +17,7 @@ from cuda_link.shm_protocol import (
     FORMAT_KIND_FLOAT,
     FORMAT_KIND_SIGNED,
     FORMAT_KIND_UNSIGNED,
+    IPC_HANDLE_SIZE,
     METADATA_SIZE,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
@@ -667,3 +668,79 @@ def test_metadata_expected_size_mismatch_detection() -> None:
         width=4, height=4, num_comps=4, format_kind=FORMAT_KIND_FLOAT, bits_per_comp=32, flags=0, data_size=1
     )  # wrong size
     assert md_bad.data_size != md_bad.expected_size
+
+
+# ---------------------------------------------------------------------------
+# C3c — SHMLayout owns the 64/64 intra-slot split (mem+event handle offsets)
+# ---------------------------------------------------------------------------
+
+
+def test_ipc_handle_size_is_64() -> None:
+    """IPC_HANDLE_SIZE must equal 64 — the size of both cudaIpcMemHandle_t and
+    cudaIpcEventHandle_t as defined by the CUDA ABI."""
+    assert IPC_HANDLE_SIZE == 64
+
+
+def test_mem_handle_offset_equals_slot_offset() -> None:
+    """mem_handle_offset(slot) is the start of the slot — no displacement."""
+    for n in [1, 2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            assert layout.mem_handle_offset(slot) == layout.slot_offset(slot)
+
+
+def test_event_handle_offset_is_slot_offset_plus_handle_size() -> None:
+    """event_handle_offset(slot) == slot_offset(slot) + IPC_HANDLE_SIZE."""
+    for n in [1, 2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            assert layout.event_handle_offset(slot) == layout.slot_offset(slot) + IPC_HANDLE_SIZE
+
+
+def test_event_minus_mem_equals_handle_size() -> None:
+    """The gap between event and mem offsets is always exactly IPC_HANDLE_SIZE bytes."""
+    layout = SHMLayout(num_slots=3)
+    for slot in range(3):
+        gap = layout.event_handle_offset(slot) - layout.mem_handle_offset(slot)
+        assert gap == IPC_HANDLE_SIZE
+
+
+def test_handle_offsets_non_overlapping_across_slots() -> None:
+    """The event handle of slot N must not overlap the mem handle of slot N+1."""
+    layout = SHMLayout(num_slots=3)
+    for slot in range(2):
+        evt_end = layout.event_handle_offset(slot) + IPC_HANDLE_SIZE
+        next_mem_start = layout.mem_handle_offset(slot + 1)
+        assert evt_end <= next_mem_start, (
+            f"Slot {slot} event handle [{layout.event_handle_offset(slot)}, {evt_end}) "
+            f"overlaps slot {slot + 1} mem handle start {next_mem_start}"
+        )
+
+
+def test_mem_event_handle_roundtrip() -> None:
+    """Write distinct 64-byte patterns to mem/event slots via the new helpers and read
+    them back — confirms exporter and importer use the same layout arithmetic."""
+    layout = SHMLayout(num_slots=2)
+    buf = bytearray(layout.total_size)
+
+    # Synthetic handle data: mem handle = 0xAA * 64, event handle = 0xBB * 64
+    for slot in range(2):
+        mem_payload = bytes([0xAA + slot]) * IPC_HANDLE_SIZE
+        evt_payload = bytes([0xCC + slot]) * IPC_HANDLE_SIZE
+
+        m = layout.mem_handle_offset(slot)
+        e = layout.event_handle_offset(slot)
+        buf[m : m + IPC_HANDLE_SIZE] = mem_payload
+        buf[e : e + IPC_HANDLE_SIZE] = evt_payload
+
+    # Read back and verify each slot independently
+    for slot in range(2):
+        m = layout.mem_handle_offset(slot)
+        e = layout.event_handle_offset(slot)
+        assert bytes(buf[m : m + IPC_HANDLE_SIZE]) == bytes([0xAA + slot]) * IPC_HANDLE_SIZE
+        assert bytes(buf[e : e + IPC_HANDLE_SIZE]) == bytes([0xCC + slot]) * IPC_HANDLE_SIZE
+
+
+def test_slot_size_equals_two_handle_sizes() -> None:
+    """SLOT_SIZE = 2 * IPC_HANDLE_SIZE — the entire slot is exactly two handles."""
+    assert SLOT_SIZE == 2 * IPC_HANDLE_SIZE
