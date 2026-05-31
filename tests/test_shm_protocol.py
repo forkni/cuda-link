@@ -13,6 +13,8 @@ import pytest
 
 from cuda_link.shm_protocol import (
     FLAGS_BFLOAT16,
+    FLAGS_MONO_ALPHA,
+    FORMAT_KIND_FLOAT,
     FORMAT_KIND_SIGNED,
     FORMAT_KIND_UNSIGNED,
     METADATA_SIZE,
@@ -535,3 +537,133 @@ def test_set_version_fixes_version_collision() -> None:
         "set_version fix failed: receiver did not see VERSION_CHANGED after dtype-change reopen"
     )
     assert result.new_version == 2
+
+
+# ---------------------------------------------------------------------------
+# DtypeCodec.decode — FLAGS_MONO_ALPHA masking (fix: bit1 is channel-semantic,
+# not dtype-relevant; decode must not fall back to "float32" for monoalpha frames)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind,bits,flags,expected_dtype",
+    [
+        # Standard dtypes without any flags — unchanged by the fix
+        (FORMAT_KIND_FLOAT, 32, 0, "float32"),
+        (FORMAT_KIND_FLOAT, 16, 0, "float16"),
+        (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, "bfloat16"),
+        (FORMAT_KIND_UNSIGNED, 8, 0, "uint8"),
+        (FORMAT_KIND_UNSIGNED, 16, 0, "uint16"),
+        (FORMAT_KIND_SIGNED, 8, 0, "int8"),
+        (FORMAT_KIND_SIGNED, 16, 0, "int16"),
+        # Mono+alpha variants — FLAGS_MONO_ALPHA must NOT change the dtype
+        (FORMAT_KIND_FLOAT, 32, FLAGS_MONO_ALPHA, "float32"),
+        (FORMAT_KIND_FLOAT, 16, FLAGS_MONO_ALPHA, "float16"),
+        (FORMAT_KIND_UNSIGNED, 8, FLAGS_MONO_ALPHA, "uint8"),
+        (FORMAT_KIND_UNSIGNED, 16, FLAGS_MONO_ALPHA, "uint16"),
+        # bfloat16 + mono_alpha (both bits set) — bfloat16 still wins
+        (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16 | FLAGS_MONO_ALPHA, "bfloat16"),
+    ],
+)
+def test_dtype_codec_decode_mono_alpha_masked(kind: int, bits: int, flags: int, expected_dtype: str) -> None:
+    """FLAGS_MONO_ALPHA (bit1) is channel-semantic; decode returns the correct
+    dtype regardless of whether the mono+alpha bit is set.
+
+    Before the fix, (UNSIGNED, 8, FLAGS_MONO_ALPHA) fell back to "float32"
+    producing a 4× oversized itemsize for monoalpha8fixed frames.
+    """
+    assert DtypeCodec.decode(kind, bits, flags) == expected_dtype
+
+
+def test_dtype_codec_decode_mono_alpha_preserves_itemsize() -> None:
+    """monoalpha8fixed and monoalpha16fixed frames must decode to 1- and 2-byte
+    dtypes respectively, not to the 4-byte float32 fallback."""
+    # monoalpha8fixed: (UNSIGNED, 8, FLAGS_MONO_ALPHA) → uint8 → 1 byte
+    dtype8 = DtypeCodec.decode(FORMAT_KIND_UNSIGNED, 8, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype8) == 1, f"monoalpha8fixed itemsize wrong: {dtype8}"
+
+    # monoalpha16fixed: (UNSIGNED, 16, FLAGS_MONO_ALPHA) → uint16 → 2 bytes
+    dtype16 = DtypeCodec.decode(FORMAT_KIND_UNSIGNED, 16, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype16) == 2, f"monoalpha16fixed itemsize wrong: {dtype16}"
+
+    # monoalpha32float: (FLOAT, 32, FLAGS_MONO_ALPHA) → float32 → 4 bytes (was already correct)
+    dtype32 = DtypeCodec.decode(FORMAT_KIND_FLOAT, 32, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype32) == 4, f"monoalpha32float itemsize wrong: {dtype32}"
+
+
+def test_dtype_codec_decode_mono_alpha_round_trip() -> None:
+    """encode/decode round-trip holds for all 7 dtypes regardless of
+    FLAGS_MONO_ALPHA — the channel-semantic bit does not participate in encode."""
+    for dtype in DtypeCodec.supported():
+        kind, bits, flags = DtypeCodec.encode(dtype)
+        # Without mono_alpha (standard path)
+        assert DtypeCodec.decode(kind, bits, flags) == dtype, f"round-trip failed for {dtype}"
+        # With mono_alpha added (as the sender would set for monoalpha* formats)
+        assert DtypeCodec.decode(kind, bits, flags | FLAGS_MONO_ALPHA) == dtype, (
+            f"round-trip with FLAGS_MONO_ALPHA failed for {dtype}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Metadata.expected_size — computed size invariant
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_expected_size_basic() -> None:
+    """expected_size = width * height * num_comps * (bits_per_comp // 8)."""
+    md = Metadata(
+        width=640,
+        height=480,
+        num_comps=4,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        flags=0,
+        data_size=640 * 480 * 4 * 4,
+    )
+    assert md.expected_size == 640 * 480 * 4 * 4
+
+
+@pytest.mark.parametrize(
+    "width,height,num_comps,bits_per_comp,expected",
+    [
+        (4, 4, 4, 32, 4 * 4 * 4 * 4),  # rgba32float
+        (4, 4, 4, 8, 4 * 4 * 4 * 1),  # rgba8fixed
+        (4, 4, 2, 8, 4 * 4 * 2 * 1),  # monoalpha8fixed / rg8fixed
+        (4, 4, 2, 16, 4 * 4 * 2 * 2),  # monoalpha16fixed
+        (4, 4, 1, 8, 4 * 4 * 1 * 1),  # mono8fixed
+        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # rgba16fixed
+        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # float16 (same byte count)
+    ],
+)
+def test_metadata_expected_size_parametrized(
+    width: int, height: int, num_comps: int, bits_per_comp: int, expected: int
+) -> None:
+    md = Metadata(
+        width=width,
+        height=height,
+        num_comps=num_comps,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=bits_per_comp,
+        flags=0,
+        data_size=expected,
+    )
+    assert md.expected_size == expected
+
+
+def test_metadata_expected_size_mismatch_detection() -> None:
+    """data_size != expected_size flags a corrupted / mismatched metadata block."""
+    md_good = Metadata(
+        width=4,
+        height=4,
+        num_comps=4,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        flags=0,
+        data_size=4 * 4 * 4 * 4,
+    )
+    assert md_good.data_size == md_good.expected_size
+
+    md_bad = Metadata(
+        width=4, height=4, num_comps=4, format_kind=FORMAT_KIND_FLOAT, bits_per_comp=32, flags=0, data_size=1
+    )  # wrong size
+    assert md_bad.data_size != md_bad.expected_size

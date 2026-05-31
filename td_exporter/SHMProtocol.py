@@ -181,6 +181,15 @@ class Metadata:
     flags: int
     data_size: int
 
+    @property
+    def expected_size(self) -> int:
+        """Expected frame byte count: width * height * num_comps * (bits_per_comp // 8).
+
+        Used to validate that data_size from the wire matches the geometry.
+        bits_per_comp is always a multiple of 8 for all registered dtypes.
+        """
+        return self.width * self.height * self.num_comps * (self.bits_per_comp // 8)
+
     def pack_into(self, buf: memoryview, layout: SHMLayout) -> None:
         offset = layout.metadata_offset
         _ST_U32.pack_into(buf, offset, self.width)
@@ -238,8 +247,13 @@ class DtypeCodec:
         """(format_kind, bits_per_comp, flags) → dtype string.
 
         Returns "float32" for unknown triples (forward-compat fallback).
+
+        Only FLAGS_BFLOAT16 is dtype-relevant; FLAGS_MONO_ALPHA (bit1) describes
+        channel semantics (R+A vs R+G) and does NOT change the element dtype or
+        itemsize.  Masking ensures e.g. (UNSIGNED, 8, FLAGS_MONO_ALPHA) → "uint8"
+        rather than falling back to "float32" with a 4× oversized itemsize.
         """
-        return _DECODE_TABLE.get((kind, bits, flags), "float32")
+        return _DECODE_TABLE.get((kind, bits, flags & FLAGS_BFLOAT16), "float32")
 
     @staticmethod
     def itemsize(dtype: str) -> int:
