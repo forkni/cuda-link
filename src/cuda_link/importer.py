@@ -32,7 +32,9 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
+from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS
 from .shm_protocol import (
+    IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     MAGIC_SIZE,
     PROTOCOL_MAGIC,
@@ -47,7 +49,7 @@ from .shm_protocol import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +786,9 @@ class Importer:
         self.frame_count = 0
         self.last_latency = 0.0
 
+        # NVML telemetry (attached after open() via attach_nvml_observer())
+        self._nvml_observer: NVMLObserver | None = None
+
         # Performance metrics (debug mode)
         self.total_wait_event_time = 0.0
         self.total_get_frame_time = 0.0
@@ -1009,14 +1014,15 @@ class Importer:
         layout = SHMLayout(num_slots)
 
         for slot in range(num_slots):
-            base_offset = layout.slot_offset(slot)
+            mem_off = layout.mem_handle_offset(slot)
+            evt_off = layout.event_handle_offset(slot)
 
-            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+            mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
             logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
             ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
 
-            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
+            event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
             if any(event_handle_bytes):
                 try:
                     ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
@@ -1427,6 +1433,10 @@ class Importer:
             return False
         return len(self._conn.dev_ptrs) > 0 and all(ptr is not None for ptr in self._conn.dev_ptrs)
 
+    def attach_nvml_observer(self, observer: NVMLObserver) -> None:
+        """Attach an NVMLObserver for GPU telemetry in get_stats()."""
+        self._nvml_observer = observer
+
     def get_stats(self) -> dict[str, object]:
         """Return current importer statistics."""
         conn = self._conn
@@ -1454,7 +1464,6 @@ class Importer:
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
             "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
         }
-        observer = getattr(self, "_nvml_observer", None)
-        if observer is not None:
-            stats["nvml"] = observer.snapshot()
+        if self._nvml_observer is not None:
+            stats["nvml"] = self._nvml_observer.snapshot()
         return stats

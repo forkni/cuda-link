@@ -165,7 +165,7 @@ class CUDAIPCImporter:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
         if self._importer is not None:
-            self._importer._nvml_observer = observer
+            self._importer.attach_nvml_observer(observer)
 
     @property
     def frame_count(self) -> int:
