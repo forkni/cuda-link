@@ -462,7 +462,7 @@ class TDReceiverEngine:
                     # CPU fallback: D2H + numpy convert + copyNumpyArray.
                     # Used when CuPy is not installed or GPU buffer allocation failed.
                     if self._f16_cpu_buf is None or self._f32_cpu_buf is None:
-                        debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
+                        self._log("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame", force=True)
                         return False
 
                     # D2H on _connection.stream: stream_wait_event (enqueued earlier) guarantees data is ready.
@@ -876,11 +876,7 @@ class TDReceiverEngine:
                             force=True,
                         )
 
-            self._cached_shape = CUDAMemoryShape()
-            self._cached_shape.width = width
-            self._cached_shape.height = height
-            self._cached_shape.numComps = num_comps
-            self._cached_shape.dataType = np_dtype
+            self._cached_shape = self._host.make_cuda_shape(width, height, num_comps, np_dtype)
 
             self._initialized = True
             self._diag_frames_since_reinit = 0  # Reset so import_frame logs the next 5 calls
@@ -1054,7 +1050,7 @@ class TDReceiverEngine:
         prev_format = self._format
         self._format = Format.from_metadata(_md)
 
-        # Rebuild _cached_shape when available (requires CUDAMemoryShape from TD runtime)
+        # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:
             if numpy is None:
                 import numpy as np_module
@@ -1068,15 +1064,7 @@ class TDReceiverEngine:
             else:
                 np_dtype = np_module.float32
 
-            try:
-                new_shape = CUDAMemoryShape()
-                new_shape.width = width
-                new_shape.height = height
-                new_shape.numComps = num_comps
-                new_shape.dataType = np_dtype
-                self._cached_shape = new_shape
-            except NameError:
-                pass  # CUDAMemoryShape not available outside TD runtime (e.g. unit tests)
+            self._cached_shape = self._host.make_cuda_shape(width, height, num_comps, np_dtype)
 
         # Advance version counter; signal resolution and/or pixel-format update if needed.
         conn.ipc_version = new_version

@@ -364,3 +364,102 @@ def test_real_top_handle_is_valid_false() -> None:
     top = type("DeletedTOP", (), {"valid": False, "par": _TDPar(), "inputs": []})()
     handle = RealTOPHandle(top)
     assert handle.is_valid() is False
+
+
+# ---------------------------------------------------------------------------
+# RealTDHost.make_cuda_shape tests
+# ---------------------------------------------------------------------------
+
+
+def test_real_tdhost_make_cuda_shape_sets_all_fields(monkeypatch: Any) -> None:
+    """make_cuda_shape() constructs a TD CUDAMemoryShape and sets all four fields."""
+    import numpy as np
+    from TDHost import RealTDHost
+
+    # Inject a minimal CUDAMemoryShape stub into the TDHost module namespace.
+    # RealTDHost.make_cuda_shape references it as a free name (TD interpreter global).
+    class _FakeShape:
+        pass
+
+    import TDHost as TDHostMod  # noqa: N813
+
+    monkeypatch.setattr(TDHostMod, "CUDAMemoryShape", _FakeShape, raising=False)
+
+    comp = _TDComp()
+    host = RealTDHost(comp)
+
+    shape = host.make_cuda_shape(1920, 1080, 4, np.float32)
+
+    assert isinstance(shape, _FakeShape)
+    assert shape.width == 1920
+    assert shape.height == 1080
+    assert shape.numComps == 4
+    assert shape.dataType is np.float32
+
+
+def test_real_tdhost_make_cuda_shape_uint8(monkeypatch: Any) -> None:
+    """make_cuda_shape() correctly stores numpy.uint8 scalar type (not dtype instance)."""
+    import numpy as np
+    from TDHost import RealTDHost
+
+    class _FakeShape:
+        pass
+
+    import TDHost as TDHostMod  # noqa: N813
+
+    monkeypatch.setattr(TDHostMod, "CUDAMemoryShape", _FakeShape, raising=False)
+
+    comp = _TDComp()
+    host = RealTDHost(comp)
+
+    shape = host.make_cuda_shape(64, 64, 1, np.uint8)
+
+    assert shape.dataType is np.uint8
+    assert shape.numComps == 1
+
+
+# ---------------------------------------------------------------------------
+# FakeTDHost.make_cuda_shape tests
+# ---------------------------------------------------------------------------
+
+
+def test_fake_tdhost_make_cuda_shape_records_call() -> None:
+    """FakeTDHost.make_cuda_shape returns FakeCUDAMemoryShape and records the call."""
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+    from _td_fakes import FakeCUDAMemoryShape, FakeTDHost
+
+    host = FakeTDHost()
+    shape = host.make_cuda_shape(320, 240, 3, np.uint8)
+
+    assert isinstance(shape, FakeCUDAMemoryShape)
+    assert shape.width == 320
+    assert shape.height == 240
+    assert shape.numComps == 3
+    assert shape.dataType is np.uint8
+    assert len(host.cuda_shapes) == 1
+    assert host.cuda_shapes[0] is shape
+
+
+def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
+    """Each make_cuda_shape call appends a distinct object to cuda_shapes."""
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+    from _td_fakes import FakeTDHost
+
+    host = FakeTDHost()
+    s1 = host.make_cuda_shape(64, 64, 4, np.float32)
+    s2 = host.make_cuda_shape(128, 128, 4, np.float32)
+
+    assert len(host.cuda_shapes) == 2
+    assert host.cuda_shapes[0] is s1
+    assert host.cuda_shapes[1] is s2
+    assert s1 is not s2
