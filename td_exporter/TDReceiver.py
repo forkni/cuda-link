@@ -49,7 +49,7 @@ from SHMProtocol import (  # noqa: E402
     SlotState,
     acquire_slot,
 )
-from TDConfig import TDSenderConfig  # noqa: E402
+from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
@@ -223,7 +223,7 @@ class TDReceiverEngine:
     def __init__(
         self,
         host: TDHost,
-        config: TDSenderConfig,
+        config: TDReceiverConfig,
         cuda: Any,
         log_fn: Callable,
         num_slots: int,

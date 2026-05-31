@@ -38,7 +38,7 @@ from SHMProtocol import (  # noqa: E402
     SHM_HEADER_SIZE,
     SLOT_SIZE,
 )
-from TDConfig import TDRuntimeState, TDSenderConfig  # noqa: E402
+from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig  # noqa: E402
 from TDHost import RealTDHost, TDHost  # noqa: E402
 from TDReceiver import TDReceiverEngine  # noqa: E402
 from TDSender import TDSenderEngine  # noqa: E402
@@ -222,7 +222,7 @@ class CUDAIPCExtension:
             )
         return TDReceiverEngine(
             host=self._host,
-            config=self._config,
+            config=TDReceiverConfig(),
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,
