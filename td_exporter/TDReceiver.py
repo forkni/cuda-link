@@ -31,6 +31,7 @@ from NVTXShim import verbose_range as _nvtx_verbose
 from SHMProtocol import (  # noqa: E402
     _ST_BBH,
     FLAGS_BFLOAT16,
+    FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
     FORMAT_KIND_UNSIGNED,
     MAGIC_OFFSET,
@@ -56,20 +57,31 @@ from TDHost import TDHost  # noqa: E402
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
 
 
-def _to_td_pixel_format(format_kind: int, bits_per_comp: int, num_comps: int) -> str:
+def _to_td_pixel_format(format_kind: int, bits_per_comp: int, num_comps: int, flags: int = 0) -> str:
     """Map SHM metadata → TouchDesigner Script TOP par.format string.
 
     Produces strings matching TD's internal par.format menu values, e.g.:
-      FORMAT_KIND_FLOAT,    32, 4  → "rgba32float"
-      FORMAT_KIND_UNSIGNED, 16, 4  → "rgba16fixed"
-      FORMAT_KIND_UNSIGNED,  8, 1  → "r8fixed"
-      FORMAT_KIND_UNSIGNED, 16, 1  → "r16fixed"
+      FORMAT_KIND_FLOAT,    32, 4               → "rgba32float"
+      FORMAT_KIND_UNSIGNED, 16, 4               → "rgba16fixed"
+      FORMAT_KIND_UNSIGNED,  8, 1               → "r8fixed"
+      FORMAT_KIND_FLOAT,    32, 2, FLAGS_MONO_ALPHA → "monoalpha32float"
+      FORMAT_KIND_FLOAT,    32, 2               → "rg32float"
 
     TD uses these to allocate the Script TOP's output texture. Setting
     par.format before copyCUDAMemory ensures the texture is the right size
     for the incoming dtype, preventing partial writes into an oversized buffer.
+
+    Args:
+        format_kind: FORMAT_KIND_FLOAT / UNSIGNED / SIGNED from wire metadata.
+        bits_per_comp: bits per component (8, 16, 32).
+        num_comps: number of channels.
+        flags: raw wire metadata flags; FLAGS_MONO_ALPHA disambiguates 2-channel
+               mono+alpha sources from genuine RG sources.
     """
-    ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
+    if num_comps == 2 and flags & FLAGS_MONO_ALPHA:
+        ch = "monoalpha"
+    else:
+        ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
     suffix = "float" if format_kind == FORMAT_KIND_FLOAT else "fixed"
     return f"{ch}{bits_per_comp}{suffix}"
 
@@ -320,7 +332,9 @@ class TDReceiverEngine:
         Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
         """
         if self._retry.consume_format_update():
-            return _to_td_pixel_format(self._format.format_kind, self._format.bits_per_comp, self._format.num_comps)
+            return _to_td_pixel_format(
+                self._format.format_kind, self._format.bits_per_comp, self._format.num_comps, self._format.flags
+            )
         return None
 
     # --- Core API ---
@@ -509,13 +523,13 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
-            _dt = self._cached_shape.dataType
-            _dtype_str = (
-                getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
+            _fmt_name = _to_td_pixel_format(
+                self._format.format_kind,
+                self._format.bits_per_comp,
+                self._format.num_comps,
+                self._format.flags,
             )
-            self._host.set_info_status(
-                f"{self._format.width}x{self._format.height} {_dtype_str} {self._format.num_comps}ch"
-            )
+            self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
 
             # Debug logging (97 = prime, avoids aliasing with slot counts 2,4,5)
             if self.verbose_performance and self.frame_count % 97 == 0:
@@ -575,7 +589,9 @@ class TDReceiverEngine:
         if not self._retry.needs_format_update:
             return False
         try:
-            fmt = _to_td_pixel_format(self._format.format_kind, self._format.bits_per_comp, self._format.num_comps)
+            fmt = _to_td_pixel_format(
+                self._format.format_kind, self._format.bits_per_comp, self._format.num_comps, self._format.flags
+            )
             handle.set_format(fmt)
             self._retry.needs_format_update = False
             self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)

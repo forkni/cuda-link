@@ -54,6 +54,7 @@ FORMAT_KIND_SIGNED: int = 0  # cudaChannelFormatKindSigned
 FORMAT_KIND_UNSIGNED: int = 1  # cudaChannelFormatKindUnsigned
 FORMAT_KIND_FLOAT: int = 2  # cudaChannelFormatKindFloat
 FLAGS_BFLOAT16: int = 0x0001  # bit0: bfloat16 (kind=Float, bits=16)
+FLAGS_MONO_ALPHA: int = 0x0002  # bit1: 2-channel source is mono+alpha, not RG
 
 
 class _DtypeEntry(NamedTuple):

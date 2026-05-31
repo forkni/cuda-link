@@ -26,7 +26,7 @@ from ActivationBarrier import HolderBarrier  # noqa: E402, I001
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
-from SHMProtocol import DtypeCodec, read_version, set_version  # noqa: E402
+from SHMProtocol import DtypeCodec, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
@@ -309,7 +309,9 @@ class TDSenderEngine:
         self._last_fmt_needs_conv = any(u in pixel_lower for u in _CUDA_UNSUPPORTED_PIXEL_FORMATS)
         return self._last_fmt_needs_conv
 
-    def initialize(self, width: int, height: int, channels: int = 4, buffer_size: int | None = None) -> bool:
+    def initialize(
+        self, width: int, height: int, channels: int = 4, buffer_size: int | None = None, extra_flags: int = 0
+    ) -> bool:
         """Open the Exporter with geometry from TD parameters.
 
         Called by CUDAIPCExtension.initialize() when the COMP first activates or
@@ -349,6 +351,7 @@ class TDSenderEngine:
                 dtype=dtype_guess,
                 num_slots=self.num_slots,
                 device=self.device,
+                extra_flags=extra_flags,
             )
             policy = ExportPolicy(
                 export_sync=self._config.export_sync,
@@ -455,7 +458,8 @@ class TDSenderEngine:
                     f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
                     force=True,
                 )
-                self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size)
+                _init_extra_flags = FLAGS_MONO_ALPHA if _pf_init.startswith("monoalpha") else 0
+                self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
                 self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
             return False  # skip this frame; next cook exports normally
@@ -587,6 +591,7 @@ class TDSenderEngine:
                     dtype=resolved_dtype,
                     num_slots=self.num_slots,
                     device=self.device,
+                    extra_flags=FLAGS_MONO_ALPHA if _pf_name.startswith("monoalpha") else 0,
                 )
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
