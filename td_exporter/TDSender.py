@@ -488,45 +488,40 @@ class TDSenderEngine:
                 cm.width, cm.height, cm_channels, cm.size, cm.data_type, self._current_spec.dtype
             )
 
-            # pixelFormatName override — detects dtype/channel changes that are invisible
-            # to cm.size / cm.data_type.  On dtype-shrink transitions (e.g. float32→uint8)
-            # TD reuses the old (larger) CUDA allocation, so cm.size and cm.data_type stay
-            # unchanged for multiple frames.  pixelFormatName updates immediately on ANY
-            # format change, in both directions.
+            # pixelFormatName — TD's authoritative label for the current pixel format.
+            # Kept for Status display and change-detection logging ONLY.
             #
-            # Applied on EVERY frame (not just when the name changes) so that stale cm.size
-            # frames after a reopen don't re-derive the old dtype from buffer size and
-            # trigger an oscillating reopen back in the opposite direction.
+            # We intentionally do NOT use it to override resolved_dtype / cm_channels for
+            # the export decision.  Previously applying it unconditionally caused a
+            # permanent skip-export trap on dtype-shrink transitions (e.g. float32→uint8):
+            # the name updated to the new format before TD's CUDA allocation had shrunk, so
+            # _size_matches was permanently false while the two stale-buffer guards returned
+            # False every frame — texture never sent, Status never updated.
+            #
+            # cm.size is the ground truth for what the GPU buffer actually contains (see
+            # _resolve_frame_dtype).  Waiting for cm.size to reflect the new format before
+            # reopening is the proven-correct approach (identical to v1.5.1 behaviour):
+            # we export the old format until TD's allocation catches up, then reopen once.
             _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
-            _pf_name_override = False
-            if _pf_name and _pf_name not in ("useinput",):
-                _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
-                if _pf_mapped is not None:
-                    _pf_dtype, _pf_ch = _pf_mapped
-                    if _pf_name != self._last_pixel_fmt_name:
-                        # Format name changed — log the override once.
-                        if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
-                            self._log(
-                                f"pixelFormatName={_pf_name!r}: overriding cm-derived "
-                                f"{resolved_dtype}/{cm_channels}ch → {_pf_dtype}/{_pf_ch}ch",
-                                force=True,
-                            )
-                        self._last_pixel_fmt_name = _pf_name
-                    # Always apply — prevents cm.size-stale frames from reverting dtype.
-                    resolved_dtype = _pf_dtype
-                    cm_channels = _pf_ch
-                    _pf_name_override = True
+            if _pf_name and _pf_name != self._last_pixel_fmt_name:
+                self._last_pixel_fmt_name = _pf_name
+                _pf_mapped_log = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
+                if _pf_mapped_log is not None:
+                    _pf_dtype_log, _pf_ch_log = _pf_mapped_log
+                    if _pf_dtype_log != resolved_dtype or _pf_ch_log != cm_channels:
+                        self._log(
+                            f"pixelFormatName changed to {_pf_name!r} "
+                            f"({_pf_dtype_log}/{_pf_ch_log}ch); cm-derived dtype is "
+                            f"{resolved_dtype}/{cm_channels}ch (cm.size={cm.size})",
+                            force=True,
+                        )
 
             # Defensive: if the byte count doesn't correspond to any supported dtype with
-            # the resolved channel count, handle two cases:
-            #   A. _pf_name_override=True → dtype-shrink transition; TD has not yet freed the
-            #      old (larger) allocation.  Fall through to the reopen guard — the dtype
-            #      change IS detected there — then skip export on this frame.
-            #   B. No override → try physical-channel inference (H2: RGBA-padded mono source
-            #      where cm.channels=1 but the GPU allocation is 4-channel RGBA).
+            # the resolved channel count, try physical-channel inference (H2: RGBA-padded
+            # mono source where cm.channels=1 but the GPU allocation is 4-channel RGBA).
             px = cm.width * cm.height * cm_channels
             _size_matches = px > 0 and bool(cm.size) and DtypeCodec.itemsize(resolved_dtype) * px == cm.size
-            if not _size_matches and not _pf_name_override:
+            if not _size_matches:
                 # H2: try to infer physical channel count from the buffer size.
                 # TD may report cm.channels=1 (logical) for a mono TOP while allocating
                 # RGBA-padded CUDA memory — e.g. mono float32 TOP: cm.channels=1 but
@@ -565,19 +560,11 @@ class TDSenderEngine:
             self._warned_dtype_size = False  # reset once a valid size is seen
 
             size_changed = cm.size != self._exporter.data_size
-            # When pixelFormatName confirms the current dtype+channels, suppress size_changed.
-            # TD's CUDA allocation may lag a format change by several frames; without this,
-            # the stale cm.size triggers an oscillating reopen back to the old dtype every frame.
-            _pf_confirms_spec = (
-                _pf_name_override
-                and resolved_dtype == self._current_spec.dtype
-                and cm_channels == self._current_spec.channels
-            )
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
                 or cm_channels != self._current_spec.channels
                 or resolved_dtype != self._current_spec.dtype
-                or (size_changed and not _pf_confirms_spec)
+                or size_changed
             ):
                 self._log(
                     f"Geometry/dtype change: "
@@ -611,15 +598,14 @@ class TDSenderEngine:
                     if self._exporter.shm_handle is not None:
                         set_version(self._exporter.shm_handle.buf, self._ipc_version)
 
-                # Stale-buffer path: pixelFormatName signalled a dtype-shrink but cm.size
-                # hasn't caught up yet (TD is still holding the old larger allocation).
-                # The reopen + VERSION_CHANGED are already done; skip exporting this frame.
-                # Force-cook ExportBuffer so TD reallocates its texture to the new format —
-                # without this, TD may hold the old allocation indefinitely because reading
-                # via cuda_memory() alone does not trigger a cook or texture reallocation.
-                if _pf_name_override and not _size_matches:
-                    top_op.cook(force=True)
-                    return False
+                # Emit Status immediately on reopen — don't wait for the first PUBLISHED
+                # frame so the format change is visible in the UI right away.
+                _reopen_status = (
+                    f"{new_spec.width}x{new_spec.height} {_pf_name}"
+                    if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
+                    else f"{new_spec.width}x{new_spec.height} {resolved_dtype} {cm_channels}ch"
+                )
+                self._host.set_info_status(_reopen_status)
 
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
@@ -628,24 +614,18 @@ class TDSenderEngine:
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
 
-            # Skip export while TD's CUDA allocation is still stale after a
-            # pixelFormatName-triggered reopen (hasn't caught up to the new format yet).
-            # The same check inside the reopen block catches the first stale frame;
-            # this catches all subsequent stale frames where no reopen fires because
-            # _pf_confirms_spec suppresses size_changed in the reopen guard above.
-            # Force-cook ExportBuffer on each stale frame to break the deadlock: without
-            # an explicit cook request, TD may hold the old allocation indefinitely.
-            if _pf_name_override and not _size_matches:
-                top_op.cook(force=True)
-                return False
-
             # Bridge step 2: wrap raw GPU pointer into GpuFrame and hand to Exporter.
             frame = GpuFrame(ptr=cm.ptr, size=cm.size)
             outcome = self._exporter.export(frame)
 
             if outcome is FrameOutcome.PUBLISHED:
                 self._barrier.tick_and_maybe_release(os.getpid(), log_fn=self._log)
-                self._host.set_info_status(f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch")
+                _pub_status = (
+                    f"{cm.width}x{cm.height} {_pf_name}"
+                    if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
+                    else f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch"
+                )
+                self._host.set_info_status(_pub_status)
                 return True
             return False
 
