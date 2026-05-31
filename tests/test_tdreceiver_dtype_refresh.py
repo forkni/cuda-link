@@ -116,9 +116,10 @@ def _inject_receiver_connection(
     buffer_size: int,
 ) -> None:
     """Simulate post-initialize_receiver state (no real CUDA handles)."""
-    from TDReceiver import FormatDescriptor, ReceiverConnection
+    from TDReceiver import ReceiverConnection
 
-    from cuda_link.shm_protocol import SHMLayout
+    from cuda_link.importer import Format
+    from cuda_link.shm_protocol import Metadata, SHMLayout
 
     layout = SHMLayout(num_slots=1)
     engine._connection = ReceiverConnection(
@@ -133,15 +134,16 @@ def _inject_receiver_connection(
         shutdown_offset=layout.shutdown_offset,
         last_write_idx=0,
     )
-    engine._format = FormatDescriptor(
+    md = Metadata(
         width=width,
         height=height,
         num_comps=channels,
         format_kind=format_kind,
         bits_per_comp=bits_per_comp,
         flags=0,
-        buffer_size=buffer_size,
+        data_size=buffer_size,
     )
+    engine._format = Format.from_metadata(md)
     engine._initialized = True
 
 
@@ -200,7 +202,7 @@ def test_receiver_refreshes_format_on_version_change(shm_cleanup: SharedMemory) 
         buffer_size=float32_size,
     )
 
-    assert engine._format.bits_per_comp == 32
+    assert engine._format.bits == 32
 
     # Step 2: sender writes new uint8 metadata and bumps version to 2
     uint8_size = W * H * C * 1
@@ -220,12 +222,11 @@ def test_receiver_refreshes_format_on_version_change(shm_cleanup: SharedMemory) 
     result = engine._refresh_on_version_change(2)
 
     assert result is True, "_refresh_on_version_change must return True for valid metadata"
-    assert engine._format.bits_per_comp == 8, (
-        f"Expected bits_per_comp=8 after refresh, got {engine._format.bits_per_comp}. "
-        "Receiver did not pick up the new dtype."
+    assert engine._format.bits == 8, (
+        f"Expected bits_per_comp=8 after refresh, got {engine._format.bits}. Receiver did not pick up the new dtype."
     )
-    assert engine._format.format_kind == FORMAT_KIND_UNSIGNED, (
-        f"Expected format_kind=1 (UNSIGNED) after refresh, got {engine._format.format_kind}."
+    assert engine._format.kind == FORMAT_KIND_UNSIGNED, (
+        f"Expected format_kind=1 (UNSIGNED) after refresh, got {engine._format.kind}."
     )
     assert engine._connection.ipc_version == 2, (
         f"ipc_version must be updated to 2, got {engine._connection.ipc_version}. "
@@ -270,8 +271,8 @@ def test_receiver_refresh_normal_case_preserves_format(shm_cleanup: SharedMemory
     result = engine._refresh_on_version_change(2)
 
     assert result is True
-    assert engine._format.bits_per_comp == 32
-    assert engine._format.format_kind == FORMAT_KIND_FLOAT
+    assert engine._format.bits == 32
+    assert engine._format.kind == FORMAT_KIND_FLOAT
     assert engine._connection.ipc_version == 2
     assert engine._connection.shm_handle is not None
 
@@ -346,13 +347,24 @@ def test_receiver_refresh_invalid_invariant_returns_false(shm_cleanup: SharedMem
     ],
 )
 def test_to_td_pixel_format(format_kind, bits, num_comps, expected):
-    """_to_td_pixel_format must produce the correct par.format string for every dtype/channel combo."""
-    from TDReceiver import _to_td_pixel_format
+    """td_format_string must produce the correct par.format string for every dtype/channel combo."""
+    from TDReceiver import td_format_string
 
-    result = _to_td_pixel_format(format_kind, bits, num_comps)
-    assert result == expected, (
-        f"_to_td_pixel_format({format_kind},{bits},{num_comps}) = {result!r}, expected {expected!r}"
+    from cuda_link.importer import Format
+    from cuda_link.shm_protocol import Metadata
+
+    md = Metadata(
+        width=1,
+        height=1,
+        num_comps=num_comps,
+        format_kind=format_kind,
+        bits_per_comp=bits,
+        flags=0,
+        data_size=num_comps * (bits // 8),
     )
+    fmt = Format.from_metadata(md)
+    result = td_format_string(fmt)
+    assert result == expected, f"td_format_string({format_kind},{bits},{num_comps}) = {result!r}, expected {expected!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -574,16 +586,17 @@ def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int)
             channels=channels,
             buffer_size=data_size,
         )
-        # Manually apply the flag logic that initialize_receiver applies post-FormatDescriptor build:
+        # Manually apply the flag logic that initialize_receiver applies post-Format build:
         # (We can't call initialize_receiver directly without real CUDA handles, so we
         # replicate the exact condition we're testing.)
-        from cuda_link.shm_protocol import FORMAT_KIND_FLOAT
+        from TDReceiver import td_format_string
 
         engine._retry.needs_format_update = False  # ensure clean state
         engine._retry.needs_resolution_update = False
 
-        # Simulate the flag-setting block added in Part 6:
-        if not (format_kind == FORMAT_KIND_FLOAT and bits == 32):
+        # Simulate the flag-setting block: any format other than the TD default rgba32float
+        # requires an explicit set_format call before copyCUDAMemory.
+        if td_format_string(engine._format) != "rgba32float":
             engine._retry.needs_format_update = True
         engine._retry.needs_resolution_update = True
 
@@ -598,8 +611,8 @@ def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int)
     "format_kind,bits,channels,expect_flag",
     [
         (2, 32, 4, False),  # float32 RGBA — Script TOP default, no set_format needed
-        (2, 32, 1, False),  # float32 mono — same bit depth, no set_format needed
-        (2, 32, 2, False),  # float32 RG   — same bit depth, no set_format needed
+        (2, 32, 1, True),  # float32 mono — r32float != rgba32float → must set par.format
+        (2, 32, 2, True),  # float32 RG   — rg32float != rgba32float → must set par.format
         (1, 16, 4, True),  # uint16 RGBA  — 16 MB into 32 MB without this → quarter-frame
         (1, 8, 4, True),  # uint8 RGBA   —  8 MB into 32 MB without this → quarter-frame
         (1, 16, 1, True),  # uint16 mono  — non-float32 bit depth
@@ -616,23 +629,37 @@ def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int)
     ],
 )
 def test_needs_format_update_at_init(format_kind, bits, channels, expect_flag):
-    """needs_format_update must be True at init for non-float32 bit depths only.
+    """needs_format_update must be True at init for all non-rgba32float formats.
 
     Part 6 regression: without this, a uint8/uint16 receiver connecting fresh to a
     non-float32 sender never sets par.format → Script TOP stays float32 → copies
     partial data into an oversized buffer → corruption on every frame, not just
     after a mid-stream change.
-    """
-    from cuda_link.shm_protocol import FORMAT_KIND_FLOAT
 
-    # Replicate the exact flag condition added in Part 6 (the single-line fix)
-    flag_would_be_set = not (format_kind == FORMAT_KIND_FLOAT and bits == 32)
+    Note: float32 mono/RG formats are also non-default (r32float / rg32float ≠
+    rgba32float) and therefore also require an explicit set_format call.
+    """
+    from TDReceiver import td_format_string
+
+    from cuda_link.importer import Format
+    from cuda_link.shm_protocol import Metadata
+
+    md = Metadata(
+        width=1,
+        height=1,
+        num_comps=channels,
+        format_kind=format_kind,
+        bits_per_comp=bits,
+        flags=0,
+        data_size=channels * (bits // 8),
+    )
+    fmt = Format.from_metadata(md)
+    flag_would_be_set = td_format_string(fmt) != "rgba32float"
     assert flag_would_be_set == expect_flag, (
         f"format_kind={format_kind}, bits={bits}, channels={channels}: "
         f"needs_format_update at init should be {expect_flag}, "
-        f"but the condition produces {flag_would_be_set}.\n"
-        "Float32 sources must NOT set it (matches Script TOP default). "
-        "Non-float32 bit depths MUST set it."
+        f"but td_format_string={td_format_string(fmt)!r} produces {flag_would_be_set}.\n"
+        "Only rgba32float matches the Script TOP default and needs no explicit set_format."
     )
 
 

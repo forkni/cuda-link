@@ -169,6 +169,32 @@ class Format:
     frame_nbytes: int
 
     @classmethod
+    def from_metadata(cls, md: Metadata) -> Format:
+        """Build from an already-read Metadata value object.
+
+        The caller is responsible for reading and validating the Metadata
+        (e.g. checking md.data_size == md.expected_size) before calling this.
+        Use from_shm() when reading directly from shared memory.
+        """
+        dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
+        itemsize = DtypeCodec.itemsize(dtype_str)
+        shape = (md.height, md.width, md.num_comps)
+        frame_nbytes = md.height * md.width * md.num_comps * itemsize
+        numpy_dtype = _numpy_dtype_for(dtype_str)
+        return cls(
+            width=md.width,
+            height=md.height,
+            num_comps=md.num_comps,
+            kind=md.format_kind,
+            bits=md.bits_per_comp,
+            flags=md.flags,
+            dtype_str=dtype_str,
+            shape=shape,
+            numpy_dtype=numpy_dtype,
+            frame_nbytes=frame_nbytes,
+        )
+
+    @classmethod
     def from_shm(cls, shm_buf: object, num_slots: int) -> Format | None:
         """Parse extended metadata block from shared memory.
 
@@ -180,23 +206,7 @@ class Format:
         try:
             md = Metadata.read_from(shm_buf, layout)
             if md.width > 0 and md.height > 0 and md.num_comps > 0:
-                dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
-                itemsize = DtypeCodec.itemsize(dtype_str)
-                shape = (md.height, md.width, md.num_comps)
-                frame_nbytes = md.height * md.width * md.num_comps * itemsize
-                numpy_dtype = _numpy_dtype_for(dtype_str)
-                return cls(
-                    width=md.width,
-                    height=md.height,
-                    num_comps=md.num_comps,
-                    kind=md.format_kind,
-                    bits=md.bits_per_comp,
-                    flags=md.flags,
-                    dtype_str=dtype_str,
-                    shape=shape,
-                    numpy_dtype=numpy_dtype,
-                    frame_nbytes=frame_nbytes,
-                )
+                return cls.from_metadata(md)
         except (struct.error, ValueError, IndexError):
             pass
         return None
