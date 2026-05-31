@@ -28,14 +28,9 @@ from unittest.mock import MagicMock
 
 def _make_api() -> object:
     """Return a CUDARuntimeAPI with a real MagicMock cudart and full setup run."""
-    from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
+    from tests.fakes import make_bare_runtime_api
 
-    api = CUDARuntimeAPI.__new__(CUDARuntimeAPI)
-    api.cudart = MagicMock()
-    api._sticky_check_enabled = False
-    api._setup_function_signatures()
-    api._install_errcheck()
-    return api
+    return make_bare_runtime_api(install_errcheck=True)
 
 
 # ---------------------------------------------------------------------------

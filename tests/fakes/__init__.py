@@ -184,3 +184,33 @@ def make_connected_importer(
         cupy=cupy,
         last_write_idx=last_write_idx,
     )
+
+
+def make_bare_runtime_api(*, install_errcheck: bool = False, cudart: object | None = None) -> object:
+    """Build a CUDARuntimeAPI without running __init__ (no GPU / DLL load).
+
+    Allocates via __new__, injects a MagicMock cudart (or the supplied one), and
+    disables sticky-error checking.  With install_errcheck=True it also runs
+    _setup_function_signatures() + _install_errcheck() for errcheck-path tests.
+
+    Args:
+        install_errcheck: If True, run _setup_function_signatures() and
+                          _install_errcheck() so that errcheck-coverage tests can
+                          exercise the full binding path without a real GPU.
+        cudart:           An explicit cudart mock to inject.  None (default) →
+                          a fresh MagicMock() is created.
+
+    Returns:
+        A CUDARuntimeAPI instance whose __init__ was never called.
+    """
+    from unittest.mock import MagicMock
+
+    from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
+
+    api = CUDARuntimeAPI.__new__(CUDARuntimeAPI)
+    api.cudart = cudart if cudart is not None else MagicMock()
+    api._sticky_check_enabled = False
+    if install_errcheck:
+        api._setup_function_signatures()
+        api._install_errcheck()
+    return api

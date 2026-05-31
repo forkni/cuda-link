@@ -24,8 +24,6 @@ MagicMock cudart.  No ``@pytest.mark.requires_cuda`` marker needed.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -33,10 +31,9 @@ from unittest.mock import MagicMock
 
 def _make_api() -> object:
     """Return a CUDARuntimeAPI instance with a mock cudart, no GPU required."""
-    from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
+    from tests.fakes import make_bare_runtime_api
 
-    api = CUDARuntimeAPI.__new__(CUDARuntimeAPI)
-    api.cudart = MagicMock()
+    api = make_bare_runtime_api()
     # ipc_open_mem_handle reads/writes a c_void_p; make cudaIpcOpenMemHandle a no-op.
     api.cudart.cudaIpcOpenMemHandle.return_value = None
     api.cudart.cudaIpcOpenEventHandle.return_value = None
