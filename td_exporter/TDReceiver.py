@@ -277,6 +277,8 @@ class TDReceiverEngine:
         self._cupy_f32_buf = None
         self._cupy_f16_views: list = []
         self._cached_shape = None
+        # monoalpha CPU path: (height, width, 2) float32 scratch buffer
+        self._monoalpha_cpu_buf = None
 
         self._diag_frames_since_reinit: int = 0
 
@@ -503,6 +505,20 @@ class TDReceiverEngine:
                         casting="same_kind",
                     )
                     handle.copy_numpy_array(self._f32_cpu_buf)
+            elif bool(self._format.flags & FLAGS_MONO_ALPHA) and self._format.num_comps == 2:
+                # 2-channel monoalpha: D2H download then copyNumpyArray into monoalpha32float
+                # Script TOP.  copyCUDAMemory(numComps=2) always routes ch1→G regardless of
+                # par.format; copyNumpyArray respects the TOP's component layout, so a
+                # monoalpha32float Script TOP should map component0→mono and component1→alpha,
+                # giving the correct R+A (mono+alpha) display instead of R+G.
+                if self._monoalpha_cpu_buf is None:
+                    # Buffer not allocated (shouldn't happen after initialize_receiver).
+                    return False
+                cpu_ptr = self._monoalpha_cpu_buf.ctypes.data_as(c_void_p)
+                # D2H on _connection.stream: stream_wait_event above guarantees GPU data is ready.
+                self.cuda.memcpy_async(cpu_ptr, c_void_p(address), self._format.buffer_size, 2, self._connection.stream)
+                self.cuda.stream_synchronize(self._connection.stream)
+                handle.copy_numpy_array(self._monoalpha_cpu_buf)
             else:
                 handle.copy_cuda_memory(
                     address,
@@ -935,6 +951,15 @@ class TDReceiverEngine:
             self._cached_shape.numComps = num_comps
             self._cached_shape.dataType = np_dtype
 
+            # Allocate CPU scratch buffer for the monoalpha D2H→copyNumpyArray path.
+            # copyCUDAMemory(numComps=2) always routes ch1→G regardless of par.format;
+            # copyNumpyArray respects the TOP's component mapping so a monoalpha32float
+            # Script TOP should route component0→mono, component1→alpha, giving R+A display.
+            if bool(flags & FLAGS_MONO_ALPHA) and num_comps == 2:
+                self._monoalpha_cpu_buf = numpy.empty((height, width, 2), dtype=numpy.float32)
+            else:
+                self._monoalpha_cpu_buf = None
+
             self._initialized = True
             self._diag_frames_since_reinit = 0  # Reset so import_frame logs the next 5 calls
             _init_ms = (time.perf_counter() - _t0) * 1000.0
@@ -1145,6 +1170,12 @@ class TDReceiverEngine:
                 self._cached_shape = new_shape
             except NameError:
                 pass  # CUDAMemoryShape not available outside TD runtime (e.g. unit tests)
+
+            # Reallocate monoalpha CPU scratch buffer on geometry/format change.
+            if bool(flags & FLAGS_MONO_ALPHA) and num_comps == 2:
+                self._monoalpha_cpu_buf = numpy.empty((height, width, 2), dtype=numpy.float32)
+            else:
+                self._monoalpha_cpu_buf = None
 
         # Advance version counter; signal resolution and/or pixel-format update if needed.
         conn.ipc_version = new_version

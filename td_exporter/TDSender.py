@@ -433,17 +433,8 @@ class TDSenderEngine:
         if self._exporter is None or not self._initialized:
             # Lazy init: probe geometry from the first available frame, then skip this
             # cook.  The Exporter opens here; the actual export starts on the next cook.
-            # Read pixelFormatName before the probe so we can request rgba32float expansion
-            # for monoalpha sources — this lets TD expand [mono,alpha] → [R,G,B,A] on the
-            # GPU, routing alpha to ch3 so copyCUDAMemory puts it in the Alpha channel.
-            _pf_init = str(getattr(top_op, "pixel_format_name", "") or "")
-            _pf_init_is_monoalpha = bool(
-                _pf_init and _pf_init not in ("useinput",) and _pf_init.startswith("monoalpha")
-            )
             try:
-                cm_probe = top_op.cuda_memory(
-                    pixel_format="rgba32float" if _pf_init_is_monoalpha else None,
-                )  # stream=None → default stream, safe for probe
+                cm_probe = top_op.cuda_memory()  # stream=None → default stream, safe for probe
             except Exception as e:
                 self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
                 return False
@@ -452,24 +443,19 @@ class TDSenderEngine:
             # (TD holds the old CUDA memory until ExportBuffer is explicitly re-cooked).
             # pixelFormatName updates immediately when the source format changes, so it
             # gives the correct dtype even before cm.size has caught up.
+            _pf_init = str(getattr(top_op, "pixel_format_name", "") or "")
             _pf_init_mapped = (
                 _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_init) if _pf_init and _pf_init not in ("useinput",) else None
             )
             if _pf_init_mapped is not None:
                 _init_dtype, _init_ch = _pf_init_mapped
-                # If monoalpha expansion was requested and cm_probe has 4 channels,
-                # TD expanded the data to RGBA — use the actual (expanded) geometry.
-                if _pf_init_is_monoalpha and cm_probe.channels == 4:
-                    _init_ch = 4
-                    _init_dtype = "float32"
                 # Compute the buffer_size that should correspond to the declared format.
                 # _guess_dtype_from_buffer_size will then derive the same dtype from it,
                 # ensuring _current_spec uses the correct dtype from the start.
                 _init_size = cm_probe.width * cm_probe.height * _init_ch * DtypeCodec.itemsize(_init_dtype)
                 self._last_pixel_fmt_name = _pf_init  # seed cache — first export frame won't re-override
                 self._log(
-                    f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch"
-                    + (" (expanded to RGBA)" if _pf_init_is_monoalpha and cm_probe.channels == 4 else ""),
+                    f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
                     force=True,
                 )
                 _init_extra_flags = FLAGS_MONO_ALPHA if _pf_init.startswith("monoalpha") else 0
@@ -483,21 +469,9 @@ class TDSenderEngine:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
-            #
-            # Read pixelFormatName first so we can request RGBA expansion for monoalpha
-            # sources: copyCUDAMemory always routes numComps=2 to R+G (no API for R+A),
-            # but passing pixelFormat='rgba32float' to cudaMemory() on a monoalpha TOP may
-            # cause TD to expand [mono,alpha]→[R,G,B,A] on the GPU, placing alpha in ch3
-            # so the Consumer's copyCUDAMemory puts it in the Alpha channel.
             _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
-            _is_monoalpha_source = bool(_pf_name and _pf_name not in ("useinput",) and _pf_name.startswith("monoalpha"))
-            _pf_pixel_format_request = "rgba32float" if _is_monoalpha_source else None
-
             try:
-                cm = top_op.cuda_memory(
-                    stream=int(self._exporter.ipc_stream.value),
-                    pixel_format=_pf_pixel_format_request,
-                )
+                cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
             except Exception as cuda_err:
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
                 return False
@@ -529,10 +503,6 @@ class TDSenderEngine:
             # length, reading only the valid front region of the (still-oversized) GPU
             # allocation — the same approach v1.5.1 uses with its fixed slot size.
             #
-            # Special case for monoalpha expansion: if we requested rgba32float and TD
-            # returned 4 channels (cm.channels==4), the expansion worked — trust the real
-            # cm.channels/cm.size instead of overriding back to the 2-ch pf mapping.
-            _pf_expanded_to_rgba = _is_monoalpha_source and cm_channels == 4
             _pf_name_override = False
             if _pf_name and _pf_name not in ("useinput",):
                 _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
@@ -544,18 +514,14 @@ class TDSenderEngine:
                             self._log(
                                 f"pixelFormatName changed to {_pf_name!r} "
                                 f"({_pf_dtype}/{_pf_ch}ch); cm-derived dtype is "
-                                f"{resolved_dtype}/{cm_channels}ch (cm.size={cm.size})"
-                                + (" [RGBA expansion active]" if _pf_expanded_to_rgba else ""),
+                                f"{resolved_dtype}/{cm_channels}ch (cm.size={cm.size})",
                                 force=True,
                             )
                         self._last_pixel_fmt_name = _pf_name
-                    if not _pf_expanded_to_rgba:
-                        # Standard path: apply the mapping override so dtype-shrink transitions
-                        # are detected before cm.size/cm.data_type catch up.
-                        resolved_dtype = _pf_dtype
-                        cm_channels = _pf_ch
-                    # else: TD already expanded to 4ch RGBA; cm.channels and resolved_dtype
-                    # are already correct — do NOT override back to the 2-ch mapping.
+                    # Always apply — gives correct dtype even before cm.size/cm.data_type
+                    # catch up to the new format (they lag on dtype-shrink transitions).
+                    resolved_dtype = _pf_dtype
+                    cm_channels = _pf_ch
                     _pf_name_override = True
 
             # Defensive: if the byte count doesn't correspond to the resolved dtype AND no
@@ -651,12 +617,9 @@ class TDSenderEngine:
                 )
                 self._host.set_info_status(_reopen_status)
 
-                # Re-fetch texture memory on the new Exporter's stream (with expansion if monoalpha).
+                # Re-fetch texture memory on the new Exporter's stream.
                 try:
-                    cm = top_op.cuda_memory(
-                        stream=int(self._exporter.ipc_stream.value),
-                        pixel_format=_pf_pixel_format_request,
-                    )
+                    cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
                 except Exception as cuda_err:
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
