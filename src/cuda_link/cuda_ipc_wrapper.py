@@ -150,6 +150,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin\cudart64_12.dll",
         ]
+        last_path_err: OSError | None = None
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
@@ -158,6 +159,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     return dll
                 except OSError as e:
                     _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
+                    last_path_err = e
                     continue
 
         # Fallback: try by bare name — if cudart is already loaded in this process
@@ -169,6 +171,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # already-loaded handle from the process DLL cache — not a new DLL search — so
         # the winmode DLL-search-path flags are irrelevant.
         dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
+        last_name_err: OSError | None = None
         for name in dll_names:
             try:
                 dll = ctypes.CDLL(name)
@@ -176,12 +179,31 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                 return dll
             except OSError as e:
                 _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
+                last_name_err = e
                 continue
 
+        # Build a diagnostic message that includes the last OS error from each tier.
+        # The ctypes reference notes that WinError 126 ("The specified module could not
+        # be found") does NOT identify the *missing dependent DLL* — only the entry
+        # point that failed to load.  Surface the winerror code so the user can run a
+        # dependency tracer (e.g. Dependencies.exe or dumpbin /dependents).
+        last_err = last_name_err or last_path_err
+        winerror = getattr(last_err, "winerror", None)
+        err_detail = f"\nLast OS error: {last_err} (winerror={winerror})" if last_err else ""
+        hint_126 = (
+            (
+                "\nHint: winerror 126 means a *dependent* DLL of cudart was not found, "
+                "not cudart itself.  Run 'dumpbin /dependents cudart64_12.dll' or open "
+                "the DLL in Dependencies.exe to identify the missing dependency."
+            )
+            if winerror == 126
+            else ""
+        )
         raise RuntimeError(
             "Could not load CUDA runtime. Please ensure CUDA 12.x is installed.\n"
             f"Tried paths: {dll_paths}\n"
             f"Tried names: {dll_names}"
+            f"{err_detail}{hint_126}"
         )
 
     @staticmethod

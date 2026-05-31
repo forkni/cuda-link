@@ -123,6 +123,50 @@ def test_exemptions_do_not_have_errcheck() -> None:
     )
 
 
+def test_every_bound_func_has_argtypes() -> None:
+    """Every explicitly-bound cudart function must have argtypes set.
+
+    Background
+    ----------
+    The ctypes reference manual stresses that *always* specifying argtypes is
+    critical on 64-bit platforms: without it, a pointer argument is silently
+    truncated to C int (32 bits), producing silent data corruption rather than
+    a clear error.  This test catches the "added restype but forgot argtypes"
+    mistake before it reaches production.
+
+    A function is considered explicitly bound when its restype was assigned
+    (stored in child.__dict__['restype']), which is the same signal used by the
+    errcheck coverage test.  We then require that argtypes was also explicitly
+    set to a non-MagicMock list/tuple.
+    """
+    api = _make_api()
+
+    missing_argtypes: list[str] = []
+
+    for name, child in api.cudart._mock_children.items():
+        if name.startswith("_"):
+            continue
+        # Only check functions that were explicitly bound (restype was assigned).
+        # Unbound functions have no __dict__ restype entry.
+        restype = child.__dict__.get("restype")
+        if restype is None:
+            continue  # never explicitly set — not a bound function
+
+        argtypes = child.__dict__.get("argtypes")
+        is_real_argtypes = argtypes is not None and not isinstance(argtypes, MagicMock)
+
+        if not is_real_argtypes:
+            missing_argtypes.append(name)
+
+    assert not missing_argtypes, (
+        "These explicitly-bound cudart functions are missing argtypes:\n"
+        + "".join(f"  {n}\n" for n in sorted(missing_argtypes))
+        + "Add argtypes to _setup_function_signatures for each listed function.  "
+        "Without argtypes, pointer arguments are silently truncated to 32-bit int "
+        "on 64-bit platforms (ctypes reference, 'Specifying the required argument types')."
+    )
+
+
 def test_cudaGetLastError_not_bound() -> None:
     """cudaGetLastError must NOT be bound on cudart.
 
