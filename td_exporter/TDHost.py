@@ -46,8 +46,14 @@ class TOPHandle(Protocol):
     RealTOPHandle (TD-connected) and FakeTOPHandle (in-process test double).
     """
 
-    def cuda_memory(self, stream: Any = None) -> CUDAMemoryRef:
-        """Call top.cudaMemory(stream=stream) and return a CUDAMemoryRef."""
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> CUDAMemoryRef:
+        """Call top.cudaMemory(stream=stream, pixelFormat=pixel_format) and return a CUDAMemoryRef.
+
+        pixel_format: optional TD pixelFormatName string (e.g. 'rgba32float').  Passed as the
+        pixelFormat keyword argument to cudaMemory() — TD may convert the texture to the requested
+        format before returning the CUDA memory block.  Use 'rgba32float' for monoalpha sources
+        to request a 4-channel RGBA expansion (R/G/B=mono, A=alpha) if TD supports it.
+        """
         ...
 
     @property
@@ -168,8 +174,13 @@ class RealTOPHandle(TOPHandle):
     def __init__(self, top: Any) -> None:
         self._top = top
 
-    def cuda_memory(self, stream: Any = None) -> CUDAMemoryRef:
-        cm = self._top.cudaMemory(stream=stream) if stream is not None else self._top.cudaMemory()
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> CUDAMemoryRef:
+        kwargs: dict = {}
+        if stream is not None:
+            kwargs["stream"] = stream
+        if pixel_format is not None:
+            kwargs["pixelFormat"] = pixel_format
+        cm = self._top.cudaMemory(**kwargs) if kwargs else self._top.cudaMemory()
         shape = cm.shape
         return CUDAMemoryRef(
             ptr=int(cm.ptr),
