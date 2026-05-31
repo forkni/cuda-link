@@ -1091,16 +1091,7 @@ class Importer:
 
     def _partial_cleanup_for_reconnect(self) -> None:
         """Release IPC handles and reset connection state; keep Importer alive for retry."""
-        if getattr(self, "_numpy", None) is not None:
-            self._numpy.close()
-            self._numpy = None
-        if getattr(self, "_conn", None) is not None:
-            self._conn.close()
-            self._conn = None
-        self._torch = None
-        self._cupy = None
-        self._format = None
-        self._initialized = False
+        self._release_connection_state()
         if self._retry is None:
             self._retry = _RetryState(
                 max_connect_attempts=self._policy.reconnect_max_attempts,
@@ -1363,8 +1354,8 @@ class Importer:
     # Teardown
     # ------------------------------------------------------------------
 
-    def close(self) -> None:
-        """Release all CUDA and SHM resources. Idempotent."""
+    def _release_connection_state(self) -> None:
+        """Release IPC/numpy resources and reset per-connection state. Idempotent."""
         if getattr(self, "_numpy", None) is not None:
             self._numpy.close()
             self._numpy = None
@@ -1375,6 +1366,10 @@ class Importer:
         self._cupy = None
         self._format = None
         self._initialized = False
+
+    def close(self) -> None:
+        """Release all CUDA and SHM resources. Idempotent."""
+        self._release_connection_state()
         logger.info("Importer closed")
 
     def __del__(self) -> None:

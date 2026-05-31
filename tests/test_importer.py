@@ -144,6 +144,36 @@ def test_close_clears_initialized_flag() -> None:
     assert not imp._initialized
 
 
+def test_release_connection_state_shared_teardown_path() -> None:
+    """close() and _partial_cleanup_for_reconnect() share _release_connection_state (C2-slice).
+
+    Both callers must null _numpy/_conn and clear _initialized.
+    Only the reconnect path calls request_immediate_reconnect() — close() must not.
+    """
+    from unittest.mock import patch
+
+    # close() path: _conn/_numpy nulled, _initialized cleared; request_immediate_reconnect NOT called.
+    imp_close = _make_connected_importer()
+    assert imp_close._conn is not None
+    assert imp_close._numpy is not None
+    assert imp_close._initialized
+    with patch.object(imp_close._retry, "request_immediate_reconnect") as mock_reconnect:
+        imp_close.close()
+        mock_reconnect.assert_not_called()
+    assert imp_close._conn is None
+    assert imp_close._numpy is None
+    assert not imp_close._initialized
+
+    # _partial_cleanup_for_reconnect() path: same nulls + request_immediate_reconnect IS called.
+    imp_reconnect = _make_connected_importer()
+    with patch.object(imp_reconnect._retry, "request_immediate_reconnect") as mock_reconnect:
+        imp_reconnect._partial_cleanup_for_reconnect()
+        mock_reconnect.assert_called_once()
+    assert imp_reconnect._conn is None
+    assert imp_reconnect._numpy is None
+    assert not imp_reconnect._initialized
+
+
 # ---------------------------------------------------------------------------
 # Context manager
 # ---------------------------------------------------------------------------
