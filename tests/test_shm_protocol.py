@@ -32,6 +32,7 @@ from cuda_link.shm_protocol import (
     read_version,
     read_write_idx,
     set_shutdown,
+    set_version,
 )
 
 # ---------------------------------------------------------------------------
@@ -446,3 +447,91 @@ def test_metadata_roundtrip_all_dtypes(dtype: str) -> None:
     assert meta_out == meta_in
     # Verify round-trip through DtypeCodec
     assert DtypeCodec.decode(meta_out.format_kind, meta_out.bits_per_comp, meta_out.flags) == dtype
+
+
+# ---------------------------------------------------------------------------
+# set_version — monotonic seeding across sender reopen (Part 2 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_set_version_writes_explicit_value() -> None:
+    """set_version writes an arbitrary value that read_version reads back."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    set_version(buf, 7)
+    assert read_version(buf) == 7
+
+
+def test_set_version_overwrites_bump_version() -> None:
+    """set_version replaces the counter set by bump_version."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    bump_version(buf)  # → 1
+    bump_version(buf)  # → 2
+    set_version(buf, 42)
+    assert read_version(buf) == 42
+
+
+def test_set_version_zero_allowed() -> None:
+    """set_version(0) is allowed (used to reset; acquire_slot skips version check at 0)."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    bump_version(buf)
+    set_version(buf, 0)
+    assert read_version(buf) == 0
+
+
+def test_version_collision_reproduces_old_bug() -> None:
+    """Demonstrates the reopen-version-collision bug: if both opens produce version=1,
+    acquire_slot with last_version=1 returns NEW_FRAME (not VERSION_CHANGED) even
+    though the IPC handles changed. This is the bug set_version() fixes."""
+    layout = SHMLayout(num_slots=1)
+    buf = memoryview(bytearray(layout.total_size))
+
+    # Simulate first open: bump_version → 1; receiver connects with last_version=1.
+    bump_version(buf)  # version now 1
+    last_version = read_version(buf)  # receiver caches 1
+
+    # Publish a frame so write_idx advances
+    publish_frame(buf, layout, write_idx=5, timestamp=time.perf_counter())
+
+    # Simulate close() unlink + reopen: fresh zeroed segment, bump_version → 1 again.
+    fresh_buf = memoryview(bytearray(layout.total_size))
+    bump_version(fresh_buf)  # version = 1 — SAME as before!
+
+    # Publish a frame on the new segment too
+    publish_frame(fresh_buf, layout, write_idx=1, timestamp=time.perf_counter())
+
+    # Without set_version: acquire returns NEW_FRAME (stale handles used → bug)
+    result = acquire_slot(fresh_buf, layout, last_write_idx=0, last_version=last_version)
+    assert result.state == SlotState.NEW_FRAME, "Collision confirmed: same version=1 → receiver missed the reopen"
+
+
+def test_set_version_fixes_version_collision() -> None:
+    """Verifies the fix: after set_version(engine_counter), acquire_slot fires
+    VERSION_CHANGED even though the SHM segment is fresh and would normally reset to 1."""
+    layout = SHMLayout(num_slots=1)
+
+    # First open: version = 1; receiver caches last_version = 1.
+    buf_open1 = memoryview(bytearray(layout.total_size))
+    bump_version(buf_open1)
+    last_version = read_version(buf_open1)  # 1
+    engine_counter = last_version  # engine seeds from first open
+
+    # Sender changes dtype → close() + open() → fresh segment.
+    buf_open2 = memoryview(bytearray(layout.total_size))
+    bump_version(buf_open2)  # would naturally be 1 — collision
+
+    # FIX: engine increments its counter and injects it.
+    engine_counter += 1  # 2
+    set_version(buf_open2, engine_counter)
+    assert read_version(buf_open2) == 2
+
+    # Now acquire_slot must fire VERSION_CHANGED (not NEW_FRAME or NO_FRAME).
+    # write_idx on fresh segment is 0 — no frame published yet, so without the
+    # version change it would be NO_FRAME.  With version change it fires immediately.
+    result = acquire_slot(buf_open2, layout, last_write_idx=0, last_version=last_version)
+    assert result.state == SlotState.VERSION_CHANGED, (
+        "set_version fix failed: receiver did not see VERSION_CHANGED after dtype-change reopen"
+    )
+    assert result.new_version == 2

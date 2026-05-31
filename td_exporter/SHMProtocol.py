@@ -54,6 +54,7 @@ FORMAT_KIND_SIGNED: int = 0  # cudaChannelFormatKindSigned
 FORMAT_KIND_UNSIGNED: int = 1  # cudaChannelFormatKindUnsigned
 FORMAT_KIND_FLOAT: int = 2  # cudaChannelFormatKindFloat
 FLAGS_BFLOAT16: int = 0x0001  # bit0: bfloat16 (kind=Float, bits=16)
+FLAGS_MONO_ALPHA: int = 0x0002  # bit1: 2-channel source is mono+alpha, not RG
 
 
 class _DtypeEntry(NamedTuple):
@@ -321,6 +322,19 @@ def bump_version(buf: memoryview) -> int:
     new_version = current + 1
     _ST_U64.pack_into(buf, VERSION_OFFSET, new_version)
     return new_version
+
+
+def set_version(buf: memoryview, version: int) -> None:
+    """Write an explicit version value, overriding the counter.
+
+    Used by the sender engine to maintain a monotonic version counter across
+    close()+open() cycles: Exporter.close() unlinks the SHM segment, so the
+    next open() creates a fresh region where bump_version would reset to 1.
+    Calling set_version() immediately after open() injects the engine-held
+    monotonic value, guaranteeing the receiver's `version != last_version`
+    check fires even when a dtype-change reopen produces a fresh segment.
+    """
+    _ST_U64.pack_into(buf, VERSION_OFFSET, version)
 
 
 # ---------------------------------------------------------------------------

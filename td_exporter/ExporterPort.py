@@ -50,6 +50,7 @@ class FrameSpec:
     dtype: str = "uint8"
     num_slots: int = 3
     device: int = 0
+    extra_flags: int = 0  # extra metadata flags to OR into the SHM Metadata.flags field
 
 
 @dataclass(frozen=True)

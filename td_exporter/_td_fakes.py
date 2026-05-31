@@ -49,12 +49,14 @@ class FakeTOPHandle(TOPHandle):
     def __init__(
         self,
         pixel_format: str = "rgba32float",
+        pixel_format_name: str = "rgba32float",
         width: int = 64,
         height: int = 64,
         channels: int = 4,
         gpu_ptr: int = 0xDEADBEEF,
     ) -> None:
         self._pixel_format = pixel_format
+        self._pixel_format_name = pixel_format_name
         self._width = width
         self._height = height
         self._channels = channels
@@ -64,7 +66,9 @@ class FakeTOPHandle(TOPHandle):
         self.copy_numpy_calls: list[Any] = []
         self.resolution_set: list[tuple[int, int]] = []
 
-    def cuda_memory(self, stream: Any = None) -> FakeCUDAMemoryRef:
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> FakeCUDAMemoryRef:
+        # pixel_format is intentionally ignored in the fake — channel expansion is a TD runtime
+        # behaviour that the in-process test double cannot replicate.
         size = self._width * self._height * self._channels * 4
         return FakeCUDAMemoryRef(
             ptr=self._gpu_ptr,
@@ -77,6 +81,13 @@ class FakeTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return self._pixel_format
+
+    @property
+    def pixel_format_name(self) -> str:
+        return self._pixel_format_name
+
+    def cook(self, force: bool = False) -> None:
+        pass  # no-op in tests; use cook_calls list to assert if needed
 
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)

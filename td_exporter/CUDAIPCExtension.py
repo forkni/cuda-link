@@ -272,6 +272,17 @@ class CUDAIPCExtension:
             handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
             self._engine.update_receiver_resolution(handle)
 
+    def update_receiver_format(self, import_buffer: TOP) -> None:
+        """Update ImportBuffer Script TOP pixel format after a dtype change.
+
+        Call from the same Execute DAT location as update_receiver_resolution so
+        par.format is updated before the next copyCUDAMemory cook. Changing par.format
+        causes TD to reallocate the output texture at the correct bit depth.
+        """
+        if self._mode == "Receiver":
+            handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
+            self._engine.update_receiver_format(handle)
+
     def is_active(self) -> bool:
         """Delegate to host's active-parameter check (hot-path safe)."""
         return self._host.is_active()
@@ -355,4 +366,15 @@ class CUDAIPCExtension:
         """
         if self._mode == "Receiver":
             return self._engine.consume_pending_resolution()
+        return None
+
+    def consume_pending_format(self) -> str | None:
+        """Return the TD par.format string if a pixel-format update is pending, else None.
+
+        Called from script_top_callbacks.onCook (fallback path) to apply par.format changes
+        that were triggered mid-stream by _refresh_on_version_change.  Mirrors
+        consume_pending_resolution — same consume-and-clear semantics.
+        """
+        if self._mode == "Receiver":
+            return self._engine.consume_pending_format()
         return None

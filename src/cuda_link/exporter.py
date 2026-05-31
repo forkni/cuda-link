@@ -328,6 +328,7 @@ class Exporter:
         if self.shm_handle is None or self.data_size == 0:
             return
         kind, bits, flags = DtypeCodec.encode(self._spec.dtype)
+        flags |= self._spec.extra_flags  # caller-provided flag bits (e.g. FLAGS_MONO_ALPHA)
         Metadata(
             width=self._spec.width,
             height=self._spec.height,

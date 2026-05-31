@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-05-30
+
+### Fixed
+
+- **Sender dtype switch (float32→uint8)** — Producer now correctly detects dtype-shrink transitions
+  via `pixelFormatName` and copies only the dtype-derived front region of the stale allocation
+  (`GpuFrame(size=spec.data_size)`), resolving permanent stop-send + frozen Status after a
+  float32→8-bit switch. The previous 5-commit chain (`cddfdae`–`70da086`) introduced a permanent
+  skip-export trap; this was corrected in `e724719` using the proven v1.5.1 copy-front-region approach.
+- **Consumer ImportBuffer format for float32 non-RGBA sources** — `needs_format_update` flag now
+  fires for all non-`rgba32float` float32 sources (e.g. `monoalpha32float`, `rg32float`). Previously
+  skipped for all float32 sources, causing Script TOP to stay at the default `rgba32float` allocation
+  even when the source was a different float32 variant (`e31bad6`).
+
+### Added
+
+- **`FLAGS_MONO_ALPHA = 0x0002`** wire metadata bit — distinguishes 2-channel mono+alpha sources
+  from genuine RG sources in the SHM metadata `flags` field. Fits in 15 spare bits of the existing
+  uint16 `flags` field; `METADATA_SIZE` unchanged at 20 bytes. Backward-compatible: old Consumers
+  see `flags=0` and fall back to `rg*` format (`54cb7df`).
+- **`FrameSpec.extra_flags`** — new `int = 0` field on `FrameSpec` (both `ExporterPort.py` and
+  `_exporter_port.py`) lets callers OR extra protocol flags into `Exporter._write_metadata_to_shm`.
+- **TD-native format names in Status and `par.format`** — both Producer Status and Consumer Status
+  now show the TD pixel-format menu name (e.g. `rgba8fixed`, `monoalpha32float`) rather than the
+  numpy dtype + channel-count string.
+- **`cudaMemory(pixelFormat=)` kwarg infrastructure** — `RealTOPHandle.cuda_memory()` now accepts
+  an optional `pixel_format` string and forwards it as the `pixelFormat=` keyword to TD's
+  `cudaMemory()`, enabling future format-conversion requests (`22b9022`).
+
+### Internal
+
+- **`pyproject.toml` version**: `1.7.1` → `1.7.2`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.7.2.tox` to be built separately.
+  `v1.7.1` retained per versioned-binary tracking policy.
+
 ## [1.7.1] — 2026-05-30
 
 ### Refactored
@@ -937,6 +972,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.7.2]: https://github.com/forkni/cuda-link/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/forkni/cuda-link/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/forkni/cuda-link/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/forkni/cuda-link/compare/v1.5.1...v1.6.0
