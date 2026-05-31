@@ -646,7 +646,7 @@ class TDReceiverEngine:
             # Read and validate metadata via the canonical Metadata value object.
             if len(shm_handle.buf) >= metadata_offset + METADATA_SIZE:
                 try:
-                    _shm_mv = memoryview(shm_handle.buf)
+                    _shm_mv = memoryview(bytes(shm_handle.buf))  # bytes copy: no mmap exported pointer
                     _md = Metadata.read_from(_shm_mv, layout)
                 except Exception as _e:  # noqa: BLE001
                     self._log(f"Failed to read SHM metadata: {_e}", force=True)
@@ -817,7 +817,7 @@ class TDReceiverEngine:
             if self._format.dtype_str == "float16":
                 np_dtype = np_module.float32  # shape dtype for copyCUDAMemory; real f16 handled via D2H
             elif self._format.numpy_dtype is not None:
-                np_dtype = self._format.numpy_dtype
+                np_dtype = self._format.numpy_dtype.type  # scalar type (e.g. numpy.uint8), not dtype instance
             else:
                 np_dtype = np_module.float32  # safe fallback (e.g. bfloat16, no numpy dtype)
 
@@ -1064,7 +1064,7 @@ class TDReceiverEngine:
             if self._format.dtype_str == "float16":
                 np_dtype = np_module.float32
             elif self._format.numpy_dtype is not None:
-                np_dtype = self._format.numpy_dtype
+                np_dtype = self._format.numpy_dtype.type  # scalar type (e.g. numpy.uint8), not dtype instance
             else:
                 np_dtype = np_module.float32
 
