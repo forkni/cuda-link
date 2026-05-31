@@ -192,6 +192,7 @@ class TDSenderEngine:
         self.verbose_performance = verbose
 
         self._initialized: bool = False
+        self._closed: bool = False
         self._exporter: Exporter | None = None
         self._current_spec: FrameSpec | None = None
         self._policy: ExportPolicy | None = None
@@ -227,11 +228,21 @@ class TDSenderEngine:
 
     @property
     def dev_ptrs(self) -> list:
-        return self._exporter.dev_ptrs if self._exporter is not None else [None] * self.num_slots
+        if self._exporter is not None:
+            return self._exporter.dev_ptrs
+        # Pre-init: return correctly-sized null stubs so len() == num_slots.
+        # Post-cleanup (_closed=True): return [] — no slots exist.
+        return [] if self._closed else [None] * self.num_slots
 
     @property
     def ipc_handles(self) -> list:
-        return self._exporter.ipc_handles if self._exporter is not None else [None] * self.num_slots
+        if self._exporter is not None:
+            return self._exporter.ipc_handles
+        return [] if self._closed else [None] * self.num_slots
+
+    @property
+    def frame_count(self) -> int:
+        return self._exporter.frame_count if self._exporter is not None else 0
 
     @property
     def shm_handle(self) -> object:
@@ -670,6 +681,7 @@ class TDSenderEngine:
             self._exporter = None
 
         self._initialized = False
+        self._closed = True
         self._export_buffer = None
 
         # Reset per-session state so the next activation starts completely clean.

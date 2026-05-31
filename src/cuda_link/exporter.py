@@ -736,11 +736,12 @@ class Exporter:
 
         self._barrier.close()
 
-        # Reset state
-        self.dev_ptrs = [None] * self._spec.num_slots
-        self.ipc_events = [None] * self._spec.num_slots
-        self.ipc_handles = [None] * self._spec.num_slots
-        self.ipc_event_handles = [None] * self._spec.num_slots
+        # Reset state — empty lists, not null-filled slots: Exporter.open() always
+        # constructs a fresh instance, so these never need to be pre-sized here.
+        self.dev_ptrs = []
+        self.ipc_events = []
+        self.ipc_handles = []
+        self.ipc_event_handles = []
         self._initialized = False
         logger.info("Exporter closed")
 
