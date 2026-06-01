@@ -104,7 +104,7 @@ Switching modes triggers a full cleanup of the current state and lazy re-initial
 ---
 
 ### Ipcmemname
-**Type:** String | **Default:** `cudalink_output_ipc`
+**Type:** String | **Default:** `cudalink_ipc_TD>>Python` (Sender mode) / `cudalink_ipc_Python>>TD` (Receiver mode)
 
 The name of the OS shared memory segment used to exchange GPU handles between the sender and receiver.
 

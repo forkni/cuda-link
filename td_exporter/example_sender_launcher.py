@@ -10,7 +10,7 @@ and receiver cannot share GPU handles within the same process.
 
 Pipeline:
     onStart()  →  subprocess.Popen(example_sender_python.py)
-                         ↓  CUDA IPC  (cudalink_output_ipc)
+                         ↓  CUDA IPC  (cudalink_ipc_Python>>TD)
                CUDAIPCLink_from_Python  (Receiver mode, same project)
                          ↓
                Script TOP output  →  cycling solid colors
@@ -18,7 +18,7 @@ Pipeline:
 TD Setup:
     1. Add CUDAIPCLink_from_Python component to the network
     2. Set Mode       → Receiver
-    3. Set Ipcmemname → cudalink_output_ipc
+    3. Set Ipcmemname → cudalink_ipc_Python>>TD
     4. Set Active     → ON
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()

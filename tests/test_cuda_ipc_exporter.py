@@ -47,7 +47,7 @@ def test_init_fallback_memname() -> None:
     host = FakeTDHost(params={})
     exporter = CUDAIPCExtension(None, host=host)
 
-    assert exporter.shm_name == "cudalink_output_ipc"
+    assert exporter.shm_name == "cudalink_ipc_TD>>Python"
 
 
 def test_init_custom_numslots() -> None:

@@ -93,7 +93,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 
 | Name | Label | Type | Default | Help Text |
 |------|-------|------|---------|-----------|
-| `Ipcmemname` | IPC Memory Name | String | `cudalink_output_ipc` | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
+| `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |

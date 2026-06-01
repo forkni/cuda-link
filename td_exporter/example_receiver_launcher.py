@@ -9,7 +9,7 @@ start and terminates it on exit. CUDA IPC requires separate processes — sender
 and receiver cannot share GPU handles within the same process.
 
 Pipeline:
-    CUDAIPCLink_to_Python  (Sender mode, Active=ON, Ipcmemname=cudalink_input_ipc)
+    CUDAIPCLink_to_Python  (Sender mode, Active=ON, Ipcmemname=cudalink_ipc_TD>>Python)
          ↓  CUDA IPC
     onStart()  →  subprocess.Popen(example_receiver_python.py)
          ↓
@@ -18,7 +18,7 @@ Pipeline:
 TD Setup:
     1. Add a CUDAIPCLink_to_Python component to the network
     2. Set Mode       → Sender
-    3. Set Ipcmemname → cudalink_input_ipc
+    3. Set Ipcmemname → cudalink_ipc_TD>>Python
     4. Set Active     → ON
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()
