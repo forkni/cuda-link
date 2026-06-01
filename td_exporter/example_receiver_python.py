@@ -8,16 +8,16 @@ or directly from the command line:
     python td_exporter/example_receiver_python.py
 
 Pipeline:  CUDAIPCLink_to_Python  (Sender mode, in TouchDesigner)
-               ↓  CUDA IPC  (cudalink_input_ipc)
+               ↓  CUDA IPC  (cudalink_ipc_TD>>Python)
            this script  (separate OS process)
                ↓
            Prints frame stats  →  shape, dtype, FPS, latency, get_frame µs
 
 TD Setup (handled by example_receiver_launcher.py Execute DAT):
-    CUDAIPCLink_to_Python → Mode=Sender, Ipcmemname=cudalink_input_ipc, Active=ON
+    CUDAIPCLink_to_Python → Mode=Sender, Ipcmemname=cudalink_ipc_TD>>Python, Active=ON
 
 Environment variables (all optional):
-    CUDALINK_RECEIVER_SHM_NAME     IPC channel name          (default: cudalink_input_ipc)
+    CUDALINK_RECEIVER_SHM_NAME     IPC channel name          (default: cudalink_ipc_TD>>Python)
     CUDALINK_RECEIVER_DEVICE       GPU device index           (default: 0)
     CUDALINK_RECEIVER_TIMEOUT_MS   Frame-wait timeout ms      (default: 5000)
     CUDALINK_RECEIVER_REPORT_EVERY Frames between status lines (default: 150)
@@ -91,7 +91,7 @@ _shutdown = install_console_ctrl_handler("[receiver]", _do_cleanup)
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_input_ipc")
+SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_ipc_TD>>Python")
 DEVICE = int(os.environ.get("CUDALINK_RECEIVER_DEVICE", "0"))
 TIMEOUT_MS = float(os.environ.get("CUDALINK_RECEIVER_TIMEOUT_MS", "5000"))
 REPORT_EVERY = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))

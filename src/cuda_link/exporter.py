@@ -44,6 +44,7 @@ from .cuda_runtime_types import (
 )
 from .shm_protocol import (
     _ST_U32,
+    IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     NUM_SLOTS_OFFSET,
     PROTOCOL_MAGIC,
@@ -315,12 +316,13 @@ class Exporter:
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
-            base_offset = self._layout.slot_offset(slot)
+            mem_off = self._layout.mem_handle_offset(slot)
+            evt_off = self._layout.event_handle_offset(slot)
             _mem_bytes = bytes(self.ipc_handles[slot].internal)
             logger.debug("Slot %d IPC mem handle prefix: %s...", slot, _mem_bytes[:16].hex())
-            self.shm_handle.buf[base_offset : base_offset + 64] = _mem_bytes
+            self.shm_handle.buf[mem_off : mem_off + IPC_HANDLE_SIZE] = _mem_bytes
             if self.ipc_event_handles[slot]:
-                self.shm_handle.buf[base_offset + 64 : base_offset + 128] = bytes(self.ipc_event_handles[slot].reserved)
+                self.shm_handle.buf[evt_off : evt_off + IPC_HANDLE_SIZE] = bytes(self.ipc_event_handles[slot].reserved)
         clear_shutdown(self.shm_handle.buf, self._layout)
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
@@ -736,11 +738,12 @@ class Exporter:
 
         self._barrier.close()
 
-        # Reset state
-        self.dev_ptrs = [None] * self._spec.num_slots
-        self.ipc_events = [None] * self._spec.num_slots
-        self.ipc_handles = [None] * self._spec.num_slots
-        self.ipc_event_handles = [None] * self._spec.num_slots
+        # Reset state — empty lists, not null-filled slots: Exporter.open() always
+        # constructs a fresh instance, so these never need to be pre-sized here.
+        self.dev_ptrs = []
+        self.ipc_events = []
+        self.ipc_handles = []
+        self.ipc_event_handles = []
         self._initialized = False
         logger.info("Exporter closed")
 

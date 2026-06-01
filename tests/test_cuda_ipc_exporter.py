@@ -47,7 +47,7 @@ def test_init_fallback_memname() -> None:
     host = FakeTDHost(params={})
     exporter = CUDAIPCExtension(None, host=host)
 
-    assert exporter.shm_name == "cudalink_output_ipc"
+    assert exporter.shm_name == "cudalink_ipc_TD>>Python"
 
 
 def test_init_custom_numslots() -> None:
@@ -284,7 +284,7 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     from cuda_link.shm_protocol import SHMLayout
 
     with patch("TDReceiver.CUPY_AVAILABLE", use_cupy):
-        from TDReceiver import FormatDescriptor, ReceiverConnection, RetryState, TDReceiverEngine
+        from TDReceiver import ReceiverConnection, RetryState, TDReceiverEngine
 
     HEIGHT, WIDTH, COMPS = 4, 4, 4
     NUM_SLOTS = 2
@@ -333,14 +333,19 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
         shutdown_offset=layout.shutdown_offset,
         last_write_idx=0,
     )
-    engine._format = FormatDescriptor(
-        width=WIDTH,
-        height=HEIGHT,
-        num_comps=COMPS,
-        format_kind=FORMAT_KIND_FLOAT,
-        bits_per_comp=16,
-        flags=0,
-        buffer_size=F16_SIZE,
+    from cuda_link.importer import Format
+    from cuda_link.shm_protocol import Metadata
+
+    engine._format = Format.from_metadata(
+        Metadata(
+            width=WIDTH,
+            height=HEIGHT,
+            num_comps=COMPS,
+            format_kind=FORMAT_KIND_FLOAT,
+            bits_per_comp=16,
+            flags=0,
+            data_size=F16_SIZE,
+        )
     )
     engine._retry = RetryState(connect_attempts=0, frames_since_last_retry=0)
 

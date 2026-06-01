@@ -560,6 +560,10 @@ CUDA IPC zero-copies GPU memory across processes; CPU SharedMemory adds two memc
 
 ### Why Legacy IPC Over VMM API
 
+> This decision is recorded canonically in
+> [`docs/adr/0004-legacy-cuda-ipc-over-vmm.md`](adr/0004-legacy-cuda-ipc-over-vmm.md).
+> The summary below is retained for inline reference.
+
 This project uses CUDA Runtime API IPC (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`)
 rather than the Driver API Virtual Memory Management (VMM) approach
 (`cuMemCreate` / `cuMemExportToShareableHandle`).
@@ -582,7 +586,10 @@ manipulation — solve problems this project does not have.
 **When VMM would be needed**: If sharing `cudaArray` objects directly (opaque
 texture memory with swizzled layout) without linearization.
 
-See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
+See [`docs/adr/0004-legacy-cuda-ipc-over-vmm.md`](adr/0004-legacy-cuda-ipc-over-vmm.md) for
+the full decision record, including the rejected VMM alternative and the one condition that
+would reopen the decision. A proof-of-concept VMM probe lives at
+`scripts/probe/driver_api_ipc_probe.py`.
 
 ---
 
@@ -594,5 +601,5 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 ---
 
-**Last Updated**: 2026-05-30
-**Version**: 1.7.2
+**Last Updated**: 2026-05-31
+**Version**: 1.8.0

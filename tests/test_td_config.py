@@ -162,3 +162,55 @@ def test_receiver_config_instantiates() -> None:
 
     cfg = TDReceiverConfig()
     assert cfg is not None
+
+
+# ---------------------------------------------------------------------------
+# S-B — honest receiver config type guard
+# ---------------------------------------------------------------------------
+
+
+def test_receiver_engine_stores_receiver_config() -> None:
+    """TDReceiverEngine accepts TDReceiverConfig and stores it as _config (S-B).
+
+    Ensures the engine's declared type matches the object it actually holds.
+    """
+    from unittest.mock import MagicMock
+
+    from TDConfig import TDReceiverConfig
+    from TDReceiver import TDReceiverEngine
+
+    engine = TDReceiverEngine(
+        host=MagicMock(),
+        config=TDReceiverConfig(),
+        cuda=None,
+        log_fn=lambda msg, force=False: None,
+        num_slots=3,
+        device=0,
+        shm_name="test",
+        verbose=False,
+    )
+    assert isinstance(engine._config, TDReceiverConfig), (
+        "TDReceiverEngine._config must be a TDReceiverConfig, not TDSenderConfig"
+    )
+
+
+def test_make_engine_receiver_mode_passes_receiver_config() -> None:
+    """_make_engine() in Receiver mode injects TDReceiverConfig(), not TDSenderConfig (S-B)."""
+    from unittest.mock import MagicMock
+
+    from CUDAIPCExtension import CUDAIPCExtension
+    from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig
+
+    # Build extension instance without __init__ to avoid TD-host side-effects.
+    ext = object.__new__(CUDAIPCExtension)
+    ext._host = MagicMock()
+    ext._config = TDSenderConfig()
+    ext._mode = "Receiver"
+    ext._device = 0
+    ext._runtime_state = TDRuntimeState(shm_name="test", num_slots=3, verbose=False)
+    ext._log = lambda msg, force=False: None
+
+    engine = ext._make_engine()
+    assert isinstance(engine._config, TDReceiverConfig), (
+        "_make_engine() must pass TDReceiverConfig() to TDReceiverEngine, not TDSenderConfig"
+    )

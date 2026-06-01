@@ -41,6 +41,7 @@ WRITE_IDX_SIZE: int = 4
 SHM_HEADER_SIZE: int = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
 
 SLOT_SIZE: int = 128  # 64B cudaIpcMemHandle_t + 64B cudaIpcEventHandle_t
+IPC_HANDLE_SIZE: int = 64  # cudaIpc{Mem,Event}Handle_t are each 64 bytes
 
 SHUTDOWN_FLAG_SIZE: int = 1
 METADATA_SIZE: int = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
@@ -134,6 +135,14 @@ class SHMLayout:
     def slot_offset(self, i: int) -> int:
         return SHM_HEADER_SIZE + i * SLOT_SIZE
 
+    def mem_handle_offset(self, slot: int) -> int:
+        """Byte offset of the 64-byte cudaIpcMemHandle_t within slot *slot*."""
+        return self.slot_offset(slot)
+
+    def event_handle_offset(self, slot: int) -> int:
+        """Byte offset of the 64-byte cudaIpcEventHandle_t within slot *slot*."""
+        return self.slot_offset(slot) + IPC_HANDLE_SIZE
+
     @property
     def shutdown_offset(self) -> int:
         return SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE
@@ -180,6 +189,15 @@ class Metadata:
     bits_per_comp: int
     flags: int
     data_size: int
+
+    @property
+    def expected_size(self) -> int:
+        """Expected frame byte count: width * height * num_comps * (bits_per_comp // 8).
+
+        Used to validate that data_size from the wire matches the geometry.
+        bits_per_comp is always a multiple of 8 for all registered dtypes.
+        """
+        return self.width * self.height * self.num_comps * (self.bits_per_comp // 8)
 
     def pack_into(self, buf: memoryview, layout: SHMLayout) -> None:
         offset = layout.metadata_offset
@@ -238,8 +256,13 @@ class DtypeCodec:
         """(format_kind, bits_per_comp, flags) → dtype string.
 
         Returns "float32" for unknown triples (forward-compat fallback).
+
+        Only FLAGS_BFLOAT16 is dtype-relevant; FLAGS_MONO_ALPHA (bit1) describes
+        channel semantics (R+A vs R+G) and does NOT change the element dtype or
+        itemsize.  Masking ensures e.g. (UNSIGNED, 8, FLAGS_MONO_ALPHA) → "uint8"
+        rather than falling back to "float32" with a 4× oversized itemsize.
         """
-        return _DECODE_TABLE.get((kind, bits, flags), "float32")
+        return _DECODE_TABLE.get((kind, bits, flags & FLAGS_BFLOAT16), "float32")
 
     @staticmethod
     def itemsize(dtype: str) -> int:

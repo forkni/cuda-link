@@ -77,7 +77,7 @@ def _find_wheel() -> Path | None:
 def _build_wheel(dry_run: bool) -> Path:
     """Run build_wheel.cmd to produce a wheel; return its path."""
     print(_bold("[build] No wheel found — building now..."))
-    cmd_path = REPO_ROOT / "build_wheel.cmd"
+    cmd_path = REPO_ROOT / "utils" / "build_wheel.cmd"
     if not cmd_path.exists():
         sys.exit(_red(f"[error] build_wheel.cmd not found at {cmd_path}"))
     if dry_run:

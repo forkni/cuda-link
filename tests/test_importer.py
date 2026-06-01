@@ -144,6 +144,36 @@ def test_close_clears_initialized_flag() -> None:
     assert not imp._initialized
 
 
+def test_release_connection_state_shared_teardown_path() -> None:
+    """close() and _partial_cleanup_for_reconnect() share _release_connection_state (C2-slice).
+
+    Both callers must null _numpy/_conn and clear _initialized.
+    Only the reconnect path calls request_immediate_reconnect() — close() must not.
+    """
+    from unittest.mock import patch
+
+    # close() path: _conn/_numpy nulled, _initialized cleared; request_immediate_reconnect NOT called.
+    imp_close = _make_connected_importer()
+    assert imp_close._conn is not None
+    assert imp_close._numpy is not None
+    assert imp_close._initialized
+    with patch.object(imp_close._retry, "request_immediate_reconnect") as mock_reconnect:
+        imp_close.close()
+        mock_reconnect.assert_not_called()
+    assert imp_close._conn is None
+    assert imp_close._numpy is None
+    assert not imp_close._initialized
+
+    # _partial_cleanup_for_reconnect() path: same nulls + request_immediate_reconnect IS called.
+    imp_reconnect = _make_connected_importer()
+    with patch.object(imp_reconnect._retry, "request_immediate_reconnect") as mock_reconnect:
+        imp_reconnect._partial_cleanup_for_reconnect()
+        mock_reconnect.assert_called_once()
+    assert imp_reconnect._conn is None
+    assert imp_reconnect._numpy is None
+    assert not imp_reconnect._initialized
+
+
 # ---------------------------------------------------------------------------
 # Context manager
 # ---------------------------------------------------------------------------
@@ -540,6 +570,104 @@ def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest
     imp._reinitialize()
 
     mock_numpy.close.assert_not_called(), "NumpyBuffers must NOT be torn down — shape+dtype unchanged"
+
+
+# ---------------------------------------------------------------------------
+# C2-bug — importer NVML seam: attach_nvml_observer + get_stats()["nvml"]
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_nvml_observer(snapshot_value: dict | None = None) -> object:
+    """Return a minimal NVMLObserver-like fake whose snapshot() returns a known dict."""
+    from unittest.mock import MagicMock
+
+    obs = MagicMock()
+    obs.snapshot.return_value = snapshot_value or {"gpu_util": 42, "mem_used": 1024}
+    return obs
+
+
+def test_importer_has_attach_nvml_observer_method() -> None:
+    """attach_nvml_observer must be a public method on Importer (symmetric with Exporter)."""
+    imp = _make_connected_importer()
+    assert hasattr(imp, "attach_nvml_observer")
+    assert callable(imp.attach_nvml_observer)
+
+
+def test_get_stats_no_nvml_key_before_attach() -> None:
+    """get_stats() has no 'nvml' key before attach_nvml_observer is called.
+
+    Before the C2-bug fix, getattr(self, '_nvml_observer', None) would silently
+    return None and the branch would be dead — this test pins the clean state.
+    """
+    imp = _make_connected_importer()
+    stats = imp.get_stats()
+    assert "nvml" not in stats
+
+
+def test_get_stats_nvml_key_after_attach() -> None:
+    """After attach_nvml_observer(obs), get_stats()['nvml'] == obs.snapshot()."""
+    imp = _make_connected_importer()
+    expected = {"gpu_util": 55, "mem_used": 2048}
+    obs = _make_fake_nvml_observer(expected)
+
+    imp.attach_nvml_observer(obs)
+    stats = imp.get_stats()
+
+    assert "nvml" in stats, "attach_nvml_observer must activate the stats branch"
+    assert stats["nvml"] == expected
+
+
+def test_attach_nvml_observer_calls_snapshot_each_get_stats() -> None:
+    """obs.snapshot() is called on every get_stats() invocation (live telemetry)."""
+    imp = _make_connected_importer()
+    obs = _make_fake_nvml_observer()
+
+    imp.attach_nvml_observer(obs)
+    imp.get_stats()
+    imp.get_stats()
+    imp.get_stats()
+
+    assert obs.snapshot.call_count == 3
+
+
+def test_attach_nvml_observer_replaces_previous() -> None:
+    """Calling attach_nvml_observer a second time replaces the first observer."""
+    imp = _make_connected_importer()
+    obs1 = _make_fake_nvml_observer({"source": "first"})
+    obs2 = _make_fake_nvml_observer({"source": "second"})
+
+    imp.attach_nvml_observer(obs1)
+    imp.attach_nvml_observer(obs2)
+
+    stats = imp.get_stats()
+    assert stats["nvml"] == {"source": "second"}
+
+
+def test_legacy_shim_attach_nvml_observer_populates_stats() -> None:
+    """CUDAIPCImporter.attach_nvml_observer() delegates to Importer.attach_nvml_observer()
+    via the public API (no longer pokes _nvml_observer directly).
+
+    This tests the C2-bug fix in cuda_ipc_importer.py:
+        Before: self._importer._nvml_observer = observer
+        After:  self._importer.attach_nvml_observer(observer)
+    """
+    from fakes import make_connected_importer as _make
+
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    fake_importer = _make(shape=(4, 4, 4), dtype="uint8")
+    expected = {"gpu_util": 77, "mem_used": 999}
+    obs = _make_fake_nvml_observer(expected)
+
+    shim = CUDAIPCImporter(shm_name="fake")
+    shim._importer = fake_importer
+
+    shim.attach_nvml_observer(obs)
+
+    # Delegate to the inner importer
+    stats = fake_importer.get_stats()
+    assert "nvml" in stats, "shim.attach_nvml_observer must wire through to Importer"
+    assert stats["nvml"] == expected
 
 
 def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest.MonkeyPatch) -> None:

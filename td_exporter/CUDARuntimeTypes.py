@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import c_int, c_size_t, c_uint64, c_void_p
+from enum import IntEnum
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
@@ -152,3 +153,39 @@ class CUDAError:
             704: "PEER_ACCESS_ALREADY_ENABLED",
         }
         return names.get(code, f"UNKNOWN_ERROR_{code}")
+
+
+# ---------------------------------------------------------------------------
+# CUDA runtime enum constants — named replacements for magic integers
+# ---------------------------------------------------------------------------
+
+
+class MemcpyKind(IntEnum):
+    """cudaMemcpyKind values used in cudaMemcpy / cudaMemcpyAsync calls."""
+
+    HOST_TO_HOST = 0  # cudaMemcpyHostToHost
+    HOST_TO_DEVICE = 1  # cudaMemcpyHostToDevice
+    DEVICE_TO_HOST = 2  # cudaMemcpyDeviceToHost
+    DEVICE_TO_DEVICE = 3  # cudaMemcpyDeviceToDevice
+
+
+class StreamFlags(IntEnum):
+    """cudaStreamFlags values passed to cudaStreamCreate* calls."""
+
+    DEFAULT = 0  # cudaStreamDefault (inherits legacy synchronisation behaviour)
+    NON_BLOCKING = 0x01  # cudaStreamNonBlocking
+
+
+class StreamCaptureMode(IntEnum):
+    """cudaStreamCaptureMode values for cudaStreamBeginCapture."""
+
+    GLOBAL = 0  # cudaStreamCaptureModeGlobal
+    THREAD_LOCAL = 1  # cudaStreamCaptureModeThreadLocal
+    RELAXED = 2  # cudaStreamCaptureModeRelaxed
+
+
+# cudaIpcMemLazyEnablePeerAccess — the only valid flag for cudaIpcOpenMemHandle.
+IPC_MEM_LAZY_ENABLE_PEER_ACCESS: int = 1
+
+# cudaHostAllocPortable — pinned allocation visible from any CUDA context in the process.
+HOST_ALLOC_PORTABLE: int = 0x01

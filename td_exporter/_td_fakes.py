@@ -20,6 +20,20 @@ from typing import Any
 from TDHost import TDHost, TOPHandle  # noqa: E402
 
 
+class FakeCUDAMemoryShape:
+    """Minimal CUDAMemoryShape-shaped object returned by FakeTDHost.make_cuda_shape.
+
+    Holds the four fields that TDReceiverEngine writes; tests can read them to
+    assert the correct dims and dtype were supplied.
+    """
+
+    def __init__(self, width: int, height: int, num_comps: int, data_type: Any) -> None:
+        self.width = width
+        self.height = height
+        self.numComps = num_comps
+        self.dataType = data_type
+
+
 class FakeCUDAMemoryRef:
     """Minimal CUDAMemoryRef-shaped object for tests that don't need the real type."""
 
@@ -122,6 +136,7 @@ class FakeTDHost(TDHost):
         self.enable_writes: list[tuple[str, bool]] = []
         self.custom_only_calls: list[bool] = []
         self.wrapped_tops: list[Any] = []
+        self.cuda_shapes: list[FakeCUDAMemoryShape] = []
 
     def param_value(self, name: str) -> Any:
         return self._params.get(name)
@@ -148,6 +163,12 @@ class FakeTDHost(TDHost):
         if isinstance(top, FakeTOPHandle):
             return top
         return FakeTOPHandle()
+
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> FakeCUDAMemoryShape:
+        """Return a FakeCUDAMemoryShape and record the call for test assertions."""
+        shape = FakeCUDAMemoryShape(width, height, num_comps, data_type)
+        self.cuda_shapes.append(shape)
+        return shape
 
     def set_warning_status(self, msg: str) -> None:
         pass

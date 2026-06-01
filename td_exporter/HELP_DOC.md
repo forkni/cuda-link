@@ -104,7 +104,7 @@ Switching modes triggers a full cleanup of the current state and lazy re-initial
 ---
 
 ### Ipcmemname
-**Type:** String | **Default:** `cudalink_output_ipc`
+**Type:** String | **Default:** `cudalink_ipc_TD>>Python` (Sender mode) / `cudalink_ipc_Python>>TD` (Receiver mode)
 
 The name of the OS shared memory segment used to exchange GPU handles between the sender and receiver.
 
@@ -188,7 +188,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.7.2.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.8.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.

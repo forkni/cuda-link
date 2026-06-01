@@ -32,7 +32,9 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
+from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS
 from .shm_protocol import (
+    IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     MAGIC_SIZE,
     PROTOCOL_MAGIC,
@@ -47,7 +49,7 @@ from .shm_protocol import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +171,32 @@ class Format:
     frame_nbytes: int
 
     @classmethod
+    def from_metadata(cls, md: Metadata) -> Format:
+        """Build from an already-read Metadata value object.
+
+        The caller is responsible for reading and validating the Metadata
+        (e.g. checking md.data_size == md.expected_size) before calling this.
+        Use from_shm() when reading directly from shared memory.
+        """
+        dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
+        itemsize = DtypeCodec.itemsize(dtype_str)
+        shape = (md.height, md.width, md.num_comps)
+        frame_nbytes = md.height * md.width * md.num_comps * itemsize
+        numpy_dtype = _numpy_dtype_for(dtype_str)
+        return cls(
+            width=md.width,
+            height=md.height,
+            num_comps=md.num_comps,
+            kind=md.format_kind,
+            bits=md.bits_per_comp,
+            flags=md.flags,
+            dtype_str=dtype_str,
+            shape=shape,
+            numpy_dtype=numpy_dtype,
+            frame_nbytes=frame_nbytes,
+        )
+
+    @classmethod
     def from_shm(cls, shm_buf: object, num_slots: int) -> Format | None:
         """Parse extended metadata block from shared memory.
 
@@ -180,23 +208,7 @@ class Format:
         try:
             md = Metadata.read_from(shm_buf, layout)
             if md.width > 0 and md.height > 0 and md.num_comps > 0:
-                dtype_str = DtypeCodec.decode(md.format_kind, md.bits_per_comp, md.flags)
-                itemsize = DtypeCodec.itemsize(dtype_str)
-                shape = (md.height, md.width, md.num_comps)
-                frame_nbytes = md.height * md.width * md.num_comps * itemsize
-                numpy_dtype = _numpy_dtype_for(dtype_str)
-                return cls(
-                    width=md.width,
-                    height=md.height,
-                    num_comps=md.num_comps,
-                    kind=md.format_kind,
-                    bits=md.bits_per_comp,
-                    flags=md.flags,
-                    dtype_str=dtype_str,
-                    shape=shape,
-                    numpy_dtype=numpy_dtype,
-                    frame_nbytes=frame_nbytes,
-                )
+                return cls.from_metadata(md)
         except (struct.error, ValueError, IndexError):
             pass
         return None
@@ -774,6 +786,9 @@ class Importer:
         self.frame_count = 0
         self.last_latency = 0.0
 
+        # NVML telemetry (attached after open() via attach_nvml_observer())
+        self._nvml_observer: NVMLObserver | None = None
+
         # Performance metrics (debug mode)
         self.total_wait_event_time = 0.0
         self.total_get_frame_time = 0.0
@@ -999,14 +1014,15 @@ class Importer:
         layout = SHMLayout(num_slots)
 
         for slot in range(num_slots):
-            base_offset = layout.slot_offset(slot)
+            mem_off = layout.mem_handle_offset(slot)
+            evt_off = layout.event_handle_offset(slot)
 
-            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+            mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
             logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
             ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
 
-            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
+            event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
             if any(event_handle_bytes):
                 try:
                     ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
@@ -1075,16 +1091,7 @@ class Importer:
 
     def _partial_cleanup_for_reconnect(self) -> None:
         """Release IPC handles and reset connection state; keep Importer alive for retry."""
-        if getattr(self, "_numpy", None) is not None:
-            self._numpy.close()
-            self._numpy = None
-        if getattr(self, "_conn", None) is not None:
-            self._conn.close()
-            self._conn = None
-        self._torch = None
-        self._cupy = None
-        self._format = None
-        self._initialized = False
+        self._release_connection_state()
         if self._retry is None:
             self._retry = _RetryState(
                 max_connect_attempts=self._policy.reconnect_max_attempts,
@@ -1347,8 +1354,8 @@ class Importer:
     # Teardown
     # ------------------------------------------------------------------
 
-    def close(self) -> None:
-        """Release all CUDA and SHM resources. Idempotent."""
+    def _release_connection_state(self) -> None:
+        """Release IPC/numpy resources and reset per-connection state. Idempotent."""
         if getattr(self, "_numpy", None) is not None:
             self._numpy.close()
             self._numpy = None
@@ -1359,6 +1366,10 @@ class Importer:
         self._cupy = None
         self._format = None
         self._initialized = False
+
+    def close(self) -> None:
+        """Release all CUDA and SHM resources. Idempotent."""
+        self._release_connection_state()
         logger.info("Importer closed")
 
     def __del__(self) -> None:
@@ -1417,6 +1428,10 @@ class Importer:
             return False
         return len(self._conn.dev_ptrs) > 0 and all(ptr is not None for ptr in self._conn.dev_ptrs)
 
+    def attach_nvml_observer(self, observer: NVMLObserver) -> None:
+        """Attach an NVMLObserver for GPU telemetry in get_stats()."""
+        self._nvml_observer = observer
+
     def get_stats(self) -> dict[str, object]:
         """Return current importer statistics."""
         conn = self._conn
@@ -1444,7 +1459,6 @@ class Importer:
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
             "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
         }
-        observer = getattr(self, "_nvml_observer", None)
-        if observer is not None:
-            stats["nvml"] = observer.snapshot()
+        if self._nvml_observer is not None:
+            stats["nvml"] = self._nvml_observer.snapshot()
         return stats

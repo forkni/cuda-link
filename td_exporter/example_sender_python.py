@@ -8,13 +8,13 @@ or directly from the command line:
     python td_exporter/example_sender_python.py
 
 Pipeline:  this script  (separate OS process)
-               ↓  CUDA IPC  (cudalink_output_ipc)
+               ↓  CUDA IPC  (cudalink_ipc_Python>>TD)
            CUDAIPCLink_from_Python  (Receiver mode, in TouchDesigner)
                ↓
            Script TOP output  →  cycling solid colors
 
 TD Setup (handled by example_sender_launcher.py Execute DAT):
-    CUDAIPCLink_from_Python → Mode=Receiver, Ipcmemname=cudalink_output_ipc, Active=ON
+    CUDAIPCLink_from_Python → Mode=Receiver, Ipcmemname=cudalink_ipc_Python>>TD, Active=ON
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ _shutdown = install_console_ctrl_handler("[sender]", _do_cleanup, defer_close=Tr
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHM_NAME = "cudalink_output_ipc"
+SHM_NAME = "cudalink_ipc_Python>>TD"
 WIDTH = 512
 HEIGHT = 512
 DTYPE = "uint8"  # "uint8" or "float32"

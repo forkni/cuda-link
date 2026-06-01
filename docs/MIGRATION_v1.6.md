@@ -83,5 +83,5 @@ from cuda_link import Importer, ImportSpec
 imp = Importer.open(ImportSpec(shm_name="my_shm"))
 ```
 
-See `docs/MIGRATION_v1.5.md` for the full before/after reference (both the Exporter
-and Importer APIs changed in v1.5.0).
+Both the Exporter and Importer APIs changed in v1.5.0; see the v1.5 release notes in
+`CHANGELOG.md` for the full before/after reference.

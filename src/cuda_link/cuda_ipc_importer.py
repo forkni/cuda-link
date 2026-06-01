@@ -80,7 +80,7 @@ class CUDAIPCImporter:
 
     def __init__(
         self,
-        shm_name: str = "cudalink_output_ipc",
+        shm_name: str = "cudalink_ipc_TD>>Python",
         shape: tuple[int, int, int] | None = None,
         dtype: str | None = None,
         debug: bool = False,
@@ -97,7 +97,7 @@ class CUDAIPCImporter:
         self._importer: Importer | None = None
 
     @classmethod
-    def from_connected(cls, shm_name: str = "cudalink_output_ipc", **kwargs) -> CUDAIPCImporter:
+    def from_connected(cls, shm_name: str = "cudalink_ipc_TD>>Python", **kwargs) -> CUDAIPCImporter:
         """Deprecated. Use Importer.open() instead."""
         _warn_once()
         imp = cls(shm_name=shm_name, **kwargs)
@@ -165,7 +165,7 @@ class CUDAIPCImporter:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
         if self._importer is not None:
-            self._importer._nvml_observer = observer
+            self._importer.attach_nvml_observer(observer)
 
     @property
     def frame_count(self) -> int:

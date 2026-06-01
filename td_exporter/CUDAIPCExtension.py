@@ -38,7 +38,7 @@ from SHMProtocol import (  # noqa: E402
     SHM_HEADER_SIZE,
     SLOT_SIZE,
 )
-from TDConfig import TDRuntimeState, TDSenderConfig  # noqa: E402
+from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig  # noqa: E402
 from TDHost import RealTDHost, TDHost  # noqa: E402
 from TDReceiver import TDReceiverEngine  # noqa: E402
 from TDSender import TDSenderEngine  # noqa: E402
@@ -101,7 +101,7 @@ class CUDAIPCExtension:
             self._device = 0
 
         _shm_val = self._host.param_value("Ipcmemname")
-        _shm_name: str = str(_shm_val) if _shm_val is not None else "cudalink_output_ipc"
+        _shm_name: str = str(_shm_val) if _shm_val is not None else "cudalink_ipc_TD>>Python"
 
         _debug_val = self._host.param_value("Debug")
         _verbose: bool = bool(_debug_val) if _debug_val is not None else False
@@ -222,7 +222,7 @@ class CUDAIPCExtension:
             )
         return TDReceiverEngine(
             host=self._host,
-            config=self._config,
+            config=TDReceiverConfig(),
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,

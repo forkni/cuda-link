@@ -146,6 +146,15 @@ class TDHost(Protocol):
         """
         ...
 
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> Any:
+        """Construct a TD CUDAMemoryShape from plain Python values.
+
+        Returns the shape object opaquely — engine code caches it and passes it back
+        to TOPHandle.copy_cuda_memory(). Keeps the TD CUDAMemoryShape type behind the
+        seam so engine code never touches a TD runtime global directly.
+        """
+        ...
+
     def set_warning_status(self, msg: str) -> None:
         """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
         ...
@@ -294,6 +303,20 @@ class RealTDHost(TDHost):
     def wrap_top(self, top: Any) -> RealTOPHandle:
         """Wrap a raw TD TOP operator as a RealTOPHandle."""
         return RealTOPHandle(top)
+
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> Any:
+        """Construct a TD CUDAMemoryShape from plain Python values.
+
+        CUDAMemoryShape is a TD interpreter global injected into the COMP namespace —
+        touching it here (in the adapter layer) is legitimate. Engine code receives
+        the result opaquely and never imports or names the TD type.
+        """
+        shape = CUDAMemoryShape()  # noqa: F821 — TD interpreter global, present at runtime
+        shape.width = width
+        shape.height = height
+        shape.numComps = num_comps
+        shape.dataType = data_type
+        return shape
 
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:
