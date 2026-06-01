@@ -162,6 +162,41 @@ def test_every_bound_func_has_argtypes() -> None:
     )
 
 
+def test_every_errcheck_func_is_typed() -> None:
+    """Reverse of test_every_c_int_cudart_func_has_errcheck.
+
+    Every cudart function that received a real errcheck (i.e. appears in
+    _strict_funcs inside _install_errcheck) must ALSO have been typed with
+    restype=c_int in _setup_function_signatures.
+
+    An errcheck'd-but-untyped function runs with default argtypes — pointer
+    arguments are silently truncated to 32-bit on 64-bit platforms (the exact
+    hazard the forward test guards against, only mirror-imaged).  This closes
+    the reverse drift path: adding a name to _strict_funcs without first adding
+    it to the signature table.
+    """
+    api = _make_api()
+
+    errcheck_without_restype: list[str] = []
+    for name, child in api.cudart._mock_children.items():
+        if name.startswith("_"):
+            continue
+        errcheck = child.__dict__.get("errcheck")
+        is_real_callable = errcheck is not None and not isinstance(errcheck, MagicMock)
+        if not is_real_callable:
+            continue
+        if child.__dict__.get("restype") is not c_int:
+            errcheck_without_restype.append(name)
+
+    assert not errcheck_without_restype, (
+        "These _strict_funcs entries have errcheck installed but were never typed "
+        "(restype=c_int) in _setup_function_signatures:\n"
+        + "".join(f"  {n}\n" for n in sorted(errcheck_without_restype))
+        + "Add argtypes+restype=c_int to _setup_function_signatures for each, or "
+        "remove them from _strict_funcs in _install_errcheck."
+    )
+
+
 def test_cudaGetLastError_not_bound() -> None:
     """cudaGetLastError must NOT be bound on cudart.
 
