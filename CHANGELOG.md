@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_setup_function_signatures`. Closes the mirror-image drift path (errcheck'd but untyped →
   silent 64-bit pointer truncation).
 
+### Changed
+
+- **Default IPC channel names** (`78bd051`) — `Ipcmemname` defaults renamed for directional
+  clarity: `cudalink_output_ipc` → `cudalink_ipc_TD>>Python` (Sender mode, TD-to-Python);
+  `cudalink_input_ipc` → `cudalink_ipc_Python>>TD` (Receiver mode, Python-to-TD). Only projects
+  relying on the hardcoded defaults need updating; explicit names set via the `Ipcmemname`
+  parameter are unaffected.
+
 ### Refactored
 
 - **`TDReceiver` frame-format unified on `Format`** (`831031a`) — `FormatDescriptor` (a
@@ -108,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - `pyproject.toml` version: `1.7.2 → 1.8.0`.
+- `build_wheel.cmd` moved from repo root to `utils/` (`0c4c8d3`); `scripts/install_td_library.py`
+  and `README.md` updated. Use `utils\build_wheel.cmd` (or double-click from `utils\`).
 - TOX artifact `TOXES/CUDAIPCLink_v1.8.0.tox` — built and saved separately by the user.
 
 ## [1.7.2] — 2026-05-30
