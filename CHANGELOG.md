@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Path(__file__).parent.parent` were deepened by one level to
   `Path(__file__).parent.parent.parent`. `README.md` testing section and ADR cross-references
   updated to reflect new paths. `pytest --collect-only` count unchanged: 667 before and after.
+- **Gemini CI — headless workspace trust** (`eb30d76`) — added `GEMINI_CLI_TRUST_WORKSPACE: 'true'`
+  to all four `run-gemini-cli` steps (`gemini-review`, `gemini-invoke`, `gemini-triage`,
+  `gemini-scheduled-triage`). Without it, Gemini CLI exits with "not running in a trusted directory"
+  in every CI run. The dispatch fork-gate (`head.repo.fork == false`) and `GITHUB_TOKEN: ''` in the
+  triage steps remain as the primary trust controls.
+- **Missing `requires_cuda` mark** (`f122d88`) — `test_connect_with_nonexistent_shm_enters_waiting_state`
+  in `tests/integration/test_cuda_ipc_importer.py` was missing `@pytest.mark.requires_cuda` despite
+  calling `connect()`, which loads the CUDA runtime. The CI filter `-m "not requires_cuda"` did not
+  exclude it, causing a pre-existing failure on every Linux runner run.
+- **GitHub Actions — Node 24 upgrade** (`2ebe90c`) — `actions/checkout@v4` → `v6` (all six
+  non-Gemini workflows) and `actions/setup-python@v5` → `v6`; both `v6` releases use Node 24 and
+  resolve the Node 20 deprecation warning active since 2026-06-16. Type checker in the lint job
+  swapped from `mypy` to `pyrefly` — mypy produced 140 false positives on this codebase (Windows
+  ctypes, optional deps) that pyrefly handles correctly via the project config.
 
 ## [1.8.0] — 2026-05-31
 
