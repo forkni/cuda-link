@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TD_EXPORTER = REPO_ROOT / "td_exporter"
 SCRIPTS = REPO_ROOT / "scripts"
 

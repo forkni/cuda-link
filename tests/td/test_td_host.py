@@ -430,7 +430,7 @@ def test_fake_tdhost_make_cuda_shape_records_call() -> None:
 
     import numpy as np
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "td_exporter"))
     from _td_fakes import FakeCUDAMemoryShape, FakeTDHost
 
     host = FakeTDHost()
@@ -452,7 +452,7 @@ def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
 
     import numpy as np
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "td_exporter"))
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "td_exporter"))
     from _td_fakes import FakeTDHost
 
     host = FakeTDHost()

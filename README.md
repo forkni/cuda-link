@@ -268,10 +268,10 @@ Run the full test suite:
 cd C:\path\to\CUDA_IPC
 
 # Protocol tests (no CUDA needed)
-pytest tests/test_shm_protocol.py -v
+pytest tests/core/test_shm_protocol.py -v
 
 # Unit tests (requires CUDA)
-pytest tests/test_cuda_ipc_wrapper.py -v
+pytest tests/cuda/test_cuda_ipc_wrapper.py -v
 
 # All tests
 pytest tests/ -v
