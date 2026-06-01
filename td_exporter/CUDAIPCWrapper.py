@@ -789,7 +789,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             dev_ptr: Device pointer to export
 
         Returns:
-            IPC handle (128 bytes)
+            IPC handle (64 bytes)
 
         Raises:
             RuntimeError: If export fails
