@@ -521,7 +521,8 @@ class TDReceiverEngine:
                 _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
                 self._log(
                     f"Frame {self.frame_count:5d} | {_fps:5.1f} FPS | "
-                    f"shape={self._cached_shape} dtype={self._format.dtype_str} | "
+                    f"shape=({self._format.height}, {self._format.width}, {self._format.num_comps}) "
+                    f"dtype={self._format.dtype_str} | "
                     f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
                     f"(slot={read_slot}, write_idx={write_idx})"
                 )
