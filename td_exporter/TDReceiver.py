@@ -10,6 +10,7 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
 import time
 import traceback
@@ -259,6 +260,11 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
+        # Per-frame performance tracking for Debug summary line
+        self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
+        self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
+        self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
     @property
@@ -407,6 +413,9 @@ class TDReceiverEngine:
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
+            _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
+            if self._rx_start == 0.0:
+                self._rx_start = time.perf_counter()
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -432,6 +441,7 @@ class TDReceiverEngine:
                 _event_ms = (time.perf_counter() - _t_event) * 1000.0
                 _t_copy = time.perf_counter()
 
+            _t_copy_wall = time.perf_counter()  # for running copy-time average (all frames)
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._connection.dev_ptrs[read_slot].value
 
@@ -485,6 +495,8 @@ class TDReceiverEngine:
                     stream=int(self._connection.stream.value),
                 )
 
+            self._copy_total_s += time.perf_counter() - _t_copy_wall
+
             if _diag:
                 _copy_ms = (time.perf_counter() - _t_copy) * 1000.0
                 self._log(
@@ -500,9 +512,19 @@ class TDReceiverEngine:
             _fmt_name = td_format_string(self._format)
             self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
 
-            # Debug logging (97 = prime, avoids aliasing with slot counts 2,4,5)
-            if self.verbose_performance and self.frame_count % 97 == 0:
-                self._log(f"Frame {self.frame_count}: read_slot={read_slot}, write_idx={write_idx}")
+            # Debug summary line — matches standalone Python receiver format
+            if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
+                _now = time.perf_counter()
+                _elapsed = _now - self._rx_start
+                _fps = self.frame_count / _elapsed if _elapsed > 0 else 0.0
+                _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
+                _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
+                self._log(
+                    f"Frame {self.frame_count:5d} | {_fps:5.1f} FPS | "
+                    f"shape={self._cached_shape} dtype={self._format.dtype_str} | "
+                    f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
+                    f"(slot={read_slot}, write_idx={write_idx})"
+                )
 
             return True
 
