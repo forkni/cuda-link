@@ -7,7 +7,7 @@ Complete workflows for common CUDA IPC use cases.
 > Code examples below that use `CUDAIPCImporter.from_connected(...)` or `CUDAIPCExporter` reflect the
 > pre-v1.5 API: `CUDAIPCImporter` still works via a deprecation shim (removed in v1.8), but
 > `CUDAIPCExporter` was **removed in v1.5.0** — use `Exporter.open(FrameSpec(...))` instead.
-> See `docs/MIGRATION_v1.5.md` for migration guides.
+> See `docs/MIGRATION_v1.6.md` for migration guides.
 
 ---
 

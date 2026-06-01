@@ -1,6 +1,7 @@
 # ADR-0004: Legacy CUDA Runtime IPC over VMM driver API
 
-**Status**: Accepted (2026-05-31)
+**Status**: Accepted
+**Date**: 2026-05-31
 **Applies to**: `src/cuda_link/cuda_ipc_wrapper.py`, `src/cuda_link/exporter.py`,
 `src/cuda_link/importer.py`, `src/cuda_link/shm_protocol.py`,
 `docs/ARCHITECTURE.md` §"Why Legacy IPC Over VMM API".
@@ -9,11 +10,11 @@
 
 ## Context
 
-The same decision has been re-litigated twice in as many sessions — once by an internal
-`docs/Ctypes_Research.md` audit, and once by an external research brief (*"ctypes Correctness and CUDA
-IPC / Zero-Copy GPU Sharing on Windows, RTX 5090 / Blackwell, CUDA 12.8+"*). Both documents argued for
-migrating to the VMM driver API (`cuMemCreate` + `CU_MEM_HANDLE_TYPE_WIN32` + `DuplicateHandle`), claiming
-legacy `cudaIpc*` memory IPC is Linux-only and fails on Windows WDDM with error 801.
+This decision has been re-litigated by external research briefs — most recently
+*"ctypes Correctness and CUDA IPC / Zero-Copy GPU Sharing on Windows, RTX 5090 / Blackwell,
+CUDA 12.8+"* — arguing for migration to the VMM driver API
+(`cuMemCreate` + `CU_MEM_HANDLE_TYPE_WIN32` + `DuplicateHandle`) and claiming that legacy
+`cudaIpc*` memory IPC is Linux-only and fails on Windows WDDM with error 801.
 
 That claim is empirically refuted by this codebase: production IPC has been validated on Windows WDDM with
 CUDA 12.x across multiple format variants and teardown/reconnect cycles with no error 801. The "err 801"
