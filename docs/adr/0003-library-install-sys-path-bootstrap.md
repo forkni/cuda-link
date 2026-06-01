@@ -4,7 +4,7 @@
 **Date**: 2026-05-29
 **Supersedes**: The "1C — TD path-shim" rejected alternative in ADR-0002 (now adopted).
 **Applies to**: `td_exporter/CUDALinkBootstrap.py`, `td_exporter/CUDAIPCExtension.py`,
-`install_td_library.cmd`, `tests/test_td_bootstrap.py`, `docs/TOX_BUILD_GUIDE.md`.
+`install_td_library.cmd`, `tests/td/test_td_bootstrap.py`, `docs/TOX_BUILD_GUIDE.md`.
 
 ---
 
@@ -56,14 +56,14 @@ issue: `TDReceiver.py` imports 15+ symbols from `SHMProtocol` (including the pri
 
 `sys.modules` aliasing keeps the 4 glue files byte-for-byte identical to today. The bootstrap
 is a single 80-line module that centralises all dual-mode logic. The alias map is explicitly
-cross-referenced against `PAIRS` by `tests/test_td_bootstrap.py::test_alias_map_covers_all_pairs`.
+cross-referenced against `PAIRS` by `tests/td/test_td_bootstrap.py::test_alias_map_covers_all_pairs`.
 
 ### Why this is safe for TD's embedded Python
 
 `cuda_link` is a **pure-ctypes, zero-required-dependency, `py3-none-any`** wheel. There is no
 ABI surface, no build step, no C extension. It imports cleanly in TD's embedded Python 3.9/3.11
 with no conflict risk. The `__init__.py` torch/cupy/numpy imports are guarded `*_AVAILABLE`
-flags — `tests/test_cuda_ipc_importer.py::test_get_frame_without_torch` confirms the package
+flags — `tests/integration/test_cuda_ipc_importer.py::test_get_frame_without_torch` confirms the package
 loads with no optional deps installed.
 
 ### Why not subprocess / separate process (the StreamDiffusion model)

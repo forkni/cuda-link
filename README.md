@@ -262,16 +262,28 @@ For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 
 ## Testing
 
+The suite lives in `tests/` split into five purpose-named packages:
+
+```
+tests/
+  core/         protocol layer — SHM layout, format negotiation, ports, activation barriers
+  cuda/         CUDA runtime seam — IPC wrapper, errcheck, handle guards, NVML, probe scripts
+  td/           TouchDesigner integration — TDHost, Sender, Receiver, bootstrap, config
+  integration/  end-to-end pipeline, round-trip data integrity, deprecation shims
+  support/      tooling — env checks, console shutdown, wrapper-sync drift guard
+```
+
 Run the full test suite:
 
 ```bash
 cd C:\path\to\CUDA_IPC
 
-# Protocol tests (no CUDA needed)
-pytest tests/test_shm_protocol.py -v
+# Run a whole category (no CUDA needed)
+pytest tests/core/ -v
 
-# Unit tests (requires CUDA)
-pytest tests/test_cuda_ipc_wrapper.py -v
+# Single-file examples
+pytest tests/core/test_shm_protocol.py -v      # protocol tests (no CUDA needed)
+pytest tests/cuda/test_cuda_ipc_wrapper.py -v  # CUDA unit tests (requires GPU)
 
 # All tests
 pytest tests/ -v

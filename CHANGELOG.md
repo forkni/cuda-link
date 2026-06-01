@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+
+- **Test suite reorganized into subfolders** (`d319703`) — the flat `tests/` directory of 37
+  `test_*.py` files is now grouped into five purpose-named packages: `core/` (12 — protocol layer),
+  `cuda/` (6 — CUDA runtime seam), `td/` (11 — TouchDesigner integration), `integration/` (5 —
+  end-to-end pipeline), `support/` (3 — tooling). Each subfolder is a Python package
+  (`__init__.py`). History preserved via `git mv`. 11 files that computed the repo root via
+  `Path(__file__).parent.parent` were deepened by one level to
+  `Path(__file__).parent.parent.parent`. `README.md` testing section and ADR cross-references
+  updated to reflect new paths. `pytest --collect-only` count unchanged: 667 before and after.
+
 ## [1.8.0] — 2026-05-31
 
 ### Fixed

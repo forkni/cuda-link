@@ -28,7 +28,7 @@ import pytest
 # Module loader
 # ---------------------------------------------------------------------------
 
-_PROBE_PATH = Path(__file__).parent.parent / "scripts" / "probe" / "driver_api_ipc_probe.py"
+_PROBE_PATH = Path(__file__).parent.parent.parent / "scripts" / "probe" / "driver_api_ipc_probe.py"
 
 
 def _load_probe():

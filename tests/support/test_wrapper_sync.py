@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-_PROJECT_ROOT = Path(__file__).parent.parent
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Import the sync script's PAIRS list and rewrite function directly so the
 # test and the script always agree on the transform.
@@ -92,7 +92,7 @@ def test_pairs_cover_all_mirrorable_modules() -> None:
     canonical module: register it in PAIRS in scripts/sync_td_wrapper.py, or
     add its filename to CANONICAL_ONLY if it intentionally has no TD twin.
     """
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
     src_dir = project_root / "src" / "cuda_link"
     paired_canonicals = {src for src, _, _ in PAIRS}
 
@@ -114,7 +114,7 @@ def test_pairs_cover_all_mirrorable_modules() -> None:
 
 def test_wrapper_contains_key_definitions() -> None:
     """Verify wrapper contains expected CUDA definitions."""
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
     pip_wrapper = project_root / "src" / "cuda_link" / "cuda_ipc_wrapper.py"
     types_module = project_root / "src" / "cuda_link" / "cuda_runtime_types.py"
 
