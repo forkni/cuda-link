@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-pushd "%~dp0" || exit /b 1
+pushd "%~dp0.." || exit /b 1
 
 REM build_wheel.cmd - Build cuda-link Python wheel for distribution
 REM

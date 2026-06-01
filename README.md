@@ -79,7 +79,7 @@ Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-targe
 (one-time):
 
 ```bat
-build_wheel.cmd                    REM build dist\cuda_link-1.8.0-py3-none-any.whl
+utils\build_wheel.cmd              REM build dist\cuda_link-1.8.0-py3-none-any.whl
 install_td_library.cmd             REM interactive menu — choose one of 5 install modes
 ```
 
@@ -117,7 +117,7 @@ for full instructions.
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-build_wheel.cmd                             # Builds dist\cuda_link-1.8.0-py3-none-any.whl
+utils\build_wheel.cmd                       # Builds dist\cuda_link-1.8.0-py3-none-any.whl
 
 pip install "dist\cuda_link-1.8.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
 pip install "dist\cuda_link-1.8.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
@@ -372,7 +372,7 @@ git clone https://github.com/forkni/cuda-link.git
 cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
-build_wheel.cmd
+utils\build_wheel.cmd
 # Output: dist\cuda_link-1.8.0-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
