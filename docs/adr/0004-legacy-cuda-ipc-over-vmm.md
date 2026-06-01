@@ -48,7 +48,7 @@ Rationale:
    equivalent functionality.
 
 | Factor | Legacy IPC (chosen) | VMM API (rejected) |
-|---|---|---|
+| --- | --- | --- |
 | Code volume | ~600 lines | ~1 500+ lines |
 | Allocation | 1 step (`cudaMalloc`) | 4 steps (create + reserve + map + access) |
 | API level | Runtime (automatic context) | Driver (manual context) |
@@ -74,11 +74,13 @@ is available on this hardware, but it was never integrated into production.
 ## Consequences
 
 **Positive:**
+
 - Production path stays simple and auditable (~600 lines, all in `cuda_ipc_wrapper.py`).
 - No Win32 handle management, no security descriptor plumbing, no driver-context lifecycle.
 - Fully validated; existing test suite and TD smoke tests cover the IPC path.
 
 **Negative / trade-offs:**
+
 - Cannot share `cudaArray`/texture objects directly (opaque, swizzled layout). If TD ever stops linearizing
   GPU memory before handing it off, the transport design would need to change.
 - Legacy `cudaIpc*` memory IPC is documented as "a similar concept" to VMM in NVIDIA's programming guide —
