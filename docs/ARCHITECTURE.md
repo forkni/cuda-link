@@ -601,5 +601,5 @@ would reopen the decision. A proof-of-concept VMM probe lives at
 
 ---
 
-**Last Updated**: 2026-05-30
-**Version**: 1.7.2
+**Last Updated**: 2026-05-31
+**Version**: 1.8.0
