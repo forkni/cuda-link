@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Debug timing summary in Receiver mode** (`25a0514`, `fc45578`) — `TDReceiverEngine` now
+  emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
+  (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
+  ```
+  [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
+  ```
+  Fields: **FPS** (frames consumed ÷ wall time since first frame); **latency** (`now −
+  producer_timestamp` — valid on single-machine TD→TD / TD→Python setups); **copy** (running
+  average of `copyCUDAMemory` wall time — the receiver's analogue of `get_frame= µs avg` in the
+  standalone Python receiver); **shape** (numpy H×W×C order). Output stops when Debug is toggled
+  Off. Format matches `td_exporter/example_receiver_python.py`.
+
 ### Internal
 
 - **Test suite reorganized into subfolders** (`d319703`) — the flat `tests/` directory of 37

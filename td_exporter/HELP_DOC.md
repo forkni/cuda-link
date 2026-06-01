@@ -153,9 +153,12 @@ Live status display — updated every frame while the component is active. Canno
 ### Debug
 **Type:** Toggle | **Default:** Off
 
-Enables verbose performance logging to the TouchDesigner Textport.
+Enables verbose performance logging to the TouchDesigner Textport. Behaviour differs by mode.
 
-- **Off:** Only critical errors and state changes are logged.
+- **Off:** Only critical errors and state changes are logged (both modes).
+
+#### Sender mode
+
 - **On:** every ~97 frames, prints an average timing breakdown:
   - `cudaMemory` — OpenGL→CUDA interop time
   - `memcpy` — D2D memcpy enqueue time
@@ -166,7 +169,22 @@ Enables verbose performance logging to the TouchDesigner Textport.
 
 The first frame after initialization always prints a detailed timing diagnostic regardless of this setting.
 
-Hot-swappable: can be toggled at runtime without affecting the pipeline. However, GPU timing events (`cudaEventElapsedTime`) are only created during initialization. If Debug is turned On after the component is already running, CPU-side timing is enabled immediately but the `GPU memcpy` metric will not appear until the next full cleanup/re-init cycle.
+GPU timing events (`cudaEventElapsedTime`) are only created during initialization. If Debug is turned On after the component is already running, CPU-side timing is enabled immediately but the `GPU memcpy` metric will not appear until the next full cleanup/re-init cycle.
+
+#### Receiver mode
+
+- **On:** every 150 frames (configurable via `CUDALINK_RECEIVER_REPORT_EVERY` env var), prints a
+  per-frame summary line:
+  ```
+  [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
+  ```
+  - **FPS** — frames consumed ÷ wall time since the first consumed frame
+  - **shape** — texture dimensions in numpy H×W×C order
+  - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
+  - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
+  - **slot / write_idx** — ring buffer diagnostics
+
+Hot-swappable in both modes: can be toggled at runtime without affecting the pipeline.
 
 ---
 
