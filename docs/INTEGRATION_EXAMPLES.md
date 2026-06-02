@@ -7,7 +7,6 @@ Complete workflows for common CUDA IPC use cases.
 > Code examples below that use `CUDAIPCImporter.from_connected(...)` or `CUDAIPCExporter` reflect the
 > pre-v1.5 API: `CUDAIPCImporter` still works via a deprecation shim (removed in v1.8), but
 > `CUDAIPCExporter` was **removed in v1.5.0** — use `Exporter.open(FrameSpec(...))` instead.
-> See `docs/MIGRATION_v1.5.md` for migration guides.
 
 ---
 
@@ -422,7 +421,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.6.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.8.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -562,5 +561,5 @@ for i in range(max_retries):
 
 ---
 
-**Last Updated**: 2026-05-29
-**Version**: 1.6.0
+**Last Updated**: 2026-05-31
+**Version**: 1.8.0

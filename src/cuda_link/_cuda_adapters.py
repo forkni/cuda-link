@@ -1,8 +1,8 @@
 """
 CUDA adapters — concrete implementations of CudaPort and ImporterCudaPort.
 
-CTypesCudaAdapter  — production adapter; thin delegation to CUDARuntimeAPI.
-FakeCudaAdapter    — in-memory adapter; no GPU required; for unit tests.
+CTypesCUDAAdapter  — production adapter; thin delegation to CUDARuntimeAPI.
+FakeCUDAAdapter    — in-memory adapter; no GPU required; for unit tests.
 
 Both classes satisfy the CudaPort Protocol (exporter side) and the
 ImporterCudaPort Protocol (importer side) structurally — the same two classes
@@ -22,7 +22,7 @@ from .cuda_ipc_wrapper import CUDARuntimeAPI
 # ---------------------------------------------------------------------------
 
 
-class CTypesCudaAdapter:
+class CTypesCUDAAdapter:
     """CudaPort adapter backed by a real CUDARuntimeAPI instance.
 
     Delegates all CUDA operations to the underlying CUDARuntimeAPI via
@@ -30,17 +30,17 @@ class CTypesCudaAdapter:
     structurally without maintaining a mechanical list of one-line forwarders.
 
     Construction:
-        adapter = CTypesCudaAdapter.for_device(device=0)
+        adapter = CTypesCUDAAdapter.for_device(device=0)
         # or, when a singleton is already loaded:
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
-        adapter = CTypesCudaAdapter(get_cuda_runtime(device=0))
+        adapter = CTypesCUDAAdapter(get_cuda_runtime(device=0))
     """
 
     def __init__(self, api: CUDARuntimeAPI) -> None:
         self._api = api
 
     @classmethod
-    def for_device(cls, device: int = 0) -> CTypesCudaAdapter:
+    def for_device(cls, device: int = 0) -> CTypesCUDAAdapter:
         """Construct a production adapter bound to the given CUDA device."""
         from .cuda_ipc_wrapper import get_cuda_runtime
 
@@ -50,7 +50,7 @@ class CTypesCudaAdapter:
         """Delegate any attribute lookup to the underlying CUDARuntimeAPI.
 
         Called only when normal instance/class lookup fails — i.e., for any
-        CUDARuntimeAPI method not explicitly defined here.  FakeCudaAdapter is
+        CUDARuntimeAPI method not explicitly defined here.  FakeCUDAAdapter is
         unaffected: it still satisfies CudaPort with its own explicit methods.
         """
         return getattr(self._api, name)
@@ -70,7 +70,7 @@ class _FakePointerAttributes:
 
 
 class _FakeHandle:
-    """Opaque handle sentinel used by FakeCudaAdapter for events, streams, etc."""
+    """Opaque handle sentinel used by FakeCUDAAdapter for events, streams, etc."""
 
     def __init__(self, tag: str) -> None:
         self._tag = tag
@@ -103,7 +103,7 @@ class _FakeIpcHandle:
 # ---------------------------------------------------------------------------
 
 
-class FakeCudaAdapter:
+class FakeCUDAAdapter:
     """In-memory CudaPort / ImporterCudaPort for unit tests — no GPU, no ctypes DLL.
 
     Satisfies both CudaPort (exporter) and ImporterCudaPort (importer) structurally.
@@ -185,7 +185,7 @@ class FakeCudaAdapter:
     def malloc(self, size: int) -> c_void_p:
         self._malloc_call_count += 1
         if self.fail_on_malloc_count is not None and self._malloc_call_count >= self.fail_on_malloc_count:
-            raise RuntimeError(f"FakeCudaAdapter: injected malloc failure on call {self._malloc_call_count}")
+            raise RuntimeError(f"FakeCUDAAdapter: injected malloc failure on call {self._malloc_call_count}")
         ptr_int = self._alloc_ptr(size)
         self.allocations[ptr_int] = size
         return c_void_p(ptr_int)
@@ -227,12 +227,12 @@ class FakeCudaAdapter:
 
     def create_stream(self, flags: int = 0x01) -> Any:
         if self.fail_on_stream_create:
-            raise RuntimeError("FakeCudaAdapter: injected stream creation failure")
+            raise RuntimeError("FakeCUDAAdapter: injected stream creation failure")
         return _FakeHandle(f"stream:flags={flags:#x}")
 
     def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> Any:
         if self.fail_on_stream_create:
-            raise RuntimeError("FakeCudaAdapter: injected stream creation failure")
+            raise RuntimeError("FakeCUDAAdapter: injected stream creation failure")
         return _FakeHandle(f"stream:prio={priority}:flags={flags:#x}")
 
     def destroy_stream(self, stream: Any) -> None:
@@ -254,7 +254,7 @@ class FakeCudaAdapter:
 
     def create_ipc_event(self) -> Any:
         if self.fail_on_event_create:
-            raise RuntimeError("FakeCudaAdapter: injected event creation failure")
+            raise RuntimeError("FakeCUDAAdapter: injected event creation failure")
         return _FakeHandle("ipc_event")
 
     def create_sync_event(self) -> Any:
@@ -300,7 +300,7 @@ class FakeCudaAdapter:
 
     def check_sticky_error(self, context: str) -> None:
         if self._sticky_error != 0:
-            raise RuntimeError(f"FakeCudaAdapter: sticky error {self._sticky_error} after {context}")
+            raise RuntimeError(f"FakeCUDAAdapter: sticky error {self._sticky_error} after {context}")
 
     # --- CUDA Graphs -------------------------------------------------------
 

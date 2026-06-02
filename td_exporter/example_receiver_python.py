@@ -8,16 +8,16 @@ or directly from the command line:
     python td_exporter/example_receiver_python.py
 
 Pipeline:  CUDAIPCLink_to_Python  (Sender mode, in TouchDesigner)
-               ↓  CUDA IPC  (cudalink_input_ipc)
+               ↓  CUDA IPC  (cudalink_ipc_TD>>Python)
            this script  (separate OS process)
                ↓
            Prints frame stats  →  shape, dtype, FPS, latency, get_frame µs
 
 TD Setup (handled by example_receiver_launcher.py Execute DAT):
-    CUDAIPCLink_to_Python → Mode=Sender, Ipcmemname=cudalink_input_ipc, Active=ON
+    CUDAIPCLink_to_Python → Mode=Sender, Ipcmemname=cudalink_ipc_TD>>Python, Active=ON
 
 Environment variables (all optional):
-    CUDALINK_RECEIVER_SHM_NAME     IPC channel name          (default: cudalink_input_ipc)
+    CUDALINK_RECEIVER_SHM_NAME     IPC channel name          (default: cudalink_ipc_TD>>Python)
     CUDALINK_RECEIVER_DEVICE       GPU device index           (default: 0)
     CUDALINK_RECEIVER_TIMEOUT_MS   Frame-wait timeout ms      (default: 5000)
     CUDALINK_RECEIVER_REPORT_EVERY Frames between status lines (default: 150)
@@ -91,7 +91,7 @@ _shutdown = install_console_ctrl_handler("[receiver]", _do_cleanup)
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_input_ipc")
+SHM_NAME = os.environ.get("CUDALINK_RECEIVER_SHM_NAME", "cudalink_ipc_TD>>Python")
 DEVICE = int(os.environ.get("CUDALINK_RECEIVER_DEVICE", "0"))
 TIMEOUT_MS = float(os.environ.get("CUDALINK_RECEIVER_TIMEOUT_MS", "5000"))
 REPORT_EVERY = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
@@ -283,4 +283,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback as _tb
+
+        _err = _tb.format_exc()
+        _log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "receiver_error.log")
+        try:
+            with open(_log, "w", encoding="utf-8") as _f:
+                _f.write(_err)
+        except OSError:
+            pass
+        print(f"\n[receiver] FATAL — unhandled exception (log: {_log})\n{_err}", flush=True)
+        with contextlib.suppress(EOFError, KeyboardInterrupt):
+            input("[receiver] Press Enter to close this window ...")
+        sys.exit(1)

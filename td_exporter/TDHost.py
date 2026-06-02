@@ -46,13 +46,25 @@ class TOPHandle(Protocol):
     RealTOPHandle (TD-connected) and FakeTOPHandle (in-process test double).
     """
 
-    def cuda_memory(self, stream: Any = None) -> CUDAMemoryRef:
-        """Call top.cudaMemory(stream=stream) and return a CUDAMemoryRef."""
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> CUDAMemoryRef:
+        """Call top.cudaMemory(stream=stream, pixelFormat=pixel_format) and return a CUDAMemoryRef.
+
+        pixel_format: optional TD pixelFormatName string (e.g. 'rgba32float').  Passed as the
+        pixelFormat keyword argument to cudaMemory() — TD may convert the texture to the requested
+        format before returning the CUDA memory block.  Use 'rgba32float' for monoalpha sources
+        to request a 4-channel RGBA expansion (R/G/B=mono, A=alpha) if TD supports it.
+        """
         ...
 
     @property
     def pixel_format(self) -> str:
-        """top.pixelFormat as a string."""
+        """top.pixelFormat as a string (display-only, not for Python comparisons)."""
+        ...
+
+    @property
+    def pixel_format_name(self) -> str:
+        """top.pixelFormatName — the par.format menu name (e.g. 'rgba8fixed', 'rgba32float').
+        Updates immediately on format change; use for dtype detection, not pixelFormat."""
         ...
 
     def set_format(self, fmt: str) -> None:
@@ -69,6 +81,15 @@ class TOPHandle(Protocol):
 
     def set_resolution(self, width: int, height: int) -> None:
         """Set Script TOP to custom resolution: outputresolution=9, resolutionw, resolutionh."""
+        ...
+
+    def cook(self, force: bool = False) -> None:
+        """Request a cook on this TOP. force=True marks it dirty unconditionally.
+
+        Used to break stale-allocation deadlocks: after a format change, calling
+        cook(force=True) ensures TD reallocates the TOP's texture to the new format
+        so cuda_memory() returns the correct size on the next frame.
+        """
         ...
 
     def is_valid(self) -> bool:
@@ -125,6 +146,15 @@ class TDHost(Protocol):
         """
         ...
 
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> Any:
+        """Construct a TD CUDAMemoryShape from plain Python values.
+
+        Returns the shape object opaquely — engine code caches it and passes it back
+        to TOPHandle.copy_cuda_memory(). Keeps the TD CUDAMemoryShape type behind the
+        seam so engine code never touches a TD runtime global directly.
+        """
+        ...
+
     def set_warning_status(self, msg: str) -> None:
         """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
         ...
@@ -153,8 +183,13 @@ class RealTOPHandle(TOPHandle):
     def __init__(self, top: Any) -> None:
         self._top = top
 
-    def cuda_memory(self, stream: Any = None) -> CUDAMemoryRef:
-        cm = self._top.cudaMemory(stream=stream) if stream is not None else self._top.cudaMemory()
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> CUDAMemoryRef:
+        kwargs: dict = {}
+        if stream is not None:
+            kwargs["stream"] = stream
+        if pixel_format is not None:
+            kwargs["pixelFormat"] = pixel_format
+        cm = self._top.cudaMemory(**kwargs) if kwargs else self._top.cudaMemory()
         shape = cm.shape
         return CUDAMemoryRef(
             ptr=int(cm.ptr),
@@ -169,8 +204,19 @@ class RealTOPHandle(TOPHandle):
     def pixel_format(self) -> str:
         return str(getattr(self._top, "pixelFormat", ""))
 
+    @property
+    def pixel_format_name(self) -> str:
+        return str(getattr(self._top, "pixelFormatName", ""))
+
+    def cook(self, force: bool = False) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            if force:
+                self._top.cook(force=True)
+            else:
+                self._top.cook()
+
     def set_format(self, fmt: str) -> None:
-        with contextlib.suppress(AttributeError):
+        with contextlib.suppress(AttributeError, RuntimeError, Exception):
             self._top.par.format = fmt
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
@@ -257,6 +303,20 @@ class RealTDHost(TDHost):
     def wrap_top(self, top: Any) -> RealTOPHandle:
         """Wrap a raw TD TOP operator as a RealTOPHandle."""
         return RealTOPHandle(top)
+
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> Any:
+        """Construct a TD CUDAMemoryShape from plain Python values.
+
+        CUDAMemoryShape is a TD interpreter global injected into the COMP namespace —
+        touching it here (in the adapter layer) is legitimate. Engine code receives
+        the result opaquely and never imports or names the TD type.
+        """
+        shape = CUDAMemoryShape()  # noqa: F821 — TD interpreter global, present at runtime
+        shape.width = width
+        shape.height = height
+        shape.numComps = num_comps
+        shape.dataType = data_type
+        return shape
 
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:

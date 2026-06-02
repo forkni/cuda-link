@@ -10,6 +10,7 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
 import time
 import traceback
@@ -28,11 +29,10 @@ from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
+from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
-    _ST_BBH,
-    FLAGS_BFLOAT16,
+    FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
-    FORMAT_KIND_UNSIGNED,
     MAGIC_OFFSET,
     MAGIC_SIZE,
     METADATA_SIZE,
@@ -45,15 +45,44 @@ from SHMProtocol import (  # noqa: E402
     VERSION_OFFSET,
     VERSION_SIZE,
     WRITE_IDX_OFFSET,
+    Metadata,
     SHMLayout,
     SlotState,
     acquire_slot,
 )
-from TDConfig import TDSenderConfig  # noqa: E402
+from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
+
+
+def td_format_string(fmt: Format) -> str:
+    """Map a Format value object → TouchDesigner Script TOP par.format string.
+
+    Produces strings matching TD's internal par.format menu values, e.g.:
+      (FLOAT, 32, 4, flags=0)               → "rgba32float"
+      (UNSIGNED, 16, 4, flags=0)            → "rgba16fixed"
+      (UNSIGNED, 8, 1, flags=0)             → "r8fixed"
+      (FLOAT, 32, 2, flags=FLAGS_MONO_ALPHA) → "monoalpha32float"
+      (FLOAT, 32, 2, flags=0)               → "rg32float"
+
+    TD uses these to allocate the Script TOP's output texture. Setting
+    par.format before copyCUDAMemory ensures the texture is the right size
+    for the incoming dtype, preventing partial writes into an oversized buffer.
+
+    FLAGS_MONO_ALPHA is preserved in fmt.flags so that mono+alpha sources are
+    correctly labelled in the par.format string and in Info/Status messages —
+    the user's only signal that the channel layout is R+A (not R+G).
+    """
+    format_kind, bits_per_comp, num_comps, flags = fmt.kind, fmt.bits, fmt.num_comps, fmt.flags
+    if num_comps == 2 and flags & FLAGS_MONO_ALPHA:
+        ch = "monoalpha"
+    else:
+        ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
+    suffix = "float" if format_kind == FORMAT_KIND_FLOAT else "fixed"
+    return f"{ch}{bits_per_comp}{suffix}"
+
 
 # CuPy import deferred (heavy; only needed for float16 receiver path)
 CUPY_AVAILABLE: bool = False
@@ -150,27 +179,6 @@ class ReceiverConnection:
 
 
 @dataclass
-class FormatDescriptor:
-    """Frame format negotiated from SHM metadata during initialize_receiver()."""
-
-    width: int = 0
-    height: int = 0
-    num_comps: int = 0
-    format_kind: int = FORMAT_KIND_FLOAT
-    bits_per_comp: int = 32
-    flags: int = 0
-    buffer_size: int = 0
-
-    @property
-    def is_bfloat16(self) -> bool:
-        return bool(self.flags & FLAGS_BFLOAT16)
-
-    @property
-    def is_float16(self) -> bool:
-        return self.format_kind == FORMAT_KIND_FLOAT and self.bits_per_comp == 16 and not self.is_bfloat16
-
-
-@dataclass
 class RetryState:
     """Retry policy and transient counters for the connection-attempt loop."""
 
@@ -180,6 +188,7 @@ class RetryState:
     retry_interval_frames: int = 1
     frames_since_last_retry: int = 0
     needs_resolution_update: bool = False
+    needs_format_update: bool = False  # set when bits_per_comp/format_kind/num_comps changes
 
     def request_immediate_reconnect(self) -> None:
         """Force the next import_frame call to attempt reconnection."""
@@ -189,6 +198,13 @@ class RetryState:
         """Return True and clear the flag if a resolution update is pending."""
         if self.needs_resolution_update:
             self.needs_resolution_update = False
+            return True
+        return False
+
+    def consume_format_update(self) -> bool:
+        """Return True and clear the flag if a pixel-format update is pending."""
+        if self.needs_format_update:
+            self.needs_format_update = False
             return True
         return False
 
@@ -208,7 +224,7 @@ class TDReceiverEngine:
     def __init__(
         self,
         host: TDHost,
-        config: TDSenderConfig,
+        config: TDReceiverConfig,
         cuda: Any,
         log_fn: Callable,
         num_slots: int,
@@ -228,7 +244,7 @@ class TDReceiverEngine:
         self._initialized = False
 
         self._connection = ReceiverConnection()
-        self._format = FormatDescriptor()
+        self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
         self._retry = RetryState()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
@@ -243,6 +259,11 @@ class TDReceiverEngine:
 
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
+
+        # Per-frame performance tracking for Debug summary line
+        self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
+        self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
+        self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
@@ -284,6 +305,18 @@ class TDReceiverEngine:
             return (self._format.width, self._format.height)
         return None
 
+    def consume_pending_format(self) -> str | None:
+        """Return the TD par.format string if a pixel-format update is pending, else None.
+
+        Called from script_top_callbacks.onCook to drive ImportBuffer par.format updates in
+        the fallback path (modoutsidecook disabled). Mirrors consume_pending_resolution.
+
+        Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
+        """
+        if self._retry.consume_format_update():
+            return td_format_string(self._format)
+        return None
+
     # --- Core API ---
 
     def is_ready(self) -> bool:
@@ -307,7 +340,7 @@ class TDReceiverEngine:
                 if self._format.width > 0
                 else "N/A"
             ),
-            "rx_buffer_size_mb": self._format.buffer_size / 1024 / 1024 if self._format.buffer_size > 0 else 0,
+            "rx_buffer_size_mb": self._format.frame_nbytes / 1024 / 1024 if self._format.frame_nbytes > 0 else 0,
             "rx_last_write_idx": self._connection.last_write_idx,
             "rx_dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self._connection.dev_ptrs],
         }
@@ -380,6 +413,9 @@ class TDReceiverEngine:
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
+            _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
+            if self._rx_start == 0.0:
+                self._rx_start = time.perf_counter()
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -405,10 +441,11 @@ class TDReceiverEngine:
                 _event_ms = (time.perf_counter() - _t_event) * 1000.0
                 _t_copy = time.perf_counter()
 
+            _t_copy_wall = time.perf_counter()  # for running copy-time average (all frames)
             # Copy CUDA memory into ImportBuffer texture using cached shape
             address = self._connection.dev_ptrs[read_slot].value
 
-            if self._format.is_float16:
+            if self._format.dtype_str == "float16":
                 if CUPY_AVAILABLE and self._cupy_f32_buf is not None:
                     # GPU-side float16→float32 conversion (Ch5: minimize PCIe traffic).
                     # stream_wait_event (enqueued above on _connection.stream) guarantees GPU data is ready.
@@ -416,7 +453,7 @@ class TDReceiverEngine:
                     # f16→f32 cast entirely on GPU via ExternalStream, then call copyCUDAMemory —
                     # eliminating two PCIe roundtrips and the CPU numpy.copyto call.
                     rx_stream_int = int(self._connection.stream.value)
-                    f16_size = self._format.buffer_size  # original float16 byte count
+                    f16_size = self._format.frame_nbytes  # original float16 byte count
                     f32_size = f16_size * 2  # float32 = 2× bytes
 
                     cupy_f16 = self._cupy_f16_views[read_slot]
@@ -435,13 +472,13 @@ class TDReceiverEngine:
                     # CPU fallback: D2H + numpy convert + copyNumpyArray.
                     # Used when CuPy is not installed or GPU buffer allocation failed.
                     if self._f16_cpu_buf is None or self._f32_cpu_buf is None:
-                        debug("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame")
+                        self._log("[CUDAIPCLink] float16 CPU buffers not allocated — skipping frame", force=True)
                         return False
 
                     # D2H on _connection.stream: stream_wait_event (enqueued earlier) guarantees data is ready.
                     cpu_ptr = self._f16_cpu_buf.ctypes.data_as(c_void_p)
                     self.cuda.memcpy_async(
-                        cpu_ptr, c_void_p(address), self._format.buffer_size, 2, self._connection.stream
+                        cpu_ptr, c_void_p(address), self._format.frame_nbytes, 2, self._connection.stream
                     )
                     self.cuda.stream_synchronize(self._connection.stream)
                     numpy.copyto(
@@ -453,10 +490,12 @@ class TDReceiverEngine:
             else:
                 handle.copy_cuda_memory(
                     address,
-                    self._format.buffer_size,
+                    self._format.frame_nbytes,
                     self._cached_shape,
                     stream=int(self._connection.stream.value),
                 )
+
+            self._copy_total_s += time.perf_counter() - _t_copy_wall
 
             if _diag:
                 _copy_ms = (time.perf_counter() - _t_copy) * 1000.0
@@ -470,17 +509,23 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
-            _dt = self._cached_shape.dataType
-            _dtype_str = (
-                getattr(_dt, "name", None) or getattr(_dt, "__name__", str(_dt)) if _dt is not None else "unknown"
-            )
-            self._host.set_info_status(
-                f"{self._format.width}x{self._format.height} {_dtype_str} {self._format.num_comps}ch"
-            )
+            _fmt_name = td_format_string(self._format)
+            self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
 
-            # Debug logging (97 = prime, avoids aliasing with slot counts 2,4,5)
-            if self.verbose_performance and self.frame_count % 97 == 0:
-                self._log(f"Frame {self.frame_count}: read_slot={read_slot}, write_idx={write_idx}")
+            # Debug summary line — matches standalone Python receiver format
+            if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
+                _now = time.perf_counter()
+                _elapsed = _now - self._rx_start
+                _fps = self.frame_count / _elapsed if _elapsed > 0 else 0.0
+                _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
+                _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
+                self._log(
+                    f"Frame {self.frame_count:5d} | {_fps:5.1f} FPS | "
+                    f"shape=({self._format.height}, {self._format.width}, {self._format.num_comps}) "
+                    f"dtype={self._format.dtype_str} | "
+                    f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
+                    f"(slot={read_slot}, write_idx={write_idx})"
+                )
 
             return True
 
@@ -517,6 +562,32 @@ class TDReceiverEngine:
             return True
         except (AttributeError, RuntimeError) as e:
             self._log(f"Could not set ImportBuffer resolution: {e}", force=True)
+            return False
+
+    def update_receiver_format(self, handle: object) -> bool:
+        """Update ImportBuffer pixel format from outside the cook cycle.
+
+        Safe to call from Execute DAT (alongside update_receiver_resolution).
+        Sets par.format on the Script TOP so copyCUDAMemory allocates an output
+        texture of the correct pixel depth — preventing partial writes when dtype
+        changes (e.g. float32→uint16 would only fill half a float32-sized texture).
+
+        Args:
+            handle: TOPHandle wrapping the ImportBuffer Script TOP.
+
+        Returns:
+            True if the format was updated, False if no update needed or not applicable.
+        """
+        if not self._retry.needs_format_update:
+            return False
+        try:
+            fmt = td_format_string(self._format)
+            handle.set_format(fmt)
+            self._retry.needs_format_update = False
+            self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
+            return True
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"Could not set ImportBuffer pixel format: {e}", force=True)
             return False
 
     def initialize_receiver(self) -> bool:
@@ -595,27 +666,18 @@ class TDReceiverEngine:
             shutdown_offset = layout.shutdown_offset
             metadata_offset = shutdown_offset + SHUTDOWN_FLAG_SIZE
 
-            # Check if SharedMemory is large enough for metadata
+            # Read and validate metadata via the canonical Metadata value object.
             if len(shm_handle.buf) >= metadata_offset + METADATA_SIZE:
-                width = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[metadata_offset : metadata_offset + 4]),
-                )[0]
-                height = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[metadata_offset + 4 : metadata_offset + 8]),
-                )[0]
-                num_comps = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[metadata_offset + 8 : metadata_offset + 12]),
-                )[0]
-                format_kind, bits_per_comp, flags = _ST_BBH.unpack(
-                    bytes(shm_handle.buf[metadata_offset + 12 : metadata_offset + 16])
-                )
-                buffer_size = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[metadata_offset + 16 : metadata_offset + 20]),
-                )[0]
+                try:
+                    _shm_mv = memoryview(bytes(shm_handle.buf))  # bytes copy: no mmap exported pointer
+                    _md = Metadata.read_from(_shm_mv, layout)
+                except Exception as _e:  # noqa: BLE001
+                    self._log(f"Failed to read SHM metadata: {_e}", force=True)
+                    shm_handle.close()
+                    return False
+                width, height, num_comps = _md.width, _md.height, _md.num_comps
+                format_kind, bits_per_comp, flags = _md.format_kind, _md.bits_per_comp, _md.flags
+                buffer_size = _md.data_size
                 self._log(
                     f"Read metadata: {width}x{height}x{num_comps}, "
                     f"kind={format_kind} bits={bits_per_comp} flags=0x{flags:04x}, "
@@ -623,11 +685,10 @@ class TDReceiverEngine:
                     force=True,
                 )
                 # Strict size invariant: data_size must exactly equal W*H*C*(bits/8).
-                expected_size = width * height * num_comps * (bits_per_comp // 8)
-                if bits_per_comp == 0 or buffer_size != expected_size:
+                if bits_per_comp == 0 or _md.data_size != _md.expected_size:
                     self._log(
-                        f"Metadata size invariant failed: W*H*C*(bits/8)={expected_size} "
-                        f"but buf_size={buffer_size}. Sender/receiver protocol mismatch.",
+                        f"Metadata size invariant failed: W*H*C*(bits/8)={_md.expected_size} "
+                        f"but buf_size={_md.data_size}. Sender/receiver protocol mismatch.",
                         force=True,
                     )
                     shm_handle.close()
@@ -750,18 +811,22 @@ class TDReceiverEngine:
                 shutdown_offset=shutdown_offset,
                 last_write_idx=0,
             )
-            self._format = FormatDescriptor(
-                width=width,
-                height=height,
-                num_comps=num_comps,
-                format_kind=format_kind,
-                bits_per_comp=bits_per_comp,
-                flags=flags,
-                buffer_size=buffer_size,
-            )
+            self._format = Format.from_metadata(_md)
 
-            # Flag that Script TOP resolution needs to be updated (will be done outside cook cycle)
+            # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
+
+            # Flag pixel-format update when the resolved format is anything other than the
+            # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
+            # _cached_shape, but par.format controls the output texture allocation (bit depth
+            # AND channel layout).  Only rgba32float matches the saved/default Script TOP
+            # format and therefore needs no explicit set_format call.  All other formats —
+            # uint8, uint16, AND float32 variants with non-RGBA channel layout (monoalpha32float,
+            # rg32float, r32float, etc.) — must be set explicitly so copyCUDAMemory writes into
+            # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
+            # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
+            if td_format_string(self._format) != "rgba32float":
+                self._retry.needs_format_update = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
@@ -769,20 +834,18 @@ class TDReceiverEngine:
             else:
                 np_module = numpy
 
-            # Decode numpy dtype directly from (format_kind, bits_per_comp, flags).
-            # float16 path uses float32 as the CUDAMemoryShape dtype because copyCUDAMemory
-            # doesn't accept float16 — the actual conversion happens via D2H + copyNumpyArray.
-            if format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 8:
-                np_dtype = np_module.uint8
-            elif format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 16:
-                np_dtype = np_module.uint16
-            elif self._format.is_float16:
+            # CUDAMemoryShape dtype: float16 must be presented as float32 because
+            # copyCUDAMemory doesn't accept float16 — the actual conversion happens via D2H + copyNumpyArray.
+            # For all other dtypes, use the numpy dtype decoded from wire metadata.
+            if self._format.dtype_str == "float16":
                 np_dtype = np_module.float32  # shape dtype for copyCUDAMemory; real f16 handled via D2H
+            elif self._format.numpy_dtype is not None:
+                np_dtype = self._format.numpy_dtype.type  # scalar type (e.g. numpy.uint8), not dtype instance
             else:
-                np_dtype = np_module.float32  # float32/float64 — TD's copyCUDAMemory expects float32 shape
+                np_dtype = np_module.float32  # safe fallback (e.g. bfloat16, no numpy dtype)
 
             # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
-            if self._format.is_float16:
+            if self._format.dtype_str == "float16":
                 n_elems = width * height * num_comps
                 f16_bytes = n_elems * 2
                 self._f16_pinned_ptr = None
@@ -836,11 +899,7 @@ class TDReceiverEngine:
                             force=True,
                         )
 
-            self._cached_shape = CUDAMemoryShape()
-            self._cached_shape.width = width
-            self._cached_shape.height = height
-            self._cached_shape.numComps = num_comps
-            self._cached_shape.dataType = np_dtype
+            self._cached_shape = self._host.make_cuda_shape(width, height, num_comps, np_dtype)
 
             self._initialized = True
             self._diag_frames_since_reinit = 0  # Reset so import_frame logs the next 5 calls
@@ -941,32 +1000,27 @@ class TDReceiverEngine:
             return False
 
         layout = conn.layout
-        metadata_offset = layout.metadata_offset
+        if len(shm.buf) < layout.metadata_offset + METADATA_SIZE:
+            return False
         try:
-            if len(shm.buf) < metadata_offset + METADATA_SIZE:
-                return False
-            width = struct.unpack("<I", bytes(shm.buf[metadata_offset : metadata_offset + 4]))[0]
-            height = struct.unpack("<I", bytes(shm.buf[metadata_offset + 4 : metadata_offset + 8]))[0]
-            num_comps = struct.unpack("<I", bytes(shm.buf[metadata_offset + 8 : metadata_offset + 12]))[0]
-            format_kind, bits_per_comp, flags = _ST_BBH.unpack(
-                bytes(shm.buf[metadata_offset + 12 : metadata_offset + 16])
-            )
-            buffer_size = struct.unpack("<I", bytes(shm.buf[metadata_offset + 16 : metadata_offset + 20]))[0]
+            _md = Metadata.read_from(memoryview(shm.buf), layout)
         except (struct.error, ValueError, IndexError):
             return False
 
         # Validate metadata invariant before accepting new format
-        if bits_per_comp == 0 or width == 0 or height == 0 or num_comps == 0:
+        if _md.bits_per_comp == 0 or _md.width == 0 or _md.height == 0 or _md.num_comps == 0:
             return False
-        expected_size = width * height * num_comps * (bits_per_comp // 8)
-        if buffer_size != expected_size:
+        if _md.data_size != _md.expected_size:
             self._log(
                 f"Metadata invariant failed during refresh: "
-                f"W*H*C*(bits/8)={expected_size} but buf_size={buffer_size}. "
+                f"W*H*C*(bits/8)={_md.expected_size} but buf_size={_md.data_size}. "
                 "Falling back to full reinit.",
                 force=True,
             )
             return False
+
+        width, height, num_comps = _md.width, _md.height, _md.num_comps
+        format_kind, bits_per_comp = _md.format_kind, _md.bits_per_comp
 
         # Detect whether IPC handles changed (metadata-only bump vs genuine sender re-init)
         handles_changed = False
@@ -1015,48 +1069,34 @@ class TDReceiverEngine:
             conn.ipc_handles = new_ipc_handles
             conn.ipc_events = new_ipc_events
 
-        # Rebuild format descriptor
+        # Rebuild format from the validated Metadata
         prev_format = self._format
-        self._format = FormatDescriptor(
-            width=width,
-            height=height,
-            num_comps=num_comps,
-            format_kind=format_kind,
-            bits_per_comp=bits_per_comp,
-            flags=flags,
-            buffer_size=buffer_size,
-        )
+        self._format = Format.from_metadata(_md)
 
-        # Rebuild _cached_shape when available (requires CUDAMemoryShape from TD runtime)
+        # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:
             if numpy is None:
                 import numpy as np_module
             else:
                 np_module = numpy
 
-            if format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 8:
-                np_dtype = np_module.uint8
-            elif format_kind == FORMAT_KIND_UNSIGNED and bits_per_comp == 16:
-                np_dtype = np_module.uint16
-            elif self._format.is_float16:
+            if self._format.dtype_str == "float16":
                 np_dtype = np_module.float32
+            elif self._format.numpy_dtype is not None:
+                np_dtype = self._format.numpy_dtype.type  # scalar type (e.g. numpy.uint8), not dtype instance
             else:
                 np_dtype = np_module.float32
 
-            try:
-                new_shape = CUDAMemoryShape()
-                new_shape.width = width
-                new_shape.height = height
-                new_shape.numComps = num_comps
-                new_shape.dataType = np_dtype
-                self._cached_shape = new_shape
-            except NameError:
-                pass  # CUDAMemoryShape not available outside TD runtime (e.g. unit tests)
+            self._cached_shape = self._host.make_cuda_shape(width, height, num_comps, np_dtype)
 
-        # Advance version counter and signal resolution update if dims changed
+        # Advance version counter; signal resolution and/or pixel-format update if needed.
         conn.ipc_version = new_version
         if width != prev_format.width or height != prev_format.height:
             self._retry.needs_resolution_update = True
+        if bits_per_comp != prev_format.bits or format_kind != prev_format.kind or num_comps != prev_format.num_comps:
+            # Script TOP's par.format must be updated so the next copyCUDAMemory writes
+            # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
+            self._retry.needs_format_update = True
 
         self._log(
             f"Format refreshed in-place: {width}x{height}x{num_comps}, "

@@ -7,6 +7,360 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-06-01
+
+### Added
+
+- **Debug timing summary in Receiver mode** (`25a0514`, `fc45578`) — `TDReceiverEngine` now
+  emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
+  (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
+  ```
+  [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
+  ```
+  Fields: **FPS** (frames consumed ÷ wall time since first frame); **latency** (`now −
+  producer_timestamp` — valid on single-machine TD→TD / TD→Python setups); **copy** (running
+  average of `copyCUDAMemory` wall time — the receiver's analogue of `get_frame= µs avg` in the
+  standalone Python receiver); **shape** (numpy H×W×C order). Output stops when Debug is toggled
+  Off. Format matches `td_exporter/example_receiver_python.py`.
+
+### Internal
+
+- **Test suite reorganized into subfolders** (`d319703`) — the flat `tests/` directory of 37
+  `test_*.py` files is now grouped into five purpose-named packages: `core/` (12 — protocol layer),
+  `cuda/` (6 — CUDA runtime seam), `td/` (11 — TouchDesigner integration), `integration/` (5 —
+  end-to-end pipeline), `support/` (3 — tooling). Each subfolder is a Python package
+  (`__init__.py`). History preserved via `git mv`. 11 files that computed the repo root via
+  `Path(__file__).parent.parent` were deepened by one level to
+  `Path(__file__).parent.parent.parent`. `README.md` testing section and ADR cross-references
+  updated to reflect new paths. `pytest --collect-only` count unchanged: 667 before and after.
+- **Gemini CI — headless workspace trust** (`eb30d76`) — added `GEMINI_CLI_TRUST_WORKSPACE: 'true'`
+  to all four `run-gemini-cli` steps (`gemini-review`, `gemini-invoke`, `gemini-triage`,
+  `gemini-scheduled-triage`). Without it, Gemini CLI exits with "not running in a trusted directory"
+  in every CI run. The dispatch fork-gate (`head.repo.fork == false`) and `GITHUB_TOKEN: ''` in the
+  triage steps remain as the primary trust controls.
+- **Missing `requires_cuda` mark** (`f122d88`) — `test_connect_with_nonexistent_shm_enters_waiting_state`
+  in `tests/integration/test_cuda_ipc_importer.py` was missing `@pytest.mark.requires_cuda` despite
+  calling `connect()`, which loads the CUDA runtime. The CI filter `-m "not requires_cuda"` did not
+  exclude it, causing a pre-existing failure on every Linux runner run.
+- **GitHub Actions — Node 24 upgrade** (`2ebe90c`) — `actions/checkout@v4` → `v6` (all six
+  non-Gemini workflows) and `actions/setup-python@v5` → `v6`; both `v6` releases use Node 24 and
+  resolve the Node 20 deprecation warning active since 2026-06-16. Type checker in the lint job
+  swapped from `mypy` to `pyrefly` — mypy produced 140 false positives on this codebase (Windows
+  ctypes, optional deps) that pyrefly handles correctly via the project config.
+
+## [1.8.0] — 2026-05-31
+
+### Fixed
+
+- **`DtypeCodec.decode` mono+alpha itemsize** (`0526096`) — `FLAGS_MONO_ALPHA` (bit 1) is a
+  channel-semantic flag, not a dtype selector. The old `_DECODE_TABLE` lookup keyed on the exact
+  `(kind, bits, flags)` triple caused `monoalpha8fixed` → `"float32"` fallback (4× oversized
+  itemsize) and `monoalpha16fixed` → 2× oversized. Fix: mask `flags & FLAGS_BFLOAT16` before the
+  lookup so only the dtype-relevant bfloat16 bit participates. Also repairs the same latent
+  mis-decode in the Direction-A `Importer.Format.from_shm` path.
+- **`TDReceiverEngine` — `CUDAMemoryShape.dataType` scalar type** (`3c4f54c`) — `Format.numpy_dtype`
+  is a `np.dtype` instance (e.g. `np.dtype('uint8')`), but `CUDAMemoryShape.dataType` requires the
+  numpy scalar *type* (`numpy.uint8`). Fixed with `.type` at both `initialize_receiver` and
+  `_refresh_on_version_change` call sites. Without this, every non-float32 format (uint8, uint16)
+  crashed with `td.tdError: dataType must be numpy.uint8, numpy.uint16, numpy.float32` on init.
+- **`TDReceiverEngine` — SHM exported-pointer loop** (`3c4f54c`) — `_shm_mv = memoryview(shm_handle.buf)`
+  in the new metadata-read path held a mmap exported pointer as a named local. When the dtype error
+  above propagated up, Python kept the `initialize_receiver` frame alive in the exception traceback
+  across cook cycles, blocking `shm_handle.close()` with `BufferError: cannot close exported pointers
+  exist` and locking the receiver into a crash loop. Fixed by snapshotting the SHM as `bytes` first
+  (`memoryview(bytes(shm_handle.buf))`).
+- **`TDSenderEngine.dev_ptrs` post-cleanup** (`9be8212`) — after `cleanup()`, `dev_ptrs` and
+  `ipc_handles` now return `[]` (empty) rather than `[None] * num_slots` (null stubs). A new
+  `_closed: bool` flag tracks post-cleanup state so the pre-init stub (`[None] * num_slots`) and
+  post-cleanup state (`[]`) are correctly distinguished. Resolved `test_sender_cleanup_resets_all_state`.
+- **CUDA DLL load error diagnostics** (`faf55cc`) — `_load_cuda_runtime` now captures the last
+  `OSError` from each search tier (absolute-path and bare-name) and surfaces the `winerror` code
+  in the final `RuntimeError`. When `winerror == 126` ("module not found"), a targeted hint directs
+  the user to run `dumpbin /dependents` or `Dependencies.exe` to identify the missing *dependent*
+  DLL, since WinError 126 does not identify cudart itself.
+- **`Importer.attach_nvml_observer` — permanently-dead NVML stats branch** (`e9f22bc`) — the NVML
+  stats reporting branch in the frame-receive hot path was unreachable due to a missing call site.
+  Root cause: `Importer` had no method to attach a live `NVMLObserver` after construction. Fix adds
+  `Importer.attach_nvml_observer(observer)` (public) and wires the stats branch correctly.
+
+### Added
+
+- **`Metadata.expected_size`** (`0526096`) — new pure property `width * height * num_comps *
+  (bits_per_comp // 8)` on the `Metadata` frozen dataclass. Single authoritative home for the
+  frame-size invariant that was previously duplicated in `TDReceiver.initialize_receiver` and
+  `_refresh_on_version_change`.
+- **`Format.from_metadata(cls, md)`** (`831031a`) — new constructor on the `Format` value object
+  in `importer.py` that builds a `Format` from an already-read `Metadata`, avoiding a second SHM
+  read. `Format.from_shm` now delegates to it.
+- **`TDSenderEngine.frame_count` property** (`9be8212`) — exposes the underlying
+  `Exporter.frame_count` (0 when no exporter is active).
+- **`Importer.attach_nvml_observer(observer)`** (`e9f22bc`) — new public method to bind a live
+  `NVMLObserver` to a connected `Importer` after construction, enabling per-frame GPU telemetry
+  without rebuilding the importer.
+- **`test_every_bound_func_has_argtypes`** (`faf55cc`) — new test in
+  `tests/test_errcheck_coverage.py` asserts that every explicitly-bound cudart function has
+  `argtypes` set. Without `argtypes`, pointer arguments are silently truncated to 32-bit int on
+  64-bit platforms (ctypes reference). 23 new parametrized decode-matrix cases added to
+  `tests/test_shm_protocol.py`.
+- **`test_every_errcheck_func_is_typed`** (`123e518`) — reverse-direction errcheck coverage guard:
+  every function in `_strict_funcs` must also have `restype=c_int` in
+  `_setup_function_signatures`. Closes the mirror-image drift path (errcheck'd but untyped →
+  silent 64-bit pointer truncation).
+
+### Changed
+
+- **Default IPC channel names** (`78bd051`) — `Ipcmemname` defaults renamed for directional
+  clarity: `cudalink_output_ipc` → `cudalink_ipc_TD>>Python` (Sender mode, TD-to-Python);
+  `cudalink_input_ipc` → `cudalink_ipc_Python>>TD` (Receiver mode, Python-to-TD). Only projects
+  relying on the hardcoded defaults need updating; explicit names set via the `Ipcmemname`
+  parameter are unaffected.
+
+### Refactored
+
+- **`TDReceiver` frame-format unified on `Format`** (`831031a`) — `FormatDescriptor` (a
+  hand-rolled near-duplicate of `importer.Format`) removed from `TDReceiver.py`. Both the
+  Direction-A `Importer` and the Direction-B `TDReceiverEngine` now share one frozen value object
+  for parsed frame format. Two hand-rolled `struct.unpack` + dtype-ladder blocks replaced with
+  `Metadata.read_from + Format.from_metadata`. `_to_td_pixel_format` renamed to
+  `td_format_string(fmt: Format)`; `FLAGS_MONO_ALPHA` preserved so `monoalpha*` par.format strings
+  and Info/Status messages are unchanged. No new `.tox` DAT: `Importer` and `SHMProtocol` already
+  ship in both deployment modes.
+- **Honest `CudaPort` seam, named CUDA enums, `SHMLayout` handle split** (`787853a`) — C3
+  refactor: `CudaPort` protocol now exposes only the operations `Exporter` genuinely needs;
+  `cudaMemcpyKind` and related enums promoted to named constants; `SHMLayout` handle-offset logic
+  extracted to a dedicated helper.
+- **`TDReceiverConfig` honest type** (`7732c36`) — C4 refactor: `TDReceiverEngine` config
+  dataclass fields typed to their actual domain types (not bare `Any`), surfacing latent type
+  errors at definition time rather than at runtime.
+- **`_release_connection_state()` extracted** (`d607eb2`) — C2 slice: deduplicates the importer
+  teardown sequence (previously duplicated across the normal-close and error-recovery paths) into
+  one method.
+- **TD-global leak closed behind `TDHost` seam** (`f6e294d`) — C5 refactor: TD runtime globals
+  accessed directly by engine code now route through the `TDHost` protocol; `make_cuda_shape`
+  factory added.
+- **`make_bare_runtime_api()` shared test factory** (`af1c610`) — C6 refactor: GPU-free
+  `CUDARuntimeAPI` construction factored into `tests/fakes.py` so multiple test modules share one
+  canonical factory instead of duplicating the setup.
+
+### Docs
+
+- **ADR-0004 — Legacy CUDA Runtime IPC over VMM driver API** (`a08f864`) — records why
+  `cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle` is used instead of the VMM driver API; prevents
+  future re-investigation of a validated, empirically-settled decision.
+- **ADR index** (`c4a2e16`) — `docs/adr/README.md` added; dead `MIGRATION_v1.5.md` cross-links
+  removed from `ARCHITECTURE.md`, `INTEGRATION_EXAMPLES.md`, and `MIGRATION_v1.6.md`; ADR-0003
+  and ADR-0004 added to `CONTEXT.md` architecture-reference list.
+- **IPC handle docstring corrected** (`75fd590`) — `ipc_get_mem_handle` docstring said
+  "128 bytes"; corrected to 64 bytes (the actual `cudaIpcMemHandle_t = c_byte * 64` size; 128 was
+  the total SHM slot, not the handle).
+
+### Internal
+
+- `pyproject.toml` version: `1.7.2 → 1.8.0`.
+- `build_wheel.cmd` moved from repo root to `utils/` (`0c4c8d3`); `scripts/install_td_library.py`
+  and `README.md` updated. Use `utils\build_wheel.cmd` (or double-click from `utils\`).
+- TOX artifact `TOXES/CUDAIPCLink_v1.8.0.tox` — built and saved separately by the user.
+
+## [1.7.2] — 2026-05-30
+
+### Fixed
+
+- **Sender dtype switch (float32→uint8)** — Producer now correctly detects dtype-shrink transitions
+  via `pixelFormatName` and copies only the dtype-derived front region of the stale allocation
+  (`GpuFrame(size=spec.data_size)`), resolving permanent stop-send + frozen Status after a
+  float32→8-bit switch. The previous 5-commit chain (`cddfdae`–`70da086`) introduced a permanent
+  skip-export trap; this was corrected in `e724719` using the proven v1.5.1 copy-front-region approach.
+- **Consumer ImportBuffer format for float32 non-RGBA sources** — `needs_format_update` flag now
+  fires for all non-`rgba32float` float32 sources (e.g. `monoalpha32float`, `rg32float`). Previously
+  skipped for all float32 sources, causing Script TOP to stay at the default `rgba32float` allocation
+  even when the source was a different float32 variant (`e31bad6`).
+
+### Added
+
+- **`FLAGS_MONO_ALPHA = 0x0002`** wire metadata bit — distinguishes 2-channel mono+alpha sources
+  from genuine RG sources in the SHM metadata `flags` field. Fits in 15 spare bits of the existing
+  uint16 `flags` field; `METADATA_SIZE` unchanged at 20 bytes. Backward-compatible: old Consumers
+  see `flags=0` and fall back to `rg*` format (`54cb7df`).
+- **`FrameSpec.extra_flags`** — new `int = 0` field on `FrameSpec` (both `ExporterPort.py` and
+  `_exporter_port.py`) lets callers OR extra protocol flags into `Exporter._write_metadata_to_shm`.
+- **TD-native format names in Status and `par.format`** — both Producer Status and Consumer Status
+  now show the TD pixel-format menu name (e.g. `rgba8fixed`, `monoalpha32float`) rather than the
+  numpy dtype + channel-count string.
+- **`cudaMemory(pixelFormat=)` kwarg infrastructure** — `RealTOPHandle.cuda_memory()` now accepts
+  an optional `pixel_format` string and forwards it as the `pixelFormat=` keyword to TD's
+  `cudaMemory()`, enabling future format-conversion requests (`22b9022`).
+
+### Internal
+
+- **`pyproject.toml` version**: `1.7.1` → `1.7.2`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.7.2.tox` to be built separately.
+  `v1.7.1` retained per versioned-binary tracking policy.
+
+## [1.7.1] — 2026-05-30
+
+### Refactored
+
+- **ctypes robustness sweep** (`a2baea9`) — eight correctness and safeguard
+  improvements cross-checked against the Python ctypes reference documentation:
+  - ABI size asserts for all graph param structs (`cudaPos==24`,
+    `cudaPitchedPtr==32`, `cudaExtent==24`, `cudaMemcpy3DParms==160`) catch
+    layout drift at import time.
+  - `NumpyBuffers.close()`: null `self.buffer` after `free_host` to prevent
+    use-after-free on the CUDA-pinned host-memory alias.
+  - `_log_dll_path`: consume `ctypes.get_last_error()` on `GetModuleFileNameW`
+    failure; guard `dll._handle` with `getattr` for forward-compatibility.
+  - `_HighResTimer.__enter__`: check `timeBeginPeriod(1)` return code; log on
+    `TIMERR_NOCANDO`.
+  - `_winmm` loader: removed unused `use_last_error=True` (winmm timer APIs
+    return status directly, not via `GetLastError`).
+  - Removed dead `cudaGetLastError` argtypes binding; `cudaPeekAtLastError` is
+    the correct non-destructive sticky-error read.
+  - `probe_producer`: decode `cudaGetErrorString` bytes → str (was embedding
+    `b'...'` repr in error messages).
+  - `_load_cuda_runtime`: documented `winmode` asymmetry between absolute-path
+    and bare-name DLL-load tiers.
+
+### Tests
+
+- **`tests/test_errcheck_coverage.py`** (`a2baea9`, 3 tests): drift-prevention
+  guard — every `c_int`-restype cudart function has `errcheck` installed;
+  `cudaGetLastError` asserted unbound.
+- **`tests/test_numpybuffers_close.py`** (`8b74ab0`, 5 tests): `NumpyBuffers.close()`
+  UAF guard — pinned path nulls `buffer`, pageable path preserves it, idempotency,
+  and `host_unregister` branch.
+- **`tests/test_probe_error_decode.py`** (`8b74ab0`, 2 tests): `probe_producer`
+  error-string decode — verifies str in message and `None` guard for NULL returns.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.7.0` → `1.7.1`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.7.1.tox` to be built separately.
+  `v1.7.0` retained per versioned-binary tracking policy.
+
+## [1.7.0] — 2026-05-29
+
+### Added
+
+- **Library-mode bootstrap (`CUDALinkBootstrap`)** — `td_exporter/CUDALinkBootstrap.py`
+  injects `CUDALINK_LIB_PATH` onto `sys.path` and registers all 14 mirror module names
+  in `sys.modules` as aliases to the installed `cuda_link` submodules. When active the
+  `.tox` needs only 6 core Text DATs (instead of 20). Falls back silently if the package
+  is not installed. Must be the first Text DAT in the COMP.
+
+- **Multi-target installer** (`scripts/install_td_library.py`, `install_td_library.cmd`)
+  — 5 install modes: (1) system Python site-packages, (2) user site-packages, (3) conda
+  active env, (4) TD-Preferences–managed Python path, (5) custom target directory.
+  Mode 4 auto-sets the installed path in TD's Python site-packages preference so library
+  mode activates immediately on the next TD launch without any env-var configuration.
+
+- **Auto-discover system Python and TouchDesigner installations** in installer modes 4
+  and 5 — the installer probes registry keys and well-known install paths to locate the
+  Python interpreter registered by the Windows Python Launcher (`py -3`) and TouchDesigner
+  (`HKCU\Software\Derivative\TouchDesigner\InstallDir`) without requiring manual path input.
+
+- **TD startup pop-up** — first-run setup dialog shown at TouchDesigner startup when
+  `cuda_link` is not yet installed in the active Python environment.
+
+- **ADR-0003**: `docs/adr/0003-library-install-sys-path-bootstrap.md` documents the
+  library-mode bootstrap design decisions and trade-offs.
+
+- **`Format.layout_differs_from`** — new predicate on the `Format` value object that
+  returns `True` only when the resolved shape or dtype has changed, letting receivers
+  avoid a full teardown/reinit for metadata-only updates. Tests: `test_format_layout.py`.
+
+- **`MIGRATION_v1.6.md`** (`docs/MIGRATION_v1.6.md`) — migration guide for callers
+  upgrading from v1.5.x to v1.6.x API changes.
+
+### Changed
+
+- **Folded `warning_emitter_callbacks.py` into `script_top_callbacks.py`** — both Script
+  TOPs inside the `.tox` (`ImportBuffer` and `warning_emitter`) now share one Callbacks
+  DAT. `onCook` dispatches by `scriptOp.name`; behaviour is unchanged. Removes one source
+  file and one DAT from the component.
+
+- **`example_receiver_python.py` crash-logging wrapper** — unhandled exceptions now write
+  a full traceback to `receiver_error.log` next to the script, print it to stdout, and
+  pause with "Press Enter to close this window" before exiting — so errors are never lost
+  when the subprocess window closes automatically.
+
+- **`CUDAAdapters` / `CTypesCUDAAdapter` / `FakeCUDAAdapter` renamed** for naming
+  consistency (`CudaAdapters` → `CUDAAdapters`, `CTypesCudaAdapter` → `CTypesCUDAAdapter`,
+  `FakeCudaAdapter` → `FakeCUDAAdapter`). The `td_exporter/` mirror (`CUDAAdapters.py`)
+  and the `_ALIAS_MAP` entry in `CUDALinkBootstrap` are updated. Out-of-tree code that
+  imported the old names must use the new names.
+
+- **`get_frame*` consumers unified behind `_FrameBackend` seam** in `Importer` — the
+  torch / numpy / cupy dispatch logic is concentrated in one place. Behaviour is unchanged;
+  this is an internal refactor that eliminates duplicate per-backend branches.
+
+- **`PAIRS` is now the single source of truth** for TD mirror registration in
+  `scripts/sync_td_wrapper.py`. `CUDALinkBootstrap._ALIAS_MAP` is verified against
+  `PAIRS` at test time (`tests/test_td_bootstrap.py::test_alias_map_covers_all_pairs`).
+
+- **Example `.toe` artifacts** — `CUDA_Link_Example.85.toe` added, `v81` retired.
+
+### Fixed
+
+- **`cudaIpcMemHandle_t`/`cudaIpcEventHandle_t` class-identity mismatch** in
+  `CUDARuntimeAPI.ipc_open_mem_handle` and `ipc_open_event_handle` — ctypes validates
+  `Structure` arguments by class identity, not structural equivalence. In TD's bare-name
+  import namespace two independent imports of `cuda_link.cuda_runtime_types` (e.g.
+  library-mode package + a leftover mirror Text DAT) create two distinct class objects;
+  handles built with one were rejected by `argtypes` bound to the other, raising
+  `ArgumentError: expected cudaIpcMemHandle_t instance instead of cudaIpcMemHandle_t`
+  every cook. Fixed by adding an `isinstance` guard that calls
+  `cudaIpcMemHandle_t.from_buffer_copy(bytes(handle))` to normalize the handle into the
+  wrapper's own class before the cudart call. Covers both the TD→TD and TD→Python paths.
+  Regression test: `tests/test_ipc_open_mem_handle_guard.py` (6 GPU-free cases).
+
+- **`CUDALinkBootstrap` import guarded** in `CUDAIPCExtension.py` —
+  `import CUDALinkBootstrap` is now wrapped in `contextlib.suppress(ImportError)` so the
+  extension loads cleanly in environments where the bootstrap module is absent (e.g.
+  classic-mode comps that pre-date the bootstrap DAT).
+
+- **`TDSenderEngine.export_frame` lazy auto-init restored** — the deferred
+  `_lazy_init_on_first_frame()` call was accidentally removed in commit `8eebda5`; the
+  sender now correctly defers CUDA allocation until the first frame export.
+
+- **`build_wheel.cmd` blocking pause suppressed** when called as a subprocess by the
+  installer — `PAUSE` is now skipped when `CI` or `CUDALINK_NO_PAUSE` is set, preventing
+  the installer from hanging.
+
+- **Site-packages detection corrected** in installer modes 2/3/4; activation simplified
+  to write directly to TD Preferences instead of intermediate env-var files.
+
+- **`python.exe` auto-resolved** from directory paths — installer modes 4/5 now append
+  `python.exe` when the resolved path points to a directory rather than an executable.
+
+- **Indented inline relative imports** now correctly rewritten by `sync_td_wrapper.py`
+  (previously only top-level `from .X import` lines were matched).
+
+- **`_console.py` registered in `CANONICAL_ONLY`** in `sync_td_wrapper.py` — the module
+  was added in `eb3c8d3` but not registered; the sync script now correctly skips it when
+  generating TD mirror stubs.
+
+### Removed
+
+- `td_exporter/warning_emitter_callbacks.py` — folded into `script_top_callbacks.py`.
+- `docs/ctypes-audit-v1.5.md`, `docs/MIGRATION_v1.5.md`,
+  `docs/perf/graphs-benchmark-v1.5.md`, `docs/perf/nsight-v1.5.md`,
+  `docs/agents/domain.md`, `docs/agents/issue-tracker.md`,
+  `docs/agents/triage-labels.md` — stale v1.5 artifacts cleaned up.
+
+### Tests
+
+- `tests/test_td_bootstrap.py` — 15 cases covering library-mode bootstrap alias
+  registration, fallback mode, and alias-map / PAIRS sync guard.
+- `tests/test_format_layout.py` — `Format.layout_differs_from` coverage.
+- `tests/test_ipc_open_mem_handle_guard.py` — 6 GPU-free regression tests for the
+  class-identity guard in `ipc_open_mem_handle` and `ipc_open_event_handle`.
+
+### Internal
+
+- **`pyproject.toml` version**: `1.6.0` → `1.7.0`.
+- **TOX artifact**: `TOXES/CUDAIPCLink_v1.7.0.tox` to be built separately.
+  `v1.6.0` retained per versioned-binary tracking policy.
+
 ## [1.6.0] — 2026-05-29
 
 ### Changed
@@ -65,7 +419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`CudaPort` / `ImporterCudaPort` unified** — `ImporterCudaPort` is now a public
   `CudaPort` alias (the full union of importer-exclusive methods was added to `CudaPort`
-  in v1.6). `CTypesCudaAdapter` body replaced with `__getattr__` delegation — no more
+  in v1.6). `CTypesCUDAAdapter` body replaced with `__getattr__` delegation — no more
   explicit one-line forwarder list, so name drift becomes structurally impossible.
 
 - **`_DTYPE_TABLE` consolidated via `_DtypeEntry` NamedTuple** — the three inline dtype
@@ -221,8 +575,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Exporter` and the CUDA runtime. Enables injecting a test double at the
   one-seam boundary without touching SHM, time, or logging.
 
-- **`CTypesCudaAdapter`** and **`FakeCudaAdapter`** (`_cuda_adapters.py`) — production
-  and in-memory test adapters satisfying `CudaPort`. `FakeCudaAdapter` requires no GPU
+- **`CTypesCUDAAdapter`** and **`FakeCUDAAdapter`** (`_cuda_adapters.py`) — production
+  and in-memory test adapters satisfying `CudaPort`. `FakeCUDAAdapter` requires no GPU
   or ctypes DLL; tracks allocations and supports failure injection. Both symbols now
   import directly from `_cuda_adapters` — the `_exporter_adapters` re-export shim has
   been removed.
@@ -327,7 +681,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **`_exporter_adapters.py` re-export shim** — `CTypesCudaAdapter` and `FakeCudaAdapter`
+- **`_exporter_adapters.py` re-export shim** — `CTypesCUDAAdapter` and `FakeCUDAAdapter`
   now import directly from `_cuda_adapters`. The `_exporter_adapters.py ↔ ExporterAdapters.py`
   sync pair removed from `scripts/sync_td_wrapper.py`.
 
@@ -347,7 +701,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - Rewrote `tests/test_device_affinity.py` and the write-ordering section of
-  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCudaAdapter())`
+  `tests/test_cuda_ipc_exporter_python.py` to use `Exporter.open(..., cuda=FakeCUDAAdapter())`
   instead of `object.__new__(CUDAIPCExporter)` followed by ~25 hand-populated private
   attributes. Both files now run without a GPU.
 
@@ -772,6 +1126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyproject.toml` with a clear error instead of cryptic build failures
   downstream. Build behavior on healthy Python ≥3.9 environments is unchanged.
 
+[1.8.0]: https://github.com/forkni/cuda-link/compare/v1.7.2...v1.8.0
+[1.7.2]: https://github.com/forkni/cuda-link/compare/v1.7.1...v1.7.2
+[1.7.1]: https://github.com/forkni/cuda-link/compare/v1.7.0...v1.7.1
+[1.7.0]: https://github.com/forkni/cuda-link/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/forkni/cuda-link/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0

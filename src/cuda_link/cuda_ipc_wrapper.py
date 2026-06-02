@@ -33,26 +33,40 @@ else:
     _kernel32 = None
 
 try:
-    from cuda_link.cuda_runtime_types import (  # noqa: E402
+    # Prefer the bare name so all callers (CUDAIPCWrapper Text DAT and TDReceiver) share
+    # the same cudaIpcMemHandle_t / cudaIpcEventHandle_t class objects — critical for ctypes
+    # argtypes checking which uses class identity, not structural equivalence.
+    # In library mode the bootstrap pre-sets sys.modules["CUDARuntimeTypes"] to
+    # cuda_link.cuda_runtime_types before this module is imported, so this succeeds.
+    # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
+    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
+        HOST_ALLOC_PORTABLE,
+        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
+        StreamFlags,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
         cudaMemcpy3DParms,
         cudaPointerAttributes,
     )
-except ImportError:
-    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
+except (ImportError, ModuleNotFoundError):
+    # Fallback: pure package context where CUDARuntimeTypes is not yet in sys.modules
+    # (e.g. imported before the bootstrap runs, or in a standalone test environment).
+    from cuda_link.cuda_runtime_types import (  # noqa: E402
+        HOST_ALLOC_PORTABLE,
+        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
         CUDAEvent_t,
         CUDAGraph_t,
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
+        StreamFlags,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
         cudaMemcpy3DParms,
@@ -132,29 +146,17 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If CUDA runtime cannot be loaded
         """
-        # Try by name FIRST: if cudart is already loaded in this process (e.g., by
-        # torch), Windows returns the cached handle — ensuring we share the same
-        # runtime instance and CUDA context. Loading by full path can create a second
-        # independent instance with its own state, breaking cross-process IPC.
-        # Probed in this order: prefer CUDA 12.x; fall back to 11.x for systems that
-        # haven't migrated (e.g. TouchDesigner historically shipped cudart64_110.dll).
-        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
-        for name in dll_names:
-            try:
-                dll = ctypes.CDLL(name)
-                self._log_dll_path(dll, name)
-                return dll
-            except OSError as e:
-                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
-                continue
-
-        # Fallback: try full toolkit paths when not already in PATH
+        # Try full CUDA Toolkit paths FIRST: these are deterministic and immune to
+        # DLL search-order side-effects (e.g. os.add_dll_directory calls from torch
+        # or other venvs added to sys.path via sitecustomize.py).  If the Toolkit is
+        # installed, we always prefer its cudart over a bundled copy.
         dll_paths = [
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin\cudart64_12.dll",
         ]
+        last_path_err: OSError | None = None
         for dll_path in dll_paths:
             if os.path.exists(dll_path):
                 try:
@@ -163,12 +165,51 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     return dll
                 except OSError as e:
                     _logger.debug("Skipped %s: %s (winerror=%s)", dll_path, e, getattr(e, "winerror", None))
+                    last_path_err = e
                     continue
 
+        # Fallback: try by bare name — if cudart is already loaded in this process
+        # (e.g., by torch), Windows returns the cached handle, sharing the same runtime
+        # instance and CUDA context.  Probed in this order: prefer CUDA 12.x; fall back
+        # to 11.x for systems that haven't migrated (TouchDesigner ships cudart64_110.dll).
+        # Note: winmode is intentionally omitted here (unlike the absolute-path tier above
+        # which uses winmode=0).  For bare-name loads we rely on Windows returning the
+        # already-loaded handle from the process DLL cache — not a new DLL search — so
+        # the winmode DLL-search-path flags are irrelevant.
+        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
+        last_name_err: OSError | None = None
+        for name in dll_names:
+            try:
+                dll = ctypes.CDLL(name)
+                self._log_dll_path(dll, name)
+                return dll
+            except OSError as e:
+                _logger.debug("Skipped %s: %s (winerror=%s)", name, e, getattr(e, "winerror", None))
+                last_name_err = e
+                continue
+
+        # Build a diagnostic message that includes the last OS error from each tier.
+        # The ctypes reference notes that WinError 126 ("The specified module could not
+        # be found") does NOT identify the *missing dependent DLL* — only the entry
+        # point that failed to load.  Surface the winerror code so the user can run a
+        # dependency tracer (e.g. Dependencies.exe or dumpbin /dependents).
+        last_err = last_name_err or last_path_err
+        winerror = getattr(last_err, "winerror", None)
+        err_detail = f"\nLast OS error: {last_err} (winerror={winerror})" if last_err else ""
+        hint_126 = (
+            (
+                "\nHint: winerror 126 means a *dependent* DLL of cudart was not found, "
+                "not cudart itself.  Run 'dumpbin /dependents cudart64_12.dll' or open "
+                "the DLL in Dependencies.exe to identify the missing dependency."
+            )
+            if winerror == 126
+            else ""
+        )
         raise RuntimeError(
             "Could not load CUDA runtime. Please ensure CUDA 12.x is installed.\n"
-            f"Tried names: {dll_names}\n"
-            f"Tried paths: {dll_paths}"
+            f"Tried paths: {dll_paths}\n"
+            f"Tried names: {dll_names}"
+            f"{err_detail}{hint_126}"
         )
 
     @staticmethod
@@ -182,11 +223,23 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         if _kernel32 is None:
             print(f"[CUDAIPC] cudart loaded: {hint} (path resolution unavailable)", flush=True)
             return
+        # dll._handle is an undocumented ctypes internal — guard it defensively so a
+        # future ctypes change degrades the log line gracefully instead of raising.
+        handle = getattr(dll, "_handle", None)
+        if not isinstance(handle, int):
+            print(f"[CUDAIPC] cudart loaded: {hint} (handle not available)", flush=True)
+            return
         try:
             buf = ctypes.create_unicode_buffer(260)
-            _kernel32.GetModuleFileNameW(ctypes.c_void_p(dll._handle), buf, 260)
-            print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
-        except (OSError, AttributeError) as e:
+            n = _kernel32.GetModuleFileNameW(ctypes.c_void_p(handle), buf, 260)
+            if n == 0:
+                # use_last_error=True on the WinDLL means ctypes captured the thread-local
+                # error code before restoring it — surface it via WinError for diagnosis.
+                err = ctypes.WinError(ctypes.get_last_error())
+                print(f"[CUDAIPC] cudart loaded: {hint} (GetModuleFileNameW failed: {err})", flush=True)
+            else:
+                print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
+        except OSError as e:
             print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
 
     def _load_driver_api(self) -> ctypes.CDLL | None:
@@ -302,11 +355,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceSynchronize.argtypes = []
         self.cudart.cudaDeviceSynchronize.restype = c_int
 
-        # cudaGetLastError()
-        self.cudart.cudaGetLastError.argtypes = []
-        self.cudart.cudaGetLastError.restype = c_int
-
         # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
+        # cudaGetLastError() is intentionally NOT bound: it destructively clears the sticky
+        # error, making it unsafe to call in poll paths. Use cudaPeekAtLastError exclusively.
         self.cudart.cudaPeekAtLastError.argtypes = []
         self.cudart.cudaPeekAtLastError.restype = c_int
 
@@ -721,7 +772,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             dst: Destination pointer
             src: Source pointer
             count: Number of bytes to copy
-            kind: cudaMemcpyKind (0=H2H, 1=H2D, 2=D2H, 3=D2D)
+            kind: MemcpyKind value (e.g. MemcpyKind.DEVICE_TO_DEVICE)
 
         Raises:
             RuntimeError: If copy fails
@@ -738,7 +789,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             dev_ptr: Device pointer to export
 
         Returns:
-            IPC handle (128 bytes)
+            IPC handle (64 bytes)
 
         Raises:
             RuntimeError: If export fails
@@ -747,12 +798,12 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaIpcGetMemHandle(byref(handle), dev_ptr)
         return handle
 
-    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = 1) -> c_void_p:
+    def ipc_open_mem_handle(self, handle: cudaIpcMemHandle_t, flags: int = IPC_MEM_LAZY_ENABLE_PEER_ACCESS) -> c_void_p:
         """Open IPC handle to access GPU memory from another process.
 
         Args:
             handle: IPC handle received from another process
-            flags: IPC flags (1 = cudaIpcMemLazyEnablePeerAccess)
+            flags: IPC flags (IPC_MEM_LAZY_ENABLE_PEER_ACCESS = cudaIpcMemLazyEnablePeerAccess)
 
         Returns:
             Device pointer to shared memory
@@ -760,6 +811,14 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If opening fails
         """
+        # Guard against ctypes class-identity mismatch: in TD's bare-name import namespace
+        # the caller's cudaIpcMemHandle_t may be a *different* class object than the one bound
+        # into argtypes (two independent imports of cuda_link.cuda_runtime_types, e.g. a
+        # CUDARuntimeTypes mirror Text DAT loaded alongside the library-mode package).
+        # ctypes validates by class identity, not structural equivalence, so the call would
+        # raise ArgumentError. Rebuild from raw bytes into THIS module's class — POD, 64 bytes.
+        if not isinstance(handle, cudaIpcMemHandle_t):
+            handle = cudaIpcMemHandle_t.from_buffer_copy(bytes(handle))
         dev_ptr = c_void_p()
         self.cudart.cudaIpcOpenMemHandle(byref(dev_ptr), handle, flags)
         return dev_ptr
@@ -874,6 +933,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Raises:
             RuntimeError: If opening fails
         """
+        # Same class-identity guard as ipc_open_mem_handle — see note there.
+        if not isinstance(handle, cudaIpcEventHandle_t):
+            handle = cudaIpcEventHandle_t.from_buffer_copy(bytes(handle))
         event = CUDAEvent_t()
         self.cudart.cudaIpcOpenEventHandle(byref(event), handle)
         return event
@@ -962,11 +1024,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaGetDevice(byref(device))
         return device.value
 
-    def create_stream(self, flags: int = 0x01) -> CUDAStream_t:
+    def create_stream(self, flags: int = StreamFlags.NON_BLOCKING) -> CUDAStream_t:
         """Create CUDA stream with specified flags.
 
         Args:
-            flags: Stream creation flags. Default 0x01 = cudaStreamNonBlocking
+            flags: Stream creation flags. Default StreamFlags.NON_BLOCKING (cudaStreamNonBlocking)
 
         Returns:
             CUDAStream_t: Opaque stream handle
@@ -978,7 +1040,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaStreamCreateWithFlags(byref(stream), flags)
         return stream
 
-    def create_stream_with_priority(self, flags: int = 0x01, priority: int | None = None) -> CUDAStream_t:
+    def create_stream_with_priority(
+        self, flags: int = StreamFlags.NON_BLOCKING, priority: int | None = None
+    ) -> CUDAStream_t:
         """Create CUDA stream at the specified (or highest available) priority.
 
         On CUDA, stream priority is an integer where a smaller value means
@@ -986,7 +1050,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         where greatest is the most-negative value — i.e., the highest priority.
 
         Args:
-            flags: Stream flags. Default 0x01 = cudaStreamNonBlocking.
+            flags: Stream flags. Default StreamFlags.NON_BLOCKING (cudaStreamNonBlocking).
             priority: Stream priority. None means use highest available (greatest).
 
         Returns:
@@ -1046,7 +1110,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             dst: Destination pointer
             src: Source pointer
             count: Number of bytes to copy
-            kind: cudaMemcpyKind (0=H2H, 1=H2D, 2=D2H, 3=D2D)
+            kind: MemcpyKind value (e.g. MemcpyKind.DEVICE_TO_DEVICE)
             stream: CUDA stream for async operation
 
         Raises:
@@ -1127,18 +1191,18 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
     # --- Phase 1: cudaHostAlloc (replaces cudaMallocHost with portable flag) ---
 
-    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
+    def malloc_host_alloc(self, size: int, flags: int = HOST_ALLOC_PORTABLE) -> c_void_p:
         """Allocate pinned host memory via cudaHostAlloc with explicit flags.
 
         Unlike malloc_host() which calls cudaMallocHost (no flags), this lets
-        callers pass cudaHostAllocPortable (0x01) to make the allocation visible
-        from any CUDA context in the process — useful when PyTorch and CuPy share
-        the same process.
+        callers pass HOST_ALLOC_PORTABLE (cudaHostAllocPortable) to make the
+        allocation visible from any CUDA context in the process — useful when
+        PyTorch and CuPy share the same process.
 
         Args:
             size:  Number of bytes to allocate.
             flags: OR-combination of:
-                   cudaHostAllocPortable    = 0x01 (cross-context visibility)
+                   HOST_ALLOC_PORTABLE (cudaHostAllocPortable = 0x01, cross-context visibility)
                    cudaHostAllocMapped      = 0x02 (map into device address space)
                    cudaHostAllocWriteCombined = 0x04 (WC; fast write, slow CPU read)
 

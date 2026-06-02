@@ -20,6 +20,20 @@ from typing import Any
 from TDHost import TDHost, TOPHandle  # noqa: E402
 
 
+class FakeCUDAMemoryShape:
+    """Minimal CUDAMemoryShape-shaped object returned by FakeTDHost.make_cuda_shape.
+
+    Holds the four fields that TDReceiverEngine writes; tests can read them to
+    assert the correct dims and dtype were supplied.
+    """
+
+    def __init__(self, width: int, height: int, num_comps: int, data_type: Any) -> None:
+        self.width = width
+        self.height = height
+        self.numComps = num_comps
+        self.dataType = data_type
+
+
 class FakeCUDAMemoryRef:
     """Minimal CUDAMemoryRef-shaped object for tests that don't need the real type."""
 
@@ -49,12 +63,14 @@ class FakeTOPHandle(TOPHandle):
     def __init__(
         self,
         pixel_format: str = "rgba32float",
+        pixel_format_name: str = "rgba32float",
         width: int = 64,
         height: int = 64,
         channels: int = 4,
         gpu_ptr: int = 0xDEADBEEF,
     ) -> None:
         self._pixel_format = pixel_format
+        self._pixel_format_name = pixel_format_name
         self._width = width
         self._height = height
         self._channels = channels
@@ -64,7 +80,9 @@ class FakeTOPHandle(TOPHandle):
         self.copy_numpy_calls: list[Any] = []
         self.resolution_set: list[tuple[int, int]] = []
 
-    def cuda_memory(self, stream: Any = None) -> FakeCUDAMemoryRef:
+    def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> FakeCUDAMemoryRef:
+        # pixel_format is intentionally ignored in the fake — channel expansion is a TD runtime
+        # behaviour that the in-process test double cannot replicate.
         size = self._width * self._height * self._channels * 4
         return FakeCUDAMemoryRef(
             ptr=self._gpu_ptr,
@@ -77,6 +95,13 @@ class FakeTOPHandle(TOPHandle):
     @property
     def pixel_format(self) -> str:
         return self._pixel_format
+
+    @property
+    def pixel_format_name(self) -> str:
+        return self._pixel_format_name
+
+    def cook(self, force: bool = False) -> None:
+        pass  # no-op in tests; use cook_calls list to assert if needed
 
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
@@ -111,6 +136,7 @@ class FakeTDHost(TDHost):
         self.enable_writes: list[tuple[str, bool]] = []
         self.custom_only_calls: list[bool] = []
         self.wrapped_tops: list[Any] = []
+        self.cuda_shapes: list[FakeCUDAMemoryShape] = []
 
     def param_value(self, name: str) -> Any:
         return self._params.get(name)
@@ -137,6 +163,12 @@ class FakeTDHost(TDHost):
         if isinstance(top, FakeTOPHandle):
             return top
         return FakeTOPHandle()
+
+    def make_cuda_shape(self, width: int, height: int, num_comps: int, data_type: Any) -> FakeCUDAMemoryShape:
+        """Return a FakeCUDAMemoryShape and record the call for test assertions."""
+        shape = FakeCUDAMemoryShape(width, height, num_comps, data_type)
+        self.cuda_shapes.append(shape)
+        return shape
 
     def set_warning_status(self, msg: str) -> None:
         pass

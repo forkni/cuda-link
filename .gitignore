@@ -141,6 +141,8 @@ Backup/
 # TOXES/ binary policy: only the LATEST CUDAIPCLink_vX.Y.Z.tox lives on main.
 # Older versions are removed via `git rm` at release time and preserved as
 # GitHub Release assets attached to their version tag (see release.yml).
+TOXES/CUDAIPCLink_v1.5.0.tox
+TOXES/CUDAIPCLink_v1.5.1.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
@@ -207,6 +209,11 @@ Sender_benchmark.*.toe
 Test_TD_Receiver1.toe
 Test_TD_Receiver1.*.toe
 
+# CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
+# Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.
+# To include a specific numbered snapshot at release time: git add -f CUDA_Link_Example.N.toe
+CUDA_Link_Example.*.toe
+
 
 # Audit reports (local-only)
 audit_reports/
@@ -258,3 +265,7 @@ logs/
 scripts/git/
 .githooks/
 cgw.conf.example
+
+# Local profiling artifacts and probe scripts
+scripts/probes/59.5
+scripts/profiling/benchmarks/

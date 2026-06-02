@@ -10,7 +10,7 @@ Public surface:
 Context manager: ``with Exporter.open(...) as exp: ...``
 
 See _exporter_port.py for FrameSpec, ExportPolicy, GpuFrame, FrameOutcome, CudaPort.
-See _cuda_adapters.py for CTypesCudaAdapter (production) and FakeCudaAdapter (tests).
+See _cuda_adapters.py for CTypesCUDAAdapter (production) and FakeCUDAAdapter (tests).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
 import NVTXShim as _nvtx
-from CUDAAdapters import CTypesCudaAdapter
+from CUDAAdapters import CTypesCUDAAdapter
 from ExporterPort import (
     CudaPort,
     ExportPolicy,
@@ -44,6 +44,7 @@ from CUDARuntimeTypes import (
 )
 from SHMProtocol import (
     _ST_U32,
+    IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     NUM_SLOTS_OFFSET,
     PROTOCOL_MAGIC,
@@ -59,7 +60,7 @@ from SHMProtocol import (
 )
 
 if TYPE_CHECKING:
-    from .nvml_observer import NVMLObserver
+    from NVMLObserver import NVMLObserver
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +178,8 @@ class Exporter:
         Args:
             spec:    Frame geometry + SHM routing (FrameSpec).
             policy:  Behavioural knobs. None → ExportPolicy.from_env().
-            cuda:    CudaPort adapter. None → CTypesCudaAdapter.for_device(spec.device).
-                     Pass a FakeCudaAdapter() for unit tests.
+            cuda:    CudaPort adapter. None → CTypesCUDAAdapter.for_device(spec.device).
+                     Pass a FakeCUDAAdapter() for unit tests.
             barrier: CheckerBarrier to use. None → construct from policy.
                      Pass CheckerBarrier(shm=FakeShmAdapter(...)) for unit tests.
 
@@ -193,7 +194,7 @@ class Exporter:
         if policy is None:
             policy = ExportPolicy.from_env()
         if cuda is None:
-            cuda = CTypesCudaAdapter.for_device(spec.device)
+            cuda = CTypesCUDAAdapter.for_device(spec.device)
 
         exp = cls(spec, policy, cuda)
         if barrier is not None:
@@ -315,12 +316,13 @@ class Exporter:
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
-            base_offset = self._layout.slot_offset(slot)
+            mem_off = self._layout.mem_handle_offset(slot)
+            evt_off = self._layout.event_handle_offset(slot)
             _mem_bytes = bytes(self.ipc_handles[slot].internal)
             logger.debug("Slot %d IPC mem handle prefix: %s...", slot, _mem_bytes[:16].hex())
-            self.shm_handle.buf[base_offset : base_offset + 64] = _mem_bytes
+            self.shm_handle.buf[mem_off : mem_off + IPC_HANDLE_SIZE] = _mem_bytes
             if self.ipc_event_handles[slot]:
-                self.shm_handle.buf[base_offset + 64 : base_offset + 128] = bytes(self.ipc_event_handles[slot].reserved)
+                self.shm_handle.buf[evt_off : evt_off + IPC_HANDLE_SIZE] = bytes(self.ipc_event_handles[slot].reserved)
         clear_shutdown(self.shm_handle.buf, self._layout)
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
@@ -328,6 +330,7 @@ class Exporter:
         if self.shm_handle is None or self.data_size == 0:
             return
         kind, bits, flags = DtypeCodec.encode(self._spec.dtype)
+        flags |= self._spec.extra_flags  # caller-provided flag bits (e.g. FLAGS_MONO_ALPHA)
         Metadata(
             width=self._spec.width,
             height=self._spec.height,
@@ -735,11 +738,12 @@ class Exporter:
 
         self._barrier.close()
 
-        # Reset state
-        self.dev_ptrs = [None] * self._spec.num_slots
-        self.ipc_events = [None] * self._spec.num_slots
-        self.ipc_handles = [None] * self._spec.num_slots
-        self.ipc_event_handles = [None] * self._spec.num_slots
+        # Reset state — empty lists, not null-filled slots: Exporter.open() always
+        # constructs a fresh instance, so these never need to be pre-sized here.
+        self.dev_ptrs = []
+        self.ipc_events = []
+        self.ipc_handles = []
+        self.ipc_event_handles = []
         self._initialized = False
         logger.info("Exporter closed")
 

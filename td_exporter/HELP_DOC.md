@@ -104,7 +104,7 @@ Switching modes triggers a full cleanup of the current state and lazy re-initial
 ---
 
 ### Ipcmemname
-**Type:** String | **Default:** `cudalink_output_ipc`
+**Type:** String | **Default:** `cudalink_ipc_TD>>Python` (Sender mode) / `cudalink_ipc_Python>>TD` (Receiver mode)
 
 The name of the OS shared memory segment used to exchange GPU handles between the sender and receiver.
 
@@ -136,12 +136,29 @@ Changing this parameter while active is silently ignored. Changing it while inac
 
 ---
 
+### Status
+**Type:** String (read-only) | **Default:** `Idle`
+
+Live status display — updated every frame while the component is active. Cannot be edited.
+
+| Value | Meaning |
+|-------|---------|
+| `Idle` | Component is inactive (`Active = Off`) or no transfer in progress. |
+| `<W>x<H> <dtype> <ch>ch` | Active transfer — e.g. `1920x1080 uint8 4ch`. Updated after each successful frame. |
+| `WARNING: <msg>` | Non-fatal issue — e.g. `WARNING: unsupported pixel format '11:11:10'`. Frames are skipped until resolved. The COMP node body tints yellow and `warning_emitter` shows a local badge. |
+| `ERROR: <msg>` | Fatal engine error (GPU/IPC init failure). The COMP node body tints red. Toggle `Active` Off → On to recover after fixing the underlying cause. |
+
+---
+
 ### Debug
 **Type:** Toggle | **Default:** Off
 
-Enables verbose performance logging to the TouchDesigner Textport.
+Enables verbose performance logging to the TouchDesigner Textport. Behaviour differs by mode.
 
-- **Off:** Only critical errors and state changes are logged.
+- **Off:** Only critical errors and state changes are logged (both modes).
+
+#### Sender mode
+
 - **On:** every ~97 frames, prints an average timing breakdown:
   - `cudaMemory` — OpenGL→CUDA interop time
   - `memcpy` — D2D memcpy enqueue time
@@ -152,7 +169,22 @@ Enables verbose performance logging to the TouchDesigner Textport.
 
 The first frame after initialization always prints a detailed timing diagnostic regardless of this setting.
 
-Hot-swappable: can be toggled at runtime without affecting the pipeline. However, GPU timing events (`cudaEventElapsedTime`) are only created during initialization. If Debug is turned On after the component is already running, CPU-side timing is enabled immediately but the `GPU memcpy` metric will not appear until the next full cleanup/re-init cycle.
+GPU timing events (`cudaEventElapsedTime`) are only created during initialization. If Debug is turned On after the component is already running, CPU-side timing is enabled immediately but the `GPU memcpy` metric will not appear until the next full cleanup/re-init cycle.
+
+#### Receiver mode
+
+- **On:** every 150 frames (configurable via `CUDALINK_RECEIVER_REPORT_EVERY` env var), prints a
+  per-frame summary line:
+  ```
+  [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
+  ```
+  - **FPS** — frames consumed ÷ wall time since the first consumed frame
+  - **shape** — texture dimensions in numpy H×W×C order
+  - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
+  - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
+  - **slot / write_idx** — ring buffer diagnostics
+
+Hot-swappable in both modes: can be toggled at runtime without affecting the pipeline.
 
 ---
 
@@ -174,7 +206,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.6.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.8.1.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -186,6 +218,12 @@ Use this when distributing the component to end-users who should not need to int
    result = importer.get_frame()          # ImportResult; .frame is torch.Tensor (zero-copy)
    result_np = importer.get_frame_numpy() # ImportResult; .frame is numpy array (CPU copy)
    ```
+
+**Library mode (fewer Text DATs in the .tox):** run `install_td_library.cmd` once to install
+`cuda_link` into a Python environment that TouchDesigner can see. The `CUDALinkBootstrap` DAT
+inside the component will then load the package automatically — no `CUDALINK_LIB_PATH` setup
+required when using TD Preferences mode (mode 4). Run `python scripts/install_td_library.py --help`
+to see all five install modes.
 
 ### Python → TD (Receiver mode)
 
@@ -243,7 +281,7 @@ Use this when distributing the component to end-users who should not need to int
 ## Requirements
 
 - **OS:** Windows 10 / 11 (CUDA IPC handle sharing is Windows-only)
-- **CUDA:** 12.x (tested with 12.4)
+- **CUDA:** 12.x (tested with 12.4 and 12.8)
 - **GPU:** NVIDIA, CUDA compute capability 3.5 or higher
 - **TouchDesigner:** 2022.x or later
 - **Python (consumer side):** 3.9+, `cuda-link` package (`pip install cuda-link`)

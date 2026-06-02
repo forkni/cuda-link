@@ -1,0 +1,746 @@
+"""
+Contract tests for shm_protocol — the canonical SHM layout module.
+
+Tests assert protocol invariants (round-trips, ordering guarantees, offset contracts)
+using the module's own types. No local constant duplication.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from cuda_link.shm_protocol import (
+    FLAGS_BFLOAT16,
+    FLAGS_MONO_ALPHA,
+    FORMAT_KIND_FLOAT,
+    FORMAT_KIND_SIGNED,
+    FORMAT_KIND_UNSIGNED,
+    IPC_HANDLE_SIZE,
+    METADATA_SIZE,
+    SHM_HEADER_SIZE,
+    SHUTDOWN_FLAG_SIZE,
+    SLOT_SIZE,
+    DtypeCodec,
+    Metadata,
+    SHMLayout,
+    SlotState,
+    acquire_slot,
+    bump_version,
+    clear_shutdown,
+    publish_frame,
+    read_magic,
+    read_num_slots,
+    read_version,
+    read_write_idx,
+    set_shutdown,
+    set_version,
+)
+
+# ---------------------------------------------------------------------------
+# SHMLayout — offset contract tests
+# ---------------------------------------------------------------------------
+
+
+def _make_buf(layout: SHMLayout) -> memoryview:
+    return memoryview(bytearray(layout.total_size))
+
+
+def test_layout_slot_offsets() -> None:
+    layout = SHMLayout(num_slots=3)
+    assert layout.slot_offset(0) == SHM_HEADER_SIZE
+    assert layout.slot_offset(1) == SHM_HEADER_SIZE + SLOT_SIZE
+    assert layout.slot_offset(2) == SHM_HEADER_SIZE + 2 * SLOT_SIZE
+
+
+def test_layout_shutdown_offset() -> None:
+    for n in [2, 3, 4, 5]:
+        layout = SHMLayout(num_slots=n)
+        assert layout.shutdown_offset == SHM_HEADER_SIZE + n * SLOT_SIZE
+
+
+def test_layout_metadata_offset() -> None:
+    for n in [2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        assert layout.metadata_offset == layout.shutdown_offset + SHUTDOWN_FLAG_SIZE
+
+
+def test_layout_timestamp_offset() -> None:
+    for n in [2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        assert layout.timestamp_offset == layout.metadata_offset + METADATA_SIZE
+
+
+def test_layout_total_size() -> None:
+    # 3 slots: 20 + 384 + 1 + 20 + 8 = 433
+    assert SHMLayout(num_slots=3).total_size == 433
+    # 2 slots: 20 + 256 + 1 + 20 + 8 = 305
+    assert SHMLayout(num_slots=2).total_size == 305
+    # 4 slots: 20 + 512 + 1 + 20 + 8 = 561
+    assert SHMLayout(num_slots=4).total_size == 561
+
+
+# ---------------------------------------------------------------------------
+# Header read/write contract
+# ---------------------------------------------------------------------------
+
+
+def test_bump_version_monotonic() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    for expected in range(1, 6):
+        v = bump_version(buf)
+        assert v == expected
+        assert read_version(buf) == expected
+
+
+def test_read_magic_initial_zero() -> None:
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    assert read_magic(buf) == 0  # all-zero buffer
+
+
+def test_read_write_idx_initial_zero() -> None:
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    assert read_write_idx(buf) == 0
+
+
+# ---------------------------------------------------------------------------
+# Metadata round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "width,height,num_comps,dtype",
+    [
+        (1920, 1080, 4, "float32"),
+        (512, 512, 4, "float16"),
+        (256, 256, 4, "uint8"),
+        (1280, 720, 4, "uint16"),
+    ],
+)
+def test_metadata_roundtrip(width: int, height: int, num_comps: int, dtype: str) -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    data_size = width * height * num_comps * (bits // 8)
+    meta_in = Metadata(
+        width=width,
+        height=height,
+        num_comps=num_comps,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=data_size,
+    )
+    meta_in.pack_into(buf, layout)
+    meta_out = Metadata.read_from(buf, layout)
+
+    assert meta_out == meta_in
+    # Size invariant
+    assert meta_out.width * meta_out.height * meta_out.num_comps * (meta_out.bits_per_comp // 8) == data_size
+
+
+# ---------------------------------------------------------------------------
+# DtypeCodec round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16"])
+def test_dtype_codec_roundtrip(dtype: str) -> None:
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    decoded = DtypeCodec.decode(kind, bits, flags)
+    assert decoded == dtype
+
+
+def test_dtype_codec_unknown_decode_fallback() -> None:
+    # Unknown (kind=0, bits=64, flags=0) should fallback to "float32"
+    assert DtypeCodec.decode(0, 64, 0) == "float32"
+
+
+def test_dtype_codec_unknown_encode_raises() -> None:
+    # "float64" is not in the supported set (bfloat16 is now supported)
+    with pytest.raises(KeyError):
+        DtypeCodec.encode("float64")
+
+
+# ---------------------------------------------------------------------------
+# publish_frame / acquire_slot round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_publish_then_acquire_new_frame() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+
+    # Simulate a frame publication
+    ts = time.perf_counter()
+    publish_frame(buf, layout, write_idx=1, timestamp=ts)
+
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.NEW_FRAME
+    assert result.slot == 0  # (1 - 1) % 3
+    assert result.write_idx == 1
+    assert abs(result.timestamp - ts) < 1e-6
+
+
+def test_acquire_no_frame_when_write_idx_unchanged() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+
+    publish_frame(buf, layout, write_idx=2, timestamp=time.perf_counter())
+    result = acquire_slot(buf, layout, last_write_idx=2, last_version=0)
+    assert result.state == SlotState.NO_FRAME
+
+
+def test_acquire_no_frame_when_write_idx_zero() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.NO_FRAME
+
+
+def test_acquire_shutdown_when_flag_set() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    buf[layout.shutdown_offset] = 1
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.SHUTDOWN
+
+
+def test_acquire_version_changed() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    # Set version to 2 in the buffer; consumer thinks it's 1
+    bump_version(buf)
+    bump_version(buf)
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=1)
+    assert result.state == SlotState.VERSION_CHANGED
+    assert result.new_version == 2
+
+
+def test_acquire_version_zero_skips_version_check() -> None:
+    """last_version=0 means consumer hasn't initialized yet; version check is skipped."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    bump_version(buf)
+    publish_frame(buf, layout, write_idx=1, timestamp=time.perf_counter())
+    # last_version=0 should not trigger VERSION_CHANGED
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.NEW_FRAME
+
+
+def test_slot_wraps_correctly() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+
+    expected_slots = [0, 1, 2, 0, 1, 2]
+    last_write_idx = 0
+    for i, expected_slot in enumerate(expected_slots, start=1):
+        publish_frame(buf, layout, write_idx=i, timestamp=time.perf_counter())
+        result = acquire_slot(buf, layout, last_write_idx=last_write_idx, last_version=0)
+        assert result.state == SlotState.NEW_FRAME
+        assert result.slot == expected_slot
+        last_write_idx = result.write_idx
+
+
+def test_publish_clears_shutdown_flag() -> None:
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    # Set shutdown, then publish a frame — flag should be cleared
+    buf[layout.shutdown_offset] = 1
+    publish_frame(buf, layout, write_idx=1, timestamp=time.perf_counter())
+    assert buf[layout.shutdown_offset] == 0
+
+
+# ---------------------------------------------------------------------------
+# set_shutdown / clear_shutdown — new B1 helpers
+# ---------------------------------------------------------------------------
+
+
+def test_set_shutdown_writes_flag() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    assert buf[layout.shutdown_offset] == 0
+    set_shutdown(buf, layout)
+    assert buf[layout.shutdown_offset] == 1
+
+
+def test_clear_shutdown_clears_flag() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    buf[layout.shutdown_offset] = 1
+    clear_shutdown(buf, layout)
+    assert buf[layout.shutdown_offset] == 0
+
+
+def test_set_shutdown_triggers_acquire_shutdown() -> None:
+    """Consumer sees SHUTDOWN after set_shutdown, not a stale raw write."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    set_shutdown(buf, layout)
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.state == SlotState.SHUTDOWN
+
+
+def test_slot_offset_now_consumed_by_protocol() -> None:
+    """slot_offset is the canonical slot-address accessor; verify it against raw formula."""
+    for n in [2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            expected = SHM_HEADER_SIZE + slot * SLOT_SIZE
+            assert layout.slot_offset(slot) == expected
+
+
+# ---------------------------------------------------------------------------
+# DtypeCodec — extended 7-dtype coverage (C1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+)
+def test_dtype_codec_roundtrip_all_dtypes(dtype: str) -> None:
+    """encode then decode is identity for all 7 registered dtypes."""
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    assert DtypeCodec.decode(kind, bits, flags) == dtype
+
+
+def test_dtype_codec_bfloat16_vs_float16_distinct() -> None:
+    """bfloat16 and float16 share (kind=Float, bits=16) but differ by FLAGS_BFLOAT16."""
+    k16, b16, f16 = DtypeCodec.encode("float16")
+    kbf, bbf, fbf = DtypeCodec.encode("bfloat16")
+    assert (k16, b16) == (kbf, bbf)  # same kind+bits
+    assert f16 == 0
+    assert fbf == FLAGS_BFLOAT16
+    # Codec distinguishes them
+    assert DtypeCodec.decode(k16, b16, f16) == "float16"
+    assert DtypeCodec.decode(kbf, bbf, fbf) == "bfloat16"
+
+
+def test_dtype_codec_int_vs_uint_distinct() -> None:
+    """int8 and uint8 have the same bits but different format_kind."""
+    ki, bi, fi = DtypeCodec.encode("int8")
+    ku, bu, fu = DtypeCodec.encode("uint8")
+    assert bi == bu == 8
+    assert ki == FORMAT_KIND_SIGNED
+    assert ku == FORMAT_KIND_UNSIGNED
+    assert DtypeCodec.decode(ki, bi, fi) == "int8"
+    assert DtypeCodec.decode(ku, bu, fu) == "uint8"
+
+
+@pytest.mark.parametrize(
+    "dtype,expected_itemsize",
+    [
+        ("float32", 4),
+        ("float16", 2),
+        ("bfloat16", 2),
+        ("uint8", 1),
+        ("uint16", 2),
+        ("int8", 1),
+        ("int16", 2),
+    ],
+)
+def test_dtype_codec_itemsize(dtype: str, expected_itemsize: int) -> None:
+    assert DtypeCodec.itemsize(dtype) == expected_itemsize
+
+
+def test_dtype_codec_supported_contains_all_seven() -> None:
+    supported = DtypeCodec.supported()
+    assert set(supported) == {"float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"}
+
+
+def test_dtype_codec_itemsize_unknown_raises() -> None:
+    with pytest.raises(KeyError):
+        DtypeCodec.itemsize("float64")
+
+
+# DtypeCodec — backend leg (typestr / numpy_name / cupy_name)
+
+_EXPECTED_TYPESTR = {
+    "float32": "<f4",
+    "float16": "<f2",
+    "bfloat16": "<u2",  # uint16 backing view for CAI; caller does tensor.view(bfloat16)
+    "uint8": "|u1",
+    "uint16": "<u2",
+    "int8": "|i1",
+    "int16": "<i2",
+}
+
+
+@pytest.mark.parametrize("dtype,expected", list(_EXPECTED_TYPESTR.items()))
+def test_dtype_codec_typestr(dtype: str, expected: str) -> None:
+    """DtypeCodec.typestr() returns the correct CAI typestr for every registered dtype."""
+    assert DtypeCodec.typestr(dtype) == expected
+
+
+def test_dtype_codec_typestr_unknown_raises() -> None:
+    with pytest.raises(KeyError):
+        DtypeCodec.typestr("float64")
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+def test_dtype_codec_numpy_name_standard_dtypes(dtype: str) -> None:
+    """numpy_name() returns the dtype string itself for all standard dtypes (np.dtype(name) works)."""
+    assert DtypeCodec.numpy_name(dtype) == dtype
+
+
+def test_dtype_codec_numpy_name_bfloat16_is_none() -> None:
+    """numpy_name() returns None for bfloat16 — signals that ml_dtypes is needed."""
+    assert DtypeCodec.numpy_name("bfloat16") is None
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+def test_dtype_codec_cupy_name_standard_dtypes(dtype: str) -> None:
+    """cupy_name() returns the dtype string itself for all standard dtypes (cp.dtype(name) works)."""
+    assert DtypeCodec.cupy_name(dtype) == dtype
+
+
+def test_dtype_codec_cupy_name_bfloat16_is_none() -> None:
+    """cupy_name() returns None for bfloat16 — CuPy has no bfloat16 dtype."""
+    assert DtypeCodec.cupy_name("bfloat16") is None
+
+
+# ---------------------------------------------------------------------------
+# read_version / read_num_slots — header helpers now consumed by protocol
+# ---------------------------------------------------------------------------
+
+
+def test_read_version_read_num_slots_helpers() -> None:
+    """read_version and read_num_slots return correct values from a built buffer."""
+    layout = SHMLayout(num_slots=3)
+    buf = bytearray(layout.total_size)
+    buf = layout.build_buffer(version=7, write_idx=0)
+    mv = memoryview(buf)
+    assert read_version(mv) == 7
+    assert read_num_slots(mv) == 3
+
+
+# ---------------------------------------------------------------------------
+# Metadata.read_from now consumed for all 7 dtypes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+)
+def test_metadata_roundtrip_all_dtypes(dtype: str) -> None:
+    """Metadata.read_from correctly recovers every registered dtype."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    kind, bits, flags = DtypeCodec.encode(dtype)
+    itemsize = DtypeCodec.itemsize(dtype)
+    w, h, c = 64, 48, 4
+    meta_in = Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * itemsize,
+    )
+    meta_in.pack_into(buf, layout)
+    meta_out = Metadata.read_from(buf, layout)
+    assert meta_out == meta_in
+    # Verify round-trip through DtypeCodec
+    assert DtypeCodec.decode(meta_out.format_kind, meta_out.bits_per_comp, meta_out.flags) == dtype
+
+
+# ---------------------------------------------------------------------------
+# set_version — monotonic seeding across sender reopen (Part 2 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_set_version_writes_explicit_value() -> None:
+    """set_version writes an arbitrary value that read_version reads back."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    set_version(buf, 7)
+    assert read_version(buf) == 7
+
+
+def test_set_version_overwrites_bump_version() -> None:
+    """set_version replaces the counter set by bump_version."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    bump_version(buf)  # → 1
+    bump_version(buf)  # → 2
+    set_version(buf, 42)
+    assert read_version(buf) == 42
+
+
+def test_set_version_zero_allowed() -> None:
+    """set_version(0) is allowed (used to reset; acquire_slot skips version check at 0)."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    bump_version(buf)
+    set_version(buf, 0)
+    assert read_version(buf) == 0
+
+
+def test_version_collision_reproduces_old_bug() -> None:
+    """Demonstrates the reopen-version-collision bug: if both opens produce version=1,
+    acquire_slot with last_version=1 returns NEW_FRAME (not VERSION_CHANGED) even
+    though the IPC handles changed. This is the bug set_version() fixes."""
+    layout = SHMLayout(num_slots=1)
+    buf = memoryview(bytearray(layout.total_size))
+
+    # Simulate first open: bump_version → 1; receiver connects with last_version=1.
+    bump_version(buf)  # version now 1
+    last_version = read_version(buf)  # receiver caches 1
+
+    # Publish a frame so write_idx advances
+    publish_frame(buf, layout, write_idx=5, timestamp=time.perf_counter())
+
+    # Simulate close() unlink + reopen: fresh zeroed segment, bump_version → 1 again.
+    fresh_buf = memoryview(bytearray(layout.total_size))
+    bump_version(fresh_buf)  # version = 1 — SAME as before!
+
+    # Publish a frame on the new segment too
+    publish_frame(fresh_buf, layout, write_idx=1, timestamp=time.perf_counter())
+
+    # Without set_version: acquire returns NEW_FRAME (stale handles used → bug)
+    result = acquire_slot(fresh_buf, layout, last_write_idx=0, last_version=last_version)
+    assert result.state == SlotState.NEW_FRAME, "Collision confirmed: same version=1 → receiver missed the reopen"
+
+
+def test_set_version_fixes_version_collision() -> None:
+    """Verifies the fix: after set_version(engine_counter), acquire_slot fires
+    VERSION_CHANGED even though the SHM segment is fresh and would normally reset to 1."""
+    layout = SHMLayout(num_slots=1)
+
+    # First open: version = 1; receiver caches last_version = 1.
+    buf_open1 = memoryview(bytearray(layout.total_size))
+    bump_version(buf_open1)
+    last_version = read_version(buf_open1)  # 1
+    engine_counter = last_version  # engine seeds from first open
+
+    # Sender changes dtype → close() + open() → fresh segment.
+    buf_open2 = memoryview(bytearray(layout.total_size))
+    bump_version(buf_open2)  # would naturally be 1 — collision
+
+    # FIX: engine increments its counter and injects it.
+    engine_counter += 1  # 2
+    set_version(buf_open2, engine_counter)
+    assert read_version(buf_open2) == 2
+
+    # Now acquire_slot must fire VERSION_CHANGED (not NEW_FRAME or NO_FRAME).
+    # write_idx on fresh segment is 0 — no frame published yet, so without the
+    # version change it would be NO_FRAME.  With version change it fires immediately.
+    result = acquire_slot(buf_open2, layout, last_write_idx=0, last_version=last_version)
+    assert result.state == SlotState.VERSION_CHANGED, (
+        "set_version fix failed: receiver did not see VERSION_CHANGED after dtype-change reopen"
+    )
+    assert result.new_version == 2
+
+
+# ---------------------------------------------------------------------------
+# DtypeCodec.decode — FLAGS_MONO_ALPHA masking (fix: bit1 is channel-semantic,
+# not dtype-relevant; decode must not fall back to "float32" for monoalpha frames)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind,bits,flags,expected_dtype",
+    [
+        # Standard dtypes without any flags — unchanged by the fix
+        (FORMAT_KIND_FLOAT, 32, 0, "float32"),
+        (FORMAT_KIND_FLOAT, 16, 0, "float16"),
+        (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, "bfloat16"),
+        (FORMAT_KIND_UNSIGNED, 8, 0, "uint8"),
+        (FORMAT_KIND_UNSIGNED, 16, 0, "uint16"),
+        (FORMAT_KIND_SIGNED, 8, 0, "int8"),
+        (FORMAT_KIND_SIGNED, 16, 0, "int16"),
+        # Mono+alpha variants — FLAGS_MONO_ALPHA must NOT change the dtype
+        (FORMAT_KIND_FLOAT, 32, FLAGS_MONO_ALPHA, "float32"),
+        (FORMAT_KIND_FLOAT, 16, FLAGS_MONO_ALPHA, "float16"),
+        (FORMAT_KIND_UNSIGNED, 8, FLAGS_MONO_ALPHA, "uint8"),
+        (FORMAT_KIND_UNSIGNED, 16, FLAGS_MONO_ALPHA, "uint16"),
+        # bfloat16 + mono_alpha (both bits set) — bfloat16 still wins
+        (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16 | FLAGS_MONO_ALPHA, "bfloat16"),
+    ],
+)
+def test_dtype_codec_decode_mono_alpha_masked(kind: int, bits: int, flags: int, expected_dtype: str) -> None:
+    """FLAGS_MONO_ALPHA (bit1) is channel-semantic; decode returns the correct
+    dtype regardless of whether the mono+alpha bit is set.
+
+    Before the fix, (UNSIGNED, 8, FLAGS_MONO_ALPHA) fell back to "float32"
+    producing a 4× oversized itemsize for monoalpha8fixed frames.
+    """
+    assert DtypeCodec.decode(kind, bits, flags) == expected_dtype
+
+
+def test_dtype_codec_decode_mono_alpha_preserves_itemsize() -> None:
+    """monoalpha8fixed and monoalpha16fixed frames must decode to 1- and 2-byte
+    dtypes respectively, not to the 4-byte float32 fallback."""
+    # monoalpha8fixed: (UNSIGNED, 8, FLAGS_MONO_ALPHA) → uint8 → 1 byte
+    dtype8 = DtypeCodec.decode(FORMAT_KIND_UNSIGNED, 8, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype8) == 1, f"monoalpha8fixed itemsize wrong: {dtype8}"
+
+    # monoalpha16fixed: (UNSIGNED, 16, FLAGS_MONO_ALPHA) → uint16 → 2 bytes
+    dtype16 = DtypeCodec.decode(FORMAT_KIND_UNSIGNED, 16, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype16) == 2, f"monoalpha16fixed itemsize wrong: {dtype16}"
+
+    # monoalpha32float: (FLOAT, 32, FLAGS_MONO_ALPHA) → float32 → 4 bytes (was already correct)
+    dtype32 = DtypeCodec.decode(FORMAT_KIND_FLOAT, 32, FLAGS_MONO_ALPHA)
+    assert DtypeCodec.itemsize(dtype32) == 4, f"monoalpha32float itemsize wrong: {dtype32}"
+
+
+def test_dtype_codec_decode_mono_alpha_round_trip() -> None:
+    """encode/decode round-trip holds for all 7 dtypes regardless of
+    FLAGS_MONO_ALPHA — the channel-semantic bit does not participate in encode."""
+    for dtype in DtypeCodec.supported():
+        kind, bits, flags = DtypeCodec.encode(dtype)
+        # Without mono_alpha (standard path)
+        assert DtypeCodec.decode(kind, bits, flags) == dtype, f"round-trip failed for {dtype}"
+        # With mono_alpha added (as the sender would set for monoalpha* formats)
+        assert DtypeCodec.decode(kind, bits, flags | FLAGS_MONO_ALPHA) == dtype, (
+            f"round-trip with FLAGS_MONO_ALPHA failed for {dtype}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Metadata.expected_size — computed size invariant
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_expected_size_basic() -> None:
+    """expected_size = width * height * num_comps * (bits_per_comp // 8)."""
+    md = Metadata(
+        width=640,
+        height=480,
+        num_comps=4,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        flags=0,
+        data_size=640 * 480 * 4 * 4,
+    )
+    assert md.expected_size == 640 * 480 * 4 * 4
+
+
+@pytest.mark.parametrize(
+    "width,height,num_comps,bits_per_comp,expected",
+    [
+        (4, 4, 4, 32, 4 * 4 * 4 * 4),  # rgba32float
+        (4, 4, 4, 8, 4 * 4 * 4 * 1),  # rgba8fixed
+        (4, 4, 2, 8, 4 * 4 * 2 * 1),  # monoalpha8fixed / rg8fixed
+        (4, 4, 2, 16, 4 * 4 * 2 * 2),  # monoalpha16fixed
+        (4, 4, 1, 8, 4 * 4 * 1 * 1),  # mono8fixed
+        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # rgba16fixed
+        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # float16 (same byte count)
+    ],
+)
+def test_metadata_expected_size_parametrized(
+    width: int, height: int, num_comps: int, bits_per_comp: int, expected: int
+) -> None:
+    md = Metadata(
+        width=width,
+        height=height,
+        num_comps=num_comps,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=bits_per_comp,
+        flags=0,
+        data_size=expected,
+    )
+    assert md.expected_size == expected
+
+
+def test_metadata_expected_size_mismatch_detection() -> None:
+    """data_size != expected_size flags a corrupted / mismatched metadata block."""
+    md_good = Metadata(
+        width=4,
+        height=4,
+        num_comps=4,
+        format_kind=FORMAT_KIND_FLOAT,
+        bits_per_comp=32,
+        flags=0,
+        data_size=4 * 4 * 4 * 4,
+    )
+    assert md_good.data_size == md_good.expected_size
+
+    md_bad = Metadata(
+        width=4, height=4, num_comps=4, format_kind=FORMAT_KIND_FLOAT, bits_per_comp=32, flags=0, data_size=1
+    )  # wrong size
+    assert md_bad.data_size != md_bad.expected_size
+
+
+# ---------------------------------------------------------------------------
+# C3c — SHMLayout owns the 64/64 intra-slot split (mem+event handle offsets)
+# ---------------------------------------------------------------------------
+
+
+def test_ipc_handle_size_is_64() -> None:
+    """IPC_HANDLE_SIZE must equal 64 — the size of both cudaIpcMemHandle_t and
+    cudaIpcEventHandle_t as defined by the CUDA ABI."""
+    assert IPC_HANDLE_SIZE == 64
+
+
+def test_mem_handle_offset_equals_slot_offset() -> None:
+    """mem_handle_offset(slot) is the start of the slot — no displacement."""
+    for n in [1, 2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            assert layout.mem_handle_offset(slot) == layout.slot_offset(slot)
+
+
+def test_event_handle_offset_is_slot_offset_plus_handle_size() -> None:
+    """event_handle_offset(slot) == slot_offset(slot) + IPC_HANDLE_SIZE."""
+    for n in [1, 2, 3, 4]:
+        layout = SHMLayout(num_slots=n)
+        for slot in range(n):
+            assert layout.event_handle_offset(slot) == layout.slot_offset(slot) + IPC_HANDLE_SIZE
+
+
+def test_event_minus_mem_equals_handle_size() -> None:
+    """The gap between event and mem offsets is always exactly IPC_HANDLE_SIZE bytes."""
+    layout = SHMLayout(num_slots=3)
+    for slot in range(3):
+        gap = layout.event_handle_offset(slot) - layout.mem_handle_offset(slot)
+        assert gap == IPC_HANDLE_SIZE
+
+
+def test_handle_offsets_non_overlapping_across_slots() -> None:
+    """The event handle of slot N must not overlap the mem handle of slot N+1."""
+    layout = SHMLayout(num_slots=3)
+    for slot in range(2):
+        evt_end = layout.event_handle_offset(slot) + IPC_HANDLE_SIZE
+        next_mem_start = layout.mem_handle_offset(slot + 1)
+        assert evt_end <= next_mem_start, (
+            f"Slot {slot} event handle [{layout.event_handle_offset(slot)}, {evt_end}) "
+            f"overlaps slot {slot + 1} mem handle start {next_mem_start}"
+        )
+
+
+def test_mem_event_handle_roundtrip() -> None:
+    """Write distinct 64-byte patterns to mem/event slots via the new helpers and read
+    them back — confirms exporter and importer use the same layout arithmetic."""
+    layout = SHMLayout(num_slots=2)
+    buf = bytearray(layout.total_size)
+
+    # Synthetic handle data: mem handle = 0xAA * 64, event handle = 0xBB * 64
+    for slot in range(2):
+        mem_payload = bytes([0xAA + slot]) * IPC_HANDLE_SIZE
+        evt_payload = bytes([0xCC + slot]) * IPC_HANDLE_SIZE
+
+        m = layout.mem_handle_offset(slot)
+        e = layout.event_handle_offset(slot)
+        buf[m : m + IPC_HANDLE_SIZE] = mem_payload
+        buf[e : e + IPC_HANDLE_SIZE] = evt_payload
+
+    # Read back and verify each slot independently
+    for slot in range(2):
+        m = layout.mem_handle_offset(slot)
+        e = layout.event_handle_offset(slot)
+        assert bytes(buf[m : m + IPC_HANDLE_SIZE]) == bytes([0xAA + slot]) * IPC_HANDLE_SIZE
+        assert bytes(buf[e : e + IPC_HANDLE_SIZE]) == bytes([0xCC + slot]) * IPC_HANDLE_SIZE
+
+
+def test_slot_size_equals_two_handle_sizes() -> None:
+    """SLOT_SIZE = 2 * IPC_HANDLE_SIZE — the entire slot is exactly two handles."""
+    assert SLOT_SIZE == 2 * IPC_HANDLE_SIZE

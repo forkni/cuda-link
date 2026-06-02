@@ -115,6 +115,11 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **textDAT binding**: every `.py` file in `td_exporter/` corresponds to a Text DAT inside the `CUDAIPCLink` Base COMP. Imports between them resolve within the COMP namespace (e.g., `from TDSender import TDSenderEngine` finds the `TDSender` sibling DAT). See `docs/TOX_BUILD_GUIDE.md` for the full assembly sequence.
 
+**Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
+
+- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 14 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 14 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 14 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+
 ---
 
 ## SharedMemory Protocol
@@ -555,6 +560,10 @@ CUDA IPC zero-copies GPU memory across processes; CPU SharedMemory adds two memc
 
 ### Why Legacy IPC Over VMM API
 
+> This decision is recorded canonically in
+> [`docs/adr/0004-legacy-cuda-ipc-over-vmm.md`](adr/0004-legacy-cuda-ipc-over-vmm.md).
+> The summary below is retained for inline reference.
+
 This project uses CUDA Runtime API IPC (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`)
 rather than the Driver API Virtual Memory Management (VMM) approach
 (`cuMemCreate` / `cuMemExportToShareableHandle`).
@@ -577,7 +586,10 @@ manipulation — solve problems this project does not have.
 **When VMM would be needed**: If sharing `cudaArray` objects directly (opaque
 texture memory with swizzled layout) without linearization.
 
-See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
+See [`docs/adr/0004-legacy-cuda-ipc-over-vmm.md`](adr/0004-legacy-cuda-ipc-over-vmm.md) for
+the full decision record, including the rejected VMM alternative and the one condition that
+would reopen the decision. A proof-of-concept VMM probe lives at
+`scripts/probe/driver_api_ipc_probe.py`.
 
 ---
 
@@ -589,5 +601,5 @@ See `References/CUDA IPC Texture Transfer Windows.txt` for full analysis.
 
 ---
 
-**Last Updated**: 2026-05-29
-**Version**: 1.6.0
+**Last Updated**: 2026-05-31
+**Version**: 1.8.0

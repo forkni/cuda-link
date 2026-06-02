@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import c_int, c_size_t, c_uint64, c_void_p
+from enum import IntEnum
 
 # CUDA handle types - use unsigned 64-bit to prevent overflow on Windows x64
 # See: https://github.com/pytorch/pytorch/pull/162920
@@ -113,6 +114,16 @@ assert ctypes.sizeof(cudaIpcEventHandle_t) == 64, (
 assert ctypes.sizeof(cudaPointerAttributes) == 24, (
     f"cudaPointerAttributes ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPointerAttributes)}"
 )
+# Graph param struct ABI guards — cudaMemcpy3DParms is the largest and most alignment-sensitive.
+# All four values were verified against Python ctypes on a 64-bit Windows host (sizeof c_size_t=8).
+assert ctypes.sizeof(cudaPos) == 24, f"cudaPos ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPos)}"
+assert ctypes.sizeof(cudaPitchedPtr) == 32, (
+    f"cudaPitchedPtr ABI mismatch: expected 32 bytes, got {ctypes.sizeof(cudaPitchedPtr)}"
+)
+assert ctypes.sizeof(cudaExtent) == 24, f"cudaExtent ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaExtent)}"
+assert ctypes.sizeof(cudaMemcpy3DParms) == 160, (
+    f"cudaMemcpy3DParms ABI mismatch: expected 160 bytes, got {ctypes.sizeof(cudaMemcpy3DParms)}"
+)
 
 
 # CUDA Error codes (subset)
@@ -142,3 +153,39 @@ class CUDAError:
             704: "PEER_ACCESS_ALREADY_ENABLED",
         }
         return names.get(code, f"UNKNOWN_ERROR_{code}")
+
+
+# ---------------------------------------------------------------------------
+# CUDA runtime enum constants — named replacements for magic integers
+# ---------------------------------------------------------------------------
+
+
+class MemcpyKind(IntEnum):
+    """cudaMemcpyKind values used in cudaMemcpy / cudaMemcpyAsync calls."""
+
+    HOST_TO_HOST = 0  # cudaMemcpyHostToHost
+    HOST_TO_DEVICE = 1  # cudaMemcpyHostToDevice
+    DEVICE_TO_HOST = 2  # cudaMemcpyDeviceToHost
+    DEVICE_TO_DEVICE = 3  # cudaMemcpyDeviceToDevice
+
+
+class StreamFlags(IntEnum):
+    """cudaStreamFlags values passed to cudaStreamCreate* calls."""
+
+    DEFAULT = 0  # cudaStreamDefault (inherits legacy synchronisation behaviour)
+    NON_BLOCKING = 0x01  # cudaStreamNonBlocking
+
+
+class StreamCaptureMode(IntEnum):
+    """cudaStreamCaptureMode values for cudaStreamBeginCapture."""
+
+    GLOBAL = 0  # cudaStreamCaptureModeGlobal
+    THREAD_LOCAL = 1  # cudaStreamCaptureModeThreadLocal
+    RELAXED = 2  # cudaStreamCaptureModeRelaxed
+
+
+# cudaIpcMemLazyEnablePeerAccess — the only valid flag for cudaIpcOpenMemHandle.
+IPC_MEM_LAZY_ENABLE_PEER_ACCESS: int = 1
+
+# cudaHostAllocPortable — pinned allocation visible from any CUDA context in the process.
+HOST_ALLOC_PORTABLE: int = 0x01
