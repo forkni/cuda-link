@@ -70,6 +70,7 @@ class ExportPolicy:
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
+    require_source_sync: bool = False
     barrier_enabled: bool = True
     barrier_stale_ns: int = 5_000_000_000
     high_priority_stream: bool = True
@@ -83,6 +84,7 @@ class ExportPolicy:
             use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
+            require_source_sync=env_bool("CUDALINK_REQUIRE_SOURCE_SYNC", default=False),
             barrier_enabled=env_bool("CUDALINK_ACTIVATION_BARRIER", default=True),
             barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
             high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
@@ -101,6 +103,7 @@ class ExportPolicy:
             flush_probe=False,
             use_graphs=True,
             strict_device=False,
+            require_source_sync=False,
             barrier_enabled=True,
             high_priority_stream=True,
             export_profile=False,
@@ -119,6 +122,7 @@ class ExportPolicy:
             use_graphs=False,
             flush_probe=False,
             strict_device=False,
+            require_source_sync=False,
             barrier_enabled=False,
             barrier_stale_ns=0,
             high_priority_stream=False,

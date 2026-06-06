@@ -9,6 +9,18 @@ Public surface:
 
 Context manager: ``with Exporter.open(...) as exp: ...``
 
+**Producer-stream ordering** — the IPC stream is non-blocking and high-priority,
+so the D2D memcpy is NOT automatically ordered after producer kernels.  Arm
+ordering before export() via either:
+  • GpuFrame(..., producer_stream=<raw stream handle>)
+  • exporter.record_source_sync(<raw stream handle>)
+PyTorch: ``torch.cuda.current_stream().cuda_stream``
+CuPy:    ``cupy.cuda.get_current_stream().ptr``
+Synchronous writers (e.g. cudaMemcpy H2D) may pass stream 0.
+CUDALINK_EXPORT_SYNC=1 is NOT a substitute (post-launch sync ≠ pre-copy ordering).
+Omitting ordering triggers a logger.warning (once per instance); set
+ExportPolicy(require_source_sync=True) / CUDALINK_REQUIRE_SOURCE_SYNC=1 to raise.
+
 See _exporter_port.py for FrameSpec, ExportPolicy, GpuFrame, FrameOutcome, CudaPort.
 See _cuda_adapters.py for CTypesCUDAAdapter (production) and FakeCUDAAdapter (tests).
 """
@@ -156,6 +168,7 @@ class Exporter:
         # Device-affinity cache
         self._source_sync_device_warned: bool = False
         self._ptr_device_cache: set[int] = set()
+        self._unordered_export_warned: bool = False
 
         # Activation barrier
         self._barrier = CheckerBarrier(enabled=policy.barrier_enabled, stale_ns=policy.barrier_stale_ns)
@@ -404,6 +417,14 @@ class Exporter:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def _ordering_armed(self) -> bool:
+        """True when a producer-stream ordering event has been recorded and the
+        source_sync_event handle is valid.  Used as the gate for stream_wait_event
+        in both the graph and legacy copy paths.
+        """
+        return self._source_sync_recorded and self.source_sync_event is not None
+
     def record_source_sync(self, producer_stream_handle: int) -> None:
         """Record the cross-stream sync event on the producer's CUDA stream.
 
@@ -453,6 +474,13 @@ class Exporter:
             PUBLISHED           — frame delivered to the ring buffer.
             SKIPPED_BARRIER     — activation barrier blocked this frame.
             FAILED              — unrecoverable error; caller should call close().
+
+        Raises:
+            ValueError: if ``ExportPolicy(require_source_sync=True)`` /
+                ``CUDALINK_REQUIRE_SOURCE_SYNC=1`` and no producer-stream ordering
+                has been armed (no ``producer_stream`` in GpuFrame and
+                ``record_source_sync()`` not called).  In the default (warn-once)
+                mode a ``logger.warning`` is emitted instead of raising.
         """
         if not self._initialized:
             logger.warning("Exporter not initialized")
@@ -485,6 +513,28 @@ class Exporter:
             # Handle producer_stream from GpuFrame (equivalent to record_source_sync)
             if frame.producer_stream is not None:
                 self.record_source_sync(frame.producer_stream)
+
+            # Warn (or raise) when no producer-stream ordering has been armed.
+            # The D2D memcpy on the non-blocking high-priority IPC stream is NOT
+            # ordered after producer kernels unless record_source_sync() / producer_stream
+            # has been used.  Waiting on a never-recorded event is a CUDA no-op, so this
+            # is a real race that can produce torn/gray frames silently.
+            if not self._source_sync_recorded:
+                _unordered_msg = (
+                    "export: no producer-stream ordering is armed -- the D2D memcpy on the "
+                    "(high-priority, non-blocking) IPC stream is NOT ordered after your "
+                    "kernels and may read a half-written buffer (torn/gray frames). "
+                    "Pass GpuFrame(..., producer_stream=<raw stream handle>) "
+                    "(PyTorch: torch.cuda.current_stream().cuda_stream) or call "
+                    "record_source_sync() before export(). "
+                    "Set ExportPolicy(require_source_sync=True) / CUDALINK_REQUIRE_SOURCE_SYNC=1 "
+                    "to raise instead of warn."
+                )
+                if self._policy.require_source_sync:
+                    raise ValueError(_unordered_msg)
+                if not self._unordered_export_warned:
+                    logger.warning(_unordered_msg)
+                    self._unordered_export_warned = True
 
             # Device-affinity pointer check (first appearance; capped cache)
             gpu_ptr_int = frame.ptr if isinstance(frame.ptr, int) else int(frame.ptr)
@@ -523,7 +573,7 @@ class Exporter:
                         count=self.data_size,
                         kind=3,
                     )
-                    if self._source_sync_recorded and self.source_sync_event is not None:
+                    if self._ordering_armed:
                         _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                     _cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
                     if self.ipc_events[slot]:
@@ -542,7 +592,7 @@ class Exporter:
             if goto_legacy:
                 if profile:
                     _t = time.perf_counter()
-                if self.source_sync_event is not None:
+                if self._ordering_armed:
                     _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                 if profile:
                     self._profile.record("stream_wait", (time.perf_counter() - _t) * 1_000_000)

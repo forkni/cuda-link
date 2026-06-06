@@ -380,6 +380,14 @@ class TDSenderEngine:
             self._current_spec = spec
             self._policy = policy
 
+            # Arm producer-stream ordering once at open time.
+            # cuda_memory() (export_frame step 1) always passes stream=ipc_stream.value, so
+            # TD enqueues its work on the same stream as the D2D copy — FIFO-ordered by
+            # construction.  Recording on the IPC stream itself is the canonical declaration
+            # of that invariant; the per-frame stream_wait_event on an already-completed
+            # event is a cheap CUDA no-op in steady state.
+            self._exporter.record_source_sync(int(self._exporter.ipc_stream.value))
+
             # Seed the monotonic version counter from the freshly-opened SHM segment.
             # The receiver will cache this value (ipc_version) on first connect; any
             # subsequent reopen must produce a strictly-greater value so the receiver's
@@ -607,6 +615,10 @@ class TDSenderEngine:
                 )
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
+
+                # Re-arm ordering on the new Exporter's IPC stream (same invariant as
+                # initialize(): cuda_memory() below will request on ipc_stream.value).
+                self._exporter.record_source_sync(int(self._exporter.ipc_stream.value))
 
                 # Force a monotonically-greater version in the SHM segment so the
                 # receiver's `version != last_version` guard always fires.
