@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cuda_link import ExportPolicy, FrameSpec, GpuFrame
+from cuda_link import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.exporter import Exporter
 
@@ -67,8 +67,6 @@ def _make_exporter(
 
 def test_warns_once_on_unordered_export() -> None:
     """Two unordered export() calls emit exactly one logger.warning."""
-    from cuda_link import FrameOutcome
-
     exp, _ = _make_exporter()
     try:
         with patch("cuda_link.exporter.logger") as mock_log:
@@ -145,8 +143,6 @@ def test_strict_raises_on_unordered_export() -> None:
 
 def test_strict_no_raise_when_ordered() -> None:
     """require_source_sync=True does NOT raise when producer_stream is provided."""
-    from cuda_link import FrameOutcome
-
     exp, _ = _make_exporter(require_source_sync=True)
     try:
         outcome = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE, producer_stream=0))
@@ -157,8 +153,6 @@ def test_strict_no_raise_when_ordered() -> None:
 
 def test_strict_no_raise_when_record_source_sync_called() -> None:
     """require_source_sync=True does NOT raise after record_source_sync()."""
-    from cuda_link import FrameOutcome
-
     exp, _ = _make_exporter(require_source_sync=True)
     try:
         exp.record_source_sync(0)
@@ -173,23 +167,27 @@ def test_strict_no_raise_when_record_source_sync_called() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stream_wait_event_not_called_when_ordering_not_armed() -> None:
-    """When no ordering is armed, stream_wait_event is never called (legacy path)."""
-    exp, fake = _make_exporter()
-    call_count = 0
-
+def _count_stream_waits(fake: FakeCUDAAdapter) -> list[int]:
+    """Wrap fake.stream_wait_event with a call counter; return a 1-element count list."""
+    count = [0]
     real_swe = fake.stream_wait_event
 
     def counting_swe(stream, event, flags=0):
-        nonlocal call_count
-        call_count += 1
+        count[0] += 1
         return real_swe(stream, event, flags)
 
     fake.stream_wait_event = counting_swe
+    return count
+
+
+def test_stream_wait_event_not_called_when_ordering_not_armed() -> None:
+    """When no ordering is armed, stream_wait_event is never called (legacy path)."""
+    exp, fake = _make_exporter()
+    count = _count_stream_waits(fake)
     try:
         with patch("cuda_link.exporter.logger"):  # suppress the warning
             exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
-        assert call_count == 0
+        assert count[0] == 0
     finally:
         exp.close()
 
@@ -197,18 +195,9 @@ def test_stream_wait_event_not_called_when_ordering_not_armed() -> None:
 def test_stream_wait_event_called_when_ordering_armed() -> None:
     """When ordering is armed via producer_stream, stream_wait_event is called."""
     exp, fake = _make_exporter()
-    call_count = 0
-
-    real_swe = fake.stream_wait_event
-
-    def counting_swe(stream, event, flags=0):
-        nonlocal call_count
-        call_count += 1
-        return real_swe(stream, event, flags)
-
-    fake.stream_wait_event = counting_swe
+    count = _count_stream_waits(fake)
     try:
         exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE, producer_stream=0))
-        assert call_count >= 1
+        assert count[0] >= 1
     finally:
         exp.close()

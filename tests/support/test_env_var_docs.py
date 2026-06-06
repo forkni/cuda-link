@@ -39,14 +39,22 @@ def _collect_env_vars() -> set[str]:
 
 
 def _extract_perf_tuning_section(readme: str) -> str:
-    """Return the slice of README from the perf-tuning heading to the next heading."""
-    start = readme.find(_SECTION_HEADING)
-    assert start != -1, f"Heading {_SECTION_HEADING!r} not found in README.md"
-    # Find the next markdown heading after the start
-    next_heading = readme.find("\n#", start + len(_SECTION_HEADING))
-    if next_heading == -1:
-        return readme[start:]
-    return readme[start:next_heading]
+    """Return the README slice from the perf-tuning heading to the next real heading.
+
+    Fence-aware: a ``#`` at column 0 inside a fenced code block is NOT a heading.
+    """
+    lines = readme.splitlines()
+    starts = [i for i, ln in enumerate(lines) if ln.strip() == _SECTION_HEADING]
+    assert starts, f"Heading {_SECTION_HEADING!r} not found in README.md"
+    start = starts[0]
+    in_fence = False
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence and re.match(r"#{1,3} ", lines[i]):
+            return "\n".join(lines[start:i])
+    return "\n".join(lines[start:])
 
 
 def test_all_env_vars_documented_in_readme() -> None:

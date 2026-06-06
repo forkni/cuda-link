@@ -419,9 +419,11 @@ class Exporter:
 
     @property
     def _ordering_armed(self) -> bool:
-        """True when a producer-stream ordering event has been recorded and the
-        source_sync_event handle is valid.  Used as the gate for stream_wait_event
-        in both the graph and legacy copy paths.
+        """True when producer-stream ordering is fully in effect.
+
+        Both conditions must hold: a source-sync event has been recorded on the
+        producer stream AND the source_sync_event handle is valid.  Used as the
+        single gate for stream_wait_event in both the graph and legacy copy paths.
         """
         return self._source_sync_recorded and self.source_sync_event is not None
 
