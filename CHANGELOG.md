@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-06-06
+
 ### Added
 
 - **Unordered-export safeguard** — `Exporter.export()` now warns (once per instance) when no
