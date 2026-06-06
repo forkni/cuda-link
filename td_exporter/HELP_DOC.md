@@ -230,8 +230,15 @@ to see all five install modes.
 1. In Python, create an exporter:
    ```python
    from cuda_link import Exporter, FrameSpec, GpuFrame
+   import torch
    exporter = Exporter.open(FrameSpec(shm_name="ai_output", width=1920, height=1080))
-   exporter.export(GpuFrame(ptr=gpu_tensor.data_ptr(), size=gpu_tensor.nbytes))
+   # Pass producer_stream so the D2D copy is ordered after your kernel writes.
+   # PyTorch: torch.cuda.current_stream().cuda_stream
+   exporter.export(GpuFrame(
+       ptr=gpu_tensor.data_ptr(),
+       size=gpu_tensor.nbytes,
+       producer_stream=torch.cuda.current_stream().cuda_stream,
+   ))
    ```
 2. Drop the component into TD and set **Mode** = `Receiver`.
 3. Set **Ipcmemname** to the same name (`ai_output`).

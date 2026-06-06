@@ -69,6 +69,7 @@ def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CUDALINK_ACTIVATION_BARRIER", "0")
     monkeypatch.setenv("CUDALINK_LIB_STREAM_PRIO", "normal")
     monkeypatch.setenv("CUDALINK_EXPORT_PROFILE", "1")
+    monkeypatch.setenv("CUDALINK_REQUIRE_SOURCE_SYNC", "1")
 
     pol = ExportPolicy.from_env()
     assert pol.export_sync is False
@@ -78,6 +79,13 @@ def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pol.barrier_enabled is False
     assert pol.high_priority_stream is False
     assert pol.export_profile is True
+    assert pol.require_source_sync is True
+
+
+def test_export_policy_require_source_sync_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUDALINK_REQUIRE_SOURCE_SYNC defaults to False."""
+    monkeypatch.delenv("CUDALINK_REQUIRE_SOURCE_SYNC", raising=False)
+    assert ExportPolicy.from_env().require_source_sync is False
 
 
 def test_export_policy_for_testing() -> None:
