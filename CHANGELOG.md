@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Unordered-export safeguard** — `Exporter.export()` now warns (once per instance) when no
+  producer-stream ordering has been armed via `GpuFrame.producer_stream` or
+  `record_source_sync()`. The D2D memcpy on the non-blocking high-priority IPC stream is silently
+  unordered without this, which can produce torn/gray frames downstream (confirmed by a real
+  StreamDiffusion → TouchDesigner regression). Set `ExportPolicy(require_source_sync=True)` /
+  `CUDALINK_REQUIRE_SOURCE_SYNC=1` to raise `ValueError` instead of warning.
+
+- **Env-var documentation sweep** — ten `CUDALINK_*` variables that were used in `src/cuda_link`
+  but absent from the README Performance Tuning table are now documented: `REQUIRE_SOURCE_SYNC`,
+  `STRICT_DEVICE`, `LIB_STREAM_PRIO`, `BARRIER_STALE_NS`, `WAIT_SPIN_US`, `D2H_STREAM_PRIO`,
+  `ALLOW_PAGEABLE_FALLBACK`, `IMPORT_RECONNECT`, `IMPORT_RECONNECT_MAX_ATTEMPTS`,
+  `STICKY_ERROR_CHECK`.
+
+- **Env-var docs invariant test** (`tests/support/test_env_var_docs.py`) — asserts every
+  `CUDALINK_*` variable referenced by `env_bool`/`env_int`/`env_str` in `src/cuda_link/*.py`
+  appears in the README Performance Tuning section. Prevents silent drift going forward.
+
+- **Producer-stream ordering documentation** — new "Producer-Stream Ordering" subsection in
+  `docs/ARCHITECTURE.md`; `producer_stream` added to all code snippets in `README.md`,
+  `docs/INTEGRATION_EXAMPLES.md`, and `td_exporter/HELP_DOC.md`.
+
+### Fixed
+
+- **All in-repo `export()` call sites now declare producer-stream ordering**:
+  - `td_exporter/example_sender_python.py` — passes `producer_stream=0` (synchronous H2D fill
+    is already complete on the host; stream 0 declares ordering explicitly).
+  - `td_exporter/TDSender.py` — calls `record_source_sync(ipc_stream)` once at `Exporter.open()`
+    and on each format-change reopen; both `cuda_memory()` calls already pass
+    `stream=ipc_stream.value`, so same-stream FIFO ordering is the correct declaration.
+  - `scripts/profiling/profile_export.py` — calls `record_source_sync(0)` once before the timing
+    loop so the measurement includes the per-frame `stream_wait_event` overhead (representative
+    of real ordered usage).
+
+### Internal
+
+- **Unified `_ordering_armed` predicate** — both the CUDA Graphs path and the legacy stream path
+  now gate `stream_wait_event` on a single `_ordering_armed` property
+  (`_source_sync_recorded and source_sync_event is not None`). Eliminates a redundant wait on a
+  never-recorded event in the legacy path when ordering was never armed.
+
 ## [1.8.1] — 2026-06-01
 
 ### Added

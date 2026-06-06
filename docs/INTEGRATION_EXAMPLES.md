@@ -402,10 +402,13 @@ while running:
     with torch.no_grad():
         output_tensor = model(input_frame)  # shape: (512, 512, 4), dtype=uint8, on CUDA
 
-    # Export to TD (see docs/BENCHMARKS.md for timing)
+    # Export to TD (see docs/BENCHMARKS.md for timing).
+    # producer_stream arms ordering on the non-blocking IPC stream —
+    # omitting it risks torn/gray frames when kernels run on a different stream.
     exporter.export(GpuFrame(
         ptr=output_tensor.data_ptr(),
         size=output_tensor.nelement() * output_tensor.element_size(),
+        producer_stream=torch.cuda.current_stream().cuda_stream,
     ))
 
 exporter.close()
@@ -416,7 +419,11 @@ Or use it as a context manager for automatic cleanup:
 ```python
 with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) as exporter:
     while running:
-        exporter.export(GpuFrame(ptr=tensor.data_ptr(), size=tensor.nbytes))
+        exporter.export(GpuFrame(
+            ptr=tensor.data_ptr(),
+            size=tensor.nbytes,
+            producer_stream=torch.cuda.current_stream().cuda_stream,
+        ))
 ```
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)

@@ -303,6 +303,66 @@ tensor = tensors[read_slot]  # Zero-copy access, already valid
 
 **Performance**: `cudaEventQuery` + `cudaStreamWaitEvent` take ~0.5-2μs combined.
 
+### Producer-Stream Ordering (Cross-Stream Sync)
+
+The IPC stream is created as **non-blocking and high-priority** (`StreamFlags.NON_BLOCKING`,
+`CUDALINK_LIB_STREAM_PRIO=high`).  This means the IPC stream has no implicit FIFO ordering
+relationship with any other stream, including the producer's default or compute stream.
+
+#### The Race — What Happens Without Ordering
+
+```
+Producer stream:   [kernel writes to src_buffer] ...
+IPC stream:                                        [D2D memcpy src→ring_slot]  ← reads before write!
+```
+
+If `export()` is called without arming ordering, the D2D memcpy on the IPC stream may execute
+concurrently with (or before) the producer kernel writes, producing torn or gray frames — silently.
+`CUDALINK_EXPORT_SYNC=1` does **not** fix this: it inserts a CPU-blocking sync *after* the memcpy,
+not before it.
+
+#### Two Equivalent APIs to Arm Ordering
+
+**Option A — GpuFrame.producer_stream (per-frame):**
+```python
+stream_handle = torch.cuda.current_stream().cuda_stream   # PyTorch
+# stream_handle = cupy.cuda.get_current_stream().ptr       # CuPy
+exporter.export(GpuFrame(ptr=..., size=..., producer_stream=stream_handle))
+```
+
+**Option B — record_source_sync() (explicit, or one-time for same-stream callers):**
+```python
+exporter.record_source_sync(stream_handle)  # records event on producer stream
+exporter.export(GpuFrame(ptr=..., size=...))
+```
+
+Both cause `stream_wait_event(ipc_stream, source_sync_event)` before the D2D memcpy, ordering
+the copy after all previously enqueued work on `producer_stream`.  The CPU is never blocked.
+
+#### Synchronous Writers
+
+If you fill the source buffer via a *synchronous* H2D copy (e.g., `cudaMemcpy` with
+`cudaMemcpyHostToDevice`), the write is complete before the Python call returns.  You may pass
+`producer_stream=0` (the CUDA legacy default stream) to declare ordering without a real kernel
+stream:
+
+```python
+cuda.memcpy(dst=staging_ptr, src=host_buf, count=nbytes, kind=1)  # H2D, synchronous
+exporter.export(GpuFrame(ptr=staging_ptr, size=nbytes, producer_stream=0))
+```
+
+#### Enforcement
+
+| Mode | Behaviour |
+|------|-----------|
+| Default (`CUDALINK_REQUIRE_SOURCE_SYNC=0`) | `logger.warning` once per exporter instance |
+| Strict (`CUDALINK_REQUIRE_SOURCE_SYNC=1`) | `ValueError` raised immediately |
+
+Set `require_source_sync=True` in `ExportPolicy` or `CUDALINK_REQUIRE_SOURCE_SYNC=1` to enforce
+ordering at call sites during development.
+
+---
+
 ### Fallback: CPU Synchronization
 
 If IPC events are unavailable (older CUDA versions), fall back to CPU sync:
