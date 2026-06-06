@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo_w.png">
+    <source media="(prefers-color-scheme: light)" srcset="logo_b.png">
+    <img alt="cuda-link" src="logo_b.png" width="160">
+  </picture>
+</p>
+
 # cuda-link
 
 Zero-copy GPU texture transfer between TouchDesigner and Python processes using CUDA IPC.
