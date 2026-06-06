@@ -255,7 +255,11 @@ def main() -> None:
             color = _COLORS[color_idx]
 
             _fill_ctypes(cuda, staging_ptr, exporter.data_size, color)
-            exporter.export(GpuFrame(ptr=int(staging_ptr.value), size=exporter.data_size))
+            # _fill_ctypes uses a synchronous H2D cudaMemcpy, so the write is complete
+            # before this call returns.  Pass producer_stream=0 (the CUDA legacy default
+            # stream) to arm cross-stream ordering — real kernel producers MUST pass the
+            # actual stream their kernels run on instead.
+            exporter.export(GpuFrame(ptr=int(staging_ptr.value), size=exporter.data_size, producer_stream=0))
             frame_count += 1
 
             now = time.perf_counter()

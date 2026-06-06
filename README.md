@@ -56,7 +56,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.8.1.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.9.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -79,7 +79,7 @@ Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-targe
 (one-time):
 
 ```bat
-utils\build_wheel.cmd              REM build dist\cuda_link-1.8.1-py3-none-any.whl
+utils\build_wheel.cmd              REM build dist\cuda_link-1.9.0-py3-none-any.whl
 install_td_library.cmd             REM interactive menu — choose one of 5 install modes
 ```
 
@@ -117,12 +117,12 @@ for full instructions.
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-utils\build_wheel.cmd                       # Builds dist\cuda_link-1.8.1-py3-none-any.whl
+utils\build_wheel.cmd                       # Builds dist\cuda_link-1.9.0-py3-none-any.whl
 
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -192,10 +192,16 @@ with Exporter.open(
         num_slots=2,               # Ring buffer slots (double-buffering)
     )
 ) as exporter:
-    # Export each AI-generated frame (~10-20μs overhead at 512x512)
+    # Export each AI-generated frame (~10-20μs overhead at 512x512).
+    # producer_stream arms cross-stream ordering so the D2D copy on the
+    # non-blocking IPC stream is ordered after your kernel writes.
+    # PyTorch: torch.cuda.current_stream().cuda_stream
+    # CuPy:    cupy.cuda.get_current_stream().ptr
+    stream_handle = torch.cuda.current_stream().cuda_stream
     exporter.export(GpuFrame(
         ptr=output_tensor.data_ptr(),
         size=output_tensor.nbytes,
+        producer_stream=stream_handle,
     ))
 ```
 
@@ -309,6 +315,16 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 
 | Variable | Default | Effect |
 |---|---|---|
+| `CUDALINK_REQUIRE_SOURCE_SYNC` | `0` | Raise `ValueError` in `export()` when no producer-stream ordering has been armed (no `producer_stream` in `GpuFrame` and `record_source_sync()` not called). Default `0` emits a `logger.warning` once per exporter instance instead. Set to `1` to enforce ordering at call sites (recommended for new integrations). See *Producer-stream ordering* below. |
+| `CUDALINK_STRICT_DEVICE` | `0` | Raise `ValueError` in `export()` / `record_source_sync()` when the source pointer or stream belongs to a different CUDA device than the exporter. Default `0` logs an error but continues. |
+| `CUDALINK_LIB_STREAM_PRIO` | `high` | CUDA stream priority for the Python-lib IPC stream. Default `high` minimises GPU scheduling latency for the D2D copy. Set to `normal` to disable high-priority scheduling (e.g., to avoid priority inversion with other high-priority streams). |
+| `CUDALINK_BARRIER_STALE_NS` | `5000000000` | Staleness threshold in nanoseconds for the activation barrier's cross-process SHM counter. Frames are skipped while a Sender is settling; a counter older than this value is treated as stale and ignored. Default is 5 seconds. |
+| `CUDALINK_WAIT_SPIN_US` | `200` | Spin-wait window in microseconds for the importer's slot-available poll before yielding. Increase on systems with high OS scheduling jitter to reduce wake-up latency; decrease to reduce CPU burn on low-latency pipelines. |
+| `CUDALINK_D2H_STREAM_PRIO` | `normal` | CUDA stream priority for the importer's D2H copy stream. Default `normal`; set to `high` to prioritise the consumer's D2H transfer over background GPU work. |
+| `CUDALINK_ALLOW_PAGEABLE_FALLBACK` | `0` | Allow fallback to pageable (non-pinned) host memory when `cudaHostAlloc` fails. Default `0` raises instead. Useful on systems where pinned memory is exhausted by other processes. |
+| `CUDALINK_IMPORT_RECONNECT` | `1` | Enable automatic reconnect in the importer when the SHM segment disappears (e.g., producer restart). Set to `0` to raise immediately on a missing segment. |
+| `CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS` | `20` | Maximum reconnect attempts before the importer raises. Only effective when `CUDALINK_IMPORT_RECONNECT=1`. |
+| `CUDALINK_STICKY_ERROR_CHECK` | `1` | Check for sticky (latched) CUDA errors via `cudaPeekAtLastError` after each export frame. Default `1`; set to `0` to skip the check (saves one CUDA API call per frame on fault-free paths). |
 | `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export()` (Python-side `Exporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 2 per frame. With EXPORT_SYNC=1 (default) the GPU D2D copy dominates wall-clock time and the net savings are small (<5% at 1080p on PCIe 4.0); see [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measured A/B. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
 | `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender. Same mechanism as `CUDALINK_USE_GRAPHS`, gated independently because TD ships `cudart64_110.dll` and the per-frame `cudaGraphExecMemcpyNodeSetParams1D` API requires CUDA 11.3+. Auto-disabled on older runtimes (probed via `cudaRuntimeGetVersion` at `initialize()`). Disabled by default. Set to `1` to opt in; falls back to the legacy `cudaMemcpyAsync` stream path automatically on any capture or launch failure. |
 | `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
@@ -386,16 +402,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 utils\build_wheel.cmd
-# Output: dist\cuda_link-1.8.1-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.9.0-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.8.1-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.9.0-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.8.1-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.9.0-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
@@ -432,7 +448,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.8.1.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.9.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag

@@ -89,6 +89,11 @@ def run(
                 num_slots=slot_count,
             )
         ) as exporter:
+            # Arm ordering once before the timing loop.  The profiler measures raw export()
+            # cost including the per-frame stream_wait_event overhead (a realistic baseline).
+            # Using stream 0 (legacy default stream) is appropriate here because we are not
+            # running any producer kernels — the buffer contains uninitialised cudaMalloc data.
+            exporter.record_source_sync(0)
             for i in range(frames + WARMUP_FRAMES):
                 t0 = time.perf_counter()
                 exporter.export(GpuFrame(ptr=gpu_ptr, size=nbytes))
