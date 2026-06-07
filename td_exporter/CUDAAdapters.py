@@ -191,7 +191,7 @@ class FakeCUDAAdapter:
         return c_void_p(ptr_int)
 
     def free(self, dev_ptr: c_void_p) -> None:
-        ptr_int = dev_ptr.value if isinstance(dev_ptr, c_void_p) else int(dev_ptr)
+        ptr_int = (dev_ptr.value if isinstance(dev_ptr, c_void_p) else int(dev_ptr)) or 0
         self.allocations.pop(ptr_int, None)
         self.freed.append(ptr_int)
 
@@ -214,7 +214,7 @@ class FakeCUDAAdapter:
         return c_void_p(ptr_int)
 
     def free_host(self, ptr: c_void_p) -> None:
-        ptr_int = ptr.value if isinstance(ptr, c_void_p) else int(ptr)
+        ptr_int = (ptr.value if isinstance(ptr, c_void_p) else int(ptr)) or 0
         self._host_allocs.pop(ptr_int, None)
 
     def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
@@ -285,7 +285,7 @@ class FakeCUDAAdapter:
         return c_void_p(ptr_int)
 
     def ipc_close_mem_handle(self, dev_ptr: c_void_p) -> None:
-        ptr_int = dev_ptr.value if isinstance(dev_ptr, c_void_p) else int(dev_ptr)
+        ptr_int = (dev_ptr.value if isinstance(dev_ptr, c_void_p) else int(dev_ptr)) or 0
         self.opened_mem_handles.pop(ptr_int, None)
 
     def ipc_open_event_handle(self, handle: Any) -> Any:

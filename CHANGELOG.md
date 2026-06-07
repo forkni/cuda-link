@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Static type-checking CI gate** (`.github/workflows/typecheck.yml`) — runs
+  `pyrefly check src/cuda_link/` on every PR/push touching the package or its
+  config. Previously pyrefly ran only as a skippable local pre-commit hook.
+- **GPU-free Protocol drift guard** (`tests/core/test_exporter_port.py::test_ctypes_adapter_api_covers_protocol_without_gpu`)
+  — asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
+  `CTypesCUDAAdapter.__getattr__` delegation otherwise hides such drift from
+  both the (suppressed) type checker and the `requires_cuda` conformance test.
+- **ADR-0005** (`docs/adr/0005-static-typing-hardening.md`) — records the scoped
+  type-suppression policy and the "no package-wide category blanket" rule.
+
+### Changed
+
+- **`[tool.pyrefly]` hardened from one package-wide suppression blanket to
+  precise per-file scoping.** Added `python-platform = "win32"` (Windows-only
+  project — resolves `ctypes.windll`/`WINFUNCTYPE` on any host) and
+  `replace-imports-with-any` for the optional GPU deps (torch/cupy/pynvml/nvtx/
+  ml_dtypes). The 9-category blanket over all of `src/cuda_link/**` is replaced
+  by per-file `sub-config` blocks scoped to the modules with accepted ctypes /
+  optional-import idioms; every other module (`shm_protocol.py`, the `_port`
+  Protocols, `_env`, `_profile`, `_console`, `cuda_runtime_types.py`, …) is now
+  fully type-checked.
+
+### Fixed
+
+- **`FakeCUDAAdapter` pointer coalescing** (`_cuda_adapters.py`) — `c_void_p.value`
+  (`int | None`) is now coalesced to `int` before dict/list operations, removing
+  a latent `None`-key path in the test fake and letting the module type-check
+  cleanly.
+
 ## [1.9.0] — 2026-06-06
 
 ### Added

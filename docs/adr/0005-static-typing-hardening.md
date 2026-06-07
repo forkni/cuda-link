@@ -1,0 +1,111 @@
+# ADR-0005: Static type-checking hardening (scoped suppression + CI gate)
+
+**Status**: Accepted
+**Date**: 2026-06-07
+**Applies to**: `pyproject.toml` (`[tool.pyrefly]`),
+`.github/workflows/typecheck.yml`, `.pre-commit-config.yaml` (pyrefly hook),
+all modules in `src/cuda_link/`.
+
+---
+
+## Context
+
+This decision arose from exploring whether to rewrite `cuda-link` in Rust for
+performance/reliability. That investigation concluded Rust is not justified —
+performance is hardware-bound (PCIe/GPU; ~4% of a frame is Python overhead) and
+a rewrite would forfeit the pure-Python, zero-dependency, drop-into-TD
+deployment story. The one real reliability gap Rust would have addressed — the
+weakly-typed ctypes seam — is addressable in Python far more cheaply, which is
+what this ADR does.
+
+Two concrete weaknesses existed before this change:
+
+1. **One package-wide suppression blanket.** `[tool.pyrefly]` disabled 9 error
+   categories (`missing-attribute`, `bad-argument-type`, `not-callable`,
+   `no-matching-overload`, `bad-assignment`, …) via a single
+   `matches = "src/cuda_link/**"` sub-config. This silenced the few genuinely
+   ctypes-heavy modules **and** the well-typed logic modules
+   (`shm_protocol.py`, the activation barrier, the `_port` Protocols), so a real
+   type error in clean code merged unnoticed.
+2. **No CI gate.** `pyrefly` ran only as a local pre-commit hook
+   (`always_run: false`), so type errors could land via any push that skipped
+   pre-commit.
+
+A win32 evaluation (`pyrefly check --python-platform win32`) showed the true
+error surface is dominated by **deliberate, documented idioms**, not bugs:
+
+- **Optional-import-as-`None`** — `torch`/`numpy`/`cupy`/`pynvml` bound to `None`
+  under `try/except` and guarded at runtime (the `NoneType has no attribute …`
+  cluster in `importer.py`, `nvml_observer.py`).
+- **ctypes `c_void_p` ↔ `int` pointer duality** (`exporter.py`, `cuda_graphs.py`).
+- **Dynamic `CUDARuntimeAPI` delegation** via `CTypesCUDAAdapter.__getattr__`,
+  an explicit design choice (see `_cuda_adapters.py` — "without maintaining a
+  mechanical list of one-line forwarders").
+- **Optional-until-attached** `SharedMemory` buffers.
+
+## Decision
+
+Replace the blanket with a **check-strictly-by-default, suppress-narrowly**
+posture:
+
+1. **`python-platform = "win32"`** — cuda-link is Windows-only; this resolves
+   `ctypes.windll`/`WINFUNCTYPE` and platform-gated code on any host (incl. the
+   Linux CI runner), so the host OS no longer changes results.
+2. **`replace-imports-with-any`** for `torch`, `cupy`, `pynvml`, `nvtx`,
+   `ml_dtypes` — the genuinely optional, runtime-guarded GPU deps. CI needs no
+   CUDA toolchain; the runtime `None`-guards remain authoritative. `numpy` is
+   **not** stubbed (it ships real stubs and stays checked).
+3. **Per-file `[[tool.pyrefly.sub-config]]` blocks** that each disable only the
+   categories a specific module triggers under an accepted idiom above. Every
+   other module — `shm_protocol.py`, `_exporter_port.py`, `_importer_port.py`,
+   `_env.py`, `_profile.py`, `_console.py`, `_nvtx.py`, `cuda_runtime_types.py`,
+   `__init__.py` — is now **fully type-checked**.
+4. **CI gate** — `.github/workflows/typecheck.yml` runs `pyrefly check
+   src/cuda_link/` on every PR/push touching the package or its config.
+5. **GPU-free Protocol drift guard** — `test_ctypes_adapter_api_covers_protocol_without_gpu`
+   asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
+   `__getattr__` delegation hides drift from both the (suppressed) checker and
+   the existing `requires_cuda` conformance test; this guard catches it without
+   a GPU.
+
+Policy going forward: **no new package-wide category blanket.** New suppressions
+must be a narrow per-file sub-config or a line-level `# type: ignore[code]`
+(the pattern already used in `nvml_observer.py`, `cuda_ipc_wrapper.py`).
+
+## Rejected alternatives
+
+- **Rewrite the ctypes seam (or library) in Rust.** Negligible performance
+  upside; forfeits the pure-Python wheel; the TD producer side is locked to
+  TouchDesigner's embedded CPython. The compile-time-safety argument is real but
+  does not outweigh the deployment cost.
+- **Add explicit one-line forwarders to `CTypesCUDAAdapter`** to make it
+  statically satisfy `CudaPort`. Directly contradicts the documented design in
+  `_cuda_adapters.py`. The runtime drift-guard test covers the same risk without
+  the boilerplate.
+- **Refactor the optional-import-`None` idiom** across `importer.py`/
+  `nvml_observer.py`. High churn in a production file for false positives that a
+  narrow per-file suppression handles cleanly.
+
+## Consequences
+
+- Type regressions in the clean logic modules are now caught locally and in CI.
+- The accepted ctypes/optional idioms remain ergonomic but are suppressed
+  precisely, per file, with a documented rationale.
+- The per-file category lists were derived from a win32 evaluation; the first CI
+  run is authoritative and the lists should be tightened/loosened from it.
+
+## Follow-ups (not in this change)
+
+- **Wire a pytest CI job.** There is currently no test workflow, so the drift
+  guard (and the rest of the suite) only run locally. Before enabling, add a
+  `pytest.importorskip("torch")`-style guard to the `test_torch_buffers_*` /
+  `test_get_frame_without_torch` tests, which fail when torch is absent rather
+  than skipping.
+- **Extend checking to `td_exporter/`** with a relaxed sub-config plus stubs for
+  TD builtins (`op`, `me`, `parent`, …).
+
+## Reopen condition
+
+Revisit if pyrefly is replaced, if the optional-dependency strategy changes, or
+if `td_exporter/` is brought under type checking (which would need its own
+sub-config and TD-builtin stubs).
