@@ -94,15 +94,19 @@ must be a narrow per-file sub-config or a line-level `# type: ignore[code]`
 - The per-file category lists were derived from a win32 evaluation; the first CI
   run is authoritative and the lists should be tightened/loosened from it.
 
-## Follow-ups (not in this change)
+## Follow-ups
 
-- **Wire a pytest CI job.** There is currently no test workflow, so the drift
-  guard (and the rest of the suite) only run locally. Before enabling, add a
-  `pytest.importorskip("torch")`-style guard to the `test_torch_buffers_*` /
-  `test_get_frame_without_torch` tests, which fail when torch is absent rather
-  than skipping.
-- **Extend checking to `td_exporter/`** with a relaxed sub-config plus stubs for
-  TD builtins (`op`, `me`, `parent`, …).
+- **Pytest CI job — done** (`.github/workflows/tests.yml`). Runs the
+  `not requires_cuda` suite on Python 3.10–3.12. The previously torch-fragile
+  tests were made robust: `test_torch_buffers_*` use `pytest.importorskip("torch")`,
+  and the stale `test_get_frame_without_torch` (which asserted a removed
+  "torch is required" contract through the unconnected deprecated wrapper) was
+  modernized to assert the current graceful `None` return. The suite is green
+  both with and without torch installed, so torch is a best-effort CPU install
+  in CI. Extending the matrix to Python 3.9 is left for when a 3.9 runner is
+  validated.
+- **Extend type checking to `td_exporter/`** with a relaxed sub-config plus
+  stubs for TD builtins (`op`, `me`, `parent`, …).
 
 ## Reopen condition
 
