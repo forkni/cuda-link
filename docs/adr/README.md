@@ -11,6 +11,7 @@ should be revisited. See `CONTEXT.md §Architecture references` for a richer set
 | [0003](0003-library-install-sys-path-bootstrap.md) | Library-install sys.path bootstrap (1C) | Accepted | 2026-05-29 |
 | [0004](0004-legacy-cuda-ipc-over-vmm.md) | Legacy CUDA Runtime IPC over VMM driver API | Accepted | 2026-05-31 |
 | [0005](0005-static-typing-hardening.md) | Static type-checking hardening (scoped suppression + CI gate) | Accepted | 2026-06-07 |
+| [0006](0006-stay-pure-python-no-rust.md) | Stay pure-Python — do not rewrite in Rust | Accepted | 2026-06-07 |
 
 ## Adding a new ADR
 

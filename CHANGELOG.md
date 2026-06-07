@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
   `CTypesCUDAAdapter.__getattr__` delegation otherwise hides such drift from
   both the (suppressed) type checker and the `requires_cuda` conformance test.
+- **ADR-0006** (`docs/adr/0006-stay-pure-python-no-rust.md`) — records the
+  decision to keep cuda-link pure Python rather than rewrite in Rust
+  (`cuda-oxide`/`cudarc`), with the performance, TD-embedded-CPython, and
+  deployment evidence, so the question is not re-litigated from scratch.
 - **ADR-0005** (`docs/adr/0005-static-typing-hardening.md`) — records the scoped
   type-suppression policy and the "no package-wide category blanket" rule.
 
