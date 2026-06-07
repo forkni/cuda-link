@@ -95,10 +95,55 @@ line-ending = "auto"
 
 [tool.pyrefly]
 python-version = "3.11.0"
+# cuda-link targets Windows exclusively (CUDA IPC is Windows-only). Evaluate
+# type checks against win32 so ctypes.windll / WINFUNCTYPE and other
+# platform-gated code resolve on any developer or CI host.
+python-platform = "win32"
+# Optional GPU/telemetry deps are imported under try/except and bound to None
+# when absent. Treat them as Any so type-checking does not require a CUDA
+# toolchain in CI; the runtime None-guards remain authoritative.
+replace-imports-with-any = ["torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes"]
 
-# ctypes-heavy library code: these error codes are false positives throughout.
-# Optional-typed ctypes handles (cudart, mmap.buf, pynvml, etc.) are always
-# validated at runtime via NVML_AVAILABLE / _initialized guards before use.
+# --- Scoped type-check suppressions ------------------------------------------
+# Policy (docs/adr/0005-static-typing-hardening.md): NO package-wide category
+# blanket. Each block below disables only the categories a specific module
+# legitimately triggers due to a deliberate, documented idiom. Every other
+# module in src/cuda_link/ is now fully type-checked.
+
+# Consumer engine: optional libs bound to None (missing-attribute), ctypes
+# c_void_p<->int pointer duality (bad-argument-type), and SharedMemory buffers
+# that are Optional until attached (unsupported-operation).
 [[tool.pyrefly.sub-config]]
-matches = "src/cuda_link/**"
-errors = {missing-attribute = false, unsupported-operation = false, bad-argument-type = false, bad-index = false, not-callable = false, no-matching-overload = false, missing-import = false, invalid-inheritance = false, bad-assignment = false}
+matches = "src/cuda_link/importer.py"
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false}
+
+# Optional NVML telemetry: pynvml bound to None when nvidia-ml-py is absent.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/nvml_observer.py"
+errors = {missing-attribute = false}
+
+# Producer engine: ctypes pointer duality, dynamic CUDARuntimeAPI delegation
+# (CTypesCUDAAdapter.__getattr__), and Optional-until-attached shm buffers.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/exporter.py"
+errors = {bad-argument-type = false, unsupported-operation = false, bad-assignment = false, missing-attribute = false}
+
+# Cross-process activation barrier: SharedMemory buffer is Optional until attached.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/activation_barrier.py"
+errors = {bad-argument-type = false, unsupported-operation = false}
+
+# CUDA ctypes seam: TD flat-namespace fallback import of CUDAGraphsMixin.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/cuda_ipc_wrapper.py"
+errors = {invalid-inheritance = false}
+
+# CUDA Graphs mixin: ctypes c_void_p<->int pointer duality.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/cuda_graphs.py"
+errors = {bad-argument-type = false}
+
+# Deprecated pre-v1.5 importer shim retained for back-compat.
+[[tool.pyrefly.sub-config]]
+matches = "src/cuda_link/cuda_ipc_importer.py"
+errors = {bad-argument-type = false}
