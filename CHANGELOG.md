@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Static type-checking CI gate** (`.github/workflows/typecheck.yml`) — runs
   `pyrefly check src/cuda_link/` on every PR/push touching the package or its
   config. Previously pyrefly ran only as a skippable local pre-commit hook.
+- **Pytest CI job** (`.github/workflows/tests.yml`) — runs the `not requires_cuda`
+  suite on Python 3.10–3.12. The suite is green with or without torch installed
+  (torch-dependent tests use `pytest.importorskip`), so torch is a best-effort
+  CPU install. Previously there was no CI test workflow at all.
 - **GPU-free Protocol drift guard** (`tests/core/test_exporter_port.py::test_ctypes_adapter_api_covers_protocol_without_gpu`)
   — asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
   `CTypesCUDAAdapter.__getattr__` delegation otherwise hides such drift from
@@ -37,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`int | None`) is now coalesced to `int` before dict/list operations, removing
   a latent `None`-key path in the test fake and letting the module type-check
   cleanly.
+- **Torch-fragile tests made CI-safe** — `test_torch_buffers_int8/int16_succeeds`
+  now use `pytest.importorskip("torch")`, and the stale `test_get_frame_without_torch`
+  (which asserted a removed "torch is required" contract via the unconnected
+  deprecated `CUDAIPCImporter`) was modernized to assert the current graceful
+  `None` return and renamed `test_get_frame_on_unconnected_importer_returns_none`.
 
 ## [1.9.0] — 2026-06-06
 
