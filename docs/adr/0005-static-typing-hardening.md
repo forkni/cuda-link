@@ -105,11 +105,23 @@ must be a narrow per-file sub-config or a line-level `# type: ignore[code]`
   both with and without torch installed, so torch is a best-effort CPU install
   in CI. Extending the matrix to Python 3.9 is left for when a 3.9 runner is
   validated.
-- **Extend type checking to `td_exporter/`** with a relaxed sub-config plus
-  stubs for TD builtins (`op`, `me`, `parent`, …).
+- **Extend type checking to `td_exporter/` — done.** `pyrefly check` (project
+  mode) now covers `td_exporter/` engine files and the 14 generated mirrors.
+  Pure-TD glue scripts (callbacks, example launchers) are excluded via
+  `project-excludes`. Bare TD ambient globals (`op`, `run`, `CUDAMemoryShape`)
+  are resolved through `if TYPE_CHECKING: from _td_builtins import …` stubs in
+  the two non-mirror files that reference them (`CUDAIPCExtension.py`,
+  `TDHost.py`). The `td` module (COMP, TOP, ui) is handled via
+  `replace-imports-with-any = ["td", "td.*"]`. Mirror files' suppressions are
+  keyed to `td_exporter/<name>.py` paths (not their src twins) so the
+  mirror invariant is respected. CI gate updated to use project mode and added
+  `td_exporter/**` to path triggers. Pre-commit hook widened to
+  `^(src/cuda_link|td_exporter)/.*\.py$`.
 
 ## Reopen condition
 
 Revisit if pyrefly is replaced, if the optional-dependency strategy changes, or
-if `td_exporter/` is brought under type checking (which would need its own
-sub-config and TD-builtin stubs).
+if the excluded pure-TD glue scripts (`callbacks_template.py`,
+`parexecute_callbacks.py`, `script_top_callbacks.py`, example launchers) are
+brought under checking (which would require per-file handling of the full
+bare TD-global surface in those files).

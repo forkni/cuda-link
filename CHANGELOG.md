@@ -9,9 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **pyrefly type-checking extended to `td_exporter/`** (ADR-0005 follow-up) —
+  `pyrefly check` (project mode) now covers the td_exporter engine files
+  (`TDHost`, `TDSender`, `TDReceiver`, `TDConfig`, `CUDAIPCExtension`,
+  `CUDALinkBootstrap`, `benchmark_timestamp`, `_td_fakes`) and all 14
+  auto-generated mirrors. Pure-TD glue scripts (callbacks, example launchers)
+  are excluded. The `td` module is handled via `replace-imports-with-any`;
+  bare ambient TD globals (`op`, `run`, `CUDAMemoryShape`) are resolved through
+  `if TYPE_CHECKING: from _td_builtins import …` stubs. CI gate (`typecheck.yml`)
+  updated to project mode and `td_exporter/**` added to path triggers.
 - **Static type-checking CI gate** (`.github/workflows/typecheck.yml`) — runs
-  `pyrefly check src/cuda_link/` on every PR/push touching the package or its
-  config. Previously pyrefly ran only as a skippable local pre-commit hook.
+  `pyrefly check` (project mode: `src/cuda_link/` + `td_exporter/`) on every
+  PR/push touching the package or its config. Previously pyrefly ran only as a
+  skippable local pre-commit hook checking `src/cuda_link/` only.
 - **Pytest CI job** (`.github/workflows/tests.yml`) — runs the `not requires_cuda`
   suite on Python 3.10–3.12. The suite is green with or without torch installed
   (torch-dependent tests use `pytest.importorskip`), so torch is a best-effort
