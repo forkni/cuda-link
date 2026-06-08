@@ -330,6 +330,22 @@ def test_fake_adapter_runtime_version() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_ctypes_adapter_api_covers_protocol_without_gpu() -> None:
+    """CUDARuntimeAPI must implement every CudaPort member — GPU-free drift guard.
+
+    CTypesCUDAAdapter forwards to CUDARuntimeAPI via __getattr__ (a deliberate
+    design choice — see _cuda_adapters.py), so neither the static type checker
+    (the dynamic attributes are suppressed) nor the isinstance(adapter, CudaPort)
+    test below — which is requires_cuda and never runs without a GPU — can catch
+    a method added to the Protocol but missing from CUDARuntimeAPI. This guard
+    runs everywhere and fails loudly on that drift.
+    """
+    from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
+
+    missing = sorted(m for m in get_protocol_members(CudaPort) if not hasattr(CUDARuntimeAPI, m))
+    assert not missing, f"CUDARuntimeAPI is missing CudaPort members (delegation would fail at runtime): {missing}"
+
+
 @pytest.mark.requires_cuda
 def test_ctypes_adapter_satisfies_protocol() -> None:
     adapter = CTypesCUDAAdapter.for_device(device=0)
