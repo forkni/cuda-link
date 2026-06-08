@@ -1,0 +1,44 @@
+name: Type Check
+
+on:
+  push:
+    branches: [development, main, master]
+    paths:
+      - 'src/cuda_link/**'
+      - 'td_exporter/**'
+      - 'pyproject.toml'
+      - '.github/workflows/typecheck.yml'
+  pull_request:
+    paths:
+      - 'src/cuda_link/**'
+      - 'td_exporter/**'
+      - 'pyproject.toml'
+      - '.github/workflows/typecheck.yml'
+
+jobs:
+  pyrefly:
+    name: pyrefly (static type check)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pyrefly + numpy
+        # numpy is the one optional dependency kept under real static checking
+        # (it ships type stubs). torch / cupy / pynvml / nvtx / ml_dtypes / td
+        # are treated as Any via [tool.pyrefly] replace-imports-with-any, so
+        # this gate needs no CUDA toolchain, GPU, or TouchDesigner install.
+        run: pip install "pyrefly==1.0.0" numpy
+
+      - name: Run pyrefly
+        # Project mode (no path arg): checks src/cuda_link/ + td_exporter/
+        # engine + mirrors per project-includes/project-excludes in pyproject.toml.
+        # python-platform = "win32" is set in pyproject.toml, so Windows-only
+        # APIs (ctypes.windll, WINFUNCTYPE, ...) resolve on this Linux runner.
+        run: pyrefly check

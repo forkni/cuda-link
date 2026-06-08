@@ -45,13 +45,13 @@ repos:
         pass_filenames: false
         always_run: true
 
-  # Pyrefly - Type checking
+  # Pyrefly - Type checking (project mode: checks src/cuda_link/ + td_exporter/ per pyproject.toml)
   - repo: local
     hooks:
       - id: pyrefly
         name: pyrefly (type checking)
         language: system
-        entry: pyrefly check src/cuda_link/
+        entry: pyrefly check
         pass_filenames: false
         always_run: false
-        files: ^src/cuda_link/.*\.py$
+        files: ^(src/cuda_link|td_exporter)/.*\.py$

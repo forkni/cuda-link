@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **pyrefly type-checking extended to `td_exporter/`** (ADR-0005 follow-up) —
+  `pyrefly check` (project mode) now covers the td_exporter engine files
+  (`TDHost`, `TDSender`, `TDReceiver`, `TDConfig`, `CUDAIPCExtension`,
+  `CUDALinkBootstrap`, `benchmark_timestamp`, `_td_fakes`) and all 14
+  auto-generated mirrors. Pure-TD glue scripts (callbacks, example launchers)
+  are excluded. The `td` module is handled via `replace-imports-with-any`;
+  bare ambient TD globals (`op`, `run`, `CUDAMemoryShape`) are resolved through
+  `if TYPE_CHECKING: from _td_builtins import …` stubs. CI gate (`typecheck.yml`)
+  updated to project mode and `td_exporter/**` added to path triggers.
+- **Static type-checking CI gate** (`.github/workflows/typecheck.yml`) — runs
+  `pyrefly check` (project mode: `src/cuda_link/` + `td_exporter/`) on every
+  PR/push touching the package or its config. Previously pyrefly ran only as a
+  skippable local pre-commit hook checking `src/cuda_link/` only.
+- **Pytest CI job** (`.github/workflows/tests.yml`) — runs the `not requires_cuda`
+  suite on Python 3.10–3.12. The suite is green with or without torch installed
+  (torch-dependent tests use `pytest.importorskip`), so torch is a best-effort
+  CPU install. Previously there was no CI test workflow at all.
+- **GPU-free Protocol drift guard** (`tests/core/test_exporter_port.py::test_ctypes_adapter_api_covers_protocol_without_gpu`)
+  — asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
+  `CTypesCUDAAdapter.__getattr__` delegation otherwise hides such drift from
+  both the (suppressed) type checker and the `requires_cuda` conformance test.
+- **ADR-0006** (`docs/adr/0006-stay-pure-python-no-rust.md`) — records the
+  decision to keep cuda-link pure Python rather than rewrite in Rust
+  (`cuda-oxide`/`cudarc`), with the performance, TD-embedded-CPython, and
+  deployment evidence, so the question is not re-litigated from scratch.
+- **ADR-0005** (`docs/adr/0005-static-typing-hardening.md`) — records the scoped
+  type-suppression policy and the "no package-wide category blanket" rule.
+
+### Changed
+
+- **`[tool.pyrefly]` hardened from one package-wide suppression blanket to
+  precise per-file scoping.** Added `python-platform = "win32"` (Windows-only
+  project — resolves `ctypes.windll`/`WINFUNCTYPE` on any host) and
+  `replace-imports-with-any` for the optional GPU deps (torch/cupy/pynvml/nvtx/
+  ml_dtypes). The 9-category blanket over all of `src/cuda_link/**` is replaced
+  by per-file `sub-config` blocks scoped to the modules with accepted ctypes /
+  optional-import idioms; every other module (`shm_protocol.py`, the `_port`
+  Protocols, `_env`, `_profile`, `_console`, `cuda_runtime_types.py`, …) is now
+  fully type-checked.
+
+### Fixed
+
+- **`FakeCUDAAdapter` pointer coalescing** (`_cuda_adapters.py`) — `c_void_p.value`
+  (`int | None`) is now coalesced to `int` before dict/list operations, removing
+  a latent `None`-key path in the test fake and letting the module type-check
+  cleanly.
+- **Torch-fragile tests made CI-safe** — `test_torch_buffers_int8/int16_succeeds`
+  now use `pytest.importorskip("torch")`, and the stale `test_get_frame_without_torch`
+  (which asserted a removed "torch is required" contract via the unconnected
+  deprecated `CUDAIPCImporter`) was modernized to assert the current graceful
+  `None` return and renamed `test_get_frame_on_unconnected_importer_returns_none`.
+
 ## [1.9.0] — 2026-06-06
 
 ### Added

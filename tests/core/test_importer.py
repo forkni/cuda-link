@@ -416,7 +416,7 @@ def test_format_from_shm_all_dtypes() -> None:
 
 def test_torch_buffers_int8_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """TorchBuffers.build no longer raises for int8 (previously crashed)."""
-    import torch
+    torch = pytest.importorskip("torch")
 
     from cuda_link.importer import Format, TorchBuffers
 
@@ -431,7 +431,7 @@ def test_torch_buffers_int8_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_torch_buffers_int16_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """TorchBuffers.build works for int16."""
-    import torch
+    torch = pytest.importorskip("torch")
 
     from cuda_link.importer import Format, TorchBuffers
 

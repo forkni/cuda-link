@@ -17,6 +17,12 @@ TDReceiverEngine.  Mode switches create a fresh engine instance — zero state l
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # op, run are TD ambient globals injected into the COMP namespace at runtime.
+    # Declared here so pyrefly can resolve the bare names used in this file.
+    from _td_builtins import CUDAMemoryShape, op, run  # noqa: F401
 
 with contextlib.suppress(ImportError):
     import CUDALinkBootstrap  # noqa: F401  -- registers sys.modules aliases when present
