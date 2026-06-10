@@ -195,7 +195,7 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
 - **On:** every 150 frames (configurable via `CUDALINK_SENDER_REPORT_EVERY` env var), prints a
   per-frame summary line:
   ```
-  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=17.4 µs avg (write_idx=150)
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
   ```
   - **FPS** — frames published ÷ wall time since the first published frame
   - **shape / dtype** — texture dimensions and pixel format

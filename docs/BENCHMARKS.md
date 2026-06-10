@@ -18,9 +18,9 @@ methodology and hardware caveats.
 
 | Operation | p50 | Notes |
 |-----------|-----|-------|
-| `export_frame()` — 512×512 RGBA float32 | 22 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
-| `export_frame()` — 1080p RGBA float32 | 117 µs | Standalone, EXPORT_SYNC=1 |
-| `export_frame()` — 4K RGBA float32 | 367 µs | Standalone, EXPORT_SYNC=1 |
+| `export_frame()` — 512×512 RGBA float32 | 24 µs | Standalone, EXPORT_SYNC=1; GPU D2D + stream_synchronize |
+| `export_frame()` — 1080p RGBA float32 | 106 µs | Standalone, EXPORT_SYNC=1 |
+| `export_frame()` — 4K RGBA float32 | 357 µs | Standalone, EXPORT_SYNC=1 |
 | `get_frame_numpy()` D2H — 512×512 float32 | 0.18 ms | Standalone, ~22 GB/s |
 | `get_frame_numpy()` D2H — 1080p float32 | 1.32 ms | Standalone, ~24 GB/s PCIe 4.0 |
 | `get_frame_numpy()` D2H — 4K float32 | 5.7 ms | Standalone, ~21 GB/s PCIe 4.0 |
@@ -38,43 +38,49 @@ Measured 2026-06-10 via `scripts/profiling/profile_export.py --frames 2000 --exp
 ```
 Cell   EXPORT_SYNC   USE_GRAPHS   median µs   p95 µs   p99 µs   sync region µs   WDDM subs/frame
 ----   -----------   ----------   ---------   ------   ------   ---------------   ---------------
-A      1 (blocking)  0 (off)         42.1      44.2     55.4         15.89               3
-B      0 (async)     0 (off)         17.4      19.7     24.1          0.00               3
-C      1 (blocking)  1 (on)          25.9      27.6     44.8          9.56               1
-D      0 (async)     1 (on)          13.6      23.6     25.6          0.00               1
+A      1 (blocking)  0 (off)         45.2      51.2    106.3         17.91               3
+B      0 (async)     0 (off)         17.9      29.3     52.1          0.00               3
+C      1 (blocking)  1 (on)          28.8      43.1     52.1         12.88               1
+D      0 (async)     1 (on)          13.9      22.7     25.1          0.00               1
 ```
 
-**P1 gain (A→B): −24.7 µs p50 (59%)** — eliminates the 15.89 µs `cudaStreamSynchronize`
-on the producer side. Async is the unconditional default; `CUDALINK_EXPORT_SYNC=1` forces
-blocking. Coexistence safety comes from explicit per-engine streams and producer-stream
-ordering (`record_source_sync` / `require_source_sync`), not from blocking export.
+**P1 gain (A→B): −27.3 µs p50 (60%)** — eliminates the 17.91 µs `cudaStreamSynchronize`
+on the producer side. `CUDALINK_EXPORT_SYNC=0` enables async mode; `CUDALINK_EXPORT_SYNC=1`
+forces blocking. **As of v1.10.1 the TD Sender defaults to blocking** (Cell A / Cell C) to
+prevent a source-buffer lifetime race with TD's transient cook-scoped TOP texture that causes
+CUDA 719 under a loaded consumer (see CHANGELOG 1.10.1). The Python library `Exporter` keeps
+async as its default (Cell D / Cell B). Coexistence safety comes from explicit per-engine
+streams and producer-stream ordering (`record_source_sync` / `require_source_sync`), not from
+blocking export.
 
-**P3 graph gain (B→D): −3.8 µs p50 (22%)** — `cudaStreamWaitEvent` + `cudaEventRecord`
+**P3 graph gain (B→D): −4.0 µs p50 (22%)** — `cudaStreamWaitEvent` + `cudaEventRecord`
 are folded into the CUDA graph; only `cudaGraphLaunch` fires per frame. nsys confirms:
 graphs OFF → 3 submissions/frame (waitEvent + memcpyAsync + eventRecord = 550 calls each);
 graphs ON → 1 submission/frame (`cudaGraphLaunch`, 550 calls; waitEvent/eventRecord absent).
 
-**Full P1+P3 (A→D): −28.5 µs p50 (68%)**
+**Full P1+P3 (A→D): −31.3 µs p50 (69%)**
 
 `per_region_avg_us` breakdown for reference:
 
 ```
 Region            Cell A (µs)   Cell D (µs)   Notes
 --------------    -----------   -----------   ----------------------------------------
-stream_wait            1.15          0.00     folded into CUDA graph (P3)
-memcpy                 7.14          7.17     unchanged — PCIe-bound, ~22 GB/s
-record_event           3.95          0.00     folded into CUDA graph (P3)
-shm_write              1.78          1.18     SHM slot write (unaffected)
-sync                  15.89          0.00     cudaStreamSynchronize eliminated (P1)
-flush_probe            0.00          1.14     stream query kick (async path only)
+stream_wait            1.26          0.00     folded into CUDA graph (P3)
+memcpy                 7.76          6.77     PCIe-bound, ~22 GB/s
+record_event           4.50          0.00     folded into CUDA graph (P3)
+shm_write              1.92          1.21     SHM slot write (unaffected)
+sync                  17.91          0.00     cudaStreamSynchronize eliminated (P1)
+flush_probe            0.00          1.13     stream query kick (async path only)
 ```
 
 Note: WDDM submission count/frame is inferred from nsys call counts ÷ frame count.
 
-Reproduce:
+Reproduce (all four cells; on Windows use `SET VAR=value &` prefix):
 ```bash
-SET CUDALINK_EXPORT_SYNC=1 & SET CUDALINK_USE_GRAPHS=0 & python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_A.json
-SET CUDALINK_EXPORT_SYNC=0 & SET CUDALINK_USE_GRAPHS=1 & python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_D.json
+CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_A.json
+CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_B.json
+CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=1 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_C.json
+CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=1 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_D.json
 ```
 
 ---
@@ -82,7 +88,10 @@ SET CUDALINK_EXPORT_SYNC=0 & SET CUDALINK_USE_GRAPHS=1 & python scripts/profilin
 ## `export_frame()` — CUDA Graphs A/B (historical, EXPORT_SYNC=1)
 
 Single-process, EXPORT_SYNC=1 (CPU waits for GPU D2D completion), 2000 frames.
-Historical baseline pre-P1/P3 (v1.4.1 era).
+Historical baseline pre-P1/P3 (v1.4.1 era). Updated blocking-arm numbers via
+`scripts/profiling/profile_export.py` (v1.10.1, 2026-06-10): 512×512 f32 → **24 µs**,
+1080p f32 → **106 µs**, 4K f32 → **357 µs** (see Summary table above; graphs ON,
+driver 596.36). Historical table retained for the graphs ON vs OFF comparison.
 
 ```
 Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
@@ -119,9 +128,9 @@ workload, 150 measurement frames (30 warmup), spawn-process IPC pair.
 ```
 Resolution   non-pipe d2h µs   non-pipe cycle µs   pipe d2h µs   pipe cycle µs   gain µs   gain %   priming NO_FRAME
 ----------   ---------------   -----------------   -----------   -------------   -------   ------   ----------------
-512x512                  97              5099              88            5090         9       0%      YES
-1920x1080               380              5382              75            5077       305       6%      YES
-3840x2160              1320              6321              85            5087      1235      20%      YES
+512x512                  97              5099              89            5091         8       0%      YES
+1920x1080               383              5384              74            5075       309       6%      YES
+3840x2160              1354              6355              78            5079      1276      20%      YES
 ```
 
 D2H copy rates derived from non-pipelined d2h time: 512² ≈ 10 GB/s (1 MB frame, latency

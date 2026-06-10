@@ -502,11 +502,15 @@ The default differs between the two producer implementations:
 
 | Producer | Default | Rationale |
 |---|---|---|
-| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (async) | Python senders are standalone; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
-| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=0` (async, default since v1.10.0) | Async is the default end-to-end. Coexistence safety (TD Sender + TD Receiver in the same process) is provided by two distinct mechanisms — see below. `EXPORT_SYNC=1` opt-in remains available for legacy deployments. |
+| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (async) | Python senders are standalone with a caller-owned persistent source buffer; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
+| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking, **default since v1.10.1**) | The TD source is TD's transient cook-scoped TOP texture (`cm.ptr`): TD reclaims it when the cook returns. Async export lets TD recycle the source while the IPC-stream copy is still queued → reads freed memory → CUDA 719 under a loaded consumer. Blocking ensures the D2D read completes before the cook exits. Set `CUDALINK_EXPORT_SYNC=0` to opt back into async **only** with a guaranteed-stable source. See CHANGELOG 1.10.1. |
 
-**Coexistence safety in v1.10.0+ does NOT rely on blocking export.** There are two
-distinct stream hazards, both fixed by explicit stream management:
+> **This section (§8) applies only to the standalone Python `Exporter` callers described above.**
+> For TD Sender deployments, note that `CUDALINK_EXPORT_SYNC=0` is an explicit opt-out from
+> the safety-blocking default — not a recommended production configuration unless the source
+> buffer lifetime is guaranteed by the caller.
+
+**Coexistence safety — two distinct stream hazards, each fixed by the correct mechanism:**
 
 1. **Receiver-side teardown TDR** (fixed since v1.4.1, `0918914`/F8 `0556197`): WDDM
    held stale CUDA↔D3D11 interop registrations when the receiver stream and IPC handles
@@ -521,9 +525,13 @@ distinct stream hazards, both fixed by explicit stream management:
    ordering** (`record_source_sync` / `require_source_sync`; see "Producer-Stream Ordering"
    in `ARCHITECTURE.md`).
 
-`EXPORT_SYNC=1` was a conservative belt-and-suspenders default that addressed neither root
-cause. It has been retired as the TD Sender default; explicit stream management is the
-correct and verified mechanism.
+3. **TD Sender source-buffer lifetime race** (fixed since v1.10.1, CUDA 719): TD's TOP
+   texture pointer (`cm.ptr`) is valid only within the cook frame. Async export can delay
+   the IPC-stream copy past cook exit → reads freed memory. Fixed by **TD Sender blocking
+   by default** (`_resolve_export_sync(None) → True`). The `record_source_sync` ordering
+   primitive guarantees the copy starts after the source is fully written but does NOT keep
+   the source live past the D2D read; only blocking export closes the lifetime window for a
+   transient source. See CHANGELOG 1.10.1 and ADR-0001.
 
 ### Prerequisites
 
