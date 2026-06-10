@@ -224,7 +224,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.10.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.10.1.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -300,6 +300,14 @@ to see all five install modes.
 
 **Debug shows high `cudaMemory` time (>0.5 ms)**
 - This is the OpenGL→CUDA interop step inside TouchDesigner's `top_op.cudaMemory()` call and is not controllable by this component. It is normal for large textures or when the GPU is under heavy load.
+
+**Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
+- This indicates a producer-side source-buffer lifetime race: the D2D memcpy read the TD
+  texture after TD reclaimed it. From v1.10.1 the TD Sender **blocks by default** (post-copy
+  `stream_synchronize`) so the source is live until `export()` returns — upgrade to
+  `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
+  set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
+  See CHANGELOG 1.10.1 for the full root-cause analysis.
 
 ---
 

@@ -775,6 +775,13 @@ class Exporter:
             except (OSError, BufferError) as e:
                 logger.warning("Could not zero IPC handles: %s", e)
 
+        # STEP 1b: Drain any in-flight async D2D before tearing down GPU resources.
+        # An async export() may have returned with a memcpy still queued on the IPC stream;
+        # destroying events/stream or freeing dev_ptrs underneath it races the copy → CUDA 719.
+        if cuda_valid and self.ipc_stream:
+            with contextlib.suppress(RuntimeError, OSError):
+                self._cuda.stream_synchronize(self.ipc_stream)
+
         # STEP 1c: Destroy graph execs
         if cuda_valid and self._policy.use_graphs:
             self._destroy_export_graphs()

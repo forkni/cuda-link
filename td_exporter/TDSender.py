@@ -356,6 +356,26 @@ class TDSenderEngine:
         """
         self._exporter.record_source_sync(int(self._exporter.ipc_stream.value))
 
+    @staticmethod
+    def _resolve_export_sync(export_sync: bool | None) -> bool:
+        """Map the tri-state CUDALINK_EXPORT_SYNC config to a strict bool for ExportPolicy.
+
+        Default is **blocking** (not async) because the TD source is TD's transient
+        cook-scoped TOP texture (``cm.ptr``): TD reclaims it the moment the cook returns,
+        so the D2D source read must complete before that happens.  Async export returns
+        immediately after enqueuing the copy, letting TD recycle the source while the IPC-
+        stream memcpy is still queued — reads freed memory under a loaded consumer → CUDA 719.
+
+        Mapping: ``None`` (unset) → True; ``True`` → True; ``False`` → False.
+        Set ``CUDALINK_EXPORT_SYNC=0`` only when the source buffer is guaranteed to outlive
+        the async copy (e.g. a persistent ring buffer with explicit lifetime management).
+
+        Note: ``record_source_sync`` / producer-stream ordering only guarantees the source
+        is fully *written* before the copy starts — it does NOT guarantee the source buffer
+        outlives the queued read.  See CHANGELOG 1.10.1.
+        """
+        return export_sync is not False
+
     def _check_deferred_cleanup(self) -> None:
         """No-op: Exporter.close() handles all cleanup immediately; no deferred queue.
 
@@ -429,12 +449,17 @@ class TDSenderEngine:
                 device=self.device,
                 extra_flags=extra_flags,
             )
-            # Async is the default. Blocking export is opt-in via CUDALINK_EXPORT_SYNC=1.
-            # Coexistence safety comes from explicit per-engine streams + producer-stream
-            # ordering (record_source_sync / require_source_sync), not from blocking export.
-            effective_sync = self._config.export_sync is True
+            # TD source is a transient cook-scoped TOP texture (cm.ptr): blocking export is
+            # the default so the D2D read finishes before TD recycles it (CUDA 719 fix).
+            # Set CUDALINK_EXPORT_SYNC=0 only with a guaranteed-stable source buffer.
+            # record_source_sync orders the copy but does NOT keep the source alive past it.
+            effective_sync = self._resolve_export_sync(self._config.export_sync)
             if self._config.export_sync is None:
-                self._log("CUDALINK_EXPORT_SYNC not set — defaulting to async export", force=True)
+                self._log(
+                    "CUDALINK_EXPORT_SYNC not set — defaulting to blocking export "
+                    "(TD source-lifetime safety; set =0 to opt into async)",
+                    force=True,
+                )
 
             policy = ExportPolicy(
                 export_sync=effective_sync,
