@@ -173,6 +173,9 @@ class Exporter:
         # Activation barrier
         self._barrier = CheckerBarrier(enabled=policy.barrier_enabled, stale_ns=policy.barrier_stale_ns)
 
+        # WDDM HWS mode (populated in _initialize; "unknown" until then)
+        self._hws_mode: str = "unknown"
+
     # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
@@ -236,6 +239,15 @@ class Exporter:
 
         hws_mode = _read_hws_mode()
         logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
+        if hws_mode == "0":
+            logger.warning(
+                "[PERFORMANCE] WDDM Hardware-Accelerated GPU Scheduling is DISABLED "
+                "(HwSchMode=0). Each cudaStreamSynchronize call adds ~0.6 ms of submission "
+                "overhead. Enable HWS: Windows Settings → Display → Graphics → "
+                "Hardware-Accelerated GPU Scheduling → On (requires reboot). "
+                "See PROFILING.md §7 for details."
+            )
+        self._hws_mode = hws_mode
         with _nvtx.annotate(f"cudalink.startup.hws_mode={hws_mode}", "cyan"):
             pass
 
@@ -839,6 +851,7 @@ class Exporter:
             "buffer_size_mb": self.buffer_size / (1024 * 1024),
             "frame_count": n,
             "write_idx": self.write_idx,
+            "hws_mode": self._hws_mode,
             "avg_memcpy_us": self._profile.avg("memcpy", n),
             "avg_total_us": self._profile.avg("export", n),
             "dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self.dev_ptrs],
