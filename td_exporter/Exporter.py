@@ -90,6 +90,13 @@ _EXPORTER_PROFILE_REGIONS: tuple[str, ...] = (
     "ptr_cache_miss",
 )
 
+# cudaEventWaitExternal (0x01) — passed to stream_wait_event() during graph capture
+# so that waiting on source_sync_event (recorded OUTSIDE the capture on the producer
+# stream) creates an external event-wait node rather than failing the capture.
+# Mirrors CUDA_EVENT_WAIT_EXTERNAL from cuda_ipc_wrapper; defined locally to avoid a
+# module-level import of the wrapper from the exporter.
+_GRAPH_EVENT_WAIT_EXTERNAL: int = 0x01
+
 
 def _read_hws_mode() -> str:
     try:
@@ -99,7 +106,7 @@ def _read_hws_mode() -> str:
         value, _ = winreg.QueryValueEx(key, "HwSchMode")
         winreg.CloseKey(key)
         return str(value)
-    except Exception:  # noqa: BLE001
+    except OSError:
         return "unknown"
 
 
@@ -140,6 +147,8 @@ class Exporter:
         self._graph_execs: list[CUDAGraphExec_t | None] = [None] * spec.num_slots
         self._graph_templates: list[CUDAGraph_t | None] = [None] * spec.num_slots
         self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * spec.num_slots
+        # cache last src pointer per slot to skip redundant node-param updates
+        self._graph_last_src: list[int | None] = [None] * spec.num_slots
 
         # CUDA handles (set during _initialize)
         self.ipc_stream = None
@@ -172,6 +181,9 @@ class Exporter:
 
         # Activation barrier
         self._barrier = CheckerBarrier(enabled=policy.barrier_enabled, stale_ns=policy.barrier_stale_ns)
+
+        # WDDM HWS mode (populated in _initialize; "unknown" until then)
+        self._hws_mode: str = "unknown"
 
     # ------------------------------------------------------------------
     # Factory
@@ -236,6 +248,15 @@ class Exporter:
 
         hws_mode = _read_hws_mode()
         logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
+        if hws_mode == "0":
+            logger.warning(
+                "[PERFORMANCE] WDDM Hardware-Accelerated GPU Scheduling is DISABLED "
+                "(HwSchMode=0). Each cudaStreamSynchronize call adds ~0.6 ms of submission "
+                "overhead. Enable HWS: Windows Settings → Display → Graphics → "
+                "Hardware-Accelerated GPU Scheduling → On (requires reboot). "
+                "See PROFILING.md §7 for details."
+            )
+        self._hws_mode = hws_mode
         with _nvtx.annotate(f"cudalink.startup.hws_mode={hws_mode}", "cyan"):
             pass
 
@@ -360,11 +381,23 @@ class Exporter:
 
     def _build_export_graphs(self) -> None:
         placeholder_src = self.dev_ptrs[0]
+        # ensure source_sync_event has a recorded state before capturing external
+        # event-wait nodes.  cudaStreamWaitEvent(cudaEventWaitExternal) during capture
+        # requires the waited event to already be in a "recorded" state (validated by
+        # ipc_event_in_graph_probe [4/4]).  This one-time warm-up has no hot-path cost.
+        if self.ipc_events[0]:
+            self._cuda.record_event(self.source_sync_event, stream=self.ipc_stream)
+            self._cuda.stream_synchronize(self.ipc_stream)
         for slot in range(self._spec.num_slots):
+            ipc_event = self.ipc_events[slot]
             capture_started = False
             try:
                 self._cuda.stream_begin_capture(self.ipc_stream, mode=2)
                 capture_started = True
+                if ipc_event:
+                    # external wait on source_sync folds cross-stream ordering
+                    # into the graph (no per-frame stream_wait_event submission).
+                    self._cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, _GRAPH_EVENT_WAIT_EXTERNAL)
                 self._cuda.memcpy_async(
                     dst=self.dev_ptrs[slot],
                     src=placeholder_src,
@@ -372,17 +405,30 @@ class Exporter:
                     kind=3,
                     stream=self.ipc_stream,
                 )
+                if ipc_event:
+                    # record IPC event with External flag inside the graph — folds
+                    # the per-frame record_event into one graph_launch (3 → 1 WDDM submit).
+                    self._cuda.record_event_external(ipc_event, self.ipc_stream)
                 template_graph = self._cuda.stream_end_capture(self.ipc_stream)
                 capture_started = False
                 nodes = self._cuda.graph_get_nodes(template_graph)
-                if len(nodes) != 1:
+                # 3-node graph: [EventWaitNode, MemcpyNode, EventRecordNode]
+                # 1-node graph: [MemcpyNode] (fallback when ipc_event is falsy)
+                expected = 3 if ipc_event else 1
+                if len(nodes) != expected:
                     self._cuda.graph_destroy(template_graph)
-                    raise RuntimeError(f"Unexpected graph node count {len(nodes)} (expected 1: MemcpyNode).")
+                    kind = "Wait+Memcpy+EventRecord" if ipc_event else "Memcpy"
+                    raise RuntimeError(f"Unexpected graph node count {len(nodes)} (expected {expected}: {kind}).")
                 graph_exec = self._cuda.graph_instantiate(template_graph)
                 self._graph_execs[slot] = graph_exec
                 self._graph_templates[slot] = template_graph
-                self._graph_memcpy_nodes[slot] = nodes[0]
-                logger.debug("Built export graph for slot %d (1-node: Memcpy)", slot)
+                # graph_get_nodes returns nodes in capture order; memcpy is nodes[-2]
+                # for the 3-node graph and nodes[0] for the 1-node fallback.
+                self._graph_memcpy_nodes[slot] = nodes[-2] if ipc_event else nodes[0]
+                if ipc_event:
+                    logger.debug("Built export graph for slot %d (3-node: Wait+Memcpy+EventRecord)", slot)
+                else:
+                    logger.debug("Built export graph for slot %d (1-node: Memcpy)", slot)
             except (RuntimeError, OSError) as exc:
                 if capture_started:
                     with contextlib.suppress(RuntimeError, OSError):
@@ -412,6 +458,7 @@ class Exporter:
                     self._cuda.graph_destroy(template)
                 self._graph_templates[slot] = None
         self._graph_memcpy_nodes = [None] * self._spec.num_slots
+        self._graph_last_src = [None] * self._spec.num_slots  # reset src cache on graph rebuild
 
     # ------------------------------------------------------------------
     # Public API
@@ -567,19 +614,23 @@ class Exporter:
                 if profile:
                     _t = time.perf_counter()
                 try:
-                    _cuda.graph_exec_memcpy_node_set_params_1d(
-                        self._graph_execs[slot],
-                        self._graph_memcpy_nodes[slot],
-                        dst=self.dev_ptrs[slot],
-                        src=c_void_p(gpu_ptr_int),
-                        count=self.data_size,
-                        kind=3,
-                    )
-                    if self._ordering_armed:
-                        _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
+                    # skip the CPU-only node-params update when src pointer
+                    # is unchanged (same ring slot, same caller buffer).
+                    if gpu_ptr_int != self._graph_last_src[slot]:
+                        _cuda.graph_exec_memcpy_node_set_params_1d(
+                            self._graph_execs[slot],
+                            self._graph_memcpy_nodes[slot],
+                            dst=self.dev_ptrs[slot],
+                            src=c_void_p(gpu_ptr_int),
+                            count=self.data_size,
+                            kind=3,
+                        )
+                        self._graph_last_src[slot] = gpu_ptr_int
+                    # stream_wait_event and record_event are captured inside the
+                    # graph (Wait+Memcpy+EventRecord), so graph_launch is the only
+                    # per-frame WDDM submission (3 → 1).  The legacy path below retains
+                    # the original per-frame stream_wait_event + record_event calls.
                     _cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
-                    if self.ipc_events[slot]:
-                        _cuda.record_event(self.ipc_events[slot], stream=self.ipc_stream)
                 except (RuntimeError, OSError) as _graph_err:
                     logger.warning("Graph launch failed (%s) — disabling graphs, retrying via legacy path", _graph_err)
                     self._graphs_disabled = True
@@ -839,6 +890,7 @@ class Exporter:
             "buffer_size_mb": self.buffer_size / (1024 * 1024),
             "frame_count": n,
             "write_idx": self.write_idx,
+            "hws_mode": self._hws_mode,
             "avg_memcpy_us": self._profile.avg("memcpy", n),
             "avg_total_us": self._profile.avg("export", n),
             "dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self.dev_ptrs],

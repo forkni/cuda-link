@@ -32,6 +32,13 @@ def onFrameStart(frame: int) -> None:
         if import_buffer is None:
             return
 
+        # P11: skip the cook entirely when the sender hasn't produced a new frame.
+        # has_new_frame() reads write_idx from SHM and returns True for: init/retry,
+        # version change, shutdown, or a new write_idx. Returns False only when the
+        # sender's write_idx matches our cursor (no new data this frame).
+        if not ext.has_new_frame():
+            return
+
         # Force-cook ImportBuffer: triggers Script TOP onCook, which calls import_frame()
         # and consume_pending_format(). update_receiver_format() afterwards is belt-and-suspenders:
         # a no-op when needs_format_update is already cleared in onCook, but catches any

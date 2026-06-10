@@ -17,6 +17,18 @@ def env_bool(name: str, *, default: bool) -> bool:
     return val == "1"
 
 
+def env_bool_opt(name: str) -> bool | None:
+    """Return the env var as bool, or None if absent.
+
+    "1" → True, "0"/"" → False, absent → None.
+    Use for tri-state config where None means "auto-select at runtime".
+    """
+    val = os.environ.get(name)
+    if val is None:
+        return None
+    return val == "1"
+
+
 def env_int(name: str, *, default: int) -> int:
     """Return the env var as int.  Falls back to default when absent or non-numeric."""
     val = os.environ.get(name)

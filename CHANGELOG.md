@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-06-10
+
 ### Added
 
+- **Sender-side periodic stats log** (`CUDALINK_SENDER_REPORT_EVERY`, default 150) —
+  mirrors the receiver's Debug summary line; prints `Frame N | FPS | shape | dtype |
+  export=… µs avg (write_idx=…)` to the Textport every N published frames when the
+  Sender COMP's **Debug** parameter is ON. Uses engine-local wall-clock timers,
+  independent of `CUDALINK_EXPORT_PROFILE`.
+- **Opt-in pipelined device-to-host copy** (`ImportPolicy.d2h_pipelined` /
+  `CUDALINK_D2H_PIPELINED`, default off) — double-buffers the D2H copy so the
+  next frame's transfer overlaps the consumer's compute on the current frame.
+  Wins only when consumer work exceeds copy time (1080p ~6% / −305 µs, 4K
+  ~20% / −1235 µs at 5 ms consumer work; ~0% at 512²). First `get_frame` returns
+  a priming `NO_FRAME`; steady-state is +1-frame latency. New standalone harness
+  `scripts/profiling/bench_d2h_pipelined.py` (spawn producer/consumer, sweeps
+  512²/1080p/4K, nsys-verifies D2H↔CPU overlap).
 - **pyrefly type-checking extended to `td_exporter/`** (ADR-0005 follow-up) —
   `pyrefly check` (project mode) now covers the td_exporter engine files
   (`TDHost`, `TDSender`, `TDReceiver`, `TDConfig`, `CUDAIPCExtension`,
@@ -39,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`export_frame()` is async end-to-end by default.** The producer no longer
+  issues a per-frame blocking `cudaStreamSynchronize`; the IPC event + async
+  flush-probe carry ordering. Blocking export is opt-in via
+  `CUDALINK_EXPORT_SYNC=1`. Coexistence safety (TD Sender + Receiver in one
+  process) comes from explicit, persistent per-engine streams plus
+  producer-stream ordering (`record_source_sync` / `require_source_sync`), not
+  from blocking export — now documented in `docs/PROFILING.md §8` and
+  `docs/ARCHITECTURE.md`.
+- **CUDA graph folds `stream_wait_event` + `record_event` into the captured
+  graph** — the per-frame export now issues a single WDDM submission
+  (`cudaGraphLaunch`) instead of three.
 - **`[tool.pyrefly]` hardened from one package-wide suppression blanket to
   precise per-file scoping.** Added `python-platform = "win32"` (Windows-only
   project — resolves `ctypes.windll`/`WINFUNCTYPE` on any host) and
@@ -60,6 +86,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (which asserted a removed "torch is required" contract via the unconnected
   deprecated `CUDAIPCImporter`) was modernized to assert the current graceful
   `None` return and renamed `test_get_frame_on_unconnected_importer_returns_none`.
+
+### Removed
+
+- **Dead export-sync receiver-topology auto-select branch** and the process-local
+  receiver registry in `td_exporter/CUDAIPCExtension.py`
+  (`_active_receiver_count` / `_register_receiver` / `_unregister_receiver` /
+  `receiver_active_in_process`). The tri-state `export_sync=None` "auto-select
+  blocking when a receiver coexists in-process" path was structurally unreachable
+  in the standard multi-COMP `.toe`: each COMP compiles its own
+  `CUDAIPCExtension` module, so the counter is per-COMP-isolated and a sender's
+  copy is always 0. `None` now simply means async (the validated production
+  default). Two registry unit tests removed; the export-sync resolution table
+  test rewritten to the two-state (`True` → blocking, `None`/`False` → async)
+  contract.
+
+### Performance
+
+- **Async export −24.7 µs p50 (59%)** @ 1080p uint8 (42.1 → 17.4 µs) — eliminates
+  the producer-side `cudaStreamSynchronize`.
+- **CUDA graphs −3.8 µs p50 (22%)** (17.4 → 13.6 µs) — 3 WDDM submissions/frame → 1.
+- **Combined async+graphs −28.5 µs p50 (68%)** @ 1080p (42.1 → 13.6 µs).
+- **Pipelined D2H** (opt-in) overlaps copy with consumer work: 1080p ~6%, 4K ~20%
+  when `work > copy`.
 
 ## [1.9.0] — 2026-06-06
 
@@ -566,6 +615,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `CUDALINK_RECEIVER_DEVICE` | `0` | GPU device index |
   | `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout ms |
   | `CUDALINK_RECEIVER_REPORT_EVERY` | `150` | Frames between status prints |
+  | `CUDALINK_SENDER_REPORT_EVERY` | `150` | Frames between sender status prints |
   | `CUDALINK_RECEIVER_FRAME_MODE` | `torch` | Frame-fetch mode: `numpy` / `torch` / `cupy` |
 
 - **Per-call `get_frame()` timing in receiver example** — each status line now

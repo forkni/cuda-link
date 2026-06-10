@@ -49,7 +49,7 @@ class CUDAGraphsMixin:
     cudart: Any
     check_error: Any
 
-    # --- Phase 2: CUDA Graph API wrappers ---
+    # --- CUDA Graph API wrappers ---
 
     def stream_begin_capture(self, stream: CUDAStream_t, mode: int = 0) -> None:
         """Begin capturing a stream into a CUDA graph.

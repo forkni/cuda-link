@@ -247,6 +247,7 @@ def main() -> None:
     frame_count = 0
     start_time = time.perf_counter()
     last_report = start_time
+    last_report_frame = 0  # frame_count at last status line — for windowed (instantaneous) FPS
 
     try:
         while not _shutdown.stop_requested:
@@ -264,8 +265,12 @@ def main() -> None:
 
             now = time.perf_counter()
             if frame_count % REPORT_EVERY == 0 or (now - last_report) >= 5.0:
-                elapsed = now - start_time
-                fps = frame_count / elapsed if elapsed > 0 else 0.0
+                # Windowed FPS over the last report interval — reflects the CURRENT
+                # rate, not the lifetime cumulative average (which only climbs
+                # asymptotically and stays diluted by the pre-first-frame idle wait).
+                window_dt = now - last_report
+                window_frames = frame_count - last_report_frame
+                fps = window_frames / window_dt if window_dt > 0 else 0.0
                 export_us = (now - t0) * 1e6
                 if profile_on:
                     stats = exporter.get_stats()
@@ -283,6 +288,7 @@ def main() -> None:
                     f"graphs={graphs_label}"
                 )
                 last_report = now
+                last_report_frame = frame_count
 
             remaining = frame_interval - (time.perf_counter() - t0)
             if remaining > 0:

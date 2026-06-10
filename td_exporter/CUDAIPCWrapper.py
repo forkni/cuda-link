@@ -25,6 +25,17 @@ except (ImportError, ModuleNotFoundError):
 
 _logger = logging.getLogger(__name__)
 
+# cudaEventRecordExternal — flag for cudaEventRecordWithFlags that allows recording
+# an IPC/interprocess event as an *external* node during stream capture (CUDA 11.0+).
+# Plain cudaEventRecord is rejected with code 900 (cudaErrorStreamCaptureUnsupported)
+# inside a capture region; this flag is what makes the in-graph record legal.
+CUDA_EVENT_RECORD_EXTERNAL: int = 0x01
+
+# cudaEventWaitExternal — flag for cudaStreamWaitEvent that captures a wait on an
+# event recorded OUTSIDE the capture (e.g. the producer-stream source-sync event)
+# as an external event-wait node, rather than failing the capture.
+CUDA_EVENT_WAIT_EXTERNAL: int = 0x01
+
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
@@ -335,6 +346,12 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaEventRecord.argtypes = [CUDAEvent_t, CUDAStream_t]
         self.cudart.cudaEventRecord.restype = c_int
 
+        # cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream, unsigned int flags)
+        # Requires CUDA 11.0+. Used with CUDA_EVENT_RECORD_EXTERNAL to record an event
+        # as an external node during stream capture (plain cudaEventRecord fails with 900).
+        self.cudart.cudaEventRecordWithFlags.argtypes = [CUDAEvent_t, CUDAStream_t, c_uint]
+        self.cudart.cudaEventRecordWithFlags.restype = c_int
+
         # cudaEventQuery(cudaEvent_t event)
         self.cudart.cudaEventQuery.argtypes = [CUDAEvent_t]
         self.cudart.cudaEventQuery.restype = c_int
@@ -425,7 +442,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
         self.cudart.cudaPointerGetAttributes.restype = c_int
 
-        # === G1: non-graph helpers (re-enabled Phase 1.1) ===
+        # === G1: non-graph helpers ===
         # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
         # Replaces cudaMallocHost with explicit flag control.
         # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
@@ -439,7 +456,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceGetAttribute.restype = c_int
 
-        # === G2: graph lifecycle (re-enabled Phase 1.2) ===
+        # === G2: graph lifecycle ===
         # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
 
         # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
@@ -485,7 +502,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
         self.cudart.cudaRuntimeGetVersion.restype = c_int
 
-        # === G3: graph node setters (re-enabled Phase 1.3) ===
+        # === G3: graph node setters ===
         # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
         # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
 
@@ -556,6 +573,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             "cudaIpcOpenEventHandle",
             "cudaEventCreateWithFlags",
             "cudaEventRecord",
+            "cudaEventRecordWithFlags",
             "cudaEventSynchronize",
             "cudaEventDestroy",
             "cudaEventElapsedTime",
@@ -874,6 +892,24 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             stream = CUDAStream_t(0)
         self.cudart.cudaEventRecord(event, stream)
 
+    def record_event_external(self, event: CUDAEvent_t, stream: CUDAStream_t) -> None:
+        """Record event on stream using CUDA_EVENT_RECORD_EXTERNAL flag.
+
+        Required when recording an IPC/interprocess event inside a stream-capture
+        region — plain record_event() fails with cudaErrorStreamCaptureUnsupported
+        (code 900).  The External flag causes the record to be captured as an
+        external event-record graph node rather than an in-graph synchronisation
+        node, allowing the resulting IPC event to fire when the graph is launched.
+
+        Args:
+            event: Event handle to record (typically an IPC event from create_ipc_event).
+            stream: CUDA stream.  Must not be None when capturing.
+
+        Raises:
+            RuntimeError: If event recording fails.
+        """
+        self.cudart.cudaEventRecordWithFlags(event, stream, CUDA_EVENT_RECORD_EXTERNAL)
+
     def query_event(self, event: CUDAEvent_t) -> bool:
         """Query if event has completed (non-blocking).
 
@@ -1189,7 +1225,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
         return bool(can_access.value)
 
-    # --- Phase 1: cudaHostAlloc (replaces cudaMallocHost with portable flag) ---
+    # --- cudaHostAlloc (explicit-flags alternative to cudaMallocHost) ---
 
     def malloc_host_alloc(self, size: int, flags: int = HOST_ALLOC_PORTABLE) -> c_void_p:
         """Allocate pinned host memory via cudaHostAlloc with explicit flags.

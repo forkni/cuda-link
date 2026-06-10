@@ -14,7 +14,8 @@ def test_sender_config_defaults() -> None:
     from TDConfig import TDSenderConfig
 
     cfg = TDSenderConfig()
-    assert cfg.export_sync is True
+    # P1: export_sync is now tri-state; None = auto-select by topology (new default)
+    assert cfg.export_sync is None
     assert cfg.export_profile is False
     assert cfg.export_flush_probe is True
     assert cfg.use_graphs is False
@@ -49,8 +50,26 @@ def test_sender_config_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg == TDSenderConfig()
 
 
+def test_sender_config_from_env_export_sync_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUDALINK_EXPORT_SYNC absent → None (auto-select by topology)."""
+    from TDConfig import TDSenderConfig
+
+    monkeypatch.delenv("CUDALINK_EXPORT_SYNC", raising=False)
+    cfg = TDSenderConfig.from_env()
+    assert cfg.export_sync is None
+
+
+def test_sender_config_from_env_export_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUDALINK_EXPORT_SYNC=1 forces blocking export_sync."""
+    from TDConfig import TDSenderConfig
+
+    monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "1")
+    cfg = TDSenderConfig.from_env()
+    assert cfg.export_sync is True
+
+
 def test_sender_config_from_env_export_sync_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_EXPORT_SYNC=0 disables export_sync."""
+    """CUDALINK_EXPORT_SYNC=0 forces async export_sync."""
     from TDConfig import TDSenderConfig
 
     monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "0")
@@ -214,3 +233,29 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
     assert isinstance(engine._config, TDReceiverConfig), (
         "_make_engine() must pass TDReceiverConfig() to TDReceiverEngine, not TDSenderConfig"
     )
+
+
+# ---------------------------------------------------------------------------
+# export_sync resolution
+# ---------------------------------------------------------------------------
+
+
+def test_export_sync_resolution_table() -> None:
+    """Export-sync resolution: config.export_sync → effective_sync.
+
+    (None,  *) → False  (async — default; coexistence safety via stream ordering)
+    (True,  *) → True   (explicit blocking opt-in)
+    (False, *) → False  (explicit async)
+    """
+    from TDConfig import TDSenderConfig
+
+    table: list[tuple[bool | None, bool]] = [
+        (None, False),  # default → async
+        (True, True),  # explicit True → blocking
+        (False, False),  # explicit False → async
+    ]
+
+    for export_sync_val, expected in table:
+        config = TDSenderConfig(export_sync=export_sync_val)
+        effective = config.export_sync is True
+        assert effective is expected, f"export_sync={export_sync_val!r} → expected {expected}, got {effective}"
