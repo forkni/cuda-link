@@ -265,6 +265,7 @@ class TDReceiverEngine:
         self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
         self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
         self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+        self._rx_start_frame: int = 0  # frame_count when _rx_start was seeded (session baseline)
         self._rx_last_report_t: float = 0.0  # perf_counter at previous status line (0 = not yet reported)
         self._rx_last_report_frame: int = 0  # frame_count at previous status line
 
@@ -453,6 +454,7 @@ class TDReceiverEngine:
             _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
             if self._rx_start == 0.0:
                 self._rx_start = time.perf_counter()
+                self._rx_start_frame = self.frame_count  # session baseline for windowed FPS
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -559,8 +561,10 @@ class TDReceiverEngine:
                 if self._rx_last_report_t == 0.0:
                     # First report this session — seed window from first-frame timestamp so the
                     # one-time startup/IPC-open latency doesn't dilute subsequent FPS readings.
+                    # Use _rx_start_frame (not 0) so lifetime frame_count doesn't inflate the
+                    # first window after a reconnect (frame_count is never reset across sessions).
                     self._rx_last_report_t = self._rx_start
-                    self._rx_last_report_frame = 0
+                    self._rx_last_report_frame = self._rx_start_frame
                 _window_dt = _now - self._rx_last_report_t
                 _window_frames = self.frame_count - self._rx_last_report_frame
                 _fps = _window_frames / _window_dt if _window_dt > 0 else 0.0
@@ -1031,6 +1035,7 @@ class TDReceiverEngine:
         self._retry.frames_since_last_retry = 0
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_start = 0.0
+        self._rx_start_frame = 0
         self._rx_last_report_t = 0.0
         self._rx_last_report_frame = 0
 
