@@ -182,9 +182,11 @@ class TDSenderEngine:
         device: int,
         shm_name: str,
         verbose: bool,
+        receiver_check: Callable[[], bool] | None = None,
     ) -> None:
         self._host = host
         self._config = config
+        self._receiver_check: Callable[[], bool] = receiver_check or (lambda: False)
         self._log_fn = log_fn
         self.num_slots = num_slots
         self.device = device
@@ -387,8 +389,24 @@ class TDSenderEngine:
                 device=self.device,
                 extra_flags=extra_flags,
             )
+            # P1: resolve tri-state export_sync.
+            # CUDALINK_EXPORT_SYNC=1/0  → explicit override (True/False)
+            # CUDALINK_EXPORT_SYNC absent → auto-select: blocking when a TDReceiverEngine
+            #   is active in this process (shared-process topology risk per PROFILING.md §8),
+            #   async otherwise (hardware-validated 2026-06-09).
+            if self._config.export_sync is not None:
+                effective_sync = self._config.export_sync
+            else:
+                effective_sync = self._receiver_check()
+                self._log(
+                    f"CUDALINK_EXPORT_SYNC not set — auto-selected "
+                    f"{'blocking' if effective_sync else 'async'} export "
+                    f"({'receiver coexists in process' if effective_sync else 'no receiver in process'})",
+                    force=True,
+                )
+
             policy = ExportPolicy(
-                export_sync=self._config.export_sync,
+                export_sync=effective_sync,
                 flush_probe=self._config.export_flush_probe,
                 use_graphs=self._config.use_graphs,
                 high_priority_stream=self._config.stream_high_prio,
