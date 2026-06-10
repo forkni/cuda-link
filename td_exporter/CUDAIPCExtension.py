@@ -69,33 +69,6 @@ cp = None
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
 _banner_shown_for_comps: set[str] = set()
 
-# ---------------------------------------------------------------------------
-# P1: process-local active-receiver registry
-#
-# In library mode all COMPs share the same Python interpreter, so this
-# module-level counter is shared across every COMP instance in the process.
-# TDSenderEngine queries it at initialize() time to auto-select blocking vs
-# async export when CUDALINK_EXPORT_SYNC is not explicitly set.
-# ---------------------------------------------------------------------------
-_active_receiver_count: int = 0
-
-
-def _register_receiver() -> None:
-    """Increment the process-local active-receiver count."""
-    global _active_receiver_count
-    _active_receiver_count += 1
-
-
-def _unregister_receiver() -> None:
-    """Decrement the process-local active-receiver count (floor 0)."""
-    global _active_receiver_count
-    _active_receiver_count = max(0, _active_receiver_count - 1)
-
-
-def receiver_active_in_process() -> bool:
-    """Return True if any TDReceiverEngine is active in this Python process."""
-    return _active_receiver_count > 0
-
 
 class CUDAIPCExtension:
     """TouchDesigner extension facade for dual-mode CUDA IPC texture sharing.
@@ -151,7 +124,6 @@ class CUDAIPCExtension:
         if _hide_val is not None:
             self._host.show_custom_only(bool(_hide_val))
 
-        self._receiver_registered: bool = False  # tracks _register_receiver() calls
         self._engine: TDSenderEngine | TDReceiverEngine = self._make_engine()
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
@@ -253,12 +225,7 @@ class CUDAIPCExtension:
                 device=self._device,
                 shm_name=rs.shm_name,
                 verbose=rs.verbose,
-                receiver_check=receiver_active_in_process,  # P1: auto-select sync
             )
-        # Receiver mode: register in the process-local registry so co-located Senders
-        # can detect coexistence and choose blocking export by default.
-        _register_receiver()
-        self._receiver_registered = True
         return TDReceiverEngine(
             host=self._host,
             config=TDReceiverConfig(),
@@ -341,10 +308,6 @@ class CUDAIPCExtension:
         return self._engine.initialize_receiver()
 
     def cleanup(self) -> None:
-        # Unregister from the process-local receiver registry before tearing down.
-        if self._receiver_registered:
-            _unregister_receiver()
-            self._receiver_registered = False
         self._engine.cleanup()
 
     def __delTD__(self) -> None:

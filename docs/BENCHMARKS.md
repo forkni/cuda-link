@@ -45,8 +45,9 @@ D      0 (async)     1 (on)          13.6      23.6     25.6          0.00      
 ```
 
 **P1 gain (A→B): −24.7 µs p50 (59%)** — eliminates the 15.89 µs `cudaStreamSynchronize`
-on the producer side. When `CUDALINK_EXPORT_SYNC` is unset (P1 auto-select), the sender
-logs which arm it chose at init time based on whether a receiver is coexisting in-process.
+on the producer side. Async is the unconditional default; `CUDALINK_EXPORT_SYNC=1` forces
+blocking. Coexistence safety comes from explicit per-engine streams and producer-stream
+ordering (`record_source_sync` / `require_source_sync`), not from blocking export.
 
 **P3 graph gain (B→D): −3.8 µs p50 (22%)** — `cudaStreamWaitEvent` + `cudaEventRecord`
 are folded into the CUDA graph; only `cudaGraphLaunch` fires per frame. nsys confirms:

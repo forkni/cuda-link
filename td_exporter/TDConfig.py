@@ -22,10 +22,12 @@ class TDSenderConfig:
     the validated production stack described in docs/ARCHITECTURE.md.
 
     export_sync is tri-state (bool | None):
-      True  — always use blocking cudaStreamSynchronize (safe, legacy default)
-      False — always use async export + flush-probe (fastest)
-      None  — auto-select: blocking when a TDReceiverEngine is active in the same
-              Python process, async otherwise.  Set by omitting CUDALINK_EXPORT_SYNC.
+      True  — always use blocking cudaStreamSynchronize (explicit opt-in)
+      False — always use async export + flush-probe (explicit)
+      None  — default to async.  Coexistence safety relies on explicit per-engine
+              streams and producer-stream ordering (record_source_sync /
+              require_source_sync), not on blocking export.
+              Set by omitting CUDALINK_EXPORT_SYNC.
     """
 
     export_sync: bool | None = None
@@ -44,7 +46,7 @@ class TDSenderConfig:
     def from_env(cls) -> TDSenderConfig:
         """Build a config from environment variables (production path)."""
         return cls(
-            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → auto-select by topology
+            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → async (default)
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
