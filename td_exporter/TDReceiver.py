@@ -265,6 +265,8 @@ class TDReceiverEngine:
         self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
         self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
         self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+        self._rx_last_report_t: float = 0.0  # perf_counter at previous status line (0 = not yet reported)
+        self._rx_last_report_frame: int = 0  # frame_count at previous status line
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
@@ -554,8 +556,14 @@ class TDReceiverEngine:
             # Debug summary line — matches standalone Python receiver format
             if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
                 _now = time.perf_counter()
-                _elapsed = _now - self._rx_start
-                _fps = self.frame_count / _elapsed if _elapsed > 0 else 0.0
+                if self._rx_last_report_t == 0.0:
+                    # First report this session — seed window from first-frame timestamp so the
+                    # one-time startup/IPC-open latency doesn't dilute subsequent FPS readings.
+                    self._rx_last_report_t = self._rx_start
+                    self._rx_last_report_frame = 0
+                _window_dt = _now - self._rx_last_report_t
+                _window_frames = self.frame_count - self._rx_last_report_frame
+                _fps = _window_frames / _window_dt if _window_dt > 0 else 0.0
                 _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
                 _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
                 self._log(
@@ -565,6 +573,8 @@ class TDReceiverEngine:
                     f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
                     f"(slot={read_slot}, write_idx={write_idx})"
                 )
+                self._rx_last_report_t = _now
+                self._rx_last_report_frame = self.frame_count
 
             return True
 
@@ -1019,6 +1029,10 @@ class TDReceiverEngine:
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+        # Reset per-session perf tracking so reconnects get a fresh window baseline
+        self._rx_start = 0.0
+        self._rx_last_report_t = 0.0
+        self._rx_last_report_frame = 0
 
     def _refresh_on_version_change(self, new_version: int) -> bool:
         """Refresh format and IPC handles in-place after a sender version bump.
