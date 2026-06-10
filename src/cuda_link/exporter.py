@@ -140,6 +140,8 @@ class Exporter:
         self._graph_execs: list[CUDAGraphExec_t | None] = [None] * spec.num_slots
         self._graph_templates: list[CUDAGraph_t | None] = [None] * spec.num_slots
         self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * spec.num_slots
+        # P4: cache last src pointer per slot to skip redundant node-param updates
+        self._graph_last_src: list[int | None] = [None] * spec.num_slots
 
         # CUDA handles (set during _initialize)
         self.ipc_stream = None
@@ -424,6 +426,7 @@ class Exporter:
                     self._cuda.graph_destroy(template)
                 self._graph_templates[slot] = None
         self._graph_memcpy_nodes = [None] * self._spec.num_slots
+        self._graph_last_src = [None] * self._spec.num_slots  # P4: reset src cache
 
     # ------------------------------------------------------------------
     # Public API
@@ -579,14 +582,18 @@ class Exporter:
                 if profile:
                     _t = time.perf_counter()
                 try:
-                    _cuda.graph_exec_memcpy_node_set_params_1d(
-                        self._graph_execs[slot],
-                        self._graph_memcpy_nodes[slot],
-                        dst=self.dev_ptrs[slot],
-                        src=c_void_p(gpu_ptr_int),
-                        count=self.data_size,
-                        kind=3,
-                    )
+                    # P4: skip the CPU-only node-params update when src pointer
+                    # is unchanged (same ring slot, same caller buffer).
+                    if gpu_ptr_int != self._graph_last_src[slot]:
+                        _cuda.graph_exec_memcpy_node_set_params_1d(
+                            self._graph_execs[slot],
+                            self._graph_memcpy_nodes[slot],
+                            dst=self.dev_ptrs[slot],
+                            src=c_void_p(gpu_ptr_int),
+                            count=self.data_size,
+                            kind=3,
+                        )
+                        self._graph_last_src[slot] = gpu_ptr_int
                     if self._ordering_armed:
                         _cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, 0)
                     _cuda.graph_launch(self._graph_execs[slot], self.ipc_stream)
