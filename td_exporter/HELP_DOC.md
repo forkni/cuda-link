@@ -184,6 +184,18 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
   - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
   - **slot / write_idx** — ring buffer diagnostics
 
+#### Sender mode
+
+- **On:** every 150 frames (configurable via `CUDALINK_SENDER_REPORT_EVERY` env var), prints a
+  per-frame summary line:
+  ```
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=17.4 µs avg (write_idx=150)
+  ```
+  - **FPS** — frames published ÷ wall time since the first published frame
+  - **shape / dtype** — texture dimensions and pixel format
+  - **export** — running average of `Exporter.export()` wall time (profile-independent; always valid regardless of `CUDALINK_EXPORT_PROFILE`)
+  - **write_idx** — ring-buffer write index (matches the receiver's `write_idx` in steady state)
+
 Hot-swappable in both modes: can be toggled at runtime without affecting the pipeline.
 
 ---
@@ -206,7 +218,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.9.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.10.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
