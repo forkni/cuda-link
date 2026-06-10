@@ -90,7 +90,7 @@ _EXPORTER_PROFILE_REGIONS: tuple[str, ...] = (
     "ptr_cache_miss",
 )
 
-# P3: cudaEventWaitExternal (0x01) — passed to stream_wait_event() during graph capture
+# cudaEventWaitExternal (0x01) — passed to stream_wait_event() during graph capture
 # so that waiting on source_sync_event (recorded OUTSIDE the capture on the producer
 # stream) creates an external event-wait node rather than failing the capture.
 # Mirrors CUDA_EVENT_WAIT_EXTERNAL from cuda_ipc_wrapper; defined locally to avoid a
@@ -106,7 +106,7 @@ def _read_hws_mode() -> str:
         value, _ = winreg.QueryValueEx(key, "HwSchMode")
         winreg.CloseKey(key)
         return str(value)
-    except Exception:  # noqa: BLE001
+    except OSError:
         return "unknown"
 
 
@@ -147,7 +147,7 @@ class Exporter:
         self._graph_execs: list[CUDAGraphExec_t | None] = [None] * spec.num_slots
         self._graph_templates: list[CUDAGraph_t | None] = [None] * spec.num_slots
         self._graph_memcpy_nodes: list[CUDAGraphNode_t | None] = [None] * spec.num_slots
-        # P4: cache last src pointer per slot to skip redundant node-param updates
+        # cache last src pointer per slot to skip redundant node-param updates
         self._graph_last_src: list[int | None] = [None] * spec.num_slots
 
         # CUDA handles (set during _initialize)
@@ -381,7 +381,7 @@ class Exporter:
 
     def _build_export_graphs(self) -> None:
         placeholder_src = self.dev_ptrs[0]
-        # P3: ensure source_sync_event has a recorded state before capturing external
+        # ensure source_sync_event has a recorded state before capturing external
         # event-wait nodes.  cudaStreamWaitEvent(cudaEventWaitExternal) during capture
         # requires the waited event to already be in a "recorded" state (validated by
         # ipc_event_in_graph_probe [4/4]).  This one-time warm-up has no hot-path cost.
@@ -395,7 +395,7 @@ class Exporter:
                 self._cuda.stream_begin_capture(self.ipc_stream, mode=2)
                 capture_started = True
                 if ipc_event:
-                    # P3: external wait on source_sync folds cross-stream ordering
+                    # external wait on source_sync folds cross-stream ordering
                     # into the graph (no per-frame stream_wait_event submission).
                     self._cuda.stream_wait_event(self.ipc_stream, self.source_sync_event, _GRAPH_EVENT_WAIT_EXTERNAL)
                 self._cuda.memcpy_async(
@@ -406,13 +406,13 @@ class Exporter:
                     stream=self.ipc_stream,
                 )
                 if ipc_event:
-                    # P3: record IPC event with External flag inside the graph — folds
+                    # record IPC event with External flag inside the graph — folds
                     # the per-frame record_event into one graph_launch (3 → 1 WDDM submit).
                     self._cuda.record_event_external(ipc_event, self.ipc_stream)
                 template_graph = self._cuda.stream_end_capture(self.ipc_stream)
                 capture_started = False
                 nodes = self._cuda.graph_get_nodes(template_graph)
-                # 3-node graph: [EventWaitNode, MemcpyNode, EventRecordNode] (P3 path)
+                # 3-node graph: [EventWaitNode, MemcpyNode, EventRecordNode]
                 # 1-node graph: [MemcpyNode] (fallback when ipc_event is falsy)
                 expected = 3 if ipc_event else 1
                 if len(nodes) != expected:
@@ -458,7 +458,7 @@ class Exporter:
                     self._cuda.graph_destroy(template)
                 self._graph_templates[slot] = None
         self._graph_memcpy_nodes = [None] * self._spec.num_slots
-        self._graph_last_src = [None] * self._spec.num_slots  # P4: reset src cache
+        self._graph_last_src = [None] * self._spec.num_slots  # reset src cache on graph rebuild
 
     # ------------------------------------------------------------------
     # Public API
@@ -614,7 +614,7 @@ class Exporter:
                 if profile:
                     _t = time.perf_counter()
                 try:
-                    # P4: skip the CPU-only node-params update when src pointer
+                    # skip the CPU-only node-params update when src pointer
                     # is unchanged (same ring slot, same caller buffer).
                     if gpu_ptr_int != self._graph_last_src[slot]:
                         _cuda.graph_exec_memcpy_node_set_params_1d(
@@ -626,7 +626,7 @@ class Exporter:
                             kind=3,
                         )
                         self._graph_last_src[slot] = gpu_ptr_int
-                    # P3: stream_wait_event and record_event are now captured inside the
+                    # stream_wait_event and record_event are captured inside the
                     # graph (Wait+Memcpy+EventRecord), so graph_launch is the only
                     # per-frame WDDM submission (3 → 1).  The legacy path below retains
                     # the original per-frame stream_wait_event + record_event calls.

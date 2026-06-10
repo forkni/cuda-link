@@ -442,7 +442,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
         self.cudart.cudaPointerGetAttributes.restype = c_int
 
-        # === G1: non-graph helpers (re-enabled Phase 1.1) ===
+        # === G1: non-graph helpers ===
         # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
         # Replaces cudaMallocHost with explicit flag control.
         # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
@@ -456,7 +456,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceGetAttribute.restype = c_int
 
-        # === G2: graph lifecycle (re-enabled Phase 1.2) ===
+        # === G2: graph lifecycle ===
         # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
 
         # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
@@ -502,7 +502,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
         self.cudart.cudaRuntimeGetVersion.restype = c_int
 
-        # === G3: graph node setters (re-enabled Phase 1.3) ===
+        # === G3: graph node setters ===
         # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
         # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
 
@@ -1225,7 +1225,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceCanAccessPeer(byref(can_access), device, peer_device)
         return bool(can_access.value)
 
-    # --- Phase 1: cudaHostAlloc (replaces cudaMallocHost with portable flag) ---
+    # --- cudaHostAlloc (explicit-flags alternative to cudaMallocHost) ---
 
     def malloc_host_alloc(self, size: int, flags: int = HOST_ALLOC_PORTABLE) -> c_void_p:
         """Allocate pinned host memory via cudaHostAlloc with explicit flags.

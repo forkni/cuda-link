@@ -724,7 +724,7 @@ class TDReceiverEngine:
                 try:
                     _shm_mv = memoryview(bytes(shm_handle.buf))  # bytes copy: no mmap exported pointer
                     _md = Metadata.read_from(_shm_mv, layout)
-                except Exception as _e:  # noqa: BLE001
+                except (struct.error, ValueError, IndexError) as _e:
                     self._log(f"Failed to read SHM metadata: {_e}", force=True)
                     shm_handle.close()
                     return False
@@ -945,7 +945,7 @@ class TDReceiverEngine:
                                     memptr=_memptr,
                                 )
                             )
-                    except Exception as _e:
+                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError; keep broad so alloc failures always degrade to CPU fallback
                         self._cupy_f32_buf = None
                         self._cupy_f16_views = []
                         self._log(

@@ -59,7 +59,7 @@ class ImportPolicy:
     d2h_num_streams: int = 1
     d2h_stream_high_priority: bool = False
     allow_pageable_fallback: bool = False
-    # P5: opt-in pipelined D2H — enqueue current slot's copy, return previous frame.
+    # opt-in pipelined D2H — enqueue current slot's copy, return previous frame.
     # First call returns NO_FRAME; steady-state adds +1 frame latency in exchange for
     # overlapping D2H with consumer CPU work.  Only beneficial when consumer takes
     # longer than D2H copy time (~0.5–2 ms for 4K RGBA).

@@ -415,7 +415,7 @@ class NumpyBuffers:
     num_streams: int
     chunk_plan: list  # [(offset, size), ...] for multi-stream D2H; empty when num_streams <= 1
     buffer_ptr: object  # ctypes.c_void_p | None — precomputed dst for D2H copy (fixed for buffer lifetime)
-    # P5: pipelined D2H double-buffer state (all None / False when not pipelined)
+    # pipelined D2H double-buffer state (all None / False when not pipelined)
     back_buffer: object = None  # second pinned host buffer
     back_pinned_ptr: object = None  # CUDA ptr from malloc_host_alloc for back buffer
     back_host_registered_arr: object = None  # ndarray from cudaHostRegister for back buffer
@@ -514,7 +514,7 @@ class NumpyBuffers:
                     break
                 chunk_plan.append((offset, size))
 
-        # P5: allocate a second pinned buffer using the same path that succeeded.
+        # allocate a second pinned buffer using the same path that succeeded.
         back_buffer = None
         back_pinned_ptr = None
         back_host_registered_arr = None
@@ -595,7 +595,7 @@ class NumpyBuffers:
                 logger.debug("D2H stream destroy skipped (context gone): %s", e)
             self.primary_stream = None
 
-        # P5: free pipelined back buffer.
+        # free pipelined back buffer.
         if self.back_pinned_ptr is not None:
             try:
                 self.cuda.free_host(self.back_pinned_ptr)
@@ -1387,7 +1387,7 @@ class Importer:
         if self._numpy_backend is None:
             self._numpy_backend = _NumpyBackend(self)
         result = self._consume_frame(self._numpy_backend)
-        # P5: pipelined path signals the priming call with frame=None; surface as NO_FRAME.
+        # pipelined path signals the priming call with frame=None; surface as NO_FRAME.
         if self._policy.d2h_pipelined and result.outcome is ImportOutcome.NEW_FRAME and result.frame is None:
             return ImportResult(outcome=ImportOutcome.NO_FRAME)
         return result

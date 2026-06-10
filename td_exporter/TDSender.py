@@ -438,7 +438,7 @@ class TDSenderEngine:
             self._log("Initialization complete — ready for zero-copy GPU transfer", force=True)
             return True
 
-        except (OSError, RuntimeError, ValueError, Exception) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
             self._host.set_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
@@ -489,7 +489,7 @@ class TDSenderEngine:
             # cook.  The Exporter opens here; the actual export starts on the next cook.
             try:
                 cm_probe = top_op.cuda_memory()  # stream=None → default stream, safe for probe
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
                 return False
             # Use pixelFormatName as authoritative dtype/channel source at init time.
@@ -526,7 +526,7 @@ class TDSenderEngine:
             _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
             try:
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
-            except Exception as cuda_err:
+            except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
                 return False
 
@@ -661,7 +661,7 @@ class TDSenderEngine:
                     f" → {cm.width}x{cm.height}x{cm_channels} {resolved_dtype}",
                     force=True,
                 )
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
                     self._exporter.close()
                 new_spec = FrameSpec(
                     shm_name=self.shm_name,
@@ -685,7 +685,7 @@ class TDSenderEngine:
                 # (open-first logic, exporter.py:274-279).  set_version writes into that
                 # shared mapping — the receiver will see VERSION_CHANGED on the next tick.
                 self._ipc_version += 1
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort SHM version write; must not raise inside a cook callback
                     if self._exporter.shm_handle is not None:
                         set_version(self._exporter.shm_handle.buf, self._ipc_version)
 
@@ -701,7 +701,7 @@ class TDSenderEngine:
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
                     cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
-                except Exception as cuda_err:
+                except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
 
@@ -749,7 +749,7 @@ class TDSenderEngine:
         self._barrier.close()
 
         if self._exporter is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort shutdown; partial close is acceptable on teardown
                 self._exporter.close()
             self._exporter = None
 
