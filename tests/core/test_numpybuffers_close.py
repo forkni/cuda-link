@@ -182,3 +182,59 @@ def test_close_unregisters_host_array() -> None:
 
     nb.cuda.host_unregister.assert_called_once_with(expected_addr)
     assert nb.host_registered_arr is None, "host_registered_arr must be nulled after unregister"
+
+
+# ---------------------------------------------------------------------------
+# P5: pipelined D2H back-buffer cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_close_frees_back_pinned_ptr() -> None:
+    """close() calls free_host on back_pinned_ptr and nulls back_buffer/back_buffer_ptr."""
+    back_sentinel_ptr = MagicMock()
+    back_buf = np.zeros((4, 4, 4), dtype=np.uint8)
+
+    nb = _make_nb(pinned_ptr=None)
+    nb.back_buffer = back_buf
+    nb.back_pinned_ptr = back_sentinel_ptr
+    nb.back_buffer_ptr = ctypes.c_void_p(back_buf.ctypes.data)
+    nb.pipelined = True
+    nb.priming = False
+
+    nb.close()
+
+    nb.cuda.free_host.assert_called_once_with(back_sentinel_ptr)
+    assert nb.back_pinned_ptr is None
+    assert nb.back_buffer is None
+    assert nb.back_buffer_ptr is None
+
+
+def test_close_unregisters_back_host_array() -> None:
+    """close() on the host_registered back-buffer path calls host_unregister."""
+    back_arr = np.zeros((4, 4, 4), dtype=np.uint8)
+    expected_addr = back_arr.ctypes.data
+
+    nb = _make_nb(pinned_ptr=None)
+    nb.back_buffer = back_arr
+    nb.back_host_registered_arr = back_arr
+    nb.back_buffer_ptr = ctypes.c_void_p(expected_addr)
+    nb.pipelined = True
+
+    nb.close()
+
+    nb.cuda.host_unregister.assert_called_once_with(expected_addr)
+    assert nb.back_host_registered_arr is None
+    assert nb.back_buffer is None
+    assert nb.back_buffer_ptr is None
+
+
+def test_close_idempotent_with_pipelined_back_buffer() -> None:
+    """close() is idempotent even when a pipelined back_pinned_ptr was set."""
+    nb = _make_nb(pinned_ptr=MagicMock())
+    nb.back_pinned_ptr = MagicMock()
+    nb.back_buffer = np.zeros((4, 4, 4), dtype=np.uint8)
+    nb.back_buffer_ptr = ctypes.c_void_p(nb.back_buffer.ctypes.data)
+    nb.pipelined = True
+
+    nb.close()
+    nb.close()  # second call must not raise

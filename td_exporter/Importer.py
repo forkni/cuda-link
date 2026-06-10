@@ -415,6 +415,13 @@ class NumpyBuffers:
     num_streams: int
     chunk_plan: list  # [(offset, size), ...] for multi-stream D2H; empty when num_streams <= 1
     buffer_ptr: object  # ctypes.c_void_p | None — precomputed dst for D2H copy (fixed for buffer lifetime)
+    # P5: pipelined D2H double-buffer state (all None / False when not pipelined)
+    back_buffer: object = None  # second pinned host buffer
+    back_pinned_ptr: object = None  # CUDA ptr from malloc_host_alloc for back buffer
+    back_host_registered_arr: object = None  # ndarray from cudaHostRegister for back buffer
+    back_buffer_ptr: object = None  # precomputed c_void_p for back_buffer
+    pipelined: bool = False  # pipelined D2H active
+    priming: bool = False  # True before the first copy completes
 
     @classmethod
     def build(
@@ -424,6 +431,7 @@ class NumpyBuffers:
         num_streams: int,
         high_priority: bool = False,
         allow_pageable: bool = False,
+        pipelined: bool = False,
     ) -> NumpyBuffers:
         """Allocate pinned host buffer + D2H streams.
 
@@ -506,6 +514,24 @@ class NumpyBuffers:
                     break
                 chunk_plan.append((offset, size))
 
+        # P5: allocate a second pinned buffer using the same path that succeeded.
+        back_buffer = None
+        back_pinned_ptr = None
+        back_host_registered_arr = None
+        if pipelined:
+            if pinned_ptr is not None:
+                back_pinned_ptr = cuda.malloc_host_alloc(nbytes, flags=0x01)
+                _back_mem = (ctypes.c_ubyte * nbytes).from_address(back_pinned_ptr.value)
+                back_buffer = np.frombuffer(_back_mem, dtype=fmt.numpy_dtype).reshape(fmt.shape)
+            elif host_registered_arr is not None:
+                _back_arr = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+                cuda.host_register(_back_arr.ctypes.data, _back_arr.nbytes)
+                back_host_registered_arr = _back_arr
+                back_buffer = _back_arr
+            else:
+                back_buffer = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+            logger.debug("Allocated pipelined D2H back buffer: %s %s", fmt.shape, fmt.dtype_str)
+
         return cls(
             cuda=cuda,
             fmt=fmt,
@@ -518,6 +544,12 @@ class NumpyBuffers:
             num_streams=num_streams,
             chunk_plan=chunk_plan,
             buffer_ptr=ctypes.c_void_p(buffer.ctypes.data) if buffer is not None else None,
+            back_buffer=back_buffer,
+            back_pinned_ptr=back_pinned_ptr,
+            back_host_registered_arr=back_host_registered_arr,
+            back_buffer_ptr=ctypes.c_void_p(back_buffer.ctypes.data) if back_buffer is not None else None,
+            pipelined=pipelined,
+            priming=pipelined,
         )
 
     def needs_rebuild(self, fmt: Format) -> bool:
@@ -562,6 +594,25 @@ class NumpyBuffers:
             except (RuntimeError, OSError) as e:
                 logger.debug("D2H stream destroy skipped (context gone): %s", e)
             self.primary_stream = None
+
+        # P5: free pipelined back buffer.
+        if self.back_pinned_ptr is not None:
+            try:
+                self.cuda.free_host(self.back_pinned_ptr)
+                logger.debug("Freed pipelined back buffer")
+            except (RuntimeError, OSError) as e:
+                logger.debug("free_host(back) skipped: %s", e)
+            self.back_pinned_ptr = None
+            self.back_buffer = None
+            self.back_buffer_ptr = None
+        if self.back_host_registered_arr is not None:
+            try:
+                self.cuda.host_unregister(self.back_host_registered_arr.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                logger.debug("host_unregister(back) failed: %s", e)
+            self.back_host_registered_arr = None
+            self.back_buffer = None
+            self.back_buffer_ptr = None
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +723,7 @@ class _NumpyBackend:
                 num_streams=importer._policy.d2h_num_streams,
                 high_priority=importer._policy.d2h_stream_high_priority,
                 allow_pageable=importer._policy.allow_pageable_fallback,
+                pipelined=importer._policy.d2h_pipelined,
             )
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
@@ -682,6 +734,37 @@ class _NumpyBackend:
         fmt = self._imp._format
         nbytes = fmt.frame_nbytes
         with _nvtx.verbose_range("cudalink.importer.d2h_copy", self.nvtx_color):
+            if nb.pipelined:
+                if nb.priming:
+                    # First call: enqueue copy into back buffer; no prior data to return.
+                    conn.cuda.memcpy_async(
+                        dst=nb.back_buffer_ptr,
+                        src=conn.dev_ptrs[read_slot],
+                        count=nbytes,
+                        kind=2,
+                        stream=nb.primary_stream,
+                    )
+                    nb.priming = False
+                    # Rotate: back (just filled) becomes new front for next call.
+                    nb.buffer, nb.back_buffer = nb.back_buffer, nb.buffer
+                    nb.buffer_ptr, nb.back_buffer_ptr = nb.back_buffer_ptr, nb.buffer_ptr
+                    conn.cuda.check_sticky_error("get_frame_numpy[pipelined-prime]")
+                    return None  # get_frame_numpy surfaces as NO_FRAME
+                # Steady state: sync the previous call's copy (now in nb.buffer = front),
+                # enqueue this call's copy into nb.back_buffer, then return front.
+                conn.cuda.stream_synchronize(nb.primary_stream)
+                conn.cuda.memcpy_async(
+                    dst=nb.back_buffer_ptr,
+                    src=conn.dev_ptrs[read_slot],
+                    count=nbytes,
+                    kind=2,
+                    stream=nb.primary_stream,
+                )
+                result = nb.buffer
+                nb.buffer, nb.back_buffer = nb.back_buffer, nb.buffer
+                nb.buffer_ptr, nb.back_buffer_ptr = nb.back_buffer_ptr, nb.buffer_ptr
+                conn.cuda.check_sticky_error("get_frame_numpy[pipelined]")
+                return result
             n_streams = nb.num_streams
             if n_streams <= 1:
                 conn.cuda.memcpy_async(
@@ -1294,12 +1377,20 @@ class Importer:
         Returns:
             ImportResult[np.ndarray] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, RECONNECTING, or TIMEOUT.
+
+        When ImportPolicy.d2h_pipelined is True the first call returns NO_FRAME
+        (priming the back buffer) and each subsequent call returns the previous
+        frame with +1 frame latency, hiding D2H copy time behind consumer CPU work.
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
         if self._numpy_backend is None:
             self._numpy_backend = _NumpyBackend(self)
-        return self._consume_frame(self._numpy_backend)
+        result = self._consume_frame(self._numpy_backend)
+        # P5: pipelined path signals the priming call with frame=None; surface as NO_FRAME.
+        if self._policy.d2h_pipelined and result.outcome is ImportOutcome.NEW_FRAME and result.frame is None:
+            return ImportResult(outcome=ImportOutcome.NO_FRAME)
+        return result
 
     def get_frame_cupy(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy CuPy ndarray on GPU.
