@@ -182,7 +182,13 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
   - **shape** — texture dimensions in numpy H×W×C order
   - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
   - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
-  - **slot / write_idx** — ring buffer diagnostics
+  - **slot / write_idx** — ring buffer diagnostics, sampled as a **1-in-N snapshot** of the
+    sender's free-running counter (`slot = (write_idx − 1) % Numslots`). Because the producer
+    advances `write_idx` slightly faster than the consumer reads (latest-frame-wins design),
+    the sampled `slot` lands on a different value almost every report and looks non-sequential
+    — this is expected sampling aliasing, **not** uneven slot usage. On the actual data path
+    every slot is written and read in equal `0→1→2…` rotation; the per-frame `[DIAG]` lines
+    printed for the first 5 frames after each re-init show that clean consecutive rotation.
 
 #### Sender mode
 
