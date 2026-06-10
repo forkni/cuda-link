@@ -143,6 +143,7 @@ Backup/
 # GitHub Release assets attached to their version tag (see release.yml).
 TOXES/CUDAIPCLink_v1.5.0.tox
 TOXES/CUDAIPCLink_v1.5.1.tox
+TOXES/CUDAIPCLink_v1.9.0.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
@@ -168,6 +169,8 @@ nul
 # Scalene profiling output (local-only; only .profiling/baseline.json is committed)
 .profiling/scalene_*.json
 .profiling/current.json
+# All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
+.profiling/
 
 # Verification probe outputs (timestamped JSON from probe_cook_context runs)
 verification/results/probe_cook_context_*.json
@@ -214,6 +217,9 @@ Test_TD_Receiver1.*.toe
 # To include a specific numbered snapshot at release time: git add -f CUDA_Link_Example.N.toe
 CUDA_Link_Example.*.toe
 
+
+# Local TD font assets
+fonts/
 
 # Audit reports (local-only)
 audit_reports/
