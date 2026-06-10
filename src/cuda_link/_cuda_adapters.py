@@ -273,6 +273,13 @@ class FakeCUDAAdapter:
         stream_tag = getattr(stream, "_tag", str(stream)) if stream is not None else "default"
         self.recorded_events.append((event_tag, stream_tag))
 
+    def record_event_external(self, event: Any, stream: Any) -> None:
+        # Same tracking as record_event — the External flag is a CUDA graph-capture
+        # detail that has no test-visible effect in the fake adapter.
+        event_tag = getattr(event, "_tag", str(event))
+        stream_tag = getattr(stream, "_tag", str(stream))
+        self.recorded_events.append((event_tag, stream_tag))
+
     def destroy_event(self, event: Any) -> None:
         pass
 
