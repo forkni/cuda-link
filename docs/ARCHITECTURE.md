@@ -363,10 +363,25 @@ ordering at call sites during development.
 
 #### Export-Sync Default and Coexistence Safety
 
-`export_frame()` defaults to **async** (`CUDALINK_EXPORT_SYNC` unset or `0`). The
-`CUDALINK_EXPORT_SYNC=1` (blocking) opt-in is still available for legacy deployments, but
-is no longer required for coexistence safety. Both coexistence hazards are addressed by
-explicit stream management:
+**Python `Exporter` API:** `export_frame()` defaults to **async** (`CUDALINK_EXPORT_SYNC`
+unset or `0`). The CUDA IPC event provides correct cross-process GPU ordering; coexistence
+safety relies on explicit per-engine streams + producer-stream ordering, not blocking export.
+
+**TD Sender (v1.10.1+):** defaults to **blocking** (`CUDALINK_EXPORT_SYNC` unset → `1`).
+The TD source is TD's cook-scoped TOP texture (`cm.ptr`) — an externally-owned, transient
+pointer reclaimed the instant the cook returns.  Async export lets TD reclaim the source
+while the queued D2D copy is still executing → reads freed memory → CUDA 719.
+`CUDALINK_EXPORT_SYNC=0` opts into async only when the caller guarantees the source buffer
+outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDAMemory`).
+
+**Critical distinction — ordering vs. lifetime:**
+- `record_source_sync` / `producer_stream` / `_arm_same_stream_ordering` are *pre-copy
+  ordering* primitives: ensure the source is fully written before the copy starts.
+  They do **not** guarantee the source outlives the queued read.
+- `CUDALINK_EXPORT_SYNC=1` is the **source-lifetime guard**: CPU-blocks until the D2D
+  finishes, so the source is provably safe to release when `export()` returns.
+
+Both coexistence hazards are addressed by explicit stream management:
 
 - **Receiver teardown TDR** — eliminated by dedicated, persistent per-engine streams
   (`CUDALINK_TD_PERSIST_STREAM=1`, default since v1.4.1). No sender-side sync needed.
