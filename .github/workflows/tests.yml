@@ -2,18 +2,23 @@ name: Tests
 
 on:
   push:
-    branches: [development, main, master]
+    branches: [development, main, master, 'claude/**']
     paths:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - 'td_exporter/**'
+      - 'scripts/sync_td_wrapper.py'
   pull_request:
     paths:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - 'td_exporter/**'
+      - 'scripts/sync_td_wrapper.py'
+  workflow_dispatch:
 
 jobs:
   pytest:
