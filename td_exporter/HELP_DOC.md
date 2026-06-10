@@ -182,7 +182,25 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
   - **shape** — texture dimensions in numpy H×W×C order
   - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
   - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
-  - **slot / write_idx** — ring buffer diagnostics
+  - **slot / write_idx** — ring buffer diagnostics, sampled as a **1-in-N snapshot** of the
+    sender's free-running counter (`slot = (write_idx − 1) % Numslots`). Because the producer
+    advances `write_idx` slightly faster than the consumer reads (latest-frame-wins design),
+    the sampled `slot` lands on a different value almost every report and looks non-sequential
+    — this is expected sampling aliasing, **not** uneven slot usage. On the actual data path
+    every slot is written and read in equal `0→1→2…` rotation; the per-frame `[DIAG]` lines
+    printed for the first 5 frames after each re-init show that clean consecutive rotation.
+
+#### Sender mode
+
+- **On:** every 150 frames (configurable via `CUDALINK_SENDER_REPORT_EVERY` env var), prints a
+  per-frame summary line:
+  ```
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=17.4 µs avg (write_idx=150)
+  ```
+  - **FPS** — frames published ÷ wall time since the first published frame
+  - **shape / dtype** — texture dimensions and pixel format
+  - **export** — running average of `Exporter.export()` wall time (profile-independent; always valid regardless of `CUDALINK_EXPORT_PROFILE`)
+  - **write_idx** — ring-buffer write index (matches the receiver's `write_idx` in steady state)
 
 Hot-swappable in both modes: can be toggled at runtime without affecting the pipeline.
 
@@ -206,7 +224,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.9.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.10.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.

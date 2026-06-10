@@ -42,6 +42,10 @@ _STRUCT = struct.Struct("<IIIIQII32s")
 
 assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {SHM_SIZE}"
 
+# Hot-path struct: reads only the fields returned by read_state, skipping reserved(32s).
+# unpack_from() reads directly from the memoryview — no intermediate bytes() copy.
+_ST_STATE = struct.Struct("<IIIIQI")  # magic version active_count pad last_change_ns barrier_skips
+
 
 def open_or_create(*, create: bool) -> SharedMemory:
     """Open the existing segment or create and initialise it.
@@ -67,10 +71,12 @@ def open_or_create(*, create: bool) -> SharedMemory:
 def read_state(shm: SharedMemory) -> tuple[int, int, int]:
     """Return (active_count, last_change_ns, barrier_skips).
 
-    Snapshot-reads the full 64-byte segment to avoid tearing.
+    Uses _ST_STATE.unpack_from() on the raw memoryview — no intermediate bytes()
+    copy per call.  Snapshot semantics are equivalent: reads the same 24 bytes in
+    one pass (fields 0-5; skips the 32-byte reserved tail).
     """
-    fields = _STRUCT.unpack(bytes(shm.buf[:SHM_SIZE]))
-    # (magic, version, active_count, pad, last_change_ns, barrier_skips, pid, reserved)
+    fields = _ST_STATE.unpack_from(shm.buf, 0)
+    # (magic, version, active_count, pad, last_change_ns, barrier_skips)
     return fields[2], fields[4], fields[5]
 
 

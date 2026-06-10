@@ -245,6 +245,7 @@ class TDReceiverEngine:
 
         self._connection = ReceiverConnection()
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
+        self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
@@ -264,6 +265,9 @@ class TDReceiverEngine:
         self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
         self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
         self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+        self._rx_start_frame: int = 0  # frame_count when _rx_start was seeded (session baseline)
+        self._rx_last_report_t: float = 0.0  # perf_counter at previous status line (0 = not yet reported)
+        self._rx_last_report_frame: int = 0  # frame_count at previous status line
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
@@ -326,6 +330,40 @@ class TDReceiverEngine:
             and bool(self._connection.dev_ptrs)
             and all(ptr is not None for ptr in self._connection.dev_ptrs)
         )
+
+    def has_new_frame(self) -> bool:
+        """Return True if the sender has new data or an engine action is needed.
+
+        Called from onFrameStart as a cheap SHM read before import_buffer.cook()
+        to skip idle cooks when the sender has not written a new frame.
+
+        Returns True in all cases where import_frame must run: init/retry,
+        version change, shutdown signal, or a new write_idx.
+
+        Returns False ONLY when all of these hold:
+          - receiver is fully initialized
+          - SHM is accessible
+          - write_idx equals our cursor (no new frame since last import)
+          - version field is unchanged (no sender restart)
+          - shutdown flag is 0
+        """
+        if not self._initialized:
+            return True  # retry/init path must run
+        shm = self._connection.shm_handle
+        if shm is None:
+            return True  # can't check; let import_frame decide
+        try:
+            buf = shm.buf
+            # Fast write_idx read — 4 bytes at WRITE_IDX_OFFSET
+            if struct.unpack_from("<I", buf, WRITE_IDX_OFFSET)[0] != self._connection.last_write_idx:
+                return True  # new frame available
+            # Check for sender restart (version change)
+            if struct.unpack_from("<Q", buf, VERSION_OFFSET)[0] != self._connection.ipc_version:
+                return True
+            # Check for sender shutdown signal; return False iff truly idle
+            return buf[self._connection.shutdown_offset] != 0
+        except (AttributeError, struct.error, ValueError, IndexError, OSError):
+            return True  # SHM unreadable; let import_frame handle it
 
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
@@ -416,6 +454,7 @@ class TDReceiverEngine:
             _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
             if self._rx_start == 0.0:
                 self._rx_start = time.perf_counter()
+                self._rx_start_frame = self.frame_count  # session baseline for windowed FPS
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -509,14 +548,26 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
-            _fmt_name = td_format_string(self._format)
-            self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
+            if not self._last_fmt_status:
+                # Rebuild only when format changed (initialize_receiver and update_receiver_format
+                # reset this to "" so the first frame after a format change always rebuilds).
+                _fmt_name = td_format_string(self._format)
+                self._last_fmt_status = f"{self._format.width}x{self._format.height} {_fmt_name}"
+            self._host.set_info_status(self._last_fmt_status)
 
             # Debug summary line — matches standalone Python receiver format
             if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
                 _now = time.perf_counter()
-                _elapsed = _now - self._rx_start
-                _fps = self.frame_count / _elapsed if _elapsed > 0 else 0.0
+                if self._rx_last_report_t == 0.0:
+                    # First report this session — seed window from first-frame timestamp so the
+                    # one-time startup/IPC-open latency doesn't dilute subsequent FPS readings.
+                    # Use _rx_start_frame (not 0) so lifetime frame_count doesn't inflate the
+                    # first window after a reconnect (frame_count is never reset across sessions).
+                    self._rx_last_report_t = self._rx_start
+                    self._rx_last_report_frame = self._rx_start_frame
+                _window_dt = _now - self._rx_last_report_t
+                _window_frames = self.frame_count - self._rx_last_report_frame
+                _fps = _window_frames / _window_dt if _window_dt > 0 else 0.0
                 _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
                 _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
                 self._log(
@@ -526,6 +577,8 @@ class TDReceiverEngine:
                     f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
                     f"(slot={read_slot}, write_idx={write_idx})"
                 )
+                self._rx_last_report_t = _now
+                self._rx_last_report_frame = self.frame_count
 
             return True
 
@@ -671,7 +724,7 @@ class TDReceiverEngine:
                 try:
                     _shm_mv = memoryview(bytes(shm_handle.buf))  # bytes copy: no mmap exported pointer
                     _md = Metadata.read_from(_shm_mv, layout)
-                except Exception as _e:  # noqa: BLE001
+                except (struct.error, ValueError, IndexError) as _e:
                     self._log(f"Failed to read SHM metadata: {_e}", force=True)
                     shm_handle.close()
                     return False
@@ -812,6 +865,7 @@ class TDReceiverEngine:
                 last_write_idx=0,
             )
             self._format = Format.from_metadata(_md)
+            self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
@@ -891,7 +945,7 @@ class TDReceiverEngine:
                                     memptr=_memptr,
                                 )
                             )
-                    except Exception as _e:
+                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError; keep broad so alloc failures always degrade to CPU fallback
                         self._cupy_f32_buf = None
                         self._cupy_f16_views = []
                         self._log(
@@ -979,6 +1033,11 @@ class TDReceiverEngine:
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+        # Reset per-session perf tracking so reconnects get a fresh window baseline
+        self._rx_start = 0.0
+        self._rx_start_frame = 0
+        self._rx_last_report_t = 0.0
+        self._rx_last_report_frame = 0
 
     def _refresh_on_version_change(self, new_version: int) -> bool:
         """Refresh format and IPC handles in-place after a sender version bump.
@@ -1072,6 +1131,7 @@ class TDReceiverEngine:
         # Rebuild format from the validated Metadata
         prev_format = self._format
         self._format = Format.from_metadata(_md)
+        self._last_fmt_status = ""  # force status string rebuild after version-change refresh
 
         # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:

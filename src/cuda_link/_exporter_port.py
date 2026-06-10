@@ -265,6 +265,10 @@ class CudaPort(Protocol):
         """Record event on stream (None → default stream)."""
         ...
 
+    def record_event_external(self, event: CUDAEvent_t, stream: CUDAStream_t) -> None:
+        """Record event with CUDA_EVENT_RECORD_EXTERNAL flag (for in-graph IPC events)."""
+        ...
+
     def destroy_event(self, event: CUDAEvent_t) -> None:
         """Destroy a CUDA event."""
         ...

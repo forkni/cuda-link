@@ -495,14 +495,28 @@ The default differs between the two producer implementations:
 
 | Producer | Default | Rationale |
 |---|---|---|
-| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (sync-free) | Python senders are standalone; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
-| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking) | Shared-process topologies — TD Sender and TD Receiver in the same TouchDesigner process — require the blocking sync as a hard ordering guarantee. Switching to async without full cycle-2 regression testing risks subtle TDR-cascade failures. |
+| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (async) | Python senders are standalone; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
+| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=0` (async, default since v1.10.0) | Async is the default end-to-end. Coexistence safety (TD Sender + TD Receiver in the same process) is provided by two distinct mechanisms — see below. `EXPORT_SYNC=1` opt-in remains available for legacy deployments. |
 
-Do **not** change `TDConfig.py` defaults. TD users running a standalone Python-side
-sender (i.e. not using TDSender at all) benefit automatically from the library
-default. TD Sender users who want the async path must set `EXPORT_SYNC=0` per-session
-via env var after validating with cycle-2 regression testing (TD Sender + TD Receiver
-in the same TD instance, sustained for multiple session reconnect cycles).
+**Coexistence safety in v1.10.0+ does NOT rely on blocking export.** There are two
+distinct stream hazards, both fixed by explicit stream management:
+
+1. **Receiver-side teardown TDR** (fixed since v1.4.1, `0918914`/F8 `0556197`): WDDM
+   held stale CUDA↔D3D11 interop registrations when the receiver stream and IPC handles
+   were torn down across deactivate→reactivate cycles → `DXGI_ERROR_DEVICE_REMOVED` → TDR.
+   Fixed by **dedicated, persistent per-engine streams** (`CUDALINK_TD_PERSIST_STREAM=1`,
+   default; `b7d51c1`, F7/F8 `3f6d1c2`/`0556197`). A blunt per-frame
+   `cudaStreamSynchronize` on the sender never addressed this teardown-lifecycle hazard.
+
+2. **Producer-side cross-stream race** (fixed since v1.9.0, `d2d4674` / SD `346a59f`):
+   cuda-link's high-priority non-blocking IPC stream can race the producer's default-stream
+   pack kernels → half-written BGRA buffer → torn gray frame. Fixed by **producer-stream
+   ordering** (`record_source_sync` / `require_source_sync`; see "Producer-Stream Ordering"
+   in `ARCHITECTURE.md`).
+
+`EXPORT_SYNC=1` was a conservative belt-and-suspenders default that addressed neither root
+cause. It has been retired as the TD Sender default; explicit stream management is the
+correct and verified mechanism.
 
 ### Prerequisites
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cuda_link._env import env_bool, env_int, env_str
+from cuda_link._env import env_bool, env_bool_opt, env_int, env_str
 
 
 class TestEnvBool:
@@ -57,6 +57,30 @@ class TestEnvInt:
     def test_empty_string_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CUDALINK_TEST_INT", "")
         assert env_int("CUDALINK_TEST_INT", default=3) == 3
+
+
+class TestEnvBoolOpt:
+    """env_bool_opt returns None when absent, True/False when set."""
+
+    def test_absent_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CUDALINK_TEST_OPT", raising=False)
+        assert env_bool_opt("CUDALINK_TEST_OPT") is None
+
+    def test_one_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CUDALINK_TEST_OPT", "1")
+        assert env_bool_opt("CUDALINK_TEST_OPT") is True
+
+    def test_zero_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CUDALINK_TEST_OPT", "0")
+        assert env_bool_opt("CUDALINK_TEST_OPT") is False
+
+    def test_empty_string_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CUDALINK_TEST_OPT", "")
+        assert env_bool_opt("CUDALINK_TEST_OPT") is False
+
+    def test_arbitrary_string_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CUDALINK_TEST_OPT", "yes")
+        assert env_bool_opt("CUDALINK_TEST_OPT") is False
 
 
 class TestEnvStr:

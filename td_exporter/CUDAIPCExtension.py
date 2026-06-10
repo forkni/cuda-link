@@ -293,6 +293,16 @@ class CUDAIPCExtension:
         """Delegate to host's active-parameter check (hot-path safe)."""
         return self._host.is_active()
 
+    def has_new_frame(self) -> bool:
+        """Return True when the receiver engine has new data or needs to run.
+
+        Delegates to TDReceiverEngine.has_new_frame() in Receiver mode.
+        Always returns True in Sender mode (unused code path there).
+        """
+        if self._mode != "Receiver":
+            return True
+        return self._engine.has_new_frame()
+
     def initialize_receiver(self) -> bool:
         """Delegate to receiver engine's initialize_receiver() (backward compat)."""
         return self._engine.initialize_receiver()
@@ -313,8 +323,8 @@ class CUDAIPCExtension:
         if new_mode == self._mode:
             return
         self._log(f"Switching mode: {self._mode} -> {new_mode}", force=True)
-        # Tear down old engine (guaranteed no state leak — new engine is a fresh instance)
-        self._engine.cleanup()
+        # Tear down old engine via full cleanup() so the receiver registry is updated.
+        self.cleanup()
         self._mode = new_mode
         # When switching to Sender: re-read num_slots from UI (receiver may have updated it)
         if new_mode == "Sender":

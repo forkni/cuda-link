@@ -157,10 +157,11 @@ def make_connected_importer(
     # Resolve the numpy backend: explicit arg wins, then with_numpy auto-build.
     if numpy is None and with_numpy:
         mock_stream = MagicMock()
+        _buf = np.zeros(shape, dtype=np.dtype(dtype))
         numpy = NumpyBuffers(
             cuda=mock_cuda,
             fmt=fmt,
-            buffer=np.zeros(shape, dtype=np.dtype(dtype)),
+            buffer=_buf,
             pinned_ptr=None,
             host_registered_arr=None,
             pinned_memory_available=False,
@@ -168,6 +169,7 @@ def make_connected_importer(
             d2h_streams=[mock_stream],
             num_streams=1,
             chunk_plan=[],
+            buffer_ptr=c_void_p(_buf.ctypes.data),
         )
 
     spec = ImportSpec(shm_name="fake", device=0, timeout_ms=timeout_ms, shape=shape, dtype=dtype)

@@ -221,7 +221,7 @@ class RealTOPHandle(TOPHandle):
                 self._top.cook()
 
     def set_format(self, fmt: str) -> None:
-        with contextlib.suppress(AttributeError, RuntimeError, Exception):
+        with contextlib.suppress(AttributeError, RuntimeError):
             self._top.par.format = fmt
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:

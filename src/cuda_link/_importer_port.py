@@ -59,6 +59,12 @@ class ImportPolicy:
     d2h_num_streams: int = 1
     d2h_stream_high_priority: bool = False
     allow_pageable_fallback: bool = False
+    # opt-in pipelined D2H — enqueue current slot's copy, return previous frame.
+    # First call returns NO_FRAME; steady-state adds +1 frame latency in exchange for
+    # overlapping D2H with consumer CPU work.  Only beneficial when consumer takes
+    # longer than D2H copy time (~0.5–2 ms for 4K RGBA).
+    # Full double-buffer implementation is pending GPU benchmark validation (see Plan §4).
+    d2h_pipelined: bool = False
     debug: bool = False
     reconnect_enabled: bool = True
     reconnect_max_attempts: int = 20
@@ -72,6 +78,7 @@ class ImportPolicy:
             d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
+            d2h_pipelined=env_bool("CUDALINK_D2H_PIPELINED", default=False),
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),

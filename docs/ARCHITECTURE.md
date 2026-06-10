@@ -361,6 +361,21 @@ exporter.export(GpuFrame(ptr=staging_ptr, size=nbytes, producer_stream=0))
 Set `require_source_sync=True` in `ExportPolicy` or `CUDALINK_REQUIRE_SOURCE_SYNC=1` to enforce
 ordering at call sites during development.
 
+#### Export-Sync Default and Coexistence Safety
+
+`export_frame()` defaults to **async** (`CUDALINK_EXPORT_SYNC` unset or `0`). The
+`CUDALINK_EXPORT_SYNC=1` (blocking) opt-in is still available for legacy deployments, but
+is no longer required for coexistence safety. Both coexistence hazards are addressed by
+explicit stream management:
+
+- **Receiver teardown TDR** — eliminated by dedicated, persistent per-engine streams
+  (`CUDALINK_TD_PERSIST_STREAM=1`, default since v1.4.1). No sender-side sync needed.
+- **Producer-side cross-stream race** — eliminated by `record_source_sync` /
+  `require_source_sync` (see above). `CUDALINK_EXPORT_SYNC=1` was a blunt CPU-blocking
+  sync *after* the memcpy and never prevented the race.
+
+See `docs/PROFILING.md §8 EXPORT_SYNC defaults` for the full hazard analysis and timeline.
+
 ---
 
 ### Fallback: CPU Synchronization
