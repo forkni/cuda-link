@@ -245,6 +245,7 @@ class TDReceiverEngine:
 
         self._connection = ReceiverConnection()
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
+        self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
@@ -509,8 +510,12 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
-            _fmt_name = td_format_string(self._format)
-            self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
+            if not self._last_fmt_status:
+                # Rebuild only when format changed (initialize_receiver and update_receiver_format
+                # reset this to "" so the first frame after a format change always rebuilds).
+                _fmt_name = td_format_string(self._format)
+                self._last_fmt_status = f"{self._format.width}x{self._format.height} {_fmt_name}"
+            self._host.set_info_status(self._last_fmt_status)
 
             # Debug summary line — matches standalone Python receiver format
             if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
@@ -812,6 +817,7 @@ class TDReceiverEngine:
                 last_write_idx=0,
             )
             self._format = Format.from_metadata(_md)
+            self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
@@ -1072,6 +1078,7 @@ class TDReceiverEngine:
         # Rebuild format from the validated Metadata
         prev_format = self._format
         self._format = Format.from_metadata(_md)
+        self._last_fmt_status = ""  # force status string rebuild after version-change refresh
 
         # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:

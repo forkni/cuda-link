@@ -63,7 +63,11 @@ _NVTX_CUPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_fram
 # timeBeginPeriod/timeEndPeriod return their status directly (TIMERR_NOERROR=0,
 # TIMERR_NOCANDO=97); they do NOT use GetLastError, so use_last_error is omitted.
 _TIMERR_NOCANDO = 97  # mmsystem.h TIMERR_NOCANDO — period granularity unsupported
-if sys.platform == "win32":
+if sys.platform == "win32" and sys.version_info < (3, 11):
+    # CPython 3.11+ uses a high-resolution waitable timer on Windows (100 ns class),
+    # so timeBeginPeriod is unnecessary and the syscall pair would be wasted work.
+    # On 3.10 and earlier, timeBeginPeriod(1) reduces time.sleep()'s floor from ~15 ms
+    # to ~1 ms — see cpython/issues/89592 and What's New in Python 3.11.
     try:
         _winmm = ctypes.WinDLL("winmm")
         _winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
@@ -410,6 +414,7 @@ class NumpyBuffers:
     d2h_streams: list
     num_streams: int
     chunk_plan: list  # [(offset, size), ...] for multi-stream D2H; empty when num_streams <= 1
+    buffer_ptr: object  # ctypes.c_void_p | None — precomputed dst for D2H copy (fixed for buffer lifetime)
 
     @classmethod
     def build(
@@ -512,6 +517,7 @@ class NumpyBuffers:
             d2h_streams=d2h_streams,
             num_streams=num_streams,
             chunk_plan=chunk_plan,
+            buffer_ptr=ctypes.c_void_p(buffer.ctypes.data) if buffer is not None else None,
         )
 
     def needs_rebuild(self, fmt: Format) -> bool:
@@ -532,6 +538,7 @@ class NumpyBuffers:
             # Clearing here ensures post-close access fails loudly (AttributeError on None)
             # instead of silently touching freed GPU memory.
             self.buffer = None
+            self.buffer_ptr = None  # precomputed pointer into freed allocation — clear it
 
         if self.host_registered_arr is not None:
             try:
@@ -678,7 +685,7 @@ class _NumpyBackend:
             n_streams = nb.num_streams
             if n_streams <= 1:
                 conn.cuda.memcpy_async(
-                    dst=nb.buffer.ctypes.data_as(ctypes.c_void_p),
+                    dst=nb.buffer_ptr,  # precomputed c_void_p; stable for buffer lifetime
                     src=conn.dev_ptrs[read_slot],
                     count=nbytes,
                     kind=2,  # cudaMemcpyDeviceToHost
@@ -770,6 +777,11 @@ class Importer:
         self._cupy: CupyBuffers | None = None
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
+
+        # Cached backend instance for the numpy path — _NumpyBackend holds only a reference
+        # to this Importer and accesses _numpy dynamically, so the instance is valid for the
+        # Importer's lifetime.  Avoids one object allocation per get_frame_numpy() call.
+        self._numpy_backend: _NumpyBackend | None = None
 
         # Reconnect state machine (None when reconnect_enabled=False)
         self._retry: _RetryState | None = (
@@ -1285,7 +1297,9 @@ class Importer:
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
-        return self._consume_frame(_NumpyBackend(self))
+        if self._numpy_backend is None:
+            self._numpy_backend = _NumpyBackend(self)
+        return self._consume_frame(self._numpy_backend)
 
     def get_frame_cupy(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy CuPy ndarray on GPU.

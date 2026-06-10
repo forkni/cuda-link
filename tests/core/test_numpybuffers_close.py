@@ -17,6 +17,7 @@ with a MagicMock cuda adapter and a real small numpy array as the buffer.
 
 from __future__ import annotations
 
+import ctypes
 import types
 from unittest.mock import MagicMock
 
@@ -50,10 +51,11 @@ def _make_nb(
     chunk_plan=None,
 ) -> NumpyBuffers:
     """Build a NumpyBuffers with a MagicMock cuda adapter and real numpy buffer."""
+    _buf = np.zeros(buffer_shape, dtype=buffer_dtype)
     return NumpyBuffers(
         cuda=MagicMock(),
         fmt=_make_fmt(shape=buffer_shape, dtype=buffer_dtype),
-        buffer=np.zeros(buffer_shape, dtype=buffer_dtype),
+        buffer=_buf,
         pinned_ptr=pinned_ptr,
         host_registered_arr=host_registered_arr,
         pinned_memory_available=(pinned_ptr is not None),
@@ -61,6 +63,7 @@ def _make_nb(
         d2h_streams=d2h_streams if d2h_streams is not None else [MagicMock()],
         num_streams=num_streams,
         chunk_plan=chunk_plan if chunk_plan is not None else [],
+        buffer_ptr=ctypes.c_void_p(_buf.ctypes.data),
     )
 
 
@@ -88,6 +91,7 @@ def test_close_nulls_buffer_and_ptr_on_pinned_path() -> None:
 
     # Core UAF guard assertions
     assert nb.buffer is None, "buffer must be nulled after freeing pinned allocation"
+    assert nb.buffer_ptr is None, "buffer_ptr must be cleared alongside buffer (stale pointer guard)"
     assert nb.pinned_ptr is None, "pinned_ptr must be cleared after free_host"
 
     # free_host called with the original ptr
