@@ -106,7 +106,7 @@ def _read_hws_mode() -> str:
         value, _ = winreg.QueryValueEx(key, "HwSchMode")
         winreg.CloseKey(key)
         return str(value)
-    except OSError:
+    except (ImportError, OSError):  # ImportError: winreg is Windows-only
         return "unknown"
 
 
