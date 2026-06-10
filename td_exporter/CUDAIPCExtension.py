@@ -293,6 +293,16 @@ class CUDAIPCExtension:
         """Delegate to host's active-parameter check (hot-path safe)."""
         return self._host.is_active()
 
+    def has_new_frame(self) -> bool:
+        """Return True when the receiver engine has new data or needs to run.
+
+        Delegates to TDReceiverEngine.has_new_frame() in Receiver mode.
+        Always returns True in Sender mode (unused code path there).
+        """
+        if self._mode != "Receiver":
+            return True
+        return self._engine.has_new_frame()
+
     def initialize_receiver(self) -> bool:
         """Delegate to receiver engine's initialize_receiver() (backward compat)."""
         return self._engine.initialize_receiver()

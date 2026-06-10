@@ -328,6 +328,40 @@ class TDReceiverEngine:
             and all(ptr is not None for ptr in self._connection.dev_ptrs)
         )
 
+    def has_new_frame(self) -> bool:
+        """Return True if the sender has new data or an engine action is needed.
+
+        Called from onFrameStart as a cheap SHM read before import_buffer.cook()
+        to skip idle cooks when the sender has not written a new frame.
+
+        Returns True in all cases where import_frame must run: init/retry,
+        version change, shutdown signal, or a new write_idx.
+
+        Returns False ONLY when all of these hold:
+          - receiver is fully initialized
+          - SHM is accessible
+          - write_idx equals our cursor (no new frame since last import)
+          - version field is unchanged (no sender restart)
+          - shutdown flag is 0
+        """
+        if not self._initialized:
+            return True  # retry/init path must run
+        shm = self._connection.shm_handle
+        if shm is None:
+            return True  # can't check; let import_frame decide
+        try:
+            buf = shm.buf
+            # Fast write_idx read — 4 bytes at WRITE_IDX_OFFSET
+            if struct.unpack_from("<I", buf, WRITE_IDX_OFFSET)[0] != self._connection.last_write_idx:
+                return True  # new frame available
+            # Check for sender restart (version change)
+            if struct.unpack_from("<Q", buf, VERSION_OFFSET)[0] != self._connection.ipc_version:
+                return True
+            # Check for sender shutdown signal; return False iff truly idle
+            return buf[self._connection.shutdown_offset] != 0
+        except (AttributeError, struct.error, ValueError, IndexError, OSError):
+            return True  # SHM unreadable; let import_frame handle it
+
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
         return {
