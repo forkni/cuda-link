@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-06-10
+
+### Fixed
+
+- **TD Sender producer-side async source-buffer lifetime race (CUDA 719).** In 1.10.0,
+  `export_frame()` defaulted to async export (`CUDALINK_EXPORT_SYNC` unset → async).  The
+  TD source is TD's cook-scoped TOP texture (`cm.ptr`) — reclaimed the instant the cook
+  returns.  Under a loaded consumer (e.g. SD's TRT inference saturating the GPU) the queued
+  async D2D read executed *after* TD recycled the source, reading freed memory → sticky CUDA
+  `cudaErrorLaunchFailure` (719), cascading through the consumer's CUDA context.
+  **Root cause (confirmed by Loop A — `CUDALINK_EXPORT_SYNC=1` eliminated the crash):**
+  Hypothesis #2 — producer-side async source-buffer lifetime race.  `record_source_sync` /
+  `_arm_same_stream_ordering` is a *pre-copy ordering* primitive only (ensures the source is
+  fully written before the copy *starts*) — it does **not** guarantee the source outlives the
+  queued async read.  The only mechanism that closes that window is a post-copy
+  `stream_synchronize(ipc_stream)`.
+  **Fix:** The **TD Sender now blocks by default** — `CUDALINK_EXPORT_SYNC` unset (or `None`)
+  resolves to blocking, matching the 1.9.0 behavior.  Explicit `CUDALINK_EXPORT_SYNC=0` opts
+  back into async for callers that own a persistent source buffer with explicit lifetime
+  management.  The async default introduced in 1.10.0 is correct for the Python `Exporter`
+  API (caller owns a stable buffer + passes `producer_stream`) but unsafe for the TD Sender
+  whose source is externally-owned and transient.
+  Regression seam: `TDSenderEngine._resolve_export_sync` (GPU-free, testable static method);
+  locked by `tests/td/test_tdsender_export_sync_default.py`.
+- **`Exporter.close()` races in-flight async D2D copies (latent CUDA 719).**
+  `_do_cleanup()` previously destroyed IPC events/stream and freed GPU ring-buffer slots
+  without first synchronizing the IPC stream.  An async export returning before the D2D
+  completes (geometry/dtype-change reopen, or any explicit `exporter.close()` call) could
+  free the destination buffers under a running copy.  Fix: a new STEP 1b in `_do_cleanup`
+  issues `stream_synchronize(ipc_stream)` before any teardown of GPU resources.
+
 ## [1.10.0] — 2026-06-10
 
 ### Added

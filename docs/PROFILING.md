@@ -458,6 +458,13 @@ the WDDM scheduling mode in effect during that capture.
 Standalone Python-sender deployments where no TD-Sender process shares the CUDA
 context. Validated in the v5 nsys capture (findings documented in `td_pipeline_v5_findings_extended.md` in contributor archives).
 
+> **Note — TD Sender users:** The **TD Sender** (TouchDesigner `CUDAIPCExtension` Sender
+> COMP) defaults to **blocking** export as of v1.10.1 because its source is TD's transient
+> cook-scoped TOP texture (`cm.ptr`), which TD reclaims immediately after the cook.  Async
+> export returns before the D2D copy reads the source, causing reads-freed-memory (CUDA 719)
+> under a loaded consumer.  This section applies only to standalone Python `Exporter` callers
+> with a **persistent, caller-owned** source buffer.  See CHANGELOG 1.10.1 and ADR-0001.
+
 ### Flags
 
 ```cmd

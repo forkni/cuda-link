@@ -65,3 +65,39 @@ When applying this template to a new module `foo`:
 - [ ] `tests/test_foo_deprecation.py` — shim emits warning exactly once
 - [ ] `docs/MIGRATION_v<N>.md` — before/after migration guide
 - [ ] `CHANGELOG.md` — entry under `[Unreleased]`
+
+---
+
+## Resolution note (2026-06-10): Async export and source-buffer lifetime
+
+**Context:** In 1.10.0, `export_frame()` was made async by default (`CUDALINK_EXPORT_SYNC`
+unset → async).  This surfaced a **source-buffer lifetime race** when the TD Sender
+integrated with StreamDiffusion (CUDA 719, confirmed by `/diagnose` Loop A).
+
+**Root cause:** `Exporter.export()` reads the caller's source pointer *directly* — there
+is no staging buffer.  For the Python `Exporter` API the caller owns a persistent source
+buffer and passes `producer_stream`, so async export is correct.  For the **TD Sender**,
+the source is TD's cook-scoped `TOP` texture (`cm.ptr`) — an **externally-owned, transient**
+pointer reclaimed by TD the instant the cook returns.  Async export lets TD reclaim the
+source while the queued IPC-stream D2D copy is still executing → reads freed memory → 719.
+
+**Critical distinction — ordering vs. lifetime:**
+- `record_source_sync` / `producer_stream` / `_arm_same_stream_ordering` are **pre-copy
+  ordering** primitives: they guarantee the source is fully *written* before the copy
+  starts.  They do **not** guarantee the source outlives the queued read.
+- `CUDALINK_EXPORT_SYNC=1` (post-copy `stream_synchronize`) is the **source-lifetime
+  guard**: it blocks the CPU until the D2D finishes, so the source pointer is provably
+  safe to release when `export()` returns.  The two primitives are not substitutes.
+
+**Fix (v1.10.1):** The TD Sender defaults to blocking export (`None` → sync via
+`TDSenderEngine._resolve_export_sync`).  Explicit `CUDALINK_EXPORT_SYNC=0` opts into async
+for callers with a guaranteed-stable source.  `Exporter._do_cleanup` now synchronizes the
+IPC stream (STEP 1b) before destroying GPU resources — closes the same race on geometry/
+dtype-change reopens and any explicit `close()` call under async export.
+
+**Architectural implication for this template:** When applying the Exporter template to new
+modules, document whether the source buffer is **caller-owned + persistent** (async export
+safe) or **externally-owned + transient** (blocking export required).  If an adapter sits
+between an external resource manager and `Exporter.export()` (as TDSender does for TD's
+`cudaMemory()` textures), the adapter MUST guarantee source-buffer lifetime before returning
+control to the resource manager — the Exporter itself cannot do this without a post-copy sync.
