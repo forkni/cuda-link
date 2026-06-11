@@ -51,7 +51,7 @@ class ReportWindow:
     seeded from the session baseline) and advances the window.
     """
 
-    __slots__ = ("start_t", "start_frame", "last_t", "last_frame")
+    __slots__ = ("start_t", "start_frame", "last_t", "last_frame", "_acc_sum", "_acc_n")
 
     def __init__(self) -> None:
         self.reset()
@@ -77,9 +77,26 @@ class ReportWindow:
         self.last_frame = frame
         return fps
 
+    def add_sample(self, value: float) -> None:
+        """Accumulate one per-frame measurement (export/copy seconds) into the
+        current report window.  Consumed and cleared by avg_and_reset()."""
+        self._acc_sum += value
+        self._acc_n += 1
+
+    def avg_and_reset(self) -> float:
+        """Mean of samples accumulated since the last report; clears the
+        accumulator so the next window starts fresh.  Returns 0.0 if no samples
+        were recorded (e.g. verbose was off for the whole window)."""
+        avg = self._acc_sum / self._acc_n if self._acc_n else 0.0
+        self._acc_sum = 0.0
+        self._acc_n = 0
+        return avg
+
     def reset(self) -> None:
         """Clear all state so the next session starts with a fresh window."""
         self.start_t = 0.0
         self.start_frame = 0
         self.last_t = 0.0
         self.last_frame = 0
+        self._acc_sum = 0.0
+        self._acc_n = 0

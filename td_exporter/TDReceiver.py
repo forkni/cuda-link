@@ -266,7 +266,6 @@ class TDReceiverEngine:
 
         # Per-frame performance tracking for Debug summary line — shares
         # ReportWindow with TDSenderEngine.
-        self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
         self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
         self._rx_window = ReportWindow()
 
@@ -534,7 +533,7 @@ class TDReceiverEngine:
                     stream=int(self._connection.stream.value),
                 )
 
-            self._copy_total_s += time.perf_counter() - _t_copy_wall
+            self._rx_window.add_sample(time.perf_counter() - _t_copy_wall)
 
             if _diag:
                 _copy_ms = (time.perf_counter() - _t_copy) * 1000.0
@@ -560,7 +559,7 @@ class TDReceiverEngine:
                 _now = time.perf_counter()
                 _fps = self._rx_window.fps(_now, self.frame_count)
                 _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
-                _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
+                _avg_copy_us = self._rx_window.avg_and_reset() * 1e6
                 self._log(
                     f"Frame {self.frame_count:5d} | {_fps:5.1f} FPS | "
                     f"shape=({self._format.height}, {self._format.width}, {self._format.num_comps}) "

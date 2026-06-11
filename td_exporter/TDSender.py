@@ -234,8 +234,7 @@ class TDSenderEngine:
         # Windowed periodic stats report — shares ReportWindow with TDReceiverEngine.
         # All timing is engine-local; does not depend on export_profile being enabled.
         self._tx_report_every: int = env_int("CUDALINK_SENDER_REPORT_EVERY", default=150)
-        self._tx_window = ReportWindow()
-        self._export_total_s: float = 0.0  # cumulative export() wall time (seconds)
+        self._tx_window = ReportWindow()  # owns FPS window + per-frame export-time accumulator
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -324,7 +323,7 @@ class TDSenderEngine:
             return
         _now = now if now is not None else time.perf_counter()
         _fps = self._tx_window.fps(_now, n)
-        _avg_export_us = (self._export_total_s / n) * 1e6 if n > 0 else 0.0
+        _avg_export_us = self._tx_window.avg_and_reset() * 1e6
         spec = self._current_spec
         self._log(
             f"Frame {n:5d} | {_fps:5.1f} FPS | "
@@ -333,16 +332,17 @@ class TDSenderEngine:
         )
 
     def _reset_report_window(self) -> None:
-        """Clear windowed-FPS state so the next report starts a fresh window.
+        """Clear windowed-FPS and export-time state so the next report starts a fresh window.
 
         Called on cleanup() and after a geometry/dtype-change Exporter reopen —
         the new Exporter restarts frame_count at 0, so a carried-over window
-        baseline would yield a negative frame delta (negative FPS) and divide
-        the old session's cumulative export time by the small new count.
-        (The receiver avoids this entirely via a lifetime-monotonic counter.)
+        baseline would yield a negative frame delta (negative FPS).  Resetting
+        also clears the per-window export-time accumulator so the first windowed
+        average after a format change reflects only the new session.
+        (The receiver avoids the frame-count reset entirely via its
+        lifetime-monotonic counter design.)
         """
-        self._tx_window.reset()
-        self._export_total_s = 0.0
+        self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -785,7 +785,7 @@ class TDSenderEngine:
 
             if outcome is FrameOutcome.PUBLISHED:
                 _now = time.perf_counter()
-                self._export_total_s += _now - _t_export
+                self._tx_window.add_sample(_now - _t_export)
                 if not self._tx_window.started:
                     # Seed the window at the first published frame so IPC-open latency
                     # (same startup-delay guard the receiver uses) doesn't dilute FPS.
