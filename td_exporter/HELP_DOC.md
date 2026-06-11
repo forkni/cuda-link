@@ -223,7 +223,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.10.2.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.10.3.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -312,7 +312,7 @@ Tuning table for break-even thresholds (1080p ~0.38 ms workload, 4K ~1.3 ms).
   `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
   set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis.  Upgrade to
-  `CUDAIPCLink_v1.10.2.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v1.10.3.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 
