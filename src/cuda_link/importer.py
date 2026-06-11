@@ -861,10 +861,12 @@ class Importer:
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
 
-        # Cached backend instance for the numpy path — _NumpyBackend holds only a reference
-        # to this Importer and accesses _numpy dynamically, so the instance is valid for the
-        # Importer's lifetime.  Avoids one object allocation per get_frame_numpy() call.
+        # Cached backend instances — each holds only a back-ref to this Importer
+        # plus (for torch/cupy) the per-call stream, refreshed in-place rather than
+        # constructing a new object each frame.  Avoids one allocation per get_frame* call.
         self._numpy_backend: _NumpyBackend | None = None
+        self._torch_backend: _TorchBackend | None = None
+        self._cupy_backend: _CupyBackend | None = None
 
         # Reconnect state machine (None when reconnect_enabled=False)
         self._retry: _RetryState | None = (
@@ -1369,7 +1371,11 @@ class Importer:
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
-        return self._consume_frame(_TorchBackend(self, stream))
+        if self._torch_backend is None:
+            self._torch_backend = _TorchBackend(self, stream)
+        else:
+            self._torch_backend._stream = stream
+        return self._consume_frame(self._torch_backend)
 
     def get_frame_numpy(self) -> ImportResult:
         """Get current frame as a numpy ndarray (CPU; involves D2H copy).
@@ -1411,7 +1417,11 @@ class Importer:
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
-        return self._consume_frame(_CupyBackend(self, stream))
+        if self._cupy_backend is None:
+            self._cupy_backend = _CupyBackend(self, stream)
+        else:
+            self._cupy_backend._stream = stream
+        return self._consume_frame(self._cupy_backend)
 
     # ------------------------------------------------------------------
     # Re-initialization (producer restarted with new IPC handles)

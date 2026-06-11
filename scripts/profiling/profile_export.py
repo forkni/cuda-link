@@ -144,7 +144,7 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--channels", type=int, default=4)
     parser.add_argument("--dtype", default="uint8", choices=["uint8", "float32", "float16"])
-    parser.add_argument("--slot-count", type=int, default=2, dest="slot_count")
+    parser.add_argument("--slot-count", type=int, default=3, dest="slot_count")
     parser.add_argument(
         "--outfile",
         default=".profiling/baseline.json",
