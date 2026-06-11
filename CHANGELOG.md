@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2] — 2026-06-11
+
+### Performance
+
+- **P11 — Receiver skips idle Script-TOP cooks.** `TDReceiverEngine.has_new_frame()`
+  does a cheap SHM `write_idx` / version / shutdown probe before
+  `import_buffer.cook(force=True)` in `callbacks_template.py:onFrameStart`.  When
+  the producer has not written a new frame the cook is skipped entirely — one
+  Script-TOP cook and all its Python overhead saved per idle TD frame.  Zero effect
+  when producer ≥ TD rate; large effect for slow producers (e.g. 30 FPS AI inference
+  into a 60 FPS TD project).  Covered by `tests/td/test_tdreceiver_has_new_frame.py`.
+- **P8 — Fewer per-frame allocations on the import hot path.**
+  `get_frame()` (`_TorchBackend`) and `get_frame_cupy()` (`_CupyBackend`) now cache
+  their backend instance and update `_stream` in-place instead of constructing a new
+  object on every call, matching the existing `_NumpyBackend` pattern.
+  `AcquireResult` is now a `NamedTuple` instead of a `@dataclass`, eliminating the
+  per-call `__dict__` allocation inside `acquire_slot` on the consumer hot path.
+  Covered by `tests/core/test_backend_reuse.py`.
+
 ## [1.10.1] — 2026-06-10
 
 ### Fixed
