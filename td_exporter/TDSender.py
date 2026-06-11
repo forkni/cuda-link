@@ -332,6 +332,18 @@ class TDSenderEngine:
             f"export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
         )
 
+    def _reset_report_window(self) -> None:
+        """Clear windowed-FPS state so the next report starts a fresh window.
+
+        Called on cleanup() and after a geometry/dtype-change Exporter reopen —
+        the new Exporter restarts frame_count at 0, so a carried-over window
+        baseline would yield a negative frame delta (negative FPS) and divide
+        the old session's cumulative export time by the small new count.
+        (The receiver avoids this entirely via a lifetime-monotonic counter.)
+        """
+        self._tx_window.reset()
+        self._export_total_s = 0.0
+
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
 
@@ -722,6 +734,7 @@ class TDSenderEngine:
                 )
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
+                self._reset_report_window()  # new Exporter restarts frame_count at 0; stale window → negative FPS
 
                 self._arm_same_stream_ordering()  # re-arm on the new Exporter's IPC stream
 
@@ -822,8 +835,7 @@ class TDSenderEngine:
         self._warned_format = False
 
         # Reset windowed-report state so the next activation starts with a fresh window.
-        self._tx_window.reset()
-        self._export_total_s = 0.0
+        self._reset_report_window()
 
         self._host.clear_status()
         self._host.set_param_enabled("Numslots", True)

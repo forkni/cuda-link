@@ -205,3 +205,76 @@ def test_cleanup_resets_window_state():
     assert engine._export_total_s == 0.0
     assert engine._tx_window.start_frame == 0
     assert engine._tx_window.last_frame == 0
+
+
+def test_reset_report_window_clears_state():
+    """_reset_report_window() is callable standalone and zeros all window state.
+
+    This exercises the helper used by the geometry/dtype-change reopen path — so
+    tests can verify it exists and works independent of cleanup().
+    """
+    engine, _ = _make_engine()
+    _inject_exporter(engine, frame_count=16500)
+    engine._tx_window.start(0.0, 0)
+    engine._tx_window.last_t = 100.0
+    engine._tx_window.last_frame = 16350
+    engine._export_total_s = 16.5
+
+    engine._reset_report_window()
+
+    assert engine._tx_window.start_t == 0.0
+    assert engine._tx_window.last_t == 0.0
+    assert engine._tx_window.start_frame == 0
+    assert engine._tx_window.last_frame == 0
+    assert engine._export_total_s == 0.0
+
+
+def test_format_change_reset_prevents_negative_fps():
+    """Regression: dtype/geometry change reopens Exporter with frame_count=0.
+
+    Without _reset_report_window(), ReportWindow.fps computes
+        (new_frame_count − old_last_frame) / dt  ≈  (150 − 16500) / 2.5  =  -6540 FPS
+    and _avg_export_us divides the old cumulative export time by the tiny new count,
+    yielding a misleading 34 000 µs. Both symptoms were observed in Log 3 after a
+    uint8→float32 switch during a live TD Sender session (v1.10.3).
+
+    The fix calls _reset_report_window() in the reopen block so the first windowed
+    report after the format change shows a positive FPS and a fresh export average.
+    """
+    engine, logs = _make_engine(report_every=150, verbose=True)
+
+    # Session 1: large lifetime frame count (simulates a long-running session).
+    _inject_exporter(engine, frame_count=16500, dtype="uint8")
+    engine._tx_window.start(0.0, 0)
+    engine._tx_window.last_t = 100.0  # last report was at t=100 s
+    engine._tx_window.last_frame = 16350
+    engine._export_total_s = 16.5  # 1 ms/frame avg over 16 500 frames
+
+    # Simulate geometry/dtype change: Exporter reopened with fresh frame_count=0.
+    # The fix calls _reset_report_window() here; replicate that:
+    _inject_exporter(engine, frame_count=0, dtype="float32")
+    engine._reset_report_window()
+
+    # First published frame of the new session seeds the window (mirrors export_frame:776-779).
+    engine._exporter.frame_count = 1
+    engine._tx_window.start(101.0, 0)  # start(now, frame_count - 1)
+
+    # Advance to the first report boundary.
+    engine._exporter.frame_count = 150
+    engine._export_total_s = 0.015  # 15 ms for 150 float32 frames
+
+    # 2.5 s window → 150 / 2.5 = 60 FPS
+    engine._maybe_report_stats(write_idx=150, now=103.5)
+
+    assert len(logs) == 1, f"Expected 1 report line, got: {logs}"
+    line = logs[0]
+    # FPS token is the second |-delimited field; strip whitespace, grab the numeric part.
+    fps_token = line.split("|")[1].strip().split()[0]
+    fps_value = float(fps_token)
+    assert fps_value > 0, (
+        f"FPS must be positive after format-change reset, got {fps_value!r}.\n"
+        f"Full line: {line!r}\n"
+        "Root cause if failing: _reset_report_window() not called on Exporter reopen."
+    )
+    # Export average should reflect only the new session (100 µs), not the old total.
+    assert "export=100.0 µs avg" in line, f"Export average should be fresh after reset (100.0 µs), got line: {line!r}"
