@@ -239,6 +239,15 @@ On the nsys timeline, the Sender export stream (`ipc_stream`) and Receiver impor
 and `cudalink.receiver.import_frame.*` NVTX ranges run in parallel without head-of-line
 blocking. Post-settle latency stabilises within 3 frames.
 
+> **P11 idle-cook gaps (v1.10.2+):** When the producer is idle (no new frame ready), the
+> TD Receiver's Script-TOP cook is skipped entirely. On the nsys CPU timeline this appears
+> as expected gaps between `cudalink.receiver.import_frame.*` ranges — **this is correct
+> behaviour, not a stall.** Observable TD cook counts will be lower than in pre-v1.10.2
+> captures when the producer sends below the TD frame rate. Do not interpret these gaps as
+> stream serialisation or blocking. If `CUDALINK_D2H_PIPELINED=1` is set, the pipeline
+> re-primes after each reconnect, producing one additional `NO_FRAME` gap on the consumer
+> CPU timeline.
+
 ### Regression signature (flags wrong)
 
 ```
@@ -375,7 +384,7 @@ Both instruments coexist. They are complementary, not duplicates.
 |---|---|---|
 | **Enable** | `SET CUDALINK_EXPORT_PROFILE=1` | `SET CUDALINK_NVTX=1` |
 | **What it measures** | CPU-side elapsed time per `export_frame()` sub-operation (enqueue cost only — async ops record enqueue latency, not GPU execution time) | GPU kernel launch and completion on the nsys/ncu timeline (actual GPU work duration) |
-| **Granularity** | Rolling average logged every 97 frames to Python logger | Per-call range visible in nsys-ui |
+| **Granularity** | Rolling average logged every 97 frames to Python logger (`CUDALINK_EXPORT_PROFILE=1`) | Per-call range visible in nsys-ui |
 | **Cross-process** | Per-process only | Both processes visible in tiled nsys-ui |
 | **When to trust** | `memcpy=`, `record=`, `shm=` for diagnosing CPU scheduling jitter and SHM write latency | GPU-side for diagnosing stream contention, PCIe saturation, kernel occupancy |
 
@@ -388,6 +397,14 @@ is blocking on an unsubmitted WDDM batch — the deferred-submission accumulatio
 (`PERSIST_STREAM=1`) was designed to prevent during reactivation. Correlate with the nsys
 timeline: if the Sender stream shows no GPU activity during that window, the batch was buffered
 by WDDM and `flush_probe` is flushing it.
+
+> **Windowed Debug telemetry (v1.10.3):** Separate from `CUDALINK_EXPORT_PROFILE`, the
+> Debug **summary line** emitted every N frames (default 150, see
+> `CUDALINK_SENDER_REPORT_EVERY` / `CUDALINK_RECEIVER_REPORT_EVERY`) reports `export=` and
+> `copy=` as **windowed (~150-frame) averages** via the shared `ReportWindow`
+> helper (`_profile.py` / `FrameProfile.py`). These reset with each window — they are not
+> lifetime means and will not match a manual average across the full session. Use
+> `CUDALINK_EXPORT_PROFILE=1` for the per-97-frame CPU sub-timer breakdown.
 
 ---
 
@@ -405,7 +422,7 @@ With HWS enabled, the GPU hardware processes the queue directly, reducing batch 
 
 | Metric | WDDM software scheduling | WDDM GPU-P (HWS on) |
 |---|---|---|
-| Producer `cudaStreamSynchronize` p50 | ~617 µs (v4 baseline) | Expected ~50–100 µs |
+| Producer `cudaStreamSynchronize` p50 | ~617 µs (v4 baseline; current blocking p50 = 24–357 µs, see [BENCHMARKS.md](BENCHMARKS.md)) | Expected ~50–100 µs |
 | Consumer `import_frame` outlier max | ~36.5 ms (WDDM queue gap) | Expected < 5 ms |
 | WDDM Copy engine max queue entry | 116 ms (v4 baseline) | Expected < 20 ms |
 
@@ -452,6 +469,16 @@ the WDDM scheduling mode in effect during that capture.
 ---
 
 ## 8. Async Export Path for Python-Sender Topologies
+
+> **⚠️ TD Sender users — stop here.** The TD Sender (`CUDAIPCExtension` Sender COMP)
+> **must remain blocking** (`CUDALINK_EXPORT_SYNC=1`, the default since v1.10.1). TD's
+> source texture (`cm.ptr`) is cook-scoped and reclaimed the moment the cook returns.
+> Setting `CUDALINK_EXPORT_SYNC=0` on the TD Sender lets the IPC-stream D2D copy run
+> after the source is freed → reads freed memory → **CUDA 719** under a loaded consumer.
+> `CUDALINK_EXPORT_SYNC=0` is an unsafe opt-out for TD Sender deployments, not a
+> recommended configuration. See CHANGELOG 1.10.1 and ADR-0001. **This section (§8)
+> applies only to standalone Python `Exporter` callers with a persistent, caller-owned
+> source buffer.**
 
 ### When this applies
 

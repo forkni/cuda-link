@@ -381,13 +381,19 @@ outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDA
 - `CUDALINK_EXPORT_SYNC=1` is the **source-lifetime guard**: CPU-blocks until the D2D
   finishes, so the source is provably safe to release when `export()` returns.
 
-Both coexistence hazards are addressed by explicit stream management:
+Three distinct stream hazards are each addressed by the correct mechanism:
 
-- **Receiver teardown TDR** — eliminated by dedicated, persistent per-engine streams
-  (`CUDALINK_TD_PERSIST_STREAM=1`, default since v1.4.1). No sender-side sync needed.
-- **Producer-side cross-stream race** — eliminated by `record_source_sync` /
-  `require_source_sync` (see above). `CUDALINK_EXPORT_SYNC=1` was a blunt CPU-blocking
-  sync *after* the memcpy and never prevented the race.
+- **Receiver teardown TDR** (fixed v1.4.1) — eliminated by dedicated, persistent per-engine
+  streams (`CUDALINK_TD_PERSIST_STREAM=1`, default). No sender-side sync needed.
+- **Producer-side cross-stream race** (fixed v1.9.0) — eliminated by `record_source_sync` /
+  `require_source_sync` (see above). These ordering primitives guarantee the source is fully
+  written before the copy *starts* — they do not keep the source alive past the queued D2D read.
+- **TD Sender source-buffer lifetime race** (fixed v1.10.1, CUDA 719) — the TD source is TD's
+  transient cook-scoped TOP texture (`cm.ptr`): TD reclaims it when the cook returns. Async
+  export can delay the IPC-stream copy past cook exit → reads freed memory.  Fixed by **TD
+  Sender blocking by default** (post-copy `stream_synchronize`): the source is provably safe to
+  release when `export()` returns.  `CUDALINK_EXPORT_SYNC=0` opts back into async only when the
+  caller guarantees the source buffer outlives the copy.
 
 See `docs/PROFILING.md §8 EXPORT_SYNC defaults` for the full hazard analysis and timeline.
 
@@ -409,6 +415,24 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
 ```
 
 **Performance**: `cudaDeviceSynchronize()` takes ~10-50μs, **10-25x slower** than IPC events.
+
+---
+
+### CUDA Graphs (v1.10.0+)
+
+When `CUDALINK_USE_GRAPHS=1` (default for the Python `Exporter`; `CUDALINK_TD_USE_GRAPHS` for the
+TD Sender — default off in TD), the per-frame export path captures a CUDA graph once and replays
+it on every subsequent frame.  The graph folds `stream_wait_event` + `cudaMemcpyAsync` +
+`cudaEventRecord` into a **single WDDM submission** (`cudaGraphLaunch`) instead of three separate
+kernel dispatches.
+
+**Effect**: 3 WDDM submissions/frame → 1.  Measured gain at 1080p uint8 standalone:
+−3.8 µs p50 (22%) from 17.9 µs (async, no graphs) to 13.9 µs (async+graphs).  See
+[docs/BENCHMARKS.md](BENCHMARKS.md) for the full 2×2 matrix.
+
+Graph replay is transparent: on the first frame after a geometry or dtype change the graph is
+automatically re-captured, then replayed for subsequent frames.  Auto-fallback to
+`cudaMemcpyAsync` occurs on capture or launch failure.
 
 ---
 
@@ -468,7 +492,7 @@ cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
 return tensors[read_slot]                        ← Zero-copy, 0µs
 ```
 
-**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (default) includes GPU D2D completion: p50 22 µs (512×512) → 367 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. See `bench_graphs.py` for resolution breakdown.
+**Total IPC primitive overhead**: ~3-8µs per frame (producer + consumer). Full `export_frame()` with EXPORT_SYNC=1 (TD Sender default, v1.10.1+; Python `Exporter` defaults to async) includes GPU D2D completion: p50 24 µs (512×512) → 106 µs (1080p) → 357 µs (4K) float32 RGBA on RTX 4090 / PCIe 4.0. Python `Exporter` async+graphs p50: 13.9 µs (1080p uint8). See [docs/BENCHMARKS.md](BENCHMARKS.md) for the full breakdown.
 
 ### Phase 3: Re-initialization
 
@@ -567,20 +591,21 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 ### Measured Benchmarks
 
-RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36 / EXPORT_SYNC=1. Full tables and per-resolution breakdowns: **[docs/BENCHMARKS.md](BENCHMARKS.md)**.
+RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. Full tables and per-resolution breakdowns: **[docs/BENCHMARKS.md](BENCHMARKS.md)**.
 
-**`export_frame()` standalone p50 (isolated — no consumer process):** 22 µs (512×512) → 117 µs (1080p) → 367 µs (4K). CUDA Graphs saves <5% wall-clock when GPU D2D copy dominates.
+**`export_frame()` standalone p50 (isolated — no consumer process, EXPORT_SYNC=1):** 24 µs (512×512) → 106 µs (1080p f32) → 357 µs (4K f32).
+**Python `Exporter` async+graphs (default):** 13.9 µs p50 at 1080p uint8 (−31.3 µs / −69% vs 45.2 µs blocking baseline). CUDA graphs collapse 3 WDDM submissions/frame to 1. See [docs/BENCHMARKS.md](BENCHMARKS.md) for the full 2×2 async/sync × graphs/no-graphs matrix.
 
 **IPC roundtrip p50 (two separate processes, graphs=off):** export 662–1483 µs; `get_frame_numpy()` 0.38–5.03 ms; IPC notify ~136–286 µs (resolution-independent signaling latency).
 
 ### Throughput Limits
 
-**Theoretical max FPS** (ignoring application logic; bench_graphs isolated export, EXPORT_SYNC=1):
+**Theoretical max FPS** (ignoring application logic; isolated export, EXPORT_SYNC=1):
 
 ```
 FPS_max = 1 / export_frame_p50
-        = 1 / 117 us   (1080p f32)  ~= 8,500 FPS
-        = 1 / 367 us   (4K f32)     ~= 2,700 FPS
+        = 1 / 106 us   (1080p f32)  ~= 9,400 FPS
+        = 1 / 357 us   (4K f32)     ~= 2,800 FPS
 ```
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
@@ -683,6 +708,61 @@ would reopen the decision. A proof-of-concept VMM probe lives at
 
 ---
 
+## Recent Optimizations (v1.10.x)
+
+### Pipelined Device-to-Host Copy (P5, v1.10.0)
+
+`CUDALINK_D2H_PIPELINED=1` (default off) enables a double-buffer pipeline that enqueues the
+**next** D2H copy asynchronously while the consumer processes the **current** frame.  The copy
+for frame *N+1* overlaps with consumer CPU work on frame *N*, hiding transfer latency.
+
+- First `get_frame_numpy()` returns `ImportOutcome.NO_FRAME` (priming).
+- Steady-state adds +1 frame of latency; the gain is `≈ d2h_copy_time` when
+  `consumer_work > d2h_copy_time` (1080p break-even ~0.38 ms; 4K ~1.3 ms).
+- On teardown and reconnect, the pipeline drains the in-flight copy (`NumpyBuffers.drain()`)
+  and re-primes — the first frame after `RECONNECTING` always returns `NO_FRAME`, matching
+  fresh-session behavior (v1.10.3).
+
+### Windowed Telemetry (v1.10.3)
+
+Both the TD Sender's `export=… µs avg` and the TD Receiver's `copy=… µs avg` summary lines
+now report a **windowed (~150-frame) average** rather than a lifetime cumulative mean.  This
+is implemented via `ReportWindow.add_sample()` / `avg_and_reset()` in `_profile.py`
+(`FrameProfile.py` in TD), shared by both engines.
+
+The windowed figure reflects current-session performance rather than converging monotonically
+from first-frame startup; it resets each time the format changes.
+
+### Hot-Path Allocation Reduction (P8, v1.10.2)
+
+`get_frame()` (`_TorchBackend`) and `get_frame_cupy()` (`_CupyBackend`) cache their backend
+instance and update `_stream` in-place instead of constructing a new object per call.
+`AcquireResult` (returned by `acquire_slot`) is now a `NamedTuple` instead of a `@dataclass`,
+eliminating the per-call `__dict__` allocation on the consumer hot path.
+
+### Receiver Idle-Cook Skip (P11, v1.10.2)
+
+`TDReceiverEngine.has_new_frame()` reads the SHM `write_idx`, `version`, and `shutdown` fields
+before `import_buffer.cook(force=True)`.  When the producer has not written a new frame, the
+cook is skipped entirely — saving one Script-TOP cook and all its Python overhead per idle TD
+frame.  Effect is zero when producer ≥ TD frame rate; significant for slow producers (e.g. 30 FPS
+AI inference into a 60 FPS TD project).
+
+---
+
+## Design Decisions
+
+See `docs/adr/` for the full Architecture Decision Record index:
+
+- **ADR-0001** — Port-adapter deepening (testable seams without real GPU)
+- **ADR-0002** — Byte-identical TD mirror files
+- **ADR-0003** — Library-mode bootstrap via `sys.path` injection
+- **ADR-0004** — Legacy CUDA IPC over VMM driver API
+- **ADR-0005** — Static typing hardening (per-file suppression policy, no category blankets)
+- **ADR-0006** — Stay pure-Python (Rust `cuda-oxide`/`cudarc` evaluated and deferred)
+
+---
+
 ## Future Enhancements
 
 1. **Adaptive slot count**: Automatically increase slots under high load.
@@ -691,5 +771,5 @@ would reopen the decision. A proof-of-concept VMM probe lives at
 
 ---
 
-**Last Updated**: 2026-05-31
-**Version**: 1.8.0
+**Last Updated**: 2026-06-11
+**Version**: 1.10.3
