@@ -165,6 +165,23 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
         exp.close()
 
 
+def test_read_hws_mode_returns_unknown_without_winreg() -> None:
+    """_read_hws_mode degrades to 'unknown' on platforms without winreg.
+
+    Regression: ``import winreg`` raises ModuleNotFoundError (an ImportError,
+    not OSError) on non-Windows — the handler must catch it or Exporter.open()
+    is unusable off-Windows (and the whole no-GPU CI suite fails).
+    """
+    import sys
+
+    from cuda_link.exporter import _read_hws_mode
+
+    result = _read_hws_mode()
+    assert isinstance(result, str)
+    if sys.platform != "win32":
+        assert result == "unknown"
+
+
 # ---------------------------------------------------------------------------
 # CUDA integration tests
 # ---------------------------------------------------------------------------

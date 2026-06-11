@@ -28,6 +28,12 @@ methodology and hardware caveats.
 | IPC notification latency | ~136–286 µs | Producer publish → consumer detect (cross-process) |
 | Initialization | ~50–100 µs | One-time IPC handle opening |
 
+> **Telemetry note (v1.10.3):** The `export=` (Sender) and `copy=` (Receiver) averages shown
+> in the Debug summary line are **windowed (~150-frame) averages**, not lifetime cumulative
+> means. They reset with each report window (period controlled by
+> `CUDALINK_SENDER_REPORT_EVERY` / `CUDALINK_RECEIVER_REPORT_EVERY`). Cross-version timing
+> comparisons that use these reported averages must account for this change.
+
 ---
 
 ## `export_frame()` — P1 Async Gain & P3 CUDA Graph Submission Collapse
@@ -117,7 +123,9 @@ python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
 
 **Opt-in** via `CUDALINK_D2H_PIPELINED=1`. Overlaps the D2H copy with the consumer's CPU
 work by enqueuing the next copy asynchronously while returning the previous frame. First
-call returns `NO_FRAME` (priming); steady-state adds +1 frame latency.
+call returns `NO_FRAME` (priming); steady-state adds +1 frame latency. **On reconnect
+(v1.10.3)**, the pipeline drains and re-primes — one additional `NO_FRAME` per reconnect
+event (same priming contract as initial open).
 
 **When to enable:** only when consumer CPU work time > D2H copy time. Break-even at 4K ≈
 1.3 ms workload; at 1080p ≈ 0.38 ms. Disabled by default pending broader validation.
@@ -194,6 +202,11 @@ Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC not
 ```
 
 Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder.
+
+> **v1.10.2 P11 note:** When the producer is idle (no new frame), the receiver's Script-TOP
+> cook is now skipped entirely, so observable cook counts in slow-producer scenarios will be
+> lower than in pre-v1.10.2 measurements. Sweep figures above use a 60 FPS active producer
+> and are unaffected.
 
 Reproduce with:
 ```bash

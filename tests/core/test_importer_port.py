@@ -61,6 +61,7 @@ def test_import_policy_defaults() -> None:
     assert pol.d2h_num_streams == 1
     assert pol.d2h_stream_high_priority is False
     assert pol.allow_pageable_fallback is False
+    assert pol.d2h_pipelined is False
     assert pol.debug is False
 
 
@@ -69,12 +70,14 @@ def test_import_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CUDALINK_D2H_STREAMS", "2")
     monkeypatch.setenv("CUDALINK_D2H_STREAM_PRIO", "high")
     monkeypatch.setenv("CUDALINK_ALLOW_PAGEABLE_FALLBACK", "1")
+    monkeypatch.setenv("CUDALINK_D2H_PIPELINED", "1")
 
     pol = ImportPolicy.from_env()
     assert pol.wait_spin_us == 1000
     assert pol.d2h_num_streams == 2
     assert pol.d2h_stream_high_priority is True
     assert pol.allow_pageable_fallback is True
+    assert pol.d2h_pipelined is True
     assert pol.debug is False
 
 
@@ -84,6 +87,7 @@ def test_import_policy_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
         "CUDALINK_D2H_STREAMS",
         "CUDALINK_D2H_STREAM_PRIO",
         "CUDALINK_ALLOW_PAGEABLE_FALLBACK",
+        "CUDALINK_D2H_PIPELINED",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -92,6 +96,7 @@ def test_import_policy_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert pol.d2h_num_streams == 1
     assert pol.d2h_stream_high_priority is False
     assert pol.allow_pageable_fallback is False
+    assert pol.d2h_pipelined is False
 
 
 def test_import_policy_for_testing() -> None:

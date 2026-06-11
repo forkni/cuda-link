@@ -277,7 +277,18 @@ def mode_1_external_folder(wheel: Path, target: str | None, non_interactive: boo
 
     dest = Path(target)
     dest.mkdir(parents=True, exist_ok=True)
-    pip = [sys.executable, "-m", "pip", "install", "--target", str(dest), str(wheel), "--upgrade"]
+    pip = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--target",
+        str(dest),
+        str(wheel),
+        "--upgrade",
+        "--force-reinstall",
+        "--no-deps",
+    ]
     _run_pip(pip, dry_run)
     _print_activation(dest, "Install folder")
 
@@ -299,7 +310,7 @@ def mode_2_venv(wheel: Path, venv_dir: str | None, non_interactive: bool, dry_ru
     if not pip_exe.exists():
         sys.exit(_red(f"[error] pip not found in venv at {venv / 'Scripts'} or {venv / 'bin'}"))
 
-    pip = [str(pip_exe), "install", str(wheel), "--upgrade"]
+    pip = [str(pip_exe), "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
     site_pkgs = _find_site_packages_in(venv)
     _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True)
@@ -314,7 +325,7 @@ def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_
         if not conda_env:
             sys.exit(_red("[error] No conda environment name specified."))
 
-    pip = ["conda", "run", "-n", conda_env, "pip", "install", str(wheel), "--upgrade"]
+    pip = ["conda", "run", "-n", conda_env, "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
 
     # Try to find the site-packages path from conda info
@@ -366,7 +377,7 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
     if not py_path.is_file():
         sys.exit(_red(f"[error] Path is not an executable file: {py_path}"))
 
-    pip = [str(py_path), "-m", "pip", "install", str(wheel), "--upgrade"]
+    pip = [str(py_path), "-m", "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
 
     # Detect site-packages — use _SITE_PKGS_QUERY to filter for the actual site-packages
@@ -421,7 +432,7 @@ def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bo
     if not td_py.is_file():
         sys.exit(_red(f"[error] Path is not an executable file: {td_py}"))
 
-    pip = [str(td_py), "-m", "pip", "install", str(wheel), "--upgrade"]
+    pip = [str(td_py), "-m", "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
 
     print(_yellow("\n  Note: installing into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
     print("  cuda_link will be importable in all TD projects automatically.")

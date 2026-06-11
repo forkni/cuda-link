@@ -214,3 +214,55 @@ def test_non_pipelined_path_unchanged() -> None:
     nb.cuda.stream_synchronize.assert_called_once_with(nb.primary_stream)
     # No buffer swap should have occurred
     assert nb.buffer is buf_a
+
+
+# ---------------------------------------------------------------------------
+# Drain / rotate / teardown — in-flight copy must complete before its endpoints
+# are released (CUDA 719-class source-lifetime race)
+# ---------------------------------------------------------------------------
+
+
+def test_drain_syncs_primary_stream() -> None:
+    """drain() synchronizes the primary D2H stream (completes the in-flight copy)."""
+    nb, _, _ = _make_pipelined_nb()
+    stream = nb.primary_stream
+
+    nb.drain()
+
+    nb.cuda.stream_synchronize.assert_called_once_with(stream)
+
+
+def test_drain_noop_without_stream() -> None:
+    """drain() after teardown (primary_stream=None) is a safe no-op."""
+    nb, _, _ = _make_pipelined_nb()
+    nb.primary_stream = None
+
+    nb.drain()  # must not raise
+
+    nb.cuda.stream_synchronize.assert_not_called()
+
+
+def test_close_drains_stream_before_freeing_pinned_buffer() -> None:
+    """close() must complete the in-flight pipelined copy BEFORE freeing its
+    pinned-host destination — free_host under an active DMA write is UB."""
+    nb, _, _ = _make_pipelined_nb()
+    nb.pinned_ptr = MagicMock()  # pretend the front buffer is CUDA-pinned
+    order: list[str] = []
+    nb.cuda.stream_synchronize.side_effect = lambda _s: order.append("sync")
+    nb.cuda.free_host.side_effect = lambda _p: order.append("free")
+
+    nb.close()
+
+    assert "sync" in order and "free" in order
+    assert order.index("sync") < order.index("free"), "stream must be drained before free_host"
+
+
+def test_rotate_swaps_buffers_and_pointers() -> None:
+    """rotate() swaps front/back buffers together with their precomputed pointers."""
+    nb, buf_a, buf_b = _make_pipelined_nb()
+    ptr_front, ptr_back = nb.buffer_ptr, nb.back_buffer_ptr
+
+    nb.rotate()
+
+    assert nb.buffer is buf_b and nb.back_buffer is buf_a
+    assert nb.buffer_ptr is ptr_back and nb.back_buffer_ptr is ptr_front

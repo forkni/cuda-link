@@ -240,22 +240,36 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_export_sync_resolution_table() -> None:
-    """Export-sync resolution: config.export_sync → effective_sync.
+def test_export_sync_config_stores_raw_tristate() -> None:
+    """TDSenderConfig stores the raw tri-state export_sync without resolving it.
 
-    (None,  *) → False  (async — default; coexistence safety via stream ordering)
-    (True,  *) → True   (explicit blocking opt-in)
-    (False, *) → False  (explicit async)
+    Resolution to a strict bool happens later, in TDSenderEngine._resolve_export_sync
+    (None → True: TD Sender BLOCKS by default for source-lifetime safety — see
+    test_tdsender_export_sync_default.py for the resolution table).
     """
     from TDConfig import TDSenderConfig
 
+    for raw in (None, True, False):
+        config = TDSenderConfig(export_sync=raw)
+        assert config.export_sync is raw, f"config must store export_sync={raw!r} unresolved"
+
+
+def test_export_sync_resolution_table() -> None:
+    """Export-sync resolution: config.export_sync → effective ExportPolicy.export_sync.
+
+    (None)  → True   (blocking — TD default; the cook-scoped source TOP texture must
+                      outlive the D2D copy, else CUDA 719 under a loaded consumer)
+    (True)  → True   (explicit blocking)
+    (False) → False  (explicit async opt-in; source lifetime is the user's problem)
+    """
+    from TDSender import TDSenderEngine
+
     table: list[tuple[bool | None, bool]] = [
-        (None, False),  # default → async
+        (None, True),  # unset → blocking (TD source-lifetime safety)
         (True, True),  # explicit True → blocking
         (False, False),  # explicit False → async
     ]
 
-    for export_sync_val, expected in table:
-        config = TDSenderConfig(export_sync=export_sync_val)
-        effective = config.export_sync is True
-        assert effective is expected, f"export_sync={export_sync_val!r} → expected {expected}, got {effective}"
+    for raw, expected in table:
+        effective = TDSenderEngine._resolve_export_sync(raw)
+        assert effective is expected, f"export_sync={raw!r} → expected {expected}, got {effective}"
