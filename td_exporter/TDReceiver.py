@@ -10,7 +10,6 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
-import os
 import struct
 import time
 import traceback
@@ -29,6 +28,8 @@ from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
+from Env import env_int  # noqa: E402
+from FrameProfile import ReportWindow  # noqa: E402
 from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
     FLAGS_MONO_ALPHA,
@@ -49,6 +50,8 @@ from SHMProtocol import (  # noqa: E402
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_version,
+    read_write_idx,
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
@@ -261,13 +264,11 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
-        # Per-frame performance tracking for Debug summary line
-        self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
+        # Per-frame performance tracking for Debug summary line — shares
+        # ReportWindow with TDSenderEngine.
         self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
-        self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
-        self._rx_start_frame: int = 0  # frame_count when _rx_start was seeded (session baseline)
-        self._rx_last_report_t: float = 0.0  # perf_counter at previous status line (0 = not yet reported)
-        self._rx_last_report_frame: int = 0  # frame_count at previous status line
+        self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
+        self._rx_window = ReportWindow()
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
@@ -354,12 +355,11 @@ class TDReceiverEngine:
             return True  # can't check; let import_frame decide
         try:
             buf = shm.buf
-            # Fast write_idx read — 4 bytes at WRITE_IDX_OFFSET
-            if struct.unpack_from("<I", buf, WRITE_IDX_OFFSET)[0] != self._connection.last_write_idx:
+            # Header reads via SHMProtocol's precompiled-Struct helpers.
+            if read_write_idx(buf) != self._connection.last_write_idx:
                 return True  # new frame available
-            # Check for sender restart (version change)
-            if struct.unpack_from("<Q", buf, VERSION_OFFSET)[0] != self._connection.ipc_version:
-                return True
+            if read_version(buf) != self._connection.ipc_version:
+                return True  # sender restarted
             # Check for sender shutdown signal; return False iff truly idle
             return buf[self._connection.shutdown_offset] != 0
         except (AttributeError, struct.error, ValueError, IndexError, OSError):
@@ -452,9 +452,9 @@ class TDReceiverEngine:
             write_idx = result.write_idx
             read_slot = result.slot
             _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
-            if self._rx_start == 0.0:
-                self._rx_start = time.perf_counter()
-                self._rx_start_frame = self.frame_count  # session baseline for windowed FPS
+            if not self._rx_window.started:
+                # Session baseline for windowed FPS (frame_count is never reset).
+                self._rx_window.start(time.perf_counter(), self.frame_count)
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -558,16 +558,7 @@ class TDReceiverEngine:
             # Debug summary line — matches standalone Python receiver format
             if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
                 _now = time.perf_counter()
-                if self._rx_last_report_t == 0.0:
-                    # First report this session — seed window from first-frame timestamp so the
-                    # one-time startup/IPC-open latency doesn't dilute subsequent FPS readings.
-                    # Use _rx_start_frame (not 0) so lifetime frame_count doesn't inflate the
-                    # first window after a reconnect (frame_count is never reset across sessions).
-                    self._rx_last_report_t = self._rx_start
-                    self._rx_last_report_frame = self._rx_start_frame
-                _window_dt = _now - self._rx_last_report_t
-                _window_frames = self.frame_count - self._rx_last_report_frame
-                _fps = _window_frames / _window_dt if _window_dt > 0 else 0.0
+                _fps = self._rx_window.fps(_now, self.frame_count)
                 _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
                 _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
                 self._log(
@@ -577,8 +568,6 @@ class TDReceiverEngine:
                     f"latency={_latency_ms:.2f} ms | copy={_avg_copy_us:.1f} µs avg "
                     f"(slot={read_slot}, write_idx={write_idx})"
                 )
-                self._rx_last_report_t = _now
-                self._rx_last_report_frame = self.frame_count
 
             return True
 
@@ -1034,10 +1023,7 @@ class TDReceiverEngine:
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
         # Reset per-session perf tracking so reconnects get a fresh window baseline
-        self._rx_start = 0.0
-        self._rx_start_frame = 0
-        self._rx_last_report_t = 0.0
-        self._rx_last_report_frame = 0
+        self._rx_window.reset()
 
     def _refresh_on_version_change(self, new_version: int) -> bool:
         """Refresh format and IPC handles in-place after a sender version bump.

@@ -385,6 +385,82 @@ def test_importer_reconnecting_on_version_change(temp_shm_name: str, shared_memo
         exp_a.close()
 
 
+def test_pipelined_drains_and_reprimes_on_reconnect(temp_shm_name: str, shared_memory_cleanup: list[str]) -> None:
+    """d2h_pipelined=True across a producer restart: drain before handle close, then re-prime.
+
+    Pipelined mode leaves one async D2H copy in flight after every get_frame_numpy().
+    On version change _reinitialize() must:
+    - synchronize the D2H stream BEFORE cudaIpcCloseMemHandle releases the copy's
+      source mapping (CUDA 719-class source-lifetime race otherwise), and
+    - reset priming so the first frame of the new session is a priming call
+      (NO_FRAME) rather than the dead session's last frame surfaced as NEW_FRAME.
+    """
+
+    class _OrderRecordingFake(FakeCUDAAdapter):
+        def __init__(self, device: int = 0) -> None:
+            super().__init__(device)
+            self.ops: list[str] = []
+
+        def stream_synchronize(self, stream: object) -> None:
+            self.ops.append("stream_synchronize")
+            super().stream_synchronize(stream)
+
+        def ipc_close_mem_handle(self, ptr: c_void_p) -> None:
+            self.ops.append("ipc_close_mem_handle")
+            super().ipc_close_mem_handle(ptr)
+
+    shared_memory_cleanup.append(temp_shm_name)
+    exp_a, _ = _open_exporter(temp_shm_name)
+    try:
+        _export_frame(exp_a)  # write_idx → 1
+
+        fake = _OrderRecordingFake()
+        policy = dataclasses.replace(ImportPolicy.for_testing(), d2h_pipelined=True)
+        imp = Importer.open(ImportSpec(shm_name=temp_shm_name), policy=policy, cuda=fake)
+        try:
+            # Session A: priming call → NO_FRAME; steady state on the next export.
+            r1 = imp.get_frame_numpy()
+            assert r1.outcome is ImportOutcome.NO_FRAME  # priming sentinel
+            assert imp._numpy is not None and imp._numpy.priming is False
+
+            _export_frame(exp_a)  # write_idx → 2
+            r2 = imp.get_frame_numpy()
+            assert r2.outcome is ImportOutcome.NEW_FRAME
+
+            # Producer restart: exporter B on the same SHM bumps the version.
+            exp_b, _ = _open_exporter(temp_shm_name)
+            try:
+                fake.ops.clear()
+                r3 = imp.get_frame_numpy()
+                assert r3.outcome is ImportOutcome.RECONNECTING
+
+                # Drain ordering: the in-flight copy's source mapping must not be
+                # closed before the stream is synchronized.
+                assert "stream_synchronize" in fake.ops and "ipc_close_mem_handle" in fake.ops
+                assert fake.ops.index("stream_synchronize") < fake.ops.index("ipc_close_mem_handle")
+
+                # The surviving pipelined buffer must be re-primed for session B.
+                assert imp._numpy.priming is True
+
+                # First visible B frame is a priming call (NO_FRAME), NOT session A's
+                # last frame replayed as NEW_FRAME.
+                _export_frame(exp_b)
+                r4 = imp.get_frame_numpy()
+                assert r4.outcome is ImportOutcome.NO_FRAME
+                assert imp._numpy.priming is False
+
+                # Steady state resumes: next export yields NEW_FRAME again.
+                _export_frame(exp_b)
+                r5 = imp.get_frame_numpy()
+                assert r5.outcome is ImportOutcome.NEW_FRAME
+            finally:
+                exp_b.close()
+        finally:
+            imp.close()
+    finally:
+        exp_a.close()
+
+
 def test_close_sets_shutdown_zeroes_handles_and_unlinks(temp_shm_name: str, shared_memory_cleanup: list[str]) -> None:
     """Exporter.close() sets the shutdown byte, zeroes IPC handle slots, and unlinks SHM.
 

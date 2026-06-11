@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["FrameProfile"]
+__all__ = ["FrameProfile", "ReportWindow"]
 
 
 class FrameProfile:
@@ -36,3 +36,50 @@ class FrameProfile:
         if n <= 0:
             return ""
         return " ".join(f"{r}={self._totals[r] / n:.1f}" for r in self.regions)
+
+
+class ReportWindow:
+    """Windowed-FPS bookkeeping for periodic status lines.
+
+    Shared by the TD sender/receiver engines (and usable by example scripts):
+    tracks a *session baseline* — seeded via start() at the first frame after
+    (re)connect so one-time IPC-open latency doesn't dilute the first window,
+    and anchored to the lifetime frame counter so reconnects don't inflate it
+    (frame counts are never reset across sessions).
+
+    fps() returns frames/second since the previous report (the first window is
+    seeded from the session baseline) and advances the window.
+    """
+
+    __slots__ = ("start_t", "start_frame", "last_t", "last_frame")
+
+    def __init__(self) -> None:
+        self.reset()
+
+    @property
+    def started(self) -> bool:
+        """True once start() has seeded the session baseline."""
+        return self.start_t != 0.0
+
+    def start(self, now: float, frame: int) -> None:
+        """Seed the session baseline at the first frame after (re)connect."""
+        self.start_t = now
+        self.start_frame = frame
+
+    def fps(self, now: float, frame: int) -> float:
+        """Windowed FPS since the previous report; advances the window."""
+        if self.last_t == 0.0:
+            self.last_t = self.start_t
+            self.last_frame = self.start_frame
+        dt = now - self.last_t
+        fps = (frame - self.last_frame) / dt if dt > 0 else 0.0
+        self.last_t = now
+        self.last_frame = frame
+        return fps
+
+    def reset(self) -> None:
+        """Clear all state so the next session starts with a fresh window."""
+        self.start_t = 0.0
+        self.start_frame = 0
+        self.last_t = 0.0
+        self.last_frame = 0
