@@ -73,6 +73,9 @@ def main() -> int:
     rows: list[tuple[str, float, float, float]] = []
 
     for region in all_regions:
+        # Skip scalar-valued regions (e.g. ptr_cache_miss_per_frame); only compare stat dicts.
+        if not isinstance(b_regions.get(region), dict) or not isinstance(c_regions.get(region), dict):
+            continue
         if region not in b_regions:
             print(f"  NEW   {region}: no baseline (current {args.metric}={c_regions[region].get(args.metric):.1f}µs)")
             continue
