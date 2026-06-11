@@ -2,18 +2,25 @@ name: Tests
 
 on:
   push:
-    branches: [development, main, master]
+    # claude/** — Claude Code sessions push there directly; without it those
+    # branches get no CI signal until a PR is opened.
+    branches: [development, main, master, 'claude/**']
     paths:
       - 'src/cuda_link/**'
+      - 'td_exporter/**'
       - 'tests/**'
+      - 'scripts/sync_td_wrapper.py'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
   pull_request:
     paths:
       - 'src/cuda_link/**'
+      - 'td_exporter/**'
       - 'tests/**'
+      - 'scripts/sync_td_wrapper.py'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+  workflow_dispatch:
 
 jobs:
   pytest:
