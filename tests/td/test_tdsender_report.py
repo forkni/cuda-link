@@ -109,7 +109,7 @@ def test_silent_when_verbose_false():
     """No report emitted when verbose_performance is off regardless of frame count."""
     engine, logs = _make_engine(verbose=False)
     _inject_exporter(engine, frame_count=150)
-    engine._tx_start = 1.0
+    engine._tx_window.start(1.0, 0)
     engine._export_total_s = 0.015  # 15 ms total
     engine._maybe_report_stats(write_idx=150, now=2.0)
     assert logs == []
@@ -119,7 +119,7 @@ def test_silent_when_not_multiple_of_report_every():
     """No report emitted for frame counts that are not multiples of report_every."""
     engine, logs = _make_engine(report_every=150)
     _inject_exporter(engine, frame_count=149)
-    engine._tx_start = 1.0
+    engine._tx_window.start(1.0, 0)
     engine._export_total_s = 0.01
     engine._maybe_report_stats(write_idx=149, now=2.0)
     assert logs == []
@@ -129,8 +129,7 @@ def test_report_emitted_at_report_every(monkeypatch):
     """A single line is emitted at frame_count == report_every."""
     engine, logs = _make_engine(report_every=150, verbose=True)
     _inject_exporter(engine, frame_count=150)
-    engine._tx_start = 1.0  # session started at t=1.0
-    engine._tx_start_frame = 0
+    engine._tx_window.start(1.0, 0)  # session started at t=1.0, frame baseline 0
     engine._export_total_s = 0.015  # 15 ms total → avg 100 µs/frame
 
     engine._maybe_report_stats(write_idx=150, now=4.0)  # 3-second window → 50 FPS
@@ -158,8 +157,7 @@ def test_consecutive_reports_use_windowed_fps():
     engine, logs = _make_engine(report_every=150, verbose=True)
     # First report: window [t=1.0, t=4.0], 150 frames → 50 FPS
     _inject_exporter(engine, frame_count=150)
-    engine._tx_start = 1.0
-    engine._tx_start_frame = 0
+    engine._tx_window.start(1.0, 0)
     engine._export_total_s = 0.015
     engine._maybe_report_stats(write_idx=150, now=4.0)
 
@@ -189,11 +187,10 @@ def test_cleanup_resets_window_state():
     """cleanup() resets windowed-report state so the next activation starts fresh."""
     engine, logs = _make_engine()
     _inject_exporter(engine, frame_count=150)
-    engine._tx_start = 1.0
-    engine._tx_last_report_t = 4.0
+    engine._tx_window.start(1.0, 0)
+    engine._tx_window.last_t = 4.0
+    engine._tx_window.last_frame = 150
     engine._export_total_s = 0.015
-    engine._tx_start_frame = 0
-    engine._tx_last_report_frame = 150
 
     # cleanup requires _barrier.force_release + _barrier.close — stub them.
 
@@ -203,8 +200,8 @@ def test_cleanup_resets_window_state():
     )
     engine.cleanup()
 
-    assert engine._tx_start == 0.0
-    assert engine._tx_last_report_t == 0.0
+    assert engine._tx_window.start_t == 0.0
+    assert engine._tx_window.last_t == 0.0
     assert engine._export_total_s == 0.0
-    assert engine._tx_start_frame == 0
-    assert engine._tx_last_report_frame == 0
+    assert engine._tx_window.start_frame == 0
+    assert engine._tx_window.last_frame == 0

@@ -63,7 +63,6 @@ class ImportPolicy:
     # First call returns NO_FRAME; steady-state adds +1 frame latency in exchange for
     # overlapping D2H with consumer CPU work.  Only beneficial when consumer takes
     # longer than D2H copy time (~0.5–2 ms for 4K RGBA).
-    # Full double-buffer implementation is pending GPU benchmark validation (see Plan §4).
     d2h_pipelined: bool = False
     debug: bool = False
     reconnect_enabled: bool = True

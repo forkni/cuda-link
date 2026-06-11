@@ -556,8 +556,27 @@ class NumpyBuffers:
         """True when the pre-allocated buffer doesn't match the new format."""
         return self.buffer.shape != fmt.shape or self.buffer.dtype != fmt.numpy_dtype
 
+    def rotate(self) -> None:
+        """Swap front/back buffers and their precomputed pointers (pipelined mode)."""
+        self.buffer, self.back_buffer = self.back_buffer, self.buffer
+        self.buffer_ptr, self.back_buffer_ptr = self.back_buffer_ptr, self.buffer_ptr
+
+    def drain(self) -> None:
+        """Block until every enqueued D2H copy completes. Best-effort, idempotent.
+
+        Pipelined mode leaves one async copy in flight after each materialize();
+        callers must drain before freeing the pinned destination (close) or
+        closing the IPC source mapping (Importer._reinitialize) — otherwise the
+        copy can still be running when its endpoint is released (CUDA 719-class
+        source-lifetime race).
+        """
+        if self.primary_stream is not None:
+            with contextlib.suppress(RuntimeError, OSError):
+                self.cuda.stream_synchronize(self.primary_stream)
+
     def close(self) -> None:
         """Idempotent teardown: free pinned allocation, destroy streams."""
+        self.drain()  # in-flight pipelined copy writes into the buffer freed below
         if self.pinned_ptr is not None:
             try:
                 self.cuda.free_host(self.pinned_ptr)
@@ -746,8 +765,7 @@ class _NumpyBackend:
                     )
                     nb.priming = False
                     # Rotate: back (just filled) becomes new front for next call.
-                    nb.buffer, nb.back_buffer = nb.back_buffer, nb.buffer
-                    nb.buffer_ptr, nb.back_buffer_ptr = nb.back_buffer_ptr, nb.buffer_ptr
+                    nb.rotate()
                     conn.cuda.check_sticky_error("get_frame_numpy[pipelined-prime]")
                     return None  # get_frame_numpy surfaces as NO_FRAME
                 # Steady state: sync the previous call's copy (now in nb.buffer = front),
@@ -761,8 +779,7 @@ class _NumpyBackend:
                     stream=nb.primary_stream,
                 )
                 result = nb.buffer
-                nb.buffer, nb.back_buffer = nb.back_buffer, nb.buffer
-                nb.buffer_ptr, nb.back_buffer_ptr = nb.back_buffer_ptr, nb.buffer_ptr
+                nb.rotate()
                 conn.cuda.check_sticky_error("get_frame_numpy[pipelined]")
                 return result
             n_streams = nb.num_streams
@@ -1387,6 +1404,8 @@ class Importer:
         When ImportPolicy.d2h_pipelined is True the first call returns NO_FRAME
         (priming the back buffer) and each subsequent call returns the previous
         frame with +1 frame latency, hiding D2H copy time behind consumer CPU work.
+        A producer restart re-primes: the first call after RECONNECTING returns
+        NO_FRAME again rather than the previous session's last frame.
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
@@ -1431,6 +1450,14 @@ class Importer:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
         old_conn = self._conn
         shm = old_conn.shm_handle
+
+        if self._numpy is not None and self._numpy.pipelined:
+            # The previous get_frame_numpy() left an async D2H copy in flight whose
+            # source is an IPC mapping closed just below — drain before releasing it.
+            self._numpy.drain()
+            # Re-prime so the first call of the new session returns NO_FRAME instead
+            # of surfacing the dead session's last frame as NEW_FRAME.
+            self._numpy.priming = True
 
         old_conn.close_ipc_handles()
 

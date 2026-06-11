@@ -24,7 +24,9 @@ import traceback
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
+from Env import env_int  # noqa: E402
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
+from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
 from SHMProtocol import DtypeCodec, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
@@ -229,13 +231,10 @@ class TDSenderEngine:
         self._last_cm_channels: int = 0
         self._last_pub_status: str = ""
 
-        # Windowed periodic stats report — mirrors TDReceiverEngine._rx_* pattern.
+        # Windowed periodic stats report — shares ReportWindow with TDReceiverEngine.
         # All timing is engine-local; does not depend on export_profile being enabled.
-        self._tx_report_every: int = int(os.environ.get("CUDALINK_SENDER_REPORT_EVERY", "150"))
-        self._tx_start: float = 0.0  # perf_counter at first published frame
-        self._tx_start_frame: int = 0  # frame_count baseline at _tx_start
-        self._tx_last_report_t: float = 0.0  # perf_counter at previous report line
-        self._tx_last_report_frame: int = 0  # frame_count at previous report line
+        self._tx_report_every: int = env_int("CUDALINK_SENDER_REPORT_EVERY", default=150)
+        self._tx_window = ReportWindow()
         self._export_total_s: float = 0.0  # cumulative export() wall time (seconds)
 
     # ------------------------------------------------------------------
@@ -314,7 +313,7 @@ class TDSenderEngine:
         published frames when verbose_performance is on.
 
         Mirrors TDReceiverEngine's Debug summary format. FPS and avg export time come
-        from engine-local timers (_tx_* / _export_total_s), independent of
+        from engine-local timers (_tx_window / _export_total_s), independent of
         CUDALINK_EXPORT_PROFILE. The optional ``now`` parameter allows tests to inject a
         deterministic timestamp without patching time.perf_counter().
         """
@@ -324,13 +323,7 @@ class TDSenderEngine:
         if n == 0 or n % self._tx_report_every != 0:
             return
         _now = now if now is not None else time.perf_counter()
-        if self._tx_last_report_t == 0.0:
-            # First report this session — seed window from first-frame timestamp so
-            # IPC-open latency doesn't dilute the initial FPS reading.
-            self._tx_last_report_t = self._tx_start
-            self._tx_last_report_frame = self._tx_start_frame
-        _window_dt = _now - self._tx_last_report_t
-        _fps = (n - self._tx_last_report_frame) / _window_dt if _window_dt > 0 else 0.0
+        _fps = self._tx_window.fps(_now, n)
         _avg_export_us = (self._export_total_s / n) * 1e6 if n > 0 else 0.0
         spec = self._current_spec
         self._log(
@@ -338,8 +331,6 @@ class TDSenderEngine:
             f"shape=({spec.height}, {spec.width}, {spec.channels}) dtype={spec.dtype} | "
             f"export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
         )
-        self._tx_last_report_t = _now
-        self._tx_last_report_frame = n
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -782,11 +773,10 @@ class TDSenderEngine:
             if outcome is FrameOutcome.PUBLISHED:
                 _now = time.perf_counter()
                 self._export_total_s += _now - _t_export
-                if self._tx_start == 0.0:
+                if not self._tx_window.started:
                     # Seed the window at the first published frame so IPC-open latency
                     # (same startup-delay guard the receiver uses) doesn't dilute FPS.
-                    self._tx_start = _now
-                    self._tx_start_frame = self._exporter.frame_count - 1
+                    self._tx_window.start(_now, self._exporter.frame_count - 1)
                 self._barrier.tick_and_maybe_release(os.getpid(), log_fn=self._log)
                 if not self._last_pub_status:
                     # Rebuild status string only when geometry changed (fast-path sets it "");
@@ -832,11 +822,8 @@ class TDSenderEngine:
         self._warned_format = False
 
         # Reset windowed-report state so the next activation starts with a fresh window.
-        self._tx_start = 0.0
-        self._tx_last_report_t = 0.0
+        self._tx_window.reset()
         self._export_total_s = 0.0
-        self._tx_start_frame = 0
-        self._tx_last_report_frame = 0
 
         self._host.clear_status()
         self._host.set_param_enabled("Numslots", True)

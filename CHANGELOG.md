@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Exporter.open()` crashed on non-Windows platforms (CI red since 1.10.0).**
+  `_read_hws_mode()` (P2 HWS warning) wrapped `import winreg` in `except OSError`,
+  but a missing module raises `ModuleNotFoundError` (an `ImportError`) — so every
+  `Exporter.open()` on Linux/macOS raised, and all 40 failures in the no-GPU CI
+  suite traced to this line.  The handler now catches `(ImportError, OSError)` and
+  degrades to `"unknown"`.  Locked by
+  `tests/core/test_exporter_python.py::test_read_hws_mode_returns_unknown_without_winreg`.
+- **Pipelined D2H left an async copy in flight across teardown/reconnect (latent
+  CUDA 719).**  With `CUDALINK_D2H_PIPELINED=1` every `get_frame_numpy()` returns
+  with one un-synchronized copy enqueued on the D2H stream.  `NumpyBuffers.close()`
+  freed the pinned-host destination and `Importer._reinitialize()` closed the IPC
+  source mapping without draining first.  New `NumpyBuffers.drain()` synchronizes
+  the stream before either endpoint is released — the importer-side counterpart of
+  the 1.10.1 sender-side STEP 1b fix.
+- **Pipelined D2H surfaced a stale frame after producer restart.**  When the format
+  was unchanged, `_reinitialize()` kept the double-buffer with `priming=False`, so
+  the first frame of the new session was the dead session's last frame replayed as
+  `NEW_FRAME`.  Reconnect now re-primes: the first call after `RECONNECTING`
+  returns `NO_FRAME`, matching fresh-session behavior.  Both pipelined fixes are
+  locked by `tests/integration/test_cpu_roundtrip.py::test_pipelined_drains_and_reprimes_on_reconnect`
+  and new drain/rotate unit tests in `tests/core/test_pipelined_d2h.py`.
+- **Malformed `CUDALINK_SENDER_REPORT_EVERY` / `CUDALINK_RECEIVER_REPORT_EVERY`
+  crashed engine init.**  Both engines parsed the env var with a raw `int(...)`;
+  they now use `Env.env_int()`, which falls back to the default (150) on
+  non-numeric values.
+
+### Changed
+
+- **Shared `ReportWindow` helper for windowed FPS reporting.**  The session-baseline
+  / window seed / advance bookkeeping previously duplicated between
+  `TDSenderEngine` (`_tx_*`) and `TDReceiverEngine` (`_rx_*`) now lives in
+  `_profile.py` (`FrameProfile.py` in TD), used by both engines.
+- `TDReceiverEngine.has_new_frame()` reads the SHM header via `SHMProtocol`'s
+  precompiled-`Struct` helpers (`read_write_idx` / `read_version`) instead of
+  per-call `struct.unpack_from` with duplicated offsets.
+- `tests/td/test_td_config.py::test_export_sync_resolution_table` now tests the
+  actual resolver (`TDSenderEngine._resolve_export_sync`) and documents the
+  blocking-by-default mapping; its previous docstring still described the pre-1.10.1
+  async default while asserting raw config storage.
+- Removed a stale "implementation pending" comment on `ImportPolicy.d2h_pipelined`
+  (the P5 implementation shipped in 1.10.2) and documented the post-reconnect
+  re-priming contract in the `get_frame_numpy()` docstring.
+
 ## [1.10.2] — 2026-06-11
 
 ### Performance
