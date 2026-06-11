@@ -34,6 +34,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crashed engine init.**  Both engines parsed the env var with a raw `int(...)`;
   they now use `Env.env_int()`, which falls back to the default (150) on
   non-numeric values.
+- **TD Sender reported negative FPS and inflated export-avg after a geometry/dtype
+  change.**  When `export_frame()` reopened the `Exporter` for a format change,
+  the new exporter reset its `frame_count` to 0 while `ReportWindow.last_frame`
+  retained the previous session's value (e.g. ~16 500).  The first post-change
+  `Frame 150` report computed `(150 − 16500) / dt` → −1030.8 FPS, and divided the
+  old session's cumulative export wall time by the tiny new count → 34 382.8 µs
+  avg.  Both figures were observed in production after a uint8 → float32 live switch
+  (v1.10.3 release candidate, confirmed by post-fix logs).  Fix:
+  `_reset_report_window()` (already called in `cleanup()`) is now also called
+  immediately after `Exporter.open()` in the format-change reopen block, resetting
+  `ReportWindow` and the export-time accumulator so the first windowed report of the
+  new session is always valid.  Data path unaffected; telemetry only.  Locked by
+  `tests/td/test_tdsender_report.py::test_format_change_reset_prevents_negative_fps`
+  and `::test_reset_report_window_clears_state`.
 
 ### Changed
 
@@ -51,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed a stale "implementation pending" comment on `ImportPolicy.d2h_pipelined`
   (the P5 implementation shipped in 1.10.2) and documented the post-reconnect
   re-priming contract in the `get_frame_numpy()` docstring.
+- **Periodic `export=… µs avg` (Sender) and `copy=… µs avg` (Receiver) are now
+  windowed, not lifetime.**  Both debug summary lines previously computed a
+  lifetime cumulative average (`total_time / frame_count`), which converged
+  slowly toward the session median and drifted visibly over long runs (e.g.
+  export-avg climbing from 366 µs at frame 150 to ~990 µs at frame 5000 in a
+  stable session).  The figure now reflects only the frames in the current report
+  window (~150 frames), in sync with the windowed FPS printed beside it.
+  Implementation: `ReportWindow` gained `add_sample(value)` and `avg_and_reset()`;
+  `TDSenderEngine` and `TDReceiverEngine` dropped their bespoke `_export_total_s` /
+  `_copy_total_s` lifetime accumulators in favour of the shared mechanism.  Locked
+  by `tests/td/test_report_window.py` (7 cases) and
+  `tests/td/test_tdsender_report.py::test_consecutive_reports_use_windowed_fps_and_avg`.
 
 ## [1.10.2] — 2026-06-11
 
