@@ -5,6 +5,66 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-06-12
+
+### Added
+
+- **R2: Win32 named-event doorbell — opt-in kernel wake for subprocess receivers**
+  (`CUDALINK_DOORBELL=1`, default OFF, Windows-only, single-consumer).  Replaces the
+  1 ms poll-sleep in `Importer.wait_for_doorbell()` with a `WaitForSingleObject` on a
+  Win32 auto-reset named event (`Local\cudalink_db_<shm_name>`).  Producer calls
+  `_doorbell.signal()` (non-blocking `SetEvent`, ~µs) after every `publish_frame()`
+  and once more on shutdown so the consumer wakes immediately on teardown.  Lost-wakeup
+  safe: an early-out in `wait_for_doorbell()` checks `write_idx` before blocking, so
+  a signal that arrives between the NO_FRAME check and the wait is never missed.
+  Tested Python↔Python (`bench_doorbell.py`): CPU ~3-4% → ~0.3-1%, notify-latency
+  p95 ~10× tighter.  TD-verified on the `TD>>Python` channel (TD Sender COMP →
+  python receiver subprocess): doorbell fires 1:1 with frames at 60 FPS, latency
+  0.02–0.10 ms (vs 0.04–1.80 ms poll baseline), cook-thread safe (no FPS dip from
+  `SetEvent`), env propagates across TD's `subprocess.Popen` boundary, and teardown
+  is clean (IPC handles closed in ~0.6 ms, no 2 s hang, no orphaned handle).
+  The in-TD COMP receiver (`TDReceiver.py`) runs on the main cook thread and returns
+  immediately on NO_FRAME — wiring the doorbell there is explicitly deferred.
+- **R1: torch GPU-side wait — opt-in `cudaStreamWaitEvent` on the consumer GPU before
+  tensor copy** (`CUDALINK_TORCH_GPU_WAIT=1`, default OFF).  Eliminates the
+  host-side `cudaEventSynchronize` on the IPC producer event when torch is the frame
+  mode, replacing it with a GPU-resident dependency edge.  Gains ~50–200 µs
+  throughput per frame depending on WDDM batch timing; safe to enable alongside
+  CUDA Graphs.
+- **R1 adaptive auto-enable latch** (`CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`).  Monitors
+  per-frame event-wait time; if three consecutive frames exceed the heuristic
+  threshold the latch fires and permanently enables GPU-side wait for the session —
+  no manual `CUDALINK_TORCH_GPU_WAIT=1` required.  One-way: once enabled it stays
+  enabled for the session lifetime.
+
+### Performance
+
+- **R3: pinned-memory f16 fallback.**  When `get_frame_numpy()` is called with a
+  float16 frame and CUDA cannot allocate pinned (page-locked) host memory for the
+  direct D2H path, the importer now falls back to a pageable staging copy rather
+  than raising.  Avoids unexpected `RuntimeError` under memory pressure.
+- **R4: hygiene — `graphs_deferred` flag and docstring cleanup.**  Internal
+  `CUDAGraphsMixin` state tracking for deferred graph builds; no behavior change.
+
+### Fixed
+
+- **In-TD Sender COMP did not honor `CUDALINK_DOORBELL`.**  `TDSenderEngine.initialize()`
+  built `ExportPolicy(...)` by hand without `doorbell=`, so the env switch had zero
+  effect on the in-TD sender (`self._doorbell` stayed `None` → signal skipped →
+  receiver always timed out).  Added `doorbell=env_bool("CUDALINK_DOORBELL", default=False)`.
+- **`sync_td_wrapper.py` rewriter dropped all but the last stem on comma-separated
+  `from . import A, B` lines.**  The regex captured `A, B` as one group and emitted a
+  single `import B as A, B` statement.  Rewriter now splits on comma and emits one
+  `import X as X` line per stem (black-compatible, avoids E702).
+- **`sync_td_wrapper.py` emitted `E702` multi-statement lines for comma-import stems.**
+  Companion fix: each stem gets its own physical line.
+- **`_event_to_int` type error on `cupy` wait path.**  `c_void_p.value` is `int | None`
+  (returns `None` for a null pointer); the fast-path `int(x.value)` raised `TypeError`
+  on null handles.  Fixed with `x.value or 0` pattern; the residual `c_uint64`
+  overload mismatch suppressed via pyrefly sub-config.
+- **`bench_doorbell.py` summary line raised `UnicodeEncodeError` on cp1252 terminals.**
+  Unicode `→` arrow replaced with ASCII `->`.
+
 ## [1.10.3] - 2026-06-11
 
 ### Fixed
