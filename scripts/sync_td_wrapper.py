@@ -54,6 +54,7 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
     (_SRC / "nvml_observer.py", _TD / "NVMLObserver.py", "byte_identical"),
     (_SRC / "shm_protocol.py", _TD / "SHMProtocol.py", "byte_identical"),
     (_SRC / "activation_barrier.py", _TD / "ActivationBarrier.py", "byte_identical"),
+    (_SRC / "_doorbell.py", _TD / "Doorbell.py", "byte_identical"),
     # ---- rewrite_relative pairs (deep modules + their dependencies) ---------
     (_SRC / "_nvtx.py", _TD / "NVTXShim.py", "rewrite_relative"),
     (_SRC / "_exporter_port.py", _TD / "ExporterPort.py", "rewrite_relative"),

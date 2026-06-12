@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any, Protocol
 
+import Doorbell as _doorbell
 import NVTXShim as _nvtx
 from ImporterPort import (
     ImportOutcome,
@@ -46,6 +47,7 @@ from SHMProtocol import (
     acquire_slot,
     read_num_slots,
     read_version,
+    read_write_idx,
 )
 
 if TYPE_CHECKING:
@@ -276,6 +278,8 @@ class IPCConnection:
     layout: object  # SHMLayout
     shutdown_offset: int
     timestamp_offset: int
+    # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
+    doorbell_handle: object = None
 
     def close_ipc_handles(self) -> None:
         """Close IPC mem handles and events. SharedMemory stays open."""
@@ -296,6 +300,11 @@ class IPCConnection:
                 except (RuntimeError, OSError) as e:
                     logger.error("Error destroying event for slot %d: %s", slot, e)
                 self.ipc_events[slot] = None
+
+        # R2: close doorbell handle alongside IPC handles
+        if self.doorbell_handle is not None:
+            _doorbell.close(self.doorbell_handle)
+            self.doorbell_handle = None
 
     def close(self) -> None:
         """Close IPC handles and SharedMemory. Idempotent."""
@@ -1212,6 +1221,18 @@ class Importer:
             )
 
         logger.info("Opened %d IPC buffer slots", num_slots)
+
+        # R2: open the doorbell event if the policy requests it
+        db_handle = None
+        if self._policy.doorbell:
+            db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
+            if db_handle is not None:
+                logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
+            else:
+                logger.warning(
+                    "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
+                )
+
         return IPCConnection(
             cuda=cuda,
             shm_handle=shm,
@@ -1223,6 +1244,7 @@ class Importer:
             layout=layout,
             shutdown_offset=layout.shutdown_offset,
             timestamp_offset=layout.timestamp_offset,
+            doorbell_handle=db_handle,
         )
 
     # ------------------------------------------------------------------
@@ -1393,6 +1415,44 @@ class Importer:
             conn.cuda.synchronize()
 
         return (time.perf_counter() - wait_start) * 1_000_000
+
+    # ------------------------------------------------------------------
+    # R2: Doorbell wait primitive
+    # ------------------------------------------------------------------
+
+    def wait_for_doorbell(self, timeout_ms: float) -> bool:
+        """Block until the producer signals a new frame or timeout_ms elapses.
+
+        Lost-wakeup-safe: before blocking the function checks whether a new
+        frame has already arrived (write_idx advanced) and returns True
+        immediately if so, consuming no signal from the kernel event.
+
+        Returns:
+            True  — a new frame *may* be waiting; caller should call get_frame().
+            False — timed out, or doorbell is disabled / not opened / non-Windows.
+                    Caller should fall back to its poll-sleep path.
+
+        Notes:
+            * This is a single-consumer primitive (auto-reset event).
+            * The 2 ms default cap in the example loop keeps the lost-wakeup
+              window bounded: worst-case latency is one timeout_ms slice, not
+              infinite.  Caller always re-checks with get_frame() after True.
+            * Returns False immediately when CUDALINK_DOORBELL=0 or on
+              non-Windows — existing behaviour is preserved without any guards
+              in the caller.
+        """
+        conn = self._conn
+        h = conn.doorbell_handle if conn is not None else None
+        if h is None:
+            return False  # disabled / not opened / non-Windows → caller polls
+
+        # Early return: frame already arrived since last get_frame() call.
+        cur = read_write_idx(conn.shm_handle.buf)
+        if cur != 0 and cur != self._last_write_idx:
+            return True
+
+        # Block until signaled; auto-reset clears the event on wake.
+        return _doorbell.wait(h, int(timeout_ms))
 
     # ------------------------------------------------------------------
     # Frame consumers

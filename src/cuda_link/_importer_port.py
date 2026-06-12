@@ -88,6 +88,11 @@ class ImportPolicy:
     reconnect_enabled: bool = True
     reconnect_max_attempts: int = 20
     reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
+    # R2: Win32 named-event doorbell. When True the consumer opens the named
+    # event published by the producer and blocks on it instead of poll-sleeping
+    # on NO_FRAME. Set the same env var on both sides. Single-consumer only
+    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
+    doorbell: bool = False
 
     @classmethod
     def from_env(cls) -> ImportPolicy:
@@ -105,6 +110,7 @@ class ImportPolicy:
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
         )
 
     @classmethod
