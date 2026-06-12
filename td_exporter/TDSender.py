@@ -24,7 +24,7 @@ import traceback
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
-from Env import env_int  # noqa: E402
+from Env import env_bool, env_int  # noqa: E402
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
@@ -473,6 +473,10 @@ class TDSenderEngine:
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier
                 # so it does not create a conflicting parallel check on the same SHM segment.
                 barrier_enabled=False,
+                # R2: Win32 named-event doorbell — opt-in via CUDALINK_DOORBELL=1.
+                # Parity with ImportPolicy.from_env() on the receiver side.
+                # Default OFF; single-consumer, Windows-only.
+                doorbell=env_bool("CUDALINK_DOORBELL", default=False),
             )
 
             # Exporter.open() with cuda=None creates CTypesCUDAAdapter.for_device(spec.device).

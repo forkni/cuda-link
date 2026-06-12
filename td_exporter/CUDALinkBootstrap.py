@@ -60,6 +60,7 @@ _ALIAS_MAP: dict[str, str] = {
     "NVMLObserver": "cuda_link.nvml_observer",
     "SHMProtocol": "cuda_link.shm_protocol",
     "ActivationBarrier": "cuda_link.activation_barrier",
+    "Doorbell": "cuda_link._doorbell",
     # rewrite_relative pairs (canonical source uses relative imports)
     "NVTXShim": "cuda_link._nvtx",
     "ExporterPort": "cuda_link._exporter_port",

@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any, Protocol
 
+import Doorbell as _doorbell
 import NVTXShim as _nvtx
 from ImporterPort import (
     ImportOutcome,
@@ -46,6 +47,7 @@ from SHMProtocol import (
     acquire_slot,
     read_num_slots,
     read_version,
+    read_write_idx,
 )
 
 if TYPE_CHECKING:
@@ -276,6 +278,8 @@ class IPCConnection:
     layout: object  # SHMLayout
     shutdown_offset: int
     timestamp_offset: int
+    # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
+    doorbell_handle: object = None
 
     def close_ipc_handles(self) -> None:
         """Close IPC mem handles and events. SharedMemory stays open."""
@@ -296,6 +300,11 @@ class IPCConnection:
                 except (RuntimeError, OSError) as e:
                     logger.error("Error destroying event for slot %d: %s", slot, e)
                 self.ipc_events[slot] = None
+
+        # R2: close doorbell handle alongside IPC handles
+        if self.doorbell_handle is not None:
+            _doorbell.close(self.doorbell_handle)
+            self.doorbell_handle = None
 
     def close(self) -> None:
         """Close IPC handles and SharedMemory. Idempotent."""
@@ -658,6 +667,26 @@ class _RetryState:
 
 
 # ---------------------------------------------------------------------------
+# IPC-event pointer helper
+# ---------------------------------------------------------------------------
+
+
+def _event_to_int(evt: object) -> int:
+    """Resolve an opened IPC event to its integer cudaEvent_t pointer.
+
+    Normally a CUDAEvent_t (ctypes c_uint64); be robust to a raw bytes handle
+    (8-byte little-endian pointer) or a plain int, so the cupy backend matches
+    the torch/CPU paths that hand the event straight to ctypes.
+    """
+    val = getattr(evt, "value", evt)
+    if isinstance(val, (bytes, bytearray)):
+        return int.from_bytes(val, "little")
+    if isinstance(val, int):
+        return val
+    return int(val)  # type: ignore[arg-type]  # ctypes c_uint64.value is int at runtime
+
+
+# ---------------------------------------------------------------------------
 # Frame-consume backends (private, one instance per get_frame* call)
 # ---------------------------------------------------------------------------
 
@@ -705,16 +734,43 @@ class _TorchBackend:
     def __init__(self, importer: Importer, stream: object | None) -> None:
         self._imp = importer
         self._stream = stream
+        # Cached raw CUDA stream handle for torch_gpu_wait path.  Populated lazily
+        # on first call to avoid paying the torch.cuda.current_stream() Python→C++
+        # crossing on every frame.  Valid as long as the caller uses a single default
+        # stream per device (the common case).  Pass stream= to get_frame() explicitly
+        # if you switch CUDA streams between calls.
+        self._gpu_wait_cs: int | None = None
 
     def prepare(self, importer: Importer) -> None:  # noqa: ARG002
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
         if self._stream is not None:
+            # Explicit stream= provided: GPU-side wait (existing behaviour).
             cs = self._imp._resolve_stream(self._stream)
-            if conn.ipc_events[read_slot]:
-                conn.cuda.stream_wait_event(cs, conn.ipc_events[read_slot], 0)
+            if evt:
+                conn.cuda.stream_wait_event(cs, evt, 0)
+            else:
+                # No IPC event for this slot — fall back to full sync so the
+                # GPU read is not unordered.
+                self._imp._wait_for_slot(read_slot)
             return 0.0
+        if self._imp._policy.torch_gpu_wait or self._imp._gpu_wait_active:
+            # R1 opt-in (explicit) or R1-adaptive (auto-latched): GPU-side wait on torch.cuda.current_stream().
+            # CPU returns immediately; ordering enforced by the GPU scheduler.
+            # TIMEOUT is unreachable on this path (hung producer = stalled stream).
+            # Stream handle cached after first call to skip repeated Python→C++ crossing.
+            import torch
+
+            if torch.cuda.is_available():
+                if self._gpu_wait_cs is None:
+                    self._gpu_wait_cs = torch.cuda.current_stream().cuda_stream
+                cs = self._gpu_wait_cs
+                if evt:
+                    conn.cuda.stream_wait_event(cs, evt, 0)
+                    return 0.0
+                # No IPC event — fall through to CPU wait.
         return self._imp._wait_for_slot(read_slot)  # may raise TimeoutError
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -824,14 +880,18 @@ class _CupyBackend:
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
+        if not evt:
+            # No IPC event for this slot — fall back to CPU wait so the GPU
+            # read is not unordered.  TimeoutError may be raised.
+            return self._imp._wait_for_slot(read_slot)
         stream = self._stream
         if stream is None:
             stream = cp.cuda.get_current_stream()
         elif not isinstance(stream, cp.cuda.Stream):
             cuda_stream_ptr = self._imp._resolve_stream(stream)
             stream = cp.cuda.ExternalStream(cuda_stream_ptr)
-        if conn.ipc_events[read_slot]:
-            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
+        cp.cuda.runtime.streamWaitEvent(stream.ptr, _event_to_int(evt), 0)
         return 0.0  # GPU-side wait — CPU returns immediately; TimeoutError unreachable
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -911,6 +971,17 @@ class Importer:
         self.total_wait_sleep_us = 0.0
         self.wait_spin_hits = 0
         self.wait_sleep_hits = 0
+
+        # R1-adaptive: one-way latch state
+        # _gpu_wait_active flips True once and stays True for the session.
+        # Precompute the minimum sleeps needed to trigger (ceil of window × pct / 100).
+        self._gpu_wait_active = False
+        self._gpu_wait_latched_frame: int | None = None
+        self._adaptive_frames = 0
+        self._adaptive_sleeps = 0
+        _w = policy.gpu_wait_adaptive_window
+        _p = policy.gpu_wait_adaptive_sleep_pct
+        self._adaptive_min_sleeps: int = max(1, -(-_w * _p // 100))  # ceil without math.ceil
 
     @classmethod
     def open(
@@ -1152,6 +1223,18 @@ class Importer:
             )
 
         logger.info("Opened %d IPC buffer slots", num_slots)
+
+        # R2: open the doorbell event if the policy requests it
+        db_handle = None
+        if self._policy.doorbell:
+            db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
+            if db_handle is not None:
+                logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
+            else:
+                logger.warning(
+                    "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
+                )
+
         return IPCConnection(
             cuda=cuda,
             shm_handle=shm,
@@ -1163,6 +1246,7 @@ class Importer:
             layout=layout,
             shutdown_offset=layout.shutdown_offset,
             timestamp_offset=layout.timestamp_offset,
+            doorbell_handle=db_handle,
         )
 
     # ------------------------------------------------------------------
@@ -1264,6 +1348,25 @@ class Importer:
         self._last_write_idx = result.write_idx
         return result, ImportOutcome.NEW_FRAME
 
+    def _adaptive_observe_wait(self, slept: bool) -> None:
+        """Record one cpu-spin/sleep outcome and latch gpu-wait when the sleep rate crosses the threshold.
+
+        Called from _wait_for_slot only — a no-op once latched or when the feature is disabled.
+        The latch is one-way: once _gpu_wait_active is True it stays True for the session.
+        """
+        if not self._policy.torch_gpu_wait_adaptive or self._gpu_wait_active:
+            return
+        self._adaptive_frames += 1
+        if slept:
+            self._adaptive_sleeps += 1
+        if self._adaptive_sleeps >= self._adaptive_min_sleeps:
+            self._gpu_wait_active = True
+            self._gpu_wait_latched_frame = self.frame_count
+        elif self._adaptive_frames >= self._policy.gpu_wait_adaptive_window:
+            # Full window passed without hitting the threshold — reset and keep watching.
+            self._adaptive_frames = 0
+            self._adaptive_sleeps = 0
+
     def _wait_for_slot(self, slot: int) -> float:
         """CPU-side wait until producer signals the slot event.
 
@@ -1279,17 +1382,26 @@ class Importer:
             query = conn.cuda.query_event
 
             if policy.wait_spin_us > 0:
-                spin_deadline = wait_start + policy.wait_spin_us / 1_000_000
-                while time.perf_counter() < spin_deadline:
+                # Clamp spin_deadline to the overall deadline so the loop needs
+                # only one perf_counter() call per iteration — no inner deadline
+                # check required (spin budget << timeout_ms in all practical cases).
+                spin_deadline = min(
+                    wait_start + policy.wait_spin_us / 1_000_000,
+                    deadline,
+                )
+                while (now := time.perf_counter()) < spin_deadline:
                     if query(evt):
-                        spin_us = (time.perf_counter() - wait_start) * 1_000_000
+                        spin_us = (now - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
+                        self._adaptive_observe_wait(False)
                         return spin_us
-                    if time.perf_counter() >= deadline:
-                        raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                # If we exited because spin_deadline == deadline, we timed out.
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
 
             phase2_start = time.perf_counter()
+            did_sleep = False
             with _HighResTimer():
                 while True:
                     if query(evt):
@@ -1297,12 +1409,52 @@ class Importer:
                     if time.perf_counter() >= deadline:
                         raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
                     time.sleep(0.0001)
+                    did_sleep = True
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
             self.wait_sleep_hits += 1
+            self._adaptive_observe_wait(did_sleep)
         else:
             conn.cuda.synchronize()
 
         return (time.perf_counter() - wait_start) * 1_000_000
+
+    # ------------------------------------------------------------------
+    # R2: Doorbell wait primitive
+    # ------------------------------------------------------------------
+
+    def wait_for_doorbell(self, timeout_ms: float) -> bool:
+        """Block until the producer signals a new frame or timeout_ms elapses.
+
+        Lost-wakeup-safe: before blocking the function checks whether a new
+        frame has already arrived (write_idx advanced) and returns True
+        immediately if so, consuming no signal from the kernel event.
+
+        Returns:
+            True  — a new frame *may* be waiting; caller should call get_frame().
+            False — timed out, or doorbell is disabled / not opened / non-Windows.
+                    Caller should fall back to its poll-sleep path.
+
+        Notes:
+            * This is a single-consumer primitive (auto-reset event).
+            * The 2 ms default cap in the example loop keeps the lost-wakeup
+              window bounded: worst-case latency is one timeout_ms slice, not
+              infinite.  Caller always re-checks with get_frame() after True.
+            * Returns False immediately when CUDALINK_DOORBELL=0 or on
+              non-Windows — existing behaviour is preserved without any guards
+              in the caller.
+        """
+        conn = self._conn
+        h = conn.doorbell_handle if conn is not None else None
+        if h is None:
+            return False  # disabled / not opened / non-Windows → caller polls
+
+        # Early return: frame already arrived since last get_frame() call.
+        cur = read_write_idx(conn.shm_handle.buf)
+        if cur != 0 and cur != self._last_write_idx:
+            return True
+
+        # Block until signaled; auto-reset clears the event on wake.
+        return _doorbell.wait(h, int(timeout_ms))
 
     # ------------------------------------------------------------------
     # Frame consumers
@@ -1379,8 +1531,19 @@ class Importer:
         Args:
             stream: Optional CUDA stream (torch.cuda.Stream, cupy.cuda.Stream,
                     or int). When provided, issues cudaStreamWaitEvent (GPU-side
-                    ordering, non-blocking CPU). When None, blocks until the
-                    producer event fires.
+                    ordering, non-blocking CPU). When None, the wait mode depends
+                    on ImportPolicy.torch_gpu_wait:
+
+                    False (default): CPU spins on cudaEventQuery then sleeps.
+                        get_frame() blocks until the producer event fires.
+                        ImportOutcome.TIMEOUT is raised after timeout_ms.
+
+                    True (opt-in, CUDALINK_TORCH_GPU_WAIT=1): cudaStreamWaitEvent
+                        on torch.cuda.current_stream(). CPU returns immediately;
+                        the tensor is valid in **stream order**, not at return.
+                        ImportOutcome.TIMEOUT is unreachable on this path —
+                        a hung producer stalls the stream instead of raising.
+                        See get_frame_cupy() for the same trade-off.
 
         Returns:
             ImportResult[torch.Tensor] with outcome NEW_FRAME, NO_FRAME,
@@ -1600,6 +1763,8 @@ class Importer:
             "wait_sleep_hits": self.wait_sleep_hits,
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
             "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
+            "gpu_wait_active": self._gpu_wait_active,
+            "gpu_wait_latched_frame": self._gpu_wait_latched_frame,
         }
         if self._nvml_observer is not None:
             stats["nvml"] = self._nvml_observer.snapshot()

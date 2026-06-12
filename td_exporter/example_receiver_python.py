@@ -177,6 +177,7 @@ def main() -> None:
     profile_on = os.environ.get("CUDALINK_IMPORT_PROFILE", "0") == "1"
     frame_count = 0
     no_frame_count = 0
+    doorbell_wake_count = 0  # R2: incremented each time wait_for_doorbell() returns True
     start_time = time.perf_counter()
     last_report = start_time
     last_report_frame = 0  # frame_count at last status line — for windowed (instantaneous) FPS
@@ -240,12 +241,13 @@ def main() -> None:
                         profile_suffix = f" | wait={(cur_wait - last_report_wait_s) / max(window_frames, 1):.1f} µs/f"
                     else:
                         profile_suffix = ""
+                    db_suffix = f" | doorbell_wakes={doorbell_wake_count}" if doorbell_wake_count else ""
                     print(
                         f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
                         f"shape={frame.shape} dtype={frame.dtype} | "
                         f"latency={latency_ms:.2f} ms | "
                         f"get_frame={avg_gf_us:.1f} µs avg"
-                        f"{profile_suffix}"
+                        f"{profile_suffix}{db_suffix}"
                     )
                     last_report = now
                     last_report_frame = frame_count
@@ -254,7 +256,13 @@ def main() -> None:
 
             elif result.outcome is ImportOutcome.NO_FRAME:
                 no_frame_count += 1
-                time.sleep(0.001)
+                # R2 doorbell: block on the Win32 named event when enabled
+                # (CUDALINK_DOORBELL=1); returns False immediately when disabled
+                # or non-Windows, preserving the existing poll-sleep behaviour.
+                if importer.wait_for_doorbell(2.0):
+                    doorbell_wake_count += 1
+                else:
+                    time.sleep(0.001)
 
             elif result.outcome is ImportOutcome.SHUTDOWN:
                 print("[receiver] TD sender shut down — exiting.")

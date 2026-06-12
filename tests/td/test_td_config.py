@@ -14,12 +14,11 @@ def test_sender_config_defaults() -> None:
     from TDConfig import TDSenderConfig
 
     cfg = TDSenderConfig()
-    # P1: export_sync is now tri-state; None = auto-select by topology (new default)
+    # export_sync stores raw tri-state; None resolves to blocking in _resolve_export_sync.
     assert cfg.export_sync is None
     assert cfg.export_profile is False
     assert cfg.export_flush_probe is True
     assert cfg.use_graphs is False
-    assert cfg.graphs_deferred is False
     assert cfg.stream_high_prio is False
     assert cfg.init_pace is False
     assert cfg.persist_stream is True

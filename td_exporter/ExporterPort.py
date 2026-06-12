@@ -75,6 +75,11 @@ class ExportPolicy:
     barrier_stale_ns: int = 5_000_000_000
     high_priority_stream: bool = True
     export_profile: bool = False
+    # R2: Win32 named-event doorbell. When True the producer creates a named
+    # auto-reset event and signals it after every publish_frame(). Requires
+    # CUDALINK_DOORBELL=1 on the consumer side too. Single-consumer only
+    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
+    doorbell: bool = False
 
     @classmethod
     def from_env(cls) -> ExportPolicy:
@@ -89,6 +94,7 @@ class ExportPolicy:
             barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
             high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
         )
 
     @classmethod

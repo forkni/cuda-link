@@ -36,7 +36,7 @@ from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
 
-from . import _nvtx
+from . import _doorbell, _nvtx
 from ._cuda_adapters import CTypesCUDAAdapter
 from ._exporter_port import (
     CudaPort,
@@ -160,6 +160,9 @@ class Exporter:
         self.ipc_events: list = [None] * spec.num_slots
         self.ipc_event_handles: list = [None] * spec.num_slots
         self.write_idx: int = 0
+
+        # R2: Win32 doorbell handle (set in _initialize when policy.doorbell=True)
+        self._doorbell: object = None
 
         # SharedMemory
         self.shm_handle: SharedMemory | None = None
@@ -319,6 +322,13 @@ class Exporter:
         self._write_metadata_to_shm()
         self._ts_offset = self._layout.timestamp_offset
         self._initialized = True
+
+        if self._policy.doorbell:
+            self._doorbell = _doorbell.create_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
+            if self._doorbell is not None:
+                logger.info("Doorbell created: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
+            else:
+                logger.warning("Doorbell creation failed; consumer will fall back to poll-sleep")
 
         if self._policy.use_graphs:
             try:
@@ -695,6 +705,8 @@ class Exporter:
             with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
                 self.write_idx += 1
                 publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
+                if self._doorbell:
+                    _doorbell.signal(self._doorbell)
             if profile:
                 self._profile.record("shm_write", (time.perf_counter() - _t) * 1_000_000)
 
@@ -770,6 +782,9 @@ class Exporter:
                 logger.info("Shutdown signal sent to consumer")
             except (OSError, BufferError) as e:
                 logger.warning("Could not write shutdown signal: %s", e)
+            # Wake a blocked consumer so it can observe the shutdown flag.
+            if self._doorbell:
+                _doorbell.signal(self._doorbell)
             try:
                 for slot in range(self._spec.num_slots):
                     base = self._layout.slot_offset(slot)
@@ -849,6 +864,11 @@ class Exporter:
             logger.warning("Could not unlink SharedMemory: %s", e)
 
         self._barrier.close()
+
+        # R2: Close doorbell handle after barrier (all wakers done).
+        if self._doorbell:
+            _doorbell.close(self._doorbell)
+            self._doorbell = None
 
         # Reset state — empty lists, not null-filled slots: Exporter.open() always
         # constructs a fresh instance, so these never need to be pre-sized here.

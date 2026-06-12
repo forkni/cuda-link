@@ -88,7 +88,7 @@ Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-targe
 (one-time):
 
 ```bat
-utils\build_wheel.cmd              REM build dist\cuda_link-1.10.3-py3-none-any.whl
+utils\build_wheel.cmd              REM build dist\cuda_link-1.11.0-py3-none-any.whl
 install_td_library.cmd             REM interactive menu — choose one of 5 install modes
 ```
 
@@ -126,12 +126,12 @@ for full instructions.
 ```bash
 # Option A: Build wheel and install (recommended — portable, no source needed):
 cd C:\path\to\CUDA_IPC
-utils\build_wheel.cmd                       # Builds dist\cuda_link-1.10.3-py3-none-any.whl
+utils\build_wheel.cmd                       # Builds dist\cuda_link-1.11.0-py3-none-any.whl
 
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[all]"     # All output modes
 
 # Option B: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -329,6 +329,10 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 | `CUDALINK_STRICT_DEVICE` | `0` | Raise `ValueError` in `export()` / `record_source_sync()` when the source pointer or stream belongs to a different CUDA device than the exporter. Default `0` logs an error but continues. |
 | `CUDALINK_LIB_STREAM_PRIO` | `high` | CUDA stream priority for the Python-lib IPC stream. Default `high` minimises GPU scheduling latency for the D2D copy. Set to `normal` to disable high-priority scheduling (e.g., to avoid priority inversion with other high-priority streams). |
 | `CUDALINK_BARRIER_STALE_NS` | `5000000000` | Staleness threshold in nanoseconds for the activation barrier's cross-process SHM counter. Frames are skipped while a Sender is settling; a counter older than this value is treated as stale and ignored. Default is 5 seconds. |
+| `CUDALINK_TORCH_GPU_WAIT` | `0` | GPU-side wait for `get_frame()` (torch backend, R1 opt-in). When `1`, issues `cudaStreamWaitEvent` on `torch.cuda.current_stream()` instead of CPU-polling; the tensor is valid in stream order, not at return. `ImportOutcome.TIMEOUT` is unreachable on this path — a hung producer stalls the stream. Default `0` preserves the existing CPU-spin/sleep behaviour and timeout detection. |
+| `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE` | `0` | Auto-promote to GPU-side wait (torch backend) once real sleep-blocking is detected at runtime (R1-adaptive). Monitors the cpu-spin/sleep ratio over a sliding window; latches into `cudaStreamWaitEvent` mode for the rest of the session when the sleep fraction exceeds `CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT` within a window of `CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW` frames. One-way — never reverts. Carries the same `ImportOutcome.TIMEOUT`-unreachable consequence as `CUDALINK_TORCH_GPU_WAIT`. Effective at 30 fps (high sleep rate); stays in cpu-spin at 60 fps (zero sleep). |
+| `CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW` | `120` | Frame window size for the adaptive gpu-wait detector (frames counted before a tumbling reset if threshold not reached). Only effective when `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`. |
+| `CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT` | `5` | Sleep-fraction threshold (integer percent of window) that triggers the adaptive gpu-wait latch. A value of `5` means ≥5 % of frames in the window must have actually slept (fallen through the spin budget) before the latch engages. Only effective when `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`. |
 | `CUDALINK_WAIT_SPIN_US` | `200` | Spin-wait window in microseconds for the importer's slot-available poll before yielding. Increase on systems with high OS scheduling jitter to reduce wake-up latency; decrease to reduce CPU burn on low-latency pipelines. |
 | `CUDALINK_D2H_STREAM_PRIO` | `normal` | CUDA stream priority for the importer's D2H copy stream. Default `normal`; set to `high` to prioritise the consumer's D2H transfer over background GPU work. |
 | `CUDALINK_ALLOW_PAGEABLE_FALLBACK` | `0` | Allow fallback to pageable (non-pinned) host memory when `cudaHostAlloc` fails. Default `0` raises instead. Useful on systems where pinned memory is exhausted by other processes. |
@@ -342,6 +346,7 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 | `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering; coexistence safety relies on explicit per-engine streams + producer-stream ordering. **TD Sender default: `1` (blocking)** — the TD source is TD's transient cook-scoped TOP texture (`cm.ptr`) reclaimed immediately after the cook, so the D2D read must complete before that happens (CUDA 719 source-lifetime guard; see CHANGELOG 1.10.1). Set `CUDALINK_EXPORT_SYNC=0` in the TD Sender only when the source buffer is guaranteed to outlive the async copy. |
 | `CUDALINK_ACTIVATION_BARRIER` | `1` | Python-lib side of the cross-process activation barrier (F9). Reads a tiny SHM counter each `export_frame()` and skips publishing while a TD Sender is in its WDDM-saturating init window. No-op in single-pair topologies (counter stays at 0); gracefully skipped if the SHM segment is absent. Set to `0` to opt out. |
 | `CUDALINK_TD_ACTIVATION_BARRIER` | `1` | TD-side counterpart of `CUDALINK_ACTIVATION_BARRIER` — increments the same SHM counter around Sender `initialize()` so the Python producer backs off. Same no-op / graceful-absence behaviour. Set to `0` to opt out. |
+| `CUDALINK_DOORBELL` | `0` | R2 Win32 named-event doorbell (single consumer, opt-in, default OFF). When `1` the producer (`Exporter`) creates a Win32 auto-reset named event and signals it after each `publish_frame()`; the consumer (`Importer.wait_for_doorbell()`) blocks on the event instead of poll-sleeping on `NO_FRAME`. Expected: sub-300 µs notify latency and ~zero idle CPU while waiting. Must be set on **both** producer and consumer. **Single-consumer only** — auto-reset wakes exactly one waiter. **Windows-only** — silently disabled on Linux/macOS (poll-sleep default is preserved). Default `0`. |
 | `CUDALINK_TD_PERSIST_STREAM` | `1` | Skip `stream_destroy` in TD Sender `cleanup()` so the IPC CUDA stream survives `deactivate`→`reactivate` cycles (F8). Free in single-pair (no deactivation ever happens); load-bearing in concurrent — without it, stream recreate on each reactivation collides with in-flight Receiver work, doubling first-settle `post=` latency (Phase 3.6 confirmed). Set to `0` to opt out. |
 | `CUDALINK_TD_STREAM_PRIO` | `normal` | CUDA stream priority for the TD Sender's IPC stream. Default `normal` is safe for both single-pair and concurrent topologies — in single-pair only one stream exists per process so priority is moot; in concurrent, equal priorities prevent WDDM contention accumulation across reactivation cycles (high/high contention produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed). Set to `high` only for explicit single-pair lowest-latency optimisation. |
 | `CUDALINK_EXPORT_FLUSH_PROBE` | `1` | Insert a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when `EXPORT_SYNC=0`. Forces WDDM-deferred CUDA submissions to drain each frame, preventing Windows Task Manager's 3D-engine counter from inflating when true compute load (per NVML) is low. NVML readings are unchanged — purely cosmetic/observability. Set to `0` to disable. |
@@ -414,16 +419,16 @@ cd cuda-link
 
 # Run the build script (uses PEP 517 isolated build via python -m build)
 utils\build_wheel.cmd
-# Output: dist\cuda_link-1.10.3-py3-none-any.whl  (~30 KB)
+# Output: dist\cuda_link-1.11.0-py3-none-any.whl  (~30 KB)
 
 # Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.10.3-py3-none-any.whl[all]"     # All output modes
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
+pip install "dist\cuda_link-1.11.0-py3-none-any.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.10.3-py3-none-any.whl[torch]"
+pip install --force-reinstall "dist\cuda_link-1.11.0-py3-none-any.whl[torch]"
 ```
 
 The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
