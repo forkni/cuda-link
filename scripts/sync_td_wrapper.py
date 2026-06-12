@@ -122,8 +122,10 @@ def rewrite_relative_imports(source: str) -> str:
             indent = m.group(1)
             stems = [s.strip() for s in m.group(2).split(",") if s.strip()]
             eol = "\n" if line.endswith("\n") else ""
-            rewritten = "; ".join(f"import {_resolve_name(s, line)} as {s}" for s in stems)
-            out.append(f"{indent}{rewritten}{eol}")
+            # Emit one import statement per stem (black-compatible; avoids E702).
+            for s in stems:
+                derived = _resolve_name(s, line)
+                out.append(f"{indent}import {derived} as {s}{eol}")
             continue
 
         # ``from .stem import ...`` — attribute import (possibly indented; single or multi-line opener)
