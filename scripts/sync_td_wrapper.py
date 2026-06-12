@@ -115,15 +115,15 @@ def rewrite_relative_imports(source: str) -> str:
         if re.match(r"^\s*from \.\.", line):
             raise ValueError(f"Unsupported upward relative import: {line!r}")
 
-        # ``from . import stem`` — bare module import (possibly indented, e.g. inside a method)
-        m = re.match(r"^(\s*)(from \. import )([\w]+)(.*)", line)
+        # ``from . import stem[, stem2, ...]`` — bare module import (possibly indented or
+        # comma-separated when the linter merges adjacent single-stem imports).
+        m = re.match(r"^(\s*)from \. import ([\w ,]+?)(\s*)$", line)
         if m:
             indent = m.group(1)
-            stem = m.group(3)
-            tail = m.group(4)
-            derived = _resolve_name(stem, line)
+            stems = [s.strip() for s in m.group(2).split(",") if s.strip()]
             eol = "\n" if line.endswith("\n") else ""
-            out.append(f"{indent}import {derived} as {stem}{tail}{eol}")
+            rewritten = "; ".join(f"import {_resolve_name(s, line)} as {s}" for s in stems)
+            out.append(f"{indent}{rewritten}{eol}")
             continue
 
         # ``from .stem import ...`` — attribute import (possibly indented; single or multi-line opener)
