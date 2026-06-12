@@ -83,6 +83,10 @@ with Importer.open(ImportSpec(
 
 **Performance**: 60 FPS achievable at 512x512; throughput is limited by model inference, not IPC overhead. See [docs/BENCHMARKS.md](BENCHMARKS.md) for IPC timings.
 
+> **Tip (R1 GPU-side wait):** Set `CUDALINK_TORCH_GPU_WAIT=1` (or `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`
+> for auto-enable) to replace the host-side IPC event sync with a GPU-resident `cudaStreamWaitEvent`.
+> Gain: ~50–200 µs/frame depending on WDDM batch timing; safe alongside CUDA Graphs.
+
 ---
 
 ## Example 2: TouchDesigner → OpenCV Processing (Numpy)
@@ -439,7 +443,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.10.3.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.11.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -474,6 +478,69 @@ Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENC
 - AI inference: ~32ms/frame (31 FPS)
 - IPC export overhead: small fraction of inference time
 - TD display: 60 FPS locked (reads latest available frame)
+
+---
+
+## Example 8: Low-CPU Doorbell Consumer (R2)
+
+### Use Case
+
+High-frequency TD → Python channel where the Python consumer must stay idle without burning CPU
+between frames.  `CUDALINK_DOORBELL=1` replaces the poll-sleep with a blocking Win32 named-event
+wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.
+
+### Requirements
+
+- Windows only (Win32 `CreateNamedEvent`)
+- `CUDALINK_DOORBELL=1` set on **both** TD Sender and Python consumer before either process starts
+- Single consumer per channel only
+
+### TouchDesigner Setup
+
+Set `CUDALINK_DOORBELL=1` in the environment before launching TD (system env or a launch wrapper),
+or add it to TD's own `CUDALINK_*` env block so it propagates to child processes.
+
+### Python Script (Doorbell Consumer)
+
+```python
+import os
+os.environ["CUDALINK_DOORBELL"] = "1"  # must be set before importing cuda_link
+
+from cuda_link import Importer, ImportSpec, ImportOutcome
+
+with Importer.open(ImportSpec(
+    shm_name="td_input",
+    shape=(1080, 1920, 4),
+    dtype="uint8",
+)) as importer:
+
+    while True:
+        result = importer.get_frame()
+
+        if result.outcome is ImportOutcome.SHUTDOWN:
+            break
+
+        if result.outcome is ImportOutcome.NO_FRAME:
+            # Block until the producer fires SetEvent — replaces poll-sleep.
+            # Returns immediately if a new frame arrived between get_frame() and this call
+            # (lost-wakeup guard: re-checks write_idx before blocking).
+            importer.wait_for_doorbell(timeout_secs=2.0)
+            continue
+
+        if result.outcome is ImportOutcome.RECONNECTING:
+            continue
+
+        # ImportOutcome.NEW_FRAME — process normally
+        process(result.frame)
+```
+
+**Performance** (TD Sender → Python subprocess, 60 FPS):
+- CPU idle: ~0.3-1% (vs ~3-4% poll baseline)
+- Notify latency p95: 0.02–0.10 ms (vs 0.04–1.80 ms poll baseline), ~10× tighter
+- Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
+
+> **Note**: `TDReceiver.py` (in-TD COMP on the cook thread) cannot use `wait_for_doorbell` — it
+> runs in a blocking cook context and must return immediately on `NO_FRAME` by design.
 
 ---
 
