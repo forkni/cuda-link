@@ -745,8 +745,8 @@ class _TorchBackend:
                 # GPU read is not unordered.
                 self._imp._wait_for_slot(read_slot)
             return 0.0
-        if self._imp._policy.torch_gpu_wait:
-            # R1 opt-in: GPU-side wait on torch.cuda.current_stream().
+        if self._imp._policy.torch_gpu_wait or self._imp._gpu_wait_active:
+            # R1 opt-in (explicit) or R1-adaptive (auto-latched): GPU-side wait on torch.cuda.current_stream().
             # CPU returns immediately; ordering enforced by the GPU scheduler.
             # TIMEOUT is unreachable on this path (hung producer = stalled stream).
             # Stream handle cached after first call to skip repeated Python→C++ crossing.
@@ -960,6 +960,17 @@ class Importer:
         self.total_wait_sleep_us = 0.0
         self.wait_spin_hits = 0
         self.wait_sleep_hits = 0
+
+        # R1-adaptive: one-way latch state
+        # _gpu_wait_active flips True once and stays True for the session.
+        # Precompute the minimum sleeps needed to trigger (ceil of window × pct / 100).
+        self._gpu_wait_active = False
+        self._gpu_wait_latched_frame: int | None = None
+        self._adaptive_frames = 0
+        self._adaptive_sleeps = 0
+        _w = policy.gpu_wait_adaptive_window
+        _p = policy.gpu_wait_adaptive_sleep_pct
+        self._adaptive_min_sleeps: int = max(1, -(-_w * _p // 100))  # ceil without math.ceil
 
     @classmethod
     def open(
@@ -1313,6 +1324,25 @@ class Importer:
         self._last_write_idx = result.write_idx
         return result, ImportOutcome.NEW_FRAME
 
+    def _adaptive_observe_wait(self, slept: bool) -> None:
+        """Record one cpu-spin/sleep outcome and latch gpu-wait when the sleep rate crosses the threshold.
+
+        Called from _wait_for_slot only — a no-op once latched or when the feature is disabled.
+        The latch is one-way: once _gpu_wait_active is True it stays True for the session.
+        """
+        if not self._policy.torch_gpu_wait_adaptive or self._gpu_wait_active:
+            return
+        self._adaptive_frames += 1
+        if slept:
+            self._adaptive_sleeps += 1
+        if self._adaptive_sleeps >= self._adaptive_min_sleeps:
+            self._gpu_wait_active = True
+            self._gpu_wait_latched_frame = self.frame_count
+        elif self._adaptive_frames >= self._policy.gpu_wait_adaptive_window:
+            # Full window passed without hitting the threshold — reset and keep watching.
+            self._adaptive_frames = 0
+            self._adaptive_sleeps = 0
+
     def _wait_for_slot(self, slot: int) -> float:
         """CPU-side wait until producer signals the slot event.
 
@@ -1340,12 +1370,14 @@ class Importer:
                         spin_us = (now - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
+                        self._adaptive_observe_wait(False)
                         return spin_us
                 # If we exited because spin_deadline == deadline, we timed out.
                 if time.perf_counter() >= deadline:
                     raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
 
             phase2_start = time.perf_counter()
+            did_sleep = False
             with _HighResTimer():
                 while True:
                     if query(evt):
@@ -1353,8 +1385,10 @@ class Importer:
                     if time.perf_counter() >= deadline:
                         raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
                     time.sleep(0.0001)
+                    did_sleep = True
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
             self.wait_sleep_hits += 1
+            self._adaptive_observe_wait(did_sleep)
         else:
             conn.cuda.synchronize()
 
@@ -1667,6 +1701,8 @@ class Importer:
             "wait_sleep_hits": self.wait_sleep_hits,
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
             "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
+            "gpu_wait_active": self._gpu_wait_active,
+            "gpu_wait_latched_frame": self._gpu_wait_latched_frame,
         }
         if self._nvml_observer is not None:
             stats["nvml"] = self._nvml_observer.snapshot()

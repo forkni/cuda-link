@@ -138,7 +138,7 @@ def _worker_producer(
 
         producer_sleep_s = 1.0 / producer_fps
         # Extra frames: warmup + 3 arms * (warmup + frames) with headroom
-        total = WARMUP_FRAMES + num_frames * 4 + 20
+        total = WARMUP_FRAMES + num_frames * 5 + 20  # cpu-spin + R1 + adaptive + cupy + headroom
         for _ in range(total):
             exporter.export(GpuFrame(ptr=int(src_ptr.value), size=nbytes))
             time.sleep(producer_sleep_s)
@@ -236,6 +236,95 @@ def _worker_consumer_torch(
                     "wait_sleep_hits": stats["wait_sleep_hits"],
                     "avg_spin_us": stats["avg_spin_us"],
                     "avg_sleep_us": stats["avg_sleep_us"],
+                },
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        import traceback
+
+        result_q.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
+
+
+def _worker_consumer_torch_adaptive(
+    shm_name: str,
+    num_frames: int,
+    spin_us: int,
+    producer_fps: float,
+    result_q: object,
+) -> None:
+    """Torch consumer with adaptive gpu-wait enabled — auto-latches once blocking is detected."""
+    try:
+        from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
+        from cuda_link.importer import Importer
+
+        if not _policy_has_gpu_wait():
+            result_q.put(("SKIP", "torch_gpu_wait not available (pre-R1 branch)"))
+            return
+
+        if not _wait_for_shm(shm_name, timeout_s=30.0):
+            result_q.put(("ERROR", f"SharedMemory '{shm_name}' never appeared"))
+            return
+
+        time.sleep(0.4)
+
+        policy = ImportPolicy(
+            wait_spin_us=spin_us,
+            torch_gpu_wait_adaptive=True,
+            debug=True,
+        )
+        spec = ImportSpec(shm_name=shm_name, shape=(HEIGHT, WIDTH, CHANNELS), dtype=DTYPE)
+        imp = Importer.open(spec, policy=policy)
+
+        gf_samples: list[float] = []
+        frames = 0
+        deadline = time.perf_counter() + 60.0
+
+        while frames < num_frames + WARMUP_FRAMES and time.perf_counter() < deadline:
+            t0 = time.perf_counter()
+            result = imp.get_frame()
+            gf_us = (time.perf_counter() - t0) * 1e6
+
+            if result.outcome is ImportOutcome.NEW_FRAME:
+                if frames >= WARMUP_FRAMES:
+                    gf_samples.append(gf_us)
+                frames += 1
+            elif result.outcome is ImportOutcome.NO_FRAME:
+                time.sleep(0.001)
+            elif result.outcome in (ImportOutcome.SHUTDOWN, ImportOutcome.TIMEOUT):
+                break
+            else:
+                time.sleep(0.001)
+
+        stats = imp.get_stats()
+        fc = imp.frame_count
+        avg_wait_us = imp.total_wait_event_time / fc if fc > 0 else 0.0
+        avg_gf_us = imp.total_get_frame_time / fc if fc > 0 else 0.0
+        latched_frame = stats.get("gpu_wait_latched_frame")
+
+        imp.close()
+
+        if len(gf_samples) < 10:
+            result_q.put(("ERROR", f"Too few samples: {len(gf_samples)}"))
+            return
+
+        result_q.put(
+            (
+                "OK",
+                {
+                    "n": len(gf_samples),
+                    "p50_us": median(gf_samples),
+                    "p95_us": _percentile(gf_samples, 95),
+                    "p99_us": _percentile(gf_samples, 99),
+                    "min_us": min(gf_samples),
+                    "max_us": max(gf_samples),
+                    "avg_wait_us": avg_wait_us,
+                    "avg_gf_us": avg_gf_us,
+                    "wait_spin_hits": stats["wait_spin_hits"],
+                    "wait_sleep_hits": stats["wait_sleep_hits"],
+                    "avg_spin_us": stats["avg_spin_us"],
+                    "avg_sleep_us": stats["avg_sleep_us"],
+                    "gpu_wait_active": stats.get("gpu_wait_active", False),
+                    "gpu_wait_latched_frame": latched_frame,
                 },
             )
         )
@@ -428,8 +517,23 @@ def _run_scenario(
         )
         if r:
             results["torch_gpu_wait"] = r
+
+        r = _run_arm(
+            label="torch/adaptive (R1-auto)",
+            target=_worker_consumer_torch_adaptive,
+            args=(shm_name, frames, spin_us, producer_fps),
+            ctx=ctx,
+            producer_fps=producer_fps,
+        )
+        if r:
+            results["torch_adaptive"] = r
+            if r.get("gpu_wait_active"):
+                print(f"    (latch engaged at frame {r['gpu_wait_latched_frame']})")
+            else:
+                print("    (latch never engaged -- producer too fast)")
     else:
         print("  [torch/gpu-wait (R1)] SKIPPED -- ImportPolicy.torch_gpu_wait not present yet")
+        print("  [torch/adaptive (R1-auto)] SKIPPED -- R1 not present yet")
 
     r = _run_arm(
         label="cupy/gpu-wait",

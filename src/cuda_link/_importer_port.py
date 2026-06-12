@@ -73,6 +73,17 @@ class ImportPolicy:
     # existing CPU-spin/sleep behaviour and TIMEOUT detection.
     # Enable via CUDALINK_TORCH_GPU_WAIT=1.
     torch_gpu_wait: bool = False
+    # R1-adaptive: auto-promote to gpu-wait once real sleep-blocking is detected (torch only).
+    # Monitors the cpu-spin/sleep ratio over a sliding window; when the fraction of frames that
+    # fell through to the 1ms sleep reaches gpu_wait_adaptive_sleep_pct% of the window, the
+    # importer latches into GPU-side wait for the rest of the session (one-way — never reverts).
+    # Carries the same TIMEOUT-unreachable consequence as torch_gpu_wait above.
+    # Sensible at 30 fps (measured ~20% sleep) but NOT at 60 fps (0% sleep) — correctly stays
+    # in cpu-spin mode at 60 fps.
+    # Enable via CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1.
+    torch_gpu_wait_adaptive: bool = False
+    gpu_wait_adaptive_window: int = 120  # tumbling window size (frames)
+    gpu_wait_adaptive_sleep_pct: int = 5  # latch threshold (% of window that slept)
     debug: bool = False
     reconnect_enabled: bool = True
     reconnect_max_attempts: int = 20
@@ -88,6 +99,9 @@ class ImportPolicy:
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
             d2h_pipelined=env_bool("CUDALINK_D2H_PIPELINED", default=False),
             torch_gpu_wait=env_bool("CUDALINK_TORCH_GPU_WAIT", default=False),
+            torch_gpu_wait_adaptive=env_bool("CUDALINK_TORCH_GPU_WAIT_ADAPTIVE", default=False),
+            gpu_wait_adaptive_window=env_int("CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW", default=120),
+            gpu_wait_adaptive_sleep_pct=env_int("CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT", default=5),
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
