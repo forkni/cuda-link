@@ -456,13 +456,13 @@ def main() -> int:
             lat95_delta = p["latency_p95_ms"] - d["latency_p95_ms"]
             noframe_ratio = p["no_frame_count"] / max(d["no_frame_count"], 1)
             print()
-            print(f"  CPU reduction   : {p['cpu_pct']:.1f}% → {d['cpu_pct']:.1f}%  ({cpu_delta:+.1f} pp)")
+            print(f"  CPU reduction   : {p['cpu_pct']:.1f}% -> {d['cpu_pct']:.1f}%  ({cpu_delta:+.1f} pp)")
             print(
-                f"  Latency p95     : {p['latency_p95_ms']:.2f} ms → {d['latency_p95_ms']:.2f} ms"
+                f"  Latency p95     : {p['latency_p95_ms']:.2f} ms -> {d['latency_p95_ms']:.2f} ms"
                 f"  ({lat95_delta:+.2f} ms)"
             )
             print(
-                f"  NO_FRAME count  : {p['no_frame_count']} → {d['no_frame_count']}  ({noframe_ratio:.0f}x reduction)"
+                f"  NO_FRAME count  : {p['no_frame_count']} -> {d['no_frame_count']}  ({noframe_ratio:.0f}x reduction)"
             )
 
     print()
