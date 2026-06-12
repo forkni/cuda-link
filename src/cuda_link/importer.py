@@ -705,16 +705,43 @@ class _TorchBackend:
     def __init__(self, importer: Importer, stream: object | None) -> None:
         self._imp = importer
         self._stream = stream
+        # Cached raw CUDA stream handle for torch_gpu_wait path.  Populated lazily
+        # on first call to avoid paying the torch.cuda.current_stream() Python→C++
+        # crossing on every frame.  Valid as long as the caller uses a single default
+        # stream per device (the common case).  Pass stream= to get_frame() explicitly
+        # if you switch CUDA streams between calls.
+        self._gpu_wait_cs: int | None = None
 
     def prepare(self, importer: Importer) -> None:  # noqa: ARG002
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
         if self._stream is not None:
+            # Explicit stream= provided: GPU-side wait (existing behaviour).
             cs = self._imp._resolve_stream(self._stream)
-            if conn.ipc_events[read_slot]:
-                conn.cuda.stream_wait_event(cs, conn.ipc_events[read_slot], 0)
+            if evt:
+                conn.cuda.stream_wait_event(cs, evt, 0)
+            else:
+                # No IPC event for this slot — fall back to full sync so the
+                # GPU read is not unordered.
+                self._imp._wait_for_slot(read_slot)
             return 0.0
+        if self._imp._policy.torch_gpu_wait:
+            # R1 opt-in: GPU-side wait on torch.cuda.current_stream().
+            # CPU returns immediately; ordering enforced by the GPU scheduler.
+            # TIMEOUT is unreachable on this path (hung producer = stalled stream).
+            # Stream handle cached after first call to skip repeated Python→C++ crossing.
+            import torch
+
+            if torch.cuda.is_available():
+                if self._gpu_wait_cs is None:
+                    self._gpu_wait_cs = torch.cuda.current_stream().cuda_stream
+                cs = self._gpu_wait_cs
+                if evt:
+                    conn.cuda.stream_wait_event(cs, evt, 0)
+                    return 0.0
+                # No IPC event — fall through to CPU wait.
         return self._imp._wait_for_slot(read_slot)  # may raise TimeoutError
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -824,14 +851,18 @@ class _CupyBackend:
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
+        if not evt:
+            # No IPC event for this slot — fall back to CPU wait so the GPU
+            # read is not unordered.  TimeoutError may be raised.
+            return self._imp._wait_for_slot(read_slot)
         stream = self._stream
         if stream is None:
             stream = cp.cuda.get_current_stream()
         elif not isinstance(stream, cp.cuda.Stream):
             cuda_stream_ptr = self._imp._resolve_stream(stream)
             stream = cp.cuda.ExternalStream(cuda_stream_ptr)
-        if conn.ipc_events[read_slot]:
-            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
+        cp.cuda.runtime.streamWaitEvent(stream.ptr, int(evt), 0)
         return 0.0  # GPU-side wait — CPU returns immediately; TimeoutError unreachable
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -1279,15 +1310,22 @@ class Importer:
             query = conn.cuda.query_event
 
             if policy.wait_spin_us > 0:
-                spin_deadline = wait_start + policy.wait_spin_us / 1_000_000
-                while time.perf_counter() < spin_deadline:
+                # Clamp spin_deadline to the overall deadline so the loop needs
+                # only one perf_counter() call per iteration — no inner deadline
+                # check required (spin budget << timeout_ms in all practical cases).
+                spin_deadline = min(
+                    wait_start + policy.wait_spin_us / 1_000_000,
+                    deadline,
+                )
+                while (now := time.perf_counter()) < spin_deadline:
                     if query(evt):
-                        spin_us = (time.perf_counter() - wait_start) * 1_000_000
+                        spin_us = (now - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
                         return spin_us
-                    if time.perf_counter() >= deadline:
-                        raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                # If we exited because spin_deadline == deadline, we timed out.
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
 
             phase2_start = time.perf_counter()
             with _HighResTimer():
@@ -1379,8 +1417,19 @@ class Importer:
         Args:
             stream: Optional CUDA stream (torch.cuda.Stream, cupy.cuda.Stream,
                     or int). When provided, issues cudaStreamWaitEvent (GPU-side
-                    ordering, non-blocking CPU). When None, blocks until the
-                    producer event fires.
+                    ordering, non-blocking CPU). When None, the wait mode depends
+                    on ImportPolicy.torch_gpu_wait:
+
+                    False (default): CPU spins on cudaEventQuery then sleeps.
+                        get_frame() blocks until the producer event fires.
+                        ImportOutcome.TIMEOUT is raised after timeout_ms.
+
+                    True (opt-in, CUDALINK_TORCH_GPU_WAIT=1): cudaStreamWaitEvent
+                        on torch.cuda.current_stream(). CPU returns immediately;
+                        the tensor is valid in **stream order**, not at return.
+                        ImportOutcome.TIMEOUT is unreachable on this path —
+                        a hung producer stalls the stream instead of raising.
+                        See get_frame_cupy() for the same trade-off.
 
         Returns:
             ImportResult[torch.Tensor] with outcome NEW_FRAME, NO_FRAME,

@@ -64,6 +64,15 @@ class ImportPolicy:
     # overlapping D2H with consumer CPU work.  Only beneficial when consumer takes
     # longer than D2H copy time (~0.5–2 ms for 4K RGBA).
     d2h_pipelined: bool = False
+    # R1: GPU-side wait for get_frame() (torch backend only).
+    # When True and no explicit stream= is passed, issues cudaStreamWaitEvent on
+    # torch.cuda.current_stream() instead of CPU-polling the IPC event.  The CPU
+    # returns immediately; ordering is enforced by the GPU scheduler.  Consequence:
+    # ImportOutcome.TIMEOUT is unreachable on this path (a hung producer stalls the
+    # stream rather than raising TimeoutError).  Opt-in; default=False preserves the
+    # existing CPU-spin/sleep behaviour and TIMEOUT detection.
+    # Enable via CUDALINK_TORCH_GPU_WAIT=1.
+    torch_gpu_wait: bool = False
     debug: bool = False
     reconnect_enabled: bool = True
     reconnect_max_attempts: int = 20
@@ -78,6 +87,7 @@ class ImportPolicy:
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
             d2h_pipelined=env_bool("CUDALINK_D2H_PIPELINED", default=False),
+            torch_gpu_wait=env_bool("CUDALINK_TORCH_GPU_WAIT", default=False),
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),

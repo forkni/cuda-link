@@ -24,17 +24,18 @@ class TDSenderConfig:
     export_sync is tri-state (bool | None):
       True  — always use blocking cudaStreamSynchronize (explicit opt-in)
       False — always use async export + flush-probe (explicit)
-      None  — default to async.  Coexistence safety relies on explicit per-engine
-              streams and producer-stream ordering (record_source_sync /
-              require_source_sync), not on blocking export.
-              Set by omitting CUDALINK_EXPORT_SYNC.
+      None  — default to **blocking** (same as True).  The TD Sender must
+              block until the D2D copy completes because TD's cook-scoped TOP
+              texture is reclaimed immediately after cook exit; async export
+              would read freed memory (CUDA error 719).  Set explicitly via
+              CUDALINK_EXPORT_SYNC=0 only when the source buffer is guaranteed
+              to outlive the queued copy.  See _resolve_export_sync().
     """
 
     export_sync: bool | None = None
     export_profile: bool = False
     export_flush_probe: bool = True
     use_graphs: bool = False
-    graphs_deferred: bool = False
     stream_high_prio: bool = False
     init_pace: bool = False
     persist_stream: bool = True
@@ -50,7 +51,6 @@ class TDSenderConfig:
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
-            graphs_deferred=env_bool("CUDALINK_TD_GRAPHS_DEFERRED", default=False),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
             init_pace=env_bool("CUDALINK_TD_INIT_PACE", default=False),
             persist_stream=env_bool("CUDALINK_TD_PERSIST_STREAM", default=True),
