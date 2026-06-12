@@ -658,6 +658,24 @@ class _RetryState:
 
 
 # ---------------------------------------------------------------------------
+# IPC-event pointer helper
+# ---------------------------------------------------------------------------
+
+
+def _event_to_int(evt: object) -> int:
+    """Resolve an opened IPC event to its integer cudaEvent_t pointer.
+
+    Normally a CUDAEvent_t (ctypes c_uint64); be robust to a raw bytes handle
+    (8-byte little-endian pointer) or a plain int, so the cupy backend matches
+    the torch/CPU paths that hand the event straight to ctypes.
+    """
+    val = getattr(evt, "value", evt)
+    if isinstance(val, (bytes, bytearray)):
+        return int.from_bytes(val, "little")
+    return int(val)
+
+
+# ---------------------------------------------------------------------------
 # Frame-consume backends (private, one instance per get_frame* call)
 # ---------------------------------------------------------------------------
 
@@ -862,7 +880,7 @@ class _CupyBackend:
         elif not isinstance(stream, cp.cuda.Stream):
             cuda_stream_ptr = self._imp._resolve_stream(stream)
             stream = cp.cuda.ExternalStream(cuda_stream_ptr)
-        cp.cuda.runtime.streamWaitEvent(stream.ptr, int(evt), 0)
+        cp.cuda.runtime.streamWaitEvent(stream.ptr, _event_to_int(evt), 0)
         return 0.0  # GPU-side wait — CPU returns immediately; TimeoutError unreachable
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002

@@ -706,3 +706,49 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
     imp._reinitialize()
 
     mock_numpy.close.assert_called_once(), "NumpyBuffers MUST be torn down when shape changes"
+
+
+# ---------------------------------------------------------------------------
+# _event_to_int: IPC event pointer resolution helper
+# ---------------------------------------------------------------------------
+
+
+def test_event_to_int_from_c_uint64() -> None:
+    """c_uint64 value (the normal CUDAEvent_t type) resolves via .value."""
+    import ctypes
+
+    from cuda_link.importer import _event_to_int
+
+    ptr = 0x02EBB2223B60
+    assert _event_to_int(ctypes.c_uint64(ptr)) == ptr
+
+
+def test_event_to_int_from_bytes() -> None:
+    """8-byte little-endian bytes (raw handle) round-trip correctly."""
+    from cuda_link.importer import _event_to_int
+
+    ptr = 0x02EBB2223B60
+    assert _event_to_int(ptr.to_bytes(8, "little")) == ptr
+
+
+def test_event_to_int_from_int() -> None:
+    """Plain int passes through unchanged."""
+    from cuda_link.importer import _event_to_int
+
+    ptr = 0x02EBB2223B60
+    assert _event_to_int(ptr) == ptr
+
+
+def test_event_to_int_all_forms_agree() -> None:
+    """All three encodings of the same pointer resolve to the same integer."""
+    import ctypes
+
+    from cuda_link.importer import _event_to_int
+
+    ptr = 0x02EBB2223B60
+    results = [
+        _event_to_int(ctypes.c_uint64(ptr)),
+        _event_to_int(ptr.to_bytes(8, "little")),
+        _event_to_int(ptr),
+    ]
+    assert results[0] == results[1] == results[2] == ptr

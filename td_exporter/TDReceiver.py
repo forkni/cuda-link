@@ -255,6 +255,7 @@ class TDReceiverEngine:
         self._f16_cpu_buf = None
         self._f32_cpu_buf = None
         self._f16_pinned_ptr = None
+        self._f16_host_registered = False  # True only when pageable fallback was page-locked via cudaHostRegister
         self._cupy_f32_buf = None
         self._cupy_f16_views: list = []
         self._cached_shape = None
@@ -902,6 +903,14 @@ class TDReceiverEngine:
                     self._f16_pinned_ptr = None
                     self._f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
                     self._log(f"float16 receiver: pinned alloc failed ({_e}), using pageable buffer", force=True)
+                    # R3: page-lock the pageable fallback buffer so D2H runs at pinned bandwidth
+                    try:
+                        self.cuda.host_register(self._f16_cpu_buf.ctypes.data, self._f16_cpu_buf.nbytes)
+                        self._f16_host_registered = True
+                        self._log("float16 receiver: pageable buffer page-locked via cudaHostRegister", force=True)
+                    except (RuntimeError, OSError) as _re:
+                        self._f16_host_registered = False
+                        self._log(f"float16 receiver: host_register skipped ({_re})", force=True)
                 self._f32_cpu_buf = np_module.empty((height, width, num_comps), dtype=np_module.float32)
 
                 # GPU-side float32 staging buffer for CuPy conversion path
@@ -1012,6 +1021,13 @@ class TDReceiverEngine:
             except (RuntimeError, OSError) as e:
                 self._log(f"free_host skipped (context gone): {e}")
             self._f16_pinned_ptr = None
+        # R3: unregister the pageable fallback buffer if it was page-locked
+        if self._f16_host_registered and self._f16_cpu_buf is not None:
+            try:
+                self.cuda.host_unregister(self._f16_cpu_buf.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                self._log(f"host_unregister skipped (context gone): {e}")
+            self._f16_host_registered = False
         self._f16_cpu_buf = None
         self._f32_cpu_buf = None
         self._cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC

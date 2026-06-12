@@ -13,8 +13,8 @@ Measures per-frame get_frame() CPU time for the torch backend (zero-copy path):
   cupy       Reference: CuPy already defaults to GPU-side wait.
              Runs if cupy is importable.
 
-The script spawns a producer process at ~120 fps and runs each consumer arm
-sequentially.  Windows CUDA IPC requires separate processes (error 201 in-process).
+The script spawns a producer process at 30/60 fps (the project's real operating
+points) and runs each consumer arm sequentially.  Windows CUDA IPC requires separate processes (error 201 in-process).
 
 Usage
 -----
@@ -481,8 +481,8 @@ def main() -> int:
         [("fast-producer", args.producer_fps)]
         if args.producer_fps > 0
         else [
-            ("fast-producer (120 fps; event pre-signaled)", 120.0),
-            ("slow-producer (30 fps; consumer must wait)", 30.0),
+            ("60fps (vsync; consumer waits at event boundary)", 60.0),
+            ("30fps (consumer waits longer; R1 most impactful)", 30.0),
         ]
     )
 
