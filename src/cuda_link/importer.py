@@ -680,7 +680,9 @@ def _event_to_int(evt: object) -> int:
     val = getattr(evt, "value", evt)
     if isinstance(val, (bytes, bytearray)):
         return int.from_bytes(val, "little")
-    return int(val)
+    if isinstance(val, int):
+        return val
+    return int(val)  # type: ignore[arg-type]  # ctypes c_uint64.value is int at runtime
 
 
 # ---------------------------------------------------------------------------
