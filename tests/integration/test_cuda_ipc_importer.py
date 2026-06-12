@@ -71,17 +71,20 @@ def test_numpy_available_check() -> None:
     assert isinstance(NUMPY_AVAILABLE, bool)
 
 
-def test_get_frame_without_torch() -> None:
-    """Test get_frame() raises when torch not available."""
-    from cuda_link.cuda_ipc_importer import TORCH_AVAILABLE, CUDAIPCImporter
+def test_get_frame_on_unconnected_importer_returns_none() -> None:
+    """Deprecated CUDAIPCImporter.get_frame() degrades gracefully when unconnected.
 
-    if TORCH_AVAILABLE:
-        pytest.skip("torch is available, cannot test error case")
+    The pre-v1.5 wrapper raised "torch is required"; the refactored shim now
+    delegates to Importer and short-circuits on the not-initialized guard,
+    returning None with a warning before any backend (torch) is touched. This
+    holds regardless of whether torch is installed, so the test is no longer
+    gated on TORCH_AVAILABLE. The torch-required contract itself now lives on
+    the connected Importer.get_frame() path (src/cuda_link/importer.py)."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
 
     importer = CUDAIPCImporter(shm_name="test", shape=(64, 64, 4))
 
-    with pytest.raises(RuntimeError, match="torch is required"):
-        importer.get_frame()
+    assert importer.get_frame() is None
 
 
 def test_get_frame_numpy_without_numpy() -> None:

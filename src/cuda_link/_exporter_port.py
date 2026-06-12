@@ -70,10 +70,16 @@ class ExportPolicy:
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
+    require_source_sync: bool = False
     barrier_enabled: bool = True
     barrier_stale_ns: int = 5_000_000_000
     high_priority_stream: bool = True
     export_profile: bool = False
+    # R2: Win32 named-event doorbell. When True the producer creates a named
+    # auto-reset event and signals it after every publish_frame(). Requires
+    # CUDALINK_DOORBELL=1 on the consumer side too. Single-consumer only
+    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
+    doorbell: bool = False
 
     @classmethod
     def from_env(cls) -> ExportPolicy:
@@ -83,10 +89,12 @@ class ExportPolicy:
             use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
+            require_source_sync=env_bool("CUDALINK_REQUIRE_SOURCE_SYNC", default=False),
             barrier_enabled=env_bool("CUDALINK_ACTIVATION_BARRIER", default=True),
             barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
             high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
         )
 
     @classmethod
@@ -101,6 +109,7 @@ class ExportPolicy:
             flush_probe=False,
             use_graphs=True,
             strict_device=False,
+            require_source_sync=False,
             barrier_enabled=True,
             high_priority_stream=True,
             export_profile=False,
@@ -119,6 +128,7 @@ class ExportPolicy:
             use_graphs=False,
             flush_probe=False,
             strict_device=False,
+            require_source_sync=False,
             barrier_enabled=False,
             barrier_stale_ns=0,
             high_priority_stream=False,
@@ -259,6 +269,10 @@ class CudaPort(Protocol):
 
     def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
         """Record event on stream (None → default stream)."""
+        ...
+
+    def record_event_external(self, event: CUDAEvent_t, stream: CUDAStream_t) -> None:
+        """Record event with CUDA_EVENT_RECORD_EXTERNAL flag (for in-graph IPC events)."""
         ...
 
     def destroy_event(self, event: CUDAEvent_t) -> None:

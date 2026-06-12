@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 import traceback
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
+from Env import env_bool, env_int  # noqa: E402
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
+from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
 from SHMProtocol import DtypeCodec, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
@@ -220,6 +223,19 @@ class TDSenderEngine:
         self._last_fmt_needs_conv: bool = False
         self._last_pixel_fmt_name: str = ""  # last seen pixelFormatName; change → override dtype
 
+        # Steady-state fast path: skip _resolve_frame_dtype + pixelFormatName override + H2 block
+        # when all cm inputs are identical to the previous exported frame.
+        # Cache is invalidated whenever the key tuple changes (format/geometry transition).
+        self._last_geom_key: tuple = ()
+        self._last_resolved_dtype: str = ""
+        self._last_cm_channels: int = 0
+        self._last_pub_status: str = ""
+
+        # Windowed periodic stats report — shares ReportWindow with TDReceiverEngine.
+        # All timing is engine-local; does not depend on export_profile being enabled.
+        self._tx_report_every: int = env_int("CUDALINK_SENDER_REPORT_EVERY", default=150)
+        self._tx_window = ReportWindow()  # owns FPS window + per-frame export-time accumulator
+
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
     # else return empty-but-correctly-sized defaults.
@@ -290,6 +306,78 @@ class TDSenderEngine:
         stats = self._exporter.get_stats()
         stats["mode"] = "Sender"
         return stats
+
+    def _maybe_report_stats(self, write_idx: int, now: float | None = None) -> None:
+        """Emit a windowed FPS / avg-export-µs line every CUDALINK_SENDER_REPORT_EVERY
+        published frames when verbose_performance is on.
+
+        Mirrors TDReceiverEngine's Debug summary format. FPS and avg export time come
+        from engine-local timers (_tx_window / _export_total_s), independent of
+        CUDALINK_EXPORT_PROFILE. The optional ``now`` parameter allows tests to inject a
+        deterministic timestamp without patching time.perf_counter().
+        """
+        if not self.verbose_performance:
+            return
+        n = self.frame_count  # property → self._exporter.frame_count
+        if n == 0 or n % self._tx_report_every != 0:
+            return
+        _now = now if now is not None else time.perf_counter()
+        _fps = self._tx_window.fps(_now, n)
+        _avg_export_us = self._tx_window.avg_and_reset() * 1e6
+        spec = self._current_spec
+        self._log(
+            f"Frame {n:5d} | {_fps:5.1f} FPS | "
+            f"shape=({spec.height}, {spec.width}, {spec.channels}) dtype={spec.dtype} | "
+            f"export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
+        )
+
+    def _reset_report_window(self) -> None:
+        """Clear windowed-FPS and export-time state so the next report starts a fresh window.
+
+        Called on cleanup() and after a geometry/dtype-change Exporter reopen —
+        the new Exporter restarts frame_count at 0, so a carried-over window
+        baseline would yield a negative frame delta (negative FPS).  Resetting
+        also clears the per-window export-time accumulator so the first windowed
+        average after a format change reflects only the new session.
+        (The receiver avoids the frame-count reset entirely via its
+        lifetime-monotonic counter design.)
+        """
+        self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
+
+    def _arm_same_stream_ordering(self) -> None:
+        """Declare same-stream producer ordering on the current Exporter's IPC stream.
+
+        The TD sender fetches texture memory via ``cudaMemory(stream=ipc_stream.value)``
+        (export_frame step 1), so TD enqueues its GL→CUDA interop work on the same stream
+        as the subsequent D2D memcpy — FIFO-ordered by construction.  Recording the source
+        sync event on the IPC stream itself is the canonical declaration of that invariant;
+        the per-frame ``stream_wait_event`` on an already-completed event is a cheap
+        CUDA no-op in steady state.
+
+        Call once immediately after every ``Exporter.open(...)`` (both the initial open and
+        any format-change reopen) before the first ``export_frame()`` on that instance.
+        """
+        self._exporter.record_source_sync(int(self._exporter.ipc_stream.value))
+
+    @staticmethod
+    def _resolve_export_sync(export_sync: bool | None) -> bool:
+        """Map the tri-state CUDALINK_EXPORT_SYNC config to a strict bool for ExportPolicy.
+
+        Default is **blocking** (not async) because the TD source is TD's transient
+        cook-scoped TOP texture (``cm.ptr``): TD reclaims it the moment the cook returns,
+        so the D2D source read must complete before that happens.  Async export returns
+        immediately after enqueuing the copy, letting TD recycle the source while the IPC-
+        stream memcpy is still queued — reads freed memory under a loaded consumer → CUDA 719.
+
+        Mapping: ``None`` (unset) → True; ``True`` → True; ``False`` → False.
+        Set ``CUDALINK_EXPORT_SYNC=0`` only when the source buffer is guaranteed to outlive
+        the async copy (e.g. a persistent ring buffer with explicit lifetime management).
+
+        Note: ``record_source_sync`` / producer-stream ordering only guarantees the source
+        is fully *written* before the copy starts — it does NOT guarantee the source buffer
+        outlives the queued read.  See CHANGELOG 1.10.1.
+        """
+        return export_sync is not False
 
     def _check_deferred_cleanup(self) -> None:
         """No-op: Exporter.close() handles all cleanup immediately; no deferred queue.
@@ -364,8 +452,20 @@ class TDSenderEngine:
                 device=self.device,
                 extra_flags=extra_flags,
             )
+            # TD source is a transient cook-scoped TOP texture (cm.ptr): blocking export is
+            # the default so the D2D read finishes before TD recycles it (CUDA 719 fix).
+            # Set CUDALINK_EXPORT_SYNC=0 only with a guaranteed-stable source buffer.
+            # record_source_sync orders the copy but does NOT keep the source alive past it.
+            effective_sync = self._resolve_export_sync(self._config.export_sync)
+            if self._config.export_sync is None:
+                self._log(
+                    "CUDALINK_EXPORT_SYNC not set — defaulting to blocking export "
+                    "(TD source-lifetime safety; set =0 to opt into async)",
+                    force=True,
+                )
+
             policy = ExportPolicy(
-                export_sync=self._config.export_sync,
+                export_sync=effective_sync,
                 flush_probe=self._config.export_flush_probe,
                 use_graphs=self._config.use_graphs,
                 high_priority_stream=self._config.stream_high_prio,
@@ -373,12 +473,18 @@ class TDSenderEngine:
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier
                 # so it does not create a conflicting parallel check on the same SHM segment.
                 barrier_enabled=False,
+                # R2: Win32 named-event doorbell — opt-in via CUDALINK_DOORBELL=1.
+                # Parity with ImportPolicy.from_env() on the receiver side.
+                # Default OFF; single-consumer, Windows-only.
+                doorbell=env_bool("CUDALINK_DOORBELL", default=False),
             )
 
             # Exporter.open() with cuda=None creates CTypesCUDAAdapter.for_device(spec.device).
             self._exporter = Exporter.open(spec, policy=policy, cuda=None)
             self._current_spec = spec
             self._policy = policy
+
+            self._arm_same_stream_ordering()
 
             # Seed the monotonic version counter from the freshly-opened SHM segment.
             # The receiver will cache this value (ipc_version) on first connect; any
@@ -395,7 +501,7 @@ class TDSenderEngine:
             self._log("Initialization complete — ready for zero-copy GPU transfer", force=True)
             return True
 
-        except (OSError, RuntimeError, ValueError, Exception) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
             self._host.set_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
@@ -446,7 +552,7 @@ class TDSenderEngine:
             # cook.  The Exporter opens here; the actual export starts on the next cook.
             try:
                 cm_probe = top_op.cuda_memory()  # stream=None → default stream, safe for probe
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
                 return False
             # Use pixelFormatName as authoritative dtype/channel source at init time.
@@ -483,103 +589,128 @@ class TDSenderEngine:
             _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
             try:
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
-            except Exception as cuda_err:
+            except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
                 return False
 
-            # Dynamic geometry / dtype correction — close+reopen Exporter if needed.
-            #
-            # We use cm.size as the authoritative dtype signal because cm.data_type can be
-            # None or stale on the transition frame when the TD source switches texture
-            # format mid-stream.  Without this, a uint8→float32 flip produces 4× the
-            # expected byte count but _cm_dtype_to_str still returns "uint8", the guard
-            # sees "no change", and Exporter.export spams "Size mismatch" forever.
-            #
-            # cm.channels is the LIVE channel count from the CUDAMemoryRef — using the
-            # cached spec value would cause stale `px` computation when the TD source
-            # switches channel count (e.g. 4ch RGBA → 1ch mono), causing _resolve_frame_dtype
-            # to compute the wrong bytes-per-pixel and misidentify the dtype.
-            cm_channels = cm.channels
-            resolved_dtype = _resolve_frame_dtype(
-                cm.width, cm.height, cm_channels, cm.size, cm.data_type, self._current_spec.dtype
+            # Steady-state fast path — skip dtype resolution when all cm inputs are identical
+            # to the previous successfully exported frame.  On any change, the slow path
+            # re-runs and updates the cache.  The geometry/reopen check below always runs.
+            _geom_key = (
+                _pf_name,
+                cm.width,
+                cm.height,
+                cm.channels,
+                cm.size,
+                str(getattr(cm, "data_type", None)),
             )
+            if _geom_key == self._last_geom_key:
+                # Fast path: reuse cached resolution outputs (~5–15 µs/frame on TD main thread).
+                cm_channels = self._last_cm_channels
+                resolved_dtype = self._last_resolved_dtype
+            else:
+                # Slow path: full dtype resolution + pixelFormatName override + H2 inference.
+                #
+                # Dynamic geometry / dtype correction — close+reopen Exporter if needed.
+                #
+                # We use cm.size as the authoritative dtype signal because cm.data_type can be
+                # None or stale on the transition frame when the TD source switches texture
+                # format mid-stream.  Without this, a uint8→float32 flip produces 4× the
+                # expected byte count but _cm_dtype_to_str still returns "uint8", the guard
+                # sees "no change", and Exporter.export spams "Size mismatch" forever.
+                #
+                # cm.channels is the LIVE channel count from the CUDAMemoryRef — using the
+                # cached spec value would cause stale `px` computation when the TD source
+                # switches channel count (e.g. 4ch RGBA → 1ch mono), causing _resolve_frame_dtype
+                # to compute the wrong bytes-per-pixel and misidentify the dtype.
+                cm_channels = cm.channels
+                resolved_dtype = _resolve_frame_dtype(
+                    cm.width, cm.height, cm_channels, cm.size, cm.data_type, self._current_spec.dtype
+                )
 
-            # pixelFormatName override — TD's immediate, authoritative format signal.
-            # Applied on every frame when the name maps to a known dtype so that
-            # dtype-shrink transitions (e.g. float32→uint8) are detected before TD's CUDA
-            # allocation has caught up: cm.size lags permanently on a shrink, but
-            # pixelFormatName and cm.data_type both update immediately.
-            #
-            # GpuFrame then uses self._exporter.data_size (dtype-derived) as the copy
-            # length, reading only the valid front region of the (still-oversized) GPU
-            # allocation — the same approach v1.5.1 uses with its fixed slot size.
-            #
-            _pf_name_override = False
-            if _pf_name and _pf_name not in ("useinput",):
-                _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
-                if _pf_mapped is not None:
-                    _pf_dtype, _pf_ch = _pf_mapped
-                    if _pf_name != self._last_pixel_fmt_name:
-                        # Format name changed — log the transition once.
-                        if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
-                            self._log(
-                                f"pixelFormatName changed to {_pf_name!r} "
-                                f"({_pf_dtype}/{_pf_ch}ch); cm-derived dtype is "
-                                f"{resolved_dtype}/{cm_channels}ch (cm.size={cm.size})",
-                                force=True,
-                            )
-                        self._last_pixel_fmt_name = _pf_name
-                    # Always apply — gives correct dtype even before cm.size/cm.data_type
-                    # catch up to the new format (they lag on dtype-shrink transitions).
-                    resolved_dtype = _pf_dtype
-                    cm_channels = _pf_ch
-                    _pf_name_override = True
-
-            # Defensive: if the byte count doesn't correspond to the resolved dtype AND no
-            # authoritative pixelFormatName override is active, try physical-channel
-            # inference (H2: RGBA-padded mono source where cm.channels=1 but the GPU
-            # allocation is 4-channel RGBA).  With _pf_name_override=True the size mismatch
-            # is expected on a dtype-shrink (cm.size still holds the old allocation); H2
-            # must not fire there or it would wrongly re-derive the old dtype.
-            px = cm.width * cm.height * cm_channels
-            _size_matches = px > 0 and bool(cm.size) and DtypeCodec.itemsize(resolved_dtype) * px == cm.size
-            if not _size_matches and not _pf_name_override:
-                # H2: try to infer physical channel count from the buffer size.
-                # TD may report cm.channels=1 (logical) for a mono TOP while allocating
-                # RGBA-padded CUDA memory — e.g. mono float32 TOP: cm.channels=1 but
-                # cm.size = W×H×4 comps×4 bytes.
-                _wh = cm.width * cm.height
-                _phys_dtype_map = {1: "uint8", 2: "uint16", 4: "float32"}
-                _inferred = False
-                for phys_ch in (4, 2):
-                    if _wh > 0 and phys_ch != cm_channels:
-                        phys_bytes = cm.size // (phys_ch * _wh) if (_wh * phys_ch) > 0 else 0
-                        phys_dtype = _phys_dtype_map.get(phys_bytes)
-                        if phys_dtype and phys_bytes * phys_ch * _wh == cm.size:
-                            if not self._warned_dtype_size:
+                # pixelFormatName override — TD's immediate, authoritative format signal.
+                # Applied on every frame when the name maps to a known dtype so that
+                # dtype-shrink transitions (e.g. float32→uint8) are detected before TD's CUDA
+                # allocation has caught up: cm.size lags permanently on a shrink, but
+                # pixelFormatName and cm.data_type both update immediately.
+                #
+                # GpuFrame then uses self._exporter.data_size (dtype-derived) as the copy
+                # length, reading only the valid front region of the (still-oversized) GPU
+                # allocation — the same approach v1.5.1 uses with its fixed slot size.
+                #
+                _pf_name_override = False
+                if _pf_name and _pf_name not in ("useinput",):
+                    _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
+                    if _pf_mapped is not None:
+                        _pf_dtype, _pf_ch = _pf_mapped
+                        if _pf_name != self._last_pixel_fmt_name:
+                            # Format name changed — log the transition once.
+                            if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
                                 self._log(
-                                    f"cm.channels={cm.channels} inconsistent with "
-                                    f"cm.size={cm.size} (bpp={cm.size / px:.2f}); "
-                                    f"inferring {phys_ch}ch {phys_dtype} from physical "
-                                    "CUDA allocation (RGBA-padded mono source).",
+                                    f"pixelFormatName changed to {_pf_name!r} "
+                                    f"({_pf_dtype}/{_pf_ch}ch); cm-derived dtype is "
+                                    f"{resolved_dtype}/{cm_channels}ch (cm.size={cm.size})",
                                     force=True,
                                 )
-                            cm_channels = phys_ch
-                            resolved_dtype = phys_dtype
-                            px = _wh * phys_ch
-                            _inferred = True
-                            break
-                if not _inferred:
-                    if not self._warned_dtype_size:
-                        self._log(
-                            f"Unsupported bytes-per-pixel "
-                            f"({cm.size}/{px}={cm.size / px:.2f}); skipping frame. "
-                            "Supported: 1 (uint8), 2 (uint16), 4 (float32).",
-                            force=True,
-                        )
-                        self._warned_dtype_size = True
-                    return False
-            self._warned_dtype_size = False  # reset once a valid size is seen
+                            self._last_pixel_fmt_name = _pf_name
+                        # Always apply — gives correct dtype even before cm.size/cm.data_type
+                        # catch up to the new format (they lag on dtype-shrink transitions).
+                        resolved_dtype = _pf_dtype
+                        cm_channels = _pf_ch
+                        _pf_name_override = True
+
+                # Defensive: if the byte count doesn't correspond to the resolved dtype AND no
+                # authoritative pixelFormatName override is active, try physical-channel
+                # inference (H2: RGBA-padded mono source where cm.channels=1 but the GPU
+                # allocation is 4-channel RGBA).  With _pf_name_override=True the size mismatch
+                # is expected on a dtype-shrink (cm.size still holds the old allocation); H2
+                # must not fire there or it would wrongly re-derive the old dtype.
+                px = cm.width * cm.height * cm_channels
+                _size_matches = px > 0 and bool(cm.size) and DtypeCodec.itemsize(resolved_dtype) * px == cm.size
+                if not _size_matches and not _pf_name_override:
+                    # H2: try to infer physical channel count from the buffer size.
+                    # TD may report cm.channels=1 (logical) for a mono TOP while allocating
+                    # RGBA-padded CUDA memory — e.g. mono float32 TOP: cm.channels=1 but
+                    # cm.size = W×H×4 comps×4 bytes.
+                    _wh = cm.width * cm.height
+                    _phys_dtype_map = {1: "uint8", 2: "uint16", 4: "float32"}
+                    _inferred = False
+                    for phys_ch in (4, 2):
+                        if _wh > 0 and phys_ch != cm_channels:
+                            phys_bytes = cm.size // (phys_ch * _wh) if (_wh * phys_ch) > 0 else 0
+                            phys_dtype = _phys_dtype_map.get(phys_bytes)
+                            if phys_dtype and phys_bytes * phys_ch * _wh == cm.size:
+                                if not self._warned_dtype_size:
+                                    self._log(
+                                        f"cm.channels={cm.channels} inconsistent with "
+                                        f"cm.size={cm.size} (bpp={cm.size / px:.2f}); "
+                                        f"inferring {phys_ch}ch {phys_dtype} from physical "
+                                        "CUDA allocation (RGBA-padded mono source).",
+                                        force=True,
+                                    )
+                                cm_channels = phys_ch
+                                resolved_dtype = phys_dtype
+                                px = _wh * phys_ch
+                                _inferred = True
+                                break
+                    if not _inferred:
+                        if not self._warned_dtype_size:
+                            self._log(
+                                f"Unsupported bytes-per-pixel "
+                                f"({cm.size}/{px}={cm.size / px:.2f}); skipping frame. "
+                                "Supported: 1 (uint8), 2 (uint16), 4 (float32).",
+                                force=True,
+                            )
+                            self._warned_dtype_size = True
+                        return False
+                self._warned_dtype_size = False  # reset once a valid size is seen
+
+                # Update resolution cache — only reached when slow path completes without
+                # returning False, so cm geometry and resolution outputs are valid.
+                self._last_geom_key = _geom_key
+                self._last_resolved_dtype = resolved_dtype
+                self._last_cm_channels = cm_channels
+                self._last_pub_status = ""  # force status string rebuild after any change
 
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
@@ -593,7 +724,7 @@ class TDSenderEngine:
                     f" → {cm.width}x{cm.height}x{cm_channels} {resolved_dtype}",
                     force=True,
                 )
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
                     self._exporter.close()
                 new_spec = FrameSpec(
                     shm_name=self.shm_name,
@@ -607,6 +738,9 @@ class TDSenderEngine:
                 )
                 self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
                 self._current_spec = new_spec
+                self._reset_report_window()  # new Exporter restarts frame_count at 0; stale window → negative FPS
+
+                self._arm_same_stream_ordering()  # re-arm on the new Exporter's IPC stream
 
                 # Force a monotonically-greater version in the SHM segment so the
                 # receiver's `version != last_version` guard always fires.
@@ -615,7 +749,7 @@ class TDSenderEngine:
                 # (open-first logic, exporter.py:274-279).  set_version writes into that
                 # shared mapping — the receiver will see VERSION_CHANGED on the next tick.
                 self._ipc_version += 1
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort SHM version write; must not raise inside a cook callback
                     if self._exporter.shm_handle is not None:
                         set_version(self._exporter.shm_handle.buf, self._ipc_version)
 
@@ -631,7 +765,7 @@ class TDSenderEngine:
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
                     cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
-                except Exception as cuda_err:
+                except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
 
@@ -650,16 +784,27 @@ class TDSenderEngine:
             # a dtype-shrink we copy only the valid front region of the stale allocation.
             # In steady state and on grow (after TD reallocates) data_size == cm.size.
             frame = GpuFrame(ptr=cm.ptr, size=self._exporter.data_size)
+            _t_export = time.perf_counter()
             outcome = self._exporter.export(frame)
 
             if outcome is FrameOutcome.PUBLISHED:
+                _now = time.perf_counter()
+                self._tx_window.add_sample(_now - _t_export)
+                if not self._tx_window.started:
+                    # Seed the window at the first published frame so IPC-open latency
+                    # (same startup-delay guard the receiver uses) doesn't dilute FPS.
+                    self._tx_window.start(_now, self._exporter.frame_count - 1)
                 self._barrier.tick_and_maybe_release(os.getpid(), log_fn=self._log)
-                _pub_status = (
-                    f"{cm.width}x{cm.height} {_pf_name}"
-                    if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
-                    else f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch"
-                )
-                self._host.set_info_status(_pub_status)
+                if not self._last_pub_status:
+                    # Rebuild status string only when geometry changed (fast-path sets it "");
+                    # avoids one f-string allocation per frame in steady state.
+                    self._last_pub_status = (
+                        f"{cm.width}x{cm.height} {_pf_name}"
+                        if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
+                        else f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch"
+                    )
+                self._host.set_info_status(self._last_pub_status)
+                self._maybe_report_stats(self._exporter.write_idx, now=_now)
                 return True
             return False
 
@@ -676,7 +821,7 @@ class TDSenderEngine:
         self._barrier.close()
 
         if self._exporter is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort shutdown; partial close is acceptable on teardown
                 self._exporter.close()
             self._exporter = None
 
@@ -692,6 +837,9 @@ class TDSenderEngine:
         self._last_fmt_needs_conv = False
         self._warned_dtype_size = False
         self._warned_format = False
+
+        # Reset windowed-report state so the next activation starts with a fresh window.
+        self._reset_report_window()
 
         self._host.clear_status()
         self._host.set_param_enabled("Numslots", True)

@@ -5,7 +5,335 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.11.0] - 2026-06-12
+
+### Added
+
+- **R2: Win32 named-event doorbell — opt-in kernel wake for subprocess receivers**
+  (`CUDALINK_DOORBELL=1`, default OFF, Windows-only, single-consumer).  Replaces the
+  1 ms poll-sleep in `Importer.wait_for_doorbell()` with a `WaitForSingleObject` on a
+  Win32 auto-reset named event (`Local\cudalink_db_<shm_name>`).  Producer calls
+  `_doorbell.signal()` (non-blocking `SetEvent`, ~µs) after every `publish_frame()`
+  and once more on shutdown so the consumer wakes immediately on teardown.  Lost-wakeup
+  safe: an early-out in `wait_for_doorbell()` checks `write_idx` before blocking, so
+  a signal that arrives between the NO_FRAME check and the wait is never missed.
+  Tested Python↔Python (`bench_doorbell.py`): CPU ~3-4% → ~0.3-1%, notify-latency
+  p95 ~10× tighter.  TD-verified on the `TD>>Python` channel (TD Sender COMP →
+  python receiver subprocess): doorbell fires 1:1 with frames at 60 FPS, latency
+  0.02–0.10 ms (vs 0.04–1.80 ms poll baseline), cook-thread safe (no FPS dip from
+  `SetEvent`), env propagates across TD's `subprocess.Popen` boundary, and teardown
+  is clean (IPC handles closed in ~0.6 ms, no 2 s hang, no orphaned handle).
+  The in-TD COMP receiver (`TDReceiver.py`) runs on the main cook thread and returns
+  immediately on NO_FRAME — wiring the doorbell there is explicitly deferred.
+- **R1: torch GPU-side wait — opt-in `cudaStreamWaitEvent` on the consumer GPU before
+  tensor copy** (`CUDALINK_TORCH_GPU_WAIT=1`, default OFF).  Eliminates the
+  host-side `cudaEventSynchronize` on the IPC producer event when torch is the frame
+  mode, replacing it with a GPU-resident dependency edge.  Gains ~50–200 µs
+  throughput per frame depending on WDDM batch timing; safe to enable alongside
+  CUDA Graphs.
+- **R1 adaptive auto-enable latch** (`CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`).  Monitors
+  per-frame event-wait time; if three consecutive frames exceed the heuristic
+  threshold the latch fires and permanently enables GPU-side wait for the session —
+  no manual `CUDALINK_TORCH_GPU_WAIT=1` required.  One-way: once enabled it stays
+  enabled for the session lifetime.
+
+### Performance
+
+- **R3: pinned-memory f16 fallback.**  When `get_frame_numpy()` is called with a
+  float16 frame and CUDA cannot allocate pinned (page-locked) host memory for the
+  direct D2H path, the importer now falls back to a pageable staging copy rather
+  than raising.  Avoids unexpected `RuntimeError` under memory pressure.
+- **R4: hygiene — `graphs_deferred` flag and docstring cleanup.**  Internal
+  `CUDAGraphsMixin` state tracking for deferred graph builds; no behavior change.
+
+### Fixed
+
+- **In-TD Sender COMP did not honor `CUDALINK_DOORBELL`.**  `TDSenderEngine.initialize()`
+  built `ExportPolicy(...)` by hand without `doorbell=`, so the env switch had zero
+  effect on the in-TD sender (`self._doorbell` stayed `None` → signal skipped →
+  receiver always timed out).  Added `doorbell=env_bool("CUDALINK_DOORBELL", default=False)`.
+- **`sync_td_wrapper.py` rewriter dropped all but the last stem on comma-separated
+  `from . import A, B` lines.**  The regex captured `A, B` as one group and emitted a
+  single `import B as A, B` statement.  Rewriter now splits on comma and emits one
+  `import X as X` line per stem (black-compatible, avoids E702).
+- **`sync_td_wrapper.py` emitted `E702` multi-statement lines for comma-import stems.**
+  Companion fix: each stem gets its own physical line.
+- **`_event_to_int` type error on `cupy` wait path.**  `c_void_p.value` is `int | None`
+  (returns `None` for a null pointer); the fast-path `int(x.value)` raised `TypeError`
+  on null handles.  Fixed with `x.value or 0` pattern; the residual `c_uint64`
+  overload mismatch suppressed via pyrefly sub-config.
+- **`bench_doorbell.py` summary line raised `UnicodeEncodeError` on cp1252 terminals.**
+  Unicode `→` arrow replaced with ASCII `->`.
+
+## [1.10.3] - 2026-06-11
+
+### Fixed
+
+- **`Exporter.open()` crashed on non-Windows platforms (CI red since 1.10.0).**
+  `_read_hws_mode()` (P2 HWS warning) wrapped `import winreg` in `except OSError`,
+  but a missing module raises `ModuleNotFoundError` (an `ImportError`) — so every
+  `Exporter.open()` on Linux/macOS raised, and all 40 failures in the no-GPU CI
+  suite traced to this line.  The handler now catches `(ImportError, OSError)` and
+  degrades to `"unknown"`.  Locked by
+  `tests/core/test_exporter_python.py::test_read_hws_mode_returns_unknown_without_winreg`.
+- **Pipelined D2H left an async copy in flight across teardown/reconnect (latent
+  CUDA 719).**  With `CUDALINK_D2H_PIPELINED=1` every `get_frame_numpy()` returns
+  with one un-synchronized copy enqueued on the D2H stream.  `NumpyBuffers.close()`
+  freed the pinned-host destination and `Importer._reinitialize()` closed the IPC
+  source mapping without draining first.  New `NumpyBuffers.drain()` synchronizes
+  the stream before either endpoint is released — the importer-side counterpart of
+  the 1.10.1 sender-side STEP 1b fix.
+- **Pipelined D2H surfaced a stale frame after producer restart.**  When the format
+  was unchanged, `_reinitialize()` kept the double-buffer with `priming=False`, so
+  the first frame of the new session was the dead session's last frame replayed as
+  `NEW_FRAME`.  Reconnect now re-primes: the first call after `RECONNECTING`
+  returns `NO_FRAME`, matching fresh-session behavior.  Both pipelined fixes are
+  locked by `tests/integration/test_cpu_roundtrip.py::test_pipelined_drains_and_reprimes_on_reconnect`
+  and new drain/rotate unit tests in `tests/core/test_pipelined_d2h.py`.
+- **Malformed `CUDALINK_SENDER_REPORT_EVERY` / `CUDALINK_RECEIVER_REPORT_EVERY`
+  crashed engine init.**  Both engines parsed the env var with a raw `int(...)`;
+  they now use `Env.env_int()`, which falls back to the default (150) on
+  non-numeric values.
+- **TD Sender reported negative FPS and inflated export-avg after a geometry/dtype
+  change.**  When `export_frame()` reopened the `Exporter` for a format change,
+  the new exporter reset its `frame_count` to 0 while `ReportWindow.last_frame`
+  retained the previous session's value (e.g. ~16 500).  The first post-change
+  `Frame 150` report computed `(150 − 16500) / dt` → −1030.8 FPS, and divided the
+  old session's cumulative export wall time by the tiny new count → 34 382.8 µs
+  avg.  Both figures were observed in production after a uint8 → float32 live switch
+  (v1.10.3 release candidate, confirmed by post-fix logs).  Fix:
+  `_reset_report_window()` (already called in `cleanup()`) is now also called
+  immediately after `Exporter.open()` in the format-change reopen block, resetting
+  `ReportWindow` and the export-time accumulator so the first windowed report of the
+  new session is always valid.  Data path unaffected; telemetry only.  Locked by
+  `tests/td/test_tdsender_report.py::test_format_change_reset_prevents_negative_fps`
+  and `::test_reset_report_window_clears_state`.
+
+### Changed
+
+- **Shared `ReportWindow` helper for windowed FPS reporting.**  The session-baseline
+  / window seed / advance bookkeeping previously duplicated between
+  `TDSenderEngine` (`_tx_*`) and `TDReceiverEngine` (`_rx_*`) now lives in
+  `_profile.py` (`FrameProfile.py` in TD), used by both engines.
+- `TDReceiverEngine.has_new_frame()` reads the SHM header via `SHMProtocol`'s
+  precompiled-`Struct` helpers (`read_write_idx` / `read_version`) instead of
+  per-call `struct.unpack_from` with duplicated offsets.
+- `tests/td/test_td_config.py::test_export_sync_resolution_table` now tests the
+  actual resolver (`TDSenderEngine._resolve_export_sync`) and documents the
+  blocking-by-default mapping; its previous docstring still described the pre-1.10.1
+  async default while asserting raw config storage.
+- Removed a stale "implementation pending" comment on `ImportPolicy.d2h_pipelined`
+  (the P5 implementation shipped in 1.10.2) and documented the post-reconnect
+  re-priming contract in the `get_frame_numpy()` docstring.
+- **Periodic `export=… µs avg` (Sender) and `copy=… µs avg` (Receiver) are now
+  windowed, not lifetime.**  Both debug summary lines previously computed a
+  lifetime cumulative average (`total_time / frame_count`), which converged
+  slowly toward the session median and drifted visibly over long runs (e.g.
+  export-avg climbing from 366 µs at frame 150 to ~990 µs at frame 5000 in a
+  stable session).  The figure now reflects only the frames in the current report
+  window (~150 frames), in sync with the windowed FPS printed beside it.
+  Implementation: `ReportWindow` gained `add_sample(value)` and `avg_and_reset()`;
+  `TDSenderEngine` and `TDReceiverEngine` dropped their bespoke `_export_total_s` /
+  `_copy_total_s` lifetime accumulators in favour of the shared mechanism.  Locked
+  by `tests/td/test_report_window.py` (7 cases) and
+  `tests/td/test_tdsender_report.py::test_consecutive_reports_use_windowed_fps_and_avg`.
+
+## [1.10.2] — 2026-06-11
+
+### Performance
+
+- **P11 — Receiver skips idle Script-TOP cooks.** `TDReceiverEngine.has_new_frame()`
+  does a cheap SHM `write_idx` / version / shutdown probe before
+  `import_buffer.cook(force=True)` in `callbacks_template.py:onFrameStart`.  When
+  the producer has not written a new frame the cook is skipped entirely — one
+  Script-TOP cook and all its Python overhead saved per idle TD frame.  Zero effect
+  when producer ≥ TD rate; large effect for slow producers (e.g. 30 FPS AI inference
+  into a 60 FPS TD project).  Covered by `tests/td/test_tdreceiver_has_new_frame.py`.
+- **P8 — Fewer per-frame allocations on the import hot path.**
+  `get_frame()` (`_TorchBackend`) and `get_frame_cupy()` (`_CupyBackend`) now cache
+  their backend instance and update `_stream` in-place instead of constructing a new
+  object on every call, matching the existing `_NumpyBackend` pattern.
+  `AcquireResult` is now a `NamedTuple` instead of a `@dataclass`, eliminating the
+  per-call `__dict__` allocation inside `acquire_slot` on the consumer hot path.
+  Covered by `tests/core/test_backend_reuse.py`.
+
+## [1.10.1] — 2026-06-10
+
+### Fixed
+
+- **TD Sender producer-side async source-buffer lifetime race (CUDA 719).** In 1.10.0,
+  `export_frame()` defaulted to async export (`CUDALINK_EXPORT_SYNC` unset → async).  The
+  TD source is TD's cook-scoped TOP texture (`cm.ptr`) — reclaimed the instant the cook
+  returns.  Under a loaded consumer (e.g. SD's TRT inference saturating the GPU) the queued
+  async D2D read executed *after* TD recycled the source, reading freed memory → sticky CUDA
+  `cudaErrorLaunchFailure` (719), cascading through the consumer's CUDA context.
+  **Root cause (confirmed by Loop A — `CUDALINK_EXPORT_SYNC=1` eliminated the crash):**
+  Hypothesis #2 — producer-side async source-buffer lifetime race.  `record_source_sync` /
+  `_arm_same_stream_ordering` is a *pre-copy ordering* primitive only (ensures the source is
+  fully written before the copy *starts*) — it does **not** guarantee the source outlives the
+  queued async read.  The only mechanism that closes that window is a post-copy
+  `stream_synchronize(ipc_stream)`.
+  **Fix:** The **TD Sender now blocks by default** — `CUDALINK_EXPORT_SYNC` unset (or `None`)
+  resolves to blocking, matching the 1.9.0 behavior.  Explicit `CUDALINK_EXPORT_SYNC=0` opts
+  back into async for callers that own a persistent source buffer with explicit lifetime
+  management.  The async default introduced in 1.10.0 is correct for the Python `Exporter`
+  API (caller owns a stable buffer + passes `producer_stream`) but unsafe for the TD Sender
+  whose source is externally-owned and transient.
+  Regression seam: `TDSenderEngine._resolve_export_sync` (GPU-free, testable static method);
+  locked by `tests/td/test_tdsender_export_sync_default.py`.
+- **`Exporter.close()` races in-flight async D2D copies (latent CUDA 719).**
+  `_do_cleanup()` previously destroyed IPC events/stream and freed GPU ring-buffer slots
+  without first synchronizing the IPC stream.  An async export returning before the D2D
+  completes (geometry/dtype-change reopen, or any explicit `exporter.close()` call) could
+  free the destination buffers under a running copy.  Fix: a new STEP 1b in `_do_cleanup`
+  issues `stream_synchronize(ipc_stream)` before any teardown of GPU resources.
+
+## [1.10.0] — 2026-06-10
+
+### Added
+
+- **Sender-side periodic stats log** (`CUDALINK_SENDER_REPORT_EVERY`, default 150) —
+  mirrors the receiver's Debug summary line; prints `Frame N | FPS | shape | dtype |
+  export=… µs avg (write_idx=…)` to the Textport every N published frames when the
+  Sender COMP's **Debug** parameter is ON. Uses engine-local wall-clock timers,
+  independent of `CUDALINK_EXPORT_PROFILE`.
+- **Opt-in pipelined device-to-host copy** (`ImportPolicy.d2h_pipelined` /
+  `CUDALINK_D2H_PIPELINED`, default off) — double-buffers the D2H copy so the
+  next frame's transfer overlaps the consumer's compute on the current frame.
+  Wins only when consumer work exceeds copy time (1080p ~6% / −305 µs, 4K
+  ~20% / −1235 µs at 5 ms consumer work; ~0% at 512²). First `get_frame` returns
+  a priming `NO_FRAME`; steady-state is +1-frame latency. New standalone harness
+  `scripts/profiling/bench_d2h_pipelined.py` (spawn producer/consumer, sweeps
+  512²/1080p/4K, nsys-verifies D2H↔CPU overlap).
+- **pyrefly type-checking extended to `td_exporter/`** (ADR-0005 follow-up) —
+  `pyrefly check` (project mode) now covers the td_exporter engine files
+  (`TDHost`, `TDSender`, `TDReceiver`, `TDConfig`, `CUDAIPCExtension`,
+  `CUDALinkBootstrap`, `benchmark_timestamp`, `_td_fakes`) and all 14
+  auto-generated mirrors. Pure-TD glue scripts (callbacks, example launchers)
+  are excluded. The `td` module is handled via `replace-imports-with-any`;
+  bare ambient TD globals (`op`, `run`, `CUDAMemoryShape`) are resolved through
+  `if TYPE_CHECKING: from _td_builtins import …` stubs. CI gate (`typecheck.yml`)
+  updated to project mode and `td_exporter/**` added to path triggers.
+- **Static type-checking CI gate** (`.github/workflows/typecheck.yml`) — runs
+  `pyrefly check` (project mode: `src/cuda_link/` + `td_exporter/`) on every
+  PR/push touching the package or its config. Previously pyrefly ran only as a
+  skippable local pre-commit hook checking `src/cuda_link/` only.
+- **Pytest CI job** (`.github/workflows/tests.yml`) — runs the `not requires_cuda`
+  suite on Python 3.10–3.12. The suite is green with or without torch installed
+  (torch-dependent tests use `pytest.importorskip`), so torch is a best-effort
+  CPU install. Previously there was no CI test workflow at all.
+- **GPU-free Protocol drift guard** (`tests/core/test_exporter_port.py::test_ctypes_adapter_api_covers_protocol_without_gpu`)
+  — asserts `CUDARuntimeAPI` implements every `CudaPort` member. The
+  `CTypesCUDAAdapter.__getattr__` delegation otherwise hides such drift from
+  both the (suppressed) type checker and the `requires_cuda` conformance test.
+- **ADR-0006** (`docs/adr/0006-stay-pure-python-no-rust.md`) — records the
+  decision to keep cuda-link pure Python rather than rewrite in Rust
+  (`cuda-oxide`/`cudarc`), with the performance, TD-embedded-CPython, and
+  deployment evidence, so the question is not re-litigated from scratch.
+- **ADR-0005** (`docs/adr/0005-static-typing-hardening.md`) — records the scoped
+  type-suppression policy and the "no package-wide category blanket" rule.
+
+### Changed
+
+- **`export_frame()` is async end-to-end by default.** The producer no longer
+  issues a per-frame blocking `cudaStreamSynchronize`; the IPC event + async
+  flush-probe carry ordering. Blocking export is opt-in via
+  `CUDALINK_EXPORT_SYNC=1`. Coexistence safety (TD Sender + Receiver in one
+  process) comes from explicit, persistent per-engine streams plus
+  producer-stream ordering (`record_source_sync` / `require_source_sync`), not
+  from blocking export — now documented in `docs/PROFILING.md §8` and
+  `docs/ARCHITECTURE.md`.
+- **CUDA graph folds `stream_wait_event` + `record_event` into the captured
+  graph** — the per-frame export now issues a single WDDM submission
+  (`cudaGraphLaunch`) instead of three.
+- **`[tool.pyrefly]` hardened from one package-wide suppression blanket to
+  precise per-file scoping.** Added `python-platform = "win32"` (Windows-only
+  project — resolves `ctypes.windll`/`WINFUNCTYPE` on any host) and
+  `replace-imports-with-any` for the optional GPU deps (torch/cupy/pynvml/nvtx/
+  ml_dtypes). The 9-category blanket over all of `src/cuda_link/**` is replaced
+  by per-file `sub-config` blocks scoped to the modules with accepted ctypes /
+  optional-import idioms; every other module (`shm_protocol.py`, the `_port`
+  Protocols, `_env`, `_profile`, `_console`, `cuda_runtime_types.py`, …) is now
+  fully type-checked.
+
+### Fixed
+
+- **`FakeCUDAAdapter` pointer coalescing** (`_cuda_adapters.py`) — `c_void_p.value`
+  (`int | None`) is now coalesced to `int` before dict/list operations, removing
+  a latent `None`-key path in the test fake and letting the module type-check
+  cleanly.
+- **Torch-fragile tests made CI-safe** — `test_torch_buffers_int8/int16_succeeds`
+  now use `pytest.importorskip("torch")`, and the stale `test_get_frame_without_torch`
+  (which asserted a removed "torch is required" contract via the unconnected
+  deprecated `CUDAIPCImporter`) was modernized to assert the current graceful
+  `None` return and renamed `test_get_frame_on_unconnected_importer_returns_none`.
+
+### Removed
+
+- **Dead export-sync receiver-topology auto-select branch** and the process-local
+  receiver registry in `td_exporter/CUDAIPCExtension.py`
+  (`_active_receiver_count` / `_register_receiver` / `_unregister_receiver` /
+  `receiver_active_in_process`). The tri-state `export_sync=None` "auto-select
+  blocking when a receiver coexists in-process" path was structurally unreachable
+  in the standard multi-COMP `.toe`: each COMP compiles its own
+  `CUDAIPCExtension` module, so the counter is per-COMP-isolated and a sender's
+  copy is always 0. `None` now simply means async (the validated production
+  default). Two registry unit tests removed; the export-sync resolution table
+  test rewritten to the two-state (`True` → blocking, `None`/`False` → async)
+  contract.
+
+### Performance
+
+- **Async export −24.7 µs p50 (59%)** @ 1080p uint8 (42.1 → 17.4 µs) — eliminates
+  the producer-side `cudaStreamSynchronize`.
+- **CUDA graphs −3.8 µs p50 (22%)** (17.4 → 13.6 µs) — 3 WDDM submissions/frame → 1.
+- **Combined async+graphs −28.5 µs p50 (68%)** @ 1080p (42.1 → 13.6 µs).
+- **Pipelined D2H** (opt-in) overlaps copy with consumer work: 1080p ~6%, 4K ~20%
+  when `work > copy`.
+
+## [1.9.0] — 2026-06-06
+
+### Added
+
+- **Unordered-export safeguard** — `Exporter.export()` now warns (once per instance) when no
+  producer-stream ordering has been armed via `GpuFrame.producer_stream` or
+  `record_source_sync()`. The D2D memcpy on the non-blocking high-priority IPC stream is silently
+  unordered without this, which can produce torn/gray frames downstream (confirmed by a real
+  StreamDiffusion → TouchDesigner regression). Set `ExportPolicy(require_source_sync=True)` /
+  `CUDALINK_REQUIRE_SOURCE_SYNC=1` to raise `ValueError` instead of warning.
+
+- **Env-var documentation sweep** — ten `CUDALINK_*` variables that were used in `src/cuda_link`
+  but absent from the README Performance Tuning table are now documented: `REQUIRE_SOURCE_SYNC`,
+  `STRICT_DEVICE`, `LIB_STREAM_PRIO`, `BARRIER_STALE_NS`, `WAIT_SPIN_US`, `D2H_STREAM_PRIO`,
+  `ALLOW_PAGEABLE_FALLBACK`, `IMPORT_RECONNECT`, `IMPORT_RECONNECT_MAX_ATTEMPTS`,
+  `STICKY_ERROR_CHECK`.
+
+- **Env-var docs invariant test** (`tests/support/test_env_var_docs.py`) — asserts every
+  `CUDALINK_*` variable referenced by `env_bool`/`env_int`/`env_str` in `src/cuda_link/*.py`
+  appears in the README Performance Tuning section. Prevents silent drift going forward.
+
+- **Producer-stream ordering documentation** — new "Producer-Stream Ordering" subsection in
+  `docs/ARCHITECTURE.md`; `producer_stream` added to all code snippets in `README.md`,
+  `docs/INTEGRATION_EXAMPLES.md`, and `td_exporter/HELP_DOC.md`.
+
+### Fixed
+
+- **All in-repo `export()` call sites now declare producer-stream ordering**:
+  - `td_exporter/example_sender_python.py` — passes `producer_stream=0` (synchronous H2D fill
+    is already complete on the host; stream 0 declares ordering explicitly).
+  - `td_exporter/TDSender.py` — calls `record_source_sync(ipc_stream)` once at `Exporter.open()`
+    and on each format-change reopen; both `cuda_memory()` calls already pass
+    `stream=ipc_stream.value`, so same-stream FIFO ordering is the correct declaration.
+  - `scripts/profiling/profile_export.py` — calls `record_source_sync(0)` once before the timing
+    loop so the measurement includes the per-frame `stream_wait_event` overhead (representative
+    of real ordered usage).
+
+### Internal
+
+- **Unified `_ordering_armed` predicate** — both the CUDA Graphs path and the legacy stream path
+  now gate `stream_wait_event` on a single `_ordering_armed` property
+  (`_source_sync_recorded and source_sync_event is not None`). Eliminates a redundant wait on a
+  never-recorded event in the legacy path when ordering was never armed.
 
 ## [1.8.1] — 2026-06-01
 
@@ -468,6 +796,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `CUDALINK_RECEIVER_DEVICE` | `0` | GPU device index |
   | `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout ms |
   | `CUDALINK_RECEIVER_REPORT_EVERY` | `150` | Frames between status prints |
+  | `CUDALINK_SENDER_REPORT_EVERY` | `150` | Frames between sender status prints |
   | `CUDALINK_RECEIVER_FRAME_MODE` | `torch` | Frame-fetch mode: `numpy` / `torch` / `cupy` |
 
 - **Per-call `get_frame()` timing in receiver example** — each status line now

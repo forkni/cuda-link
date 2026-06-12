@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    # CUDAMemoryShape is a TD ambient global injected into the COMP namespace.
+    # Declared here so pyrefly resolves the bare name used in make_cuda_shape().
+    from _td_builtins import CUDAMemoryShape  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # CUDAMemoryRef — TD-agnostic result of top.cudaMemory()
@@ -216,7 +221,7 @@ class RealTOPHandle(TOPHandle):
                 self._top.cook()
 
     def set_format(self, fmt: str) -> None:
-        with contextlib.suppress(AttributeError, RuntimeError, Exception):
+        with contextlib.suppress(AttributeError, RuntimeError):
             self._top.par.format = fmt
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:

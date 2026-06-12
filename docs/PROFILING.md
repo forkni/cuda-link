@@ -239,6 +239,15 @@ On the nsys timeline, the Sender export stream (`ipc_stream`) and Receiver impor
 and `cudalink.receiver.import_frame.*` NVTX ranges run in parallel without head-of-line
 blocking. Post-settle latency stabilises within 3 frames.
 
+> **P11 idle-cook gaps (v1.10.2+):** When the producer is idle (no new frame ready), the
+> TD Receiver's Script-TOP cook is skipped entirely. On the nsys CPU timeline this appears
+> as expected gaps between `cudalink.receiver.import_frame.*` ranges — **this is correct
+> behaviour, not a stall.** Observable TD cook counts will be lower than in pre-v1.10.2
+> captures when the producer sends below the TD frame rate. Do not interpret these gaps as
+> stream serialisation or blocking. If `CUDALINK_D2H_PIPELINED=1` is set, the pipeline
+> re-primes after each reconnect, producing one additional `NO_FRAME` gap on the consumer
+> CPU timeline.
+
 ### Regression signature (flags wrong)
 
 ```
@@ -375,7 +384,7 @@ Both instruments coexist. They are complementary, not duplicates.
 |---|---|---|
 | **Enable** | `SET CUDALINK_EXPORT_PROFILE=1` | `SET CUDALINK_NVTX=1` |
 | **What it measures** | CPU-side elapsed time per `export_frame()` sub-operation (enqueue cost only — async ops record enqueue latency, not GPU execution time) | GPU kernel launch and completion on the nsys/ncu timeline (actual GPU work duration) |
-| **Granularity** | Rolling average logged every 97 frames to Python logger | Per-call range visible in nsys-ui |
+| **Granularity** | Rolling average logged every 97 frames to Python logger (`CUDALINK_EXPORT_PROFILE=1`) | Per-call range visible in nsys-ui |
 | **Cross-process** | Per-process only | Both processes visible in tiled nsys-ui |
 | **When to trust** | `memcpy=`, `record=`, `shm=` for diagnosing CPU scheduling jitter and SHM write latency | GPU-side for diagnosing stream contention, PCIe saturation, kernel occupancy |
 
@@ -388,6 +397,14 @@ is blocking on an unsubmitted WDDM batch — the deferred-submission accumulatio
 (`PERSIST_STREAM=1`) was designed to prevent during reactivation. Correlate with the nsys
 timeline: if the Sender stream shows no GPU activity during that window, the batch was buffered
 by WDDM and `flush_probe` is flushing it.
+
+> **Windowed Debug telemetry (v1.10.3):** Separate from `CUDALINK_EXPORT_PROFILE`, the
+> Debug **summary line** emitted every N frames (default 150, see
+> `CUDALINK_SENDER_REPORT_EVERY` / `CUDALINK_RECEIVER_REPORT_EVERY`) reports `export=` and
+> `copy=` as **windowed (~150-frame) averages** via the shared `ReportWindow`
+> helper (`_profile.py` / `FrameProfile.py`). These reset with each window — they are not
+> lifetime means and will not match a manual average across the full session. Use
+> `CUDALINK_EXPORT_PROFILE=1` for the per-97-frame CPU sub-timer breakdown.
 
 ---
 
@@ -405,7 +422,7 @@ With HWS enabled, the GPU hardware processes the queue directly, reducing batch 
 
 | Metric | WDDM software scheduling | WDDM GPU-P (HWS on) |
 |---|---|---|
-| Producer `cudaStreamSynchronize` p50 | ~617 µs (v4 baseline) | Expected ~50–100 µs |
+| Producer `cudaStreamSynchronize` p50 | ~617 µs (v4 baseline; current blocking p50 = 24–357 µs, see [BENCHMARKS.md](BENCHMARKS.md)) | Expected ~50–100 µs |
 | Consumer `import_frame` outlier max | ~36.5 ms (WDDM queue gap) | Expected < 5 ms |
 | WDDM Copy engine max queue entry | 116 ms (v4 baseline) | Expected < 20 ms |
 
@@ -453,10 +470,27 @@ the WDDM scheduling mode in effect during that capture.
 
 ## 8. Async Export Path for Python-Sender Topologies
 
+> **⚠️ TD Sender users — stop here.** The TD Sender (`CUDAIPCExtension` Sender COMP)
+> **must remain blocking** (`CUDALINK_EXPORT_SYNC=1`, the default since v1.10.1). TD's
+> source texture (`cm.ptr`) is cook-scoped and reclaimed the moment the cook returns.
+> Setting `CUDALINK_EXPORT_SYNC=0` on the TD Sender lets the IPC-stream D2D copy run
+> after the source is freed → reads freed memory → **CUDA 719** under a loaded consumer.
+> `CUDALINK_EXPORT_SYNC=0` is an unsafe opt-out for TD Sender deployments, not a
+> recommended configuration. See CHANGELOG 1.10.1 and ADR-0001. **This section (§8)
+> applies only to standalone Python `Exporter` callers with a persistent, caller-owned
+> source buffer.**
+
 ### When this applies
 
 Standalone Python-sender deployments where no TD-Sender process shares the CUDA
 context. Validated in the v5 nsys capture (findings documented in `td_pipeline_v5_findings_extended.md` in contributor archives).
+
+> **Note — TD Sender users:** The **TD Sender** (TouchDesigner `CUDAIPCExtension` Sender
+> COMP) defaults to **blocking** export as of v1.10.1 because its source is TD's transient
+> cook-scoped TOP texture (`cm.ptr`), which TD reclaims immediately after the cook.  Async
+> export returns before the D2D copy reads the source, causing reads-freed-memory (CUDA 719)
+> under a loaded consumer.  This section applies only to standalone Python `Exporter` callers
+> with a **persistent, caller-owned** source buffer.  See CHANGELOG 1.10.1 and ADR-0001.
 
 ### Flags
 
@@ -495,14 +529,36 @@ The default differs between the two producer implementations:
 
 | Producer | Default | Rationale |
 |---|---|---|
-| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (sync-free) | Python senders are standalone; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
-| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking) | Shared-process topologies — TD Sender and TD Receiver in the same TouchDesigner process — require the blocking sync as a hard ordering guarantee. Switching to async without full cycle-2 regression testing risks subtle TDR-cascade failures. |
+| **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (async) | Python senders are standalone with a caller-owned persistent source buffer; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
+| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking, **default since v1.10.1**) | The TD source is TD's transient cook-scoped TOP texture (`cm.ptr`): TD reclaims it when the cook returns. Async export lets TD recycle the source while the IPC-stream copy is still queued → reads freed memory → CUDA 719 under a loaded consumer. Blocking ensures the D2D read completes before the cook exits. Set `CUDALINK_EXPORT_SYNC=0` to opt back into async **only** with a guaranteed-stable source. See CHANGELOG 1.10.1. |
 
-Do **not** change `TDConfig.py` defaults. TD users running a standalone Python-side
-sender (i.e. not using TDSender at all) benefit automatically from the library
-default. TD Sender users who want the async path must set `EXPORT_SYNC=0` per-session
-via env var after validating with cycle-2 regression testing (TD Sender + TD Receiver
-in the same TD instance, sustained for multiple session reconnect cycles).
+> **This section (§8) applies only to the standalone Python `Exporter` callers described above.**
+> For TD Sender deployments, note that `CUDALINK_EXPORT_SYNC=0` is an explicit opt-out from
+> the safety-blocking default — not a recommended production configuration unless the source
+> buffer lifetime is guaranteed by the caller.
+
+**Coexistence safety — two distinct stream hazards, each fixed by the correct mechanism:**
+
+1. **Receiver-side teardown TDR** (fixed since v1.4.1, `0918914`/F8 `0556197`): WDDM
+   held stale CUDA↔D3D11 interop registrations when the receiver stream and IPC handles
+   were torn down across deactivate→reactivate cycles → `DXGI_ERROR_DEVICE_REMOVED` → TDR.
+   Fixed by **dedicated, persistent per-engine streams** (`CUDALINK_TD_PERSIST_STREAM=1`,
+   default; `b7d51c1`, F7/F8 `3f6d1c2`/`0556197`). A blunt per-frame
+   `cudaStreamSynchronize` on the sender never addressed this teardown-lifecycle hazard.
+
+2. **Producer-side cross-stream race** (fixed since v1.9.0, `d2d4674` / SD `346a59f`):
+   cuda-link's high-priority non-blocking IPC stream can race the producer's default-stream
+   pack kernels → half-written BGRA buffer → torn gray frame. Fixed by **producer-stream
+   ordering** (`record_source_sync` / `require_source_sync`; see "Producer-Stream Ordering"
+   in `ARCHITECTURE.md`).
+
+3. **TD Sender source-buffer lifetime race** (fixed since v1.10.1, CUDA 719): TD's TOP
+   texture pointer (`cm.ptr`) is valid only within the cook frame. Async export can delay
+   the IPC-stream copy past cook exit → reads freed memory. Fixed by **TD Sender blocking
+   by default** (`_resolve_export_sync(None) → True`). The `record_source_sync` ordering
+   primitive guarantees the copy starts after the source is fully written but does NOT keep
+   the source live past the D2D read; only blocking export closes the lifetime window for a
+   transient source. See CHANGELOG 1.10.1 and ADR-0001.
 
 ### Prerequisites
 

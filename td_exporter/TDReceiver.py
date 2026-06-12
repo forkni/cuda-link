@@ -10,7 +10,6 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
-import os
 import struct
 import time
 import traceback
@@ -29,6 +28,8 @@ from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
+from Env import env_int  # noqa: E402
+from FrameProfile import ReportWindow  # noqa: E402
 from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
     FLAGS_MONO_ALPHA,
@@ -49,6 +50,8 @@ from SHMProtocol import (  # noqa: E402
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_version,
+    read_write_idx,
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
@@ -245,12 +248,14 @@ class TDReceiverEngine:
 
         self._connection = ReceiverConnection()
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
+        self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
         self._f16_cpu_buf = None
         self._f32_cpu_buf = None
         self._f16_pinned_ptr = None
+        self._f16_host_registered = False  # True only when pageable fallback was page-locked via cudaHostRegister
         self._cupy_f32_buf = None
         self._cupy_f16_views: list = []
         self._cached_shape = None
@@ -260,10 +265,10 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
-        # Per-frame performance tracking for Debug summary line
-        self._rx_start: float = 0.0  # wall time at first consumed frame (0 = not yet started)
-        self._copy_total_s: float = 0.0  # cumulative copyCUDAMemory time in seconds
-        self._rx_report_every: int = int(os.environ.get("CUDALINK_RECEIVER_REPORT_EVERY", "150"))
+        # Per-frame performance tracking for Debug summary line — shares
+        # ReportWindow with TDSenderEngine.
+        self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
+        self._rx_window = ReportWindow()
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
 
@@ -326,6 +331,39 @@ class TDReceiverEngine:
             and bool(self._connection.dev_ptrs)
             and all(ptr is not None for ptr in self._connection.dev_ptrs)
         )
+
+    def has_new_frame(self) -> bool:
+        """Return True if the sender has new data or an engine action is needed.
+
+        Called from onFrameStart as a cheap SHM read before import_buffer.cook()
+        to skip idle cooks when the sender has not written a new frame.
+
+        Returns True in all cases where import_frame must run: init/retry,
+        version change, shutdown signal, or a new write_idx.
+
+        Returns False ONLY when all of these hold:
+          - receiver is fully initialized
+          - SHM is accessible
+          - write_idx equals our cursor (no new frame since last import)
+          - version field is unchanged (no sender restart)
+          - shutdown flag is 0
+        """
+        if not self._initialized:
+            return True  # retry/init path must run
+        shm = self._connection.shm_handle
+        if shm is None:
+            return True  # can't check; let import_frame decide
+        try:
+            buf = shm.buf
+            # Header reads via SHMProtocol's precompiled-Struct helpers.
+            if read_write_idx(buf) != self._connection.last_write_idx:
+                return True  # new frame available
+            if read_version(buf) != self._connection.ipc_version:
+                return True  # sender restarted
+            # Check for sender shutdown signal; return False iff truly idle
+            return buf[self._connection.shutdown_offset] != 0
+        except (AttributeError, struct.error, ValueError, IndexError, OSError):
+            return True  # SHM unreadable; let import_frame handle it
 
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
@@ -414,8 +452,9 @@ class TDReceiverEngine:
             write_idx = result.write_idx
             read_slot = result.slot
             _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
-            if self._rx_start == 0.0:
-                self._rx_start = time.perf_counter()
+            if not self._rx_window.started:
+                # Session baseline for windowed FPS (frame_count is never reset).
+                self._rx_window.start(time.perf_counter(), self.frame_count)
 
             _diag = self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
@@ -495,7 +534,7 @@ class TDReceiverEngine:
                     stream=int(self._connection.stream.value),
                 )
 
-            self._copy_total_s += time.perf_counter() - _t_copy_wall
+            self._rx_window.add_sample(time.perf_counter() - _t_copy_wall)
 
             if _diag:
                 _copy_ms = (time.perf_counter() - _t_copy) * 1000.0
@@ -509,16 +548,19 @@ class TDReceiverEngine:
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
 
-            _fmt_name = td_format_string(self._format)
-            self._host.set_info_status(f"{self._format.width}x{self._format.height} {_fmt_name}")
+            if not self._last_fmt_status:
+                # Rebuild only when format changed (initialize_receiver and update_receiver_format
+                # reset this to "" so the first frame after a format change always rebuilds).
+                _fmt_name = td_format_string(self._format)
+                self._last_fmt_status = f"{self._format.width}x{self._format.height} {_fmt_name}"
+            self._host.set_info_status(self._last_fmt_status)
 
             # Debug summary line — matches standalone Python receiver format
             if self.verbose_performance and self.frame_count % self._rx_report_every == 0:
                 _now = time.perf_counter()
-                _elapsed = _now - self._rx_start
-                _fps = self.frame_count / _elapsed if _elapsed > 0 else 0.0
+                _fps = self._rx_window.fps(_now, self.frame_count)
                 _latency_ms = (_now - _ts) * 1000.0 if _ts > 0 else 0.0
-                _avg_copy_us = (self._copy_total_s / self.frame_count) * 1e6
+                _avg_copy_us = self._rx_window.avg_and_reset() * 1e6
                 self._log(
                     f"Frame {self.frame_count:5d} | {_fps:5.1f} FPS | "
                     f"shape=({self._format.height}, {self._format.width}, {self._format.num_comps}) "
@@ -671,7 +713,7 @@ class TDReceiverEngine:
                 try:
                     _shm_mv = memoryview(bytes(shm_handle.buf))  # bytes copy: no mmap exported pointer
                     _md = Metadata.read_from(_shm_mv, layout)
-                except Exception as _e:  # noqa: BLE001
+                except (struct.error, ValueError, IndexError) as _e:
                     self._log(f"Failed to read SHM metadata: {_e}", force=True)
                     shm_handle.close()
                     return False
@@ -812,6 +854,7 @@ class TDReceiverEngine:
                 last_write_idx=0,
             )
             self._format = Format.from_metadata(_md)
+            self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._retry.needs_resolution_update = True
@@ -860,6 +903,14 @@ class TDReceiverEngine:
                     self._f16_pinned_ptr = None
                     self._f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
                     self._log(f"float16 receiver: pinned alloc failed ({_e}), using pageable buffer", force=True)
+                    # R3: page-lock the pageable fallback buffer so D2H runs at pinned bandwidth
+                    try:
+                        self.cuda.host_register(self._f16_cpu_buf.ctypes.data, self._f16_cpu_buf.nbytes)
+                        self._f16_host_registered = True
+                        self._log("float16 receiver: pageable buffer page-locked via cudaHostRegister", force=True)
+                    except (RuntimeError, OSError) as _re:
+                        self._f16_host_registered = False
+                        self._log(f"float16 receiver: host_register skipped ({_re})", force=True)
                 self._f32_cpu_buf = np_module.empty((height, width, num_comps), dtype=np_module.float32)
 
                 # GPU-side float32 staging buffer for CuPy conversion path
@@ -891,7 +942,7 @@ class TDReceiverEngine:
                                     memptr=_memptr,
                                 )
                             )
-                    except Exception as _e:
+                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError; keep broad so alloc failures always degrade to CPU fallback
                         self._cupy_f32_buf = None
                         self._cupy_f16_views = []
                         self._log(
@@ -970,6 +1021,13 @@ class TDReceiverEngine:
             except (RuntimeError, OSError) as e:
                 self._log(f"free_host skipped (context gone): {e}")
             self._f16_pinned_ptr = None
+        # R3: unregister the pageable fallback buffer if it was page-locked
+        if self._f16_host_registered and self._f16_cpu_buf is not None:
+            try:
+                self.cuda.host_unregister(self._f16_cpu_buf.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                self._log(f"host_unregister skipped (context gone): {e}")
+            self._f16_host_registered = False
         self._f16_cpu_buf = None
         self._f32_cpu_buf = None
         self._cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC
@@ -979,6 +1037,8 @@ class TDReceiverEngine:
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+        # Reset per-session perf tracking so reconnects get a fresh window baseline
+        self._rx_window.reset()
 
     def _refresh_on_version_change(self, new_version: int) -> bool:
         """Refresh format and IPC handles in-place after a sender version bump.
@@ -1072,6 +1132,7 @@ class TDReceiverEngine:
         # Rebuild format from the validated Metadata
         prev_format = self._format
         self._format = Format.from_metadata(_md)
+        self._last_fmt_status = ""  # force status string rebuild after version-change refresh
 
         # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:

@@ -143,6 +143,13 @@ Backup/
 # GitHub Release assets attached to their version tag (see release.yml).
 TOXES/CUDAIPCLink_v1.5.0.tox
 TOXES/CUDAIPCLink_v1.5.1.tox
+TOXES/CUDAIPCLink_v1.9.0.tox
+TOXES/CUDAIPCLink_v1.10.0.tox
+TOXES/CUDAIPCLink_v1.10.1.tox
+TOXES/CUDAIPCLink_v1.10.2.tox
+
+# Local-only tooling component (never distributed)
+TOXES/Semantic_Version_Control_v0.4.2.tox
 
 # AI assistant config (Gemini)
 GEMINI.md
@@ -168,6 +175,8 @@ nul
 # Scalene profiling output (local-only; only .profiling/baseline.json is committed)
 .profiling/scalene_*.json
 .profiling/current.json
+# All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
+.profiling/
 
 # Verification probe outputs (timestamped JSON from probe_cook_context runs)
 verification/results/probe_cook_context_*.json
@@ -215,6 +224,9 @@ Test_TD_Receiver1.*.toe
 CUDA_Link_Example.*.toe
 
 
+# Local TD font assets
+fonts/
+
 # Audit reports (local-only)
 audit_reports/
 
@@ -246,6 +258,9 @@ CONTEXT.md
 .claude/commands/
 .claude/skills/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
+
+# Implementation plan docs (local-only; plan files live in .claude/plans/)
+docs/plans/
 
 # Local-only docs (style guides, workflow docs, debug protocol)
 docs/STYLE_AUDIT_REPORT.md

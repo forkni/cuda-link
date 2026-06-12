@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from Env import env_bool, env_int, env_str
+from Env import env_bool, env_bool_opt, env_int, env_str
 
 
 @dataclass(frozen=True)
@@ -20,13 +20,22 @@ class TDSenderConfig:
 
     All booleans map 1-to-1 to CUDALINK_* env vars.  Defaults match
     the validated production stack described in docs/ARCHITECTURE.md.
+
+    export_sync is tri-state (bool | None):
+      True  — always use blocking cudaStreamSynchronize (explicit opt-in)
+      False — always use async export + flush-probe (explicit)
+      None  — default to **blocking** (same as True).  The TD Sender must
+              block until the D2D copy completes because TD's cook-scoped TOP
+              texture is reclaimed immediately after cook exit; async export
+              would read freed memory (CUDA error 719).  Set explicitly via
+              CUDALINK_EXPORT_SYNC=0 only when the source buffer is guaranteed
+              to outlive the queued copy.  See _resolve_export_sync().
     """
 
-    export_sync: bool = True
+    export_sync: bool | None = None
     export_profile: bool = False
     export_flush_probe: bool = True
     use_graphs: bool = False
-    graphs_deferred: bool = False
     stream_high_prio: bool = False
     init_pace: bool = False
     persist_stream: bool = True
@@ -38,11 +47,10 @@ class TDSenderConfig:
     def from_env(cls) -> TDSenderConfig:
         """Build a config from environment variables (production path)."""
         return cls(
-            export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=True),
+            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → async (default)
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
-            graphs_deferred=env_bool("CUDALINK_TD_GRAPHS_DEFERRED", default=False),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
             init_pace=env_bool("CUDALINK_TD_INIT_PACE", default=False),
             persist_stream=env_bool("CUDALINK_TD_PERSIST_STREAM", default=True),
@@ -52,7 +60,7 @@ class TDSenderConfig:
         )
 
     def __post_init__(self) -> None:
-        # export_flush_probe only takes effect when export_sync is False;
+        # export_flush_probe only takes effect when export_sync is False (or auto-selects async);
         # no error, just a documented no-op.
         if self.barrier_settle_frames < 0:
             raise ValueError(f"barrier_settle_frames must be >= 0, got {self.barrier_settle_frames}")

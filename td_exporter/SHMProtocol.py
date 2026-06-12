@@ -411,9 +411,12 @@ class SlotState(Enum):
     VERSION_CHANGED = "version_changed"
 
 
-@dataclass
-class AcquireResult:
-    """Result of acquire_slot()."""
+class AcquireResult(NamedTuple):
+    """Result of acquire_slot().
+
+    NamedTuple for lighter per-call construction (no __dict__, no dataclass
+    overhead) on the import hot path.  Fields are never mutated after creation.
+    """
 
     state: SlotState
     slot: int = -1

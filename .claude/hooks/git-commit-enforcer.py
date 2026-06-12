@@ -40,7 +40,7 @@ def main():
         sys.exit(0)
 
     # Respect --no-verify flag - user explicitly wants to bypass hooks
-    no_verify_pattern = r"\b(--no-verify|-n)\b"
+    no_verify_pattern = r"(?:^|\s)(--no-verify|-n)(?=\s|$)"
     if re.search(no_verify_pattern, command):
         # Allow raw command to pass through
         sys.exit(0)
@@ -89,6 +89,8 @@ def main():
     # Build safe commit command
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "F:/RD_PROJECTS/COMPONENTS/claude-context-local")
     safe_script = f"{project_dir}/scripts/git/commit_enhanced.sh"
+    if not os.path.isfile(safe_script):
+        sys.exit(0)
 
     # Construct updated command - shell script runs natively in Git Bash
     if message:

@@ -14,11 +14,11 @@ def test_sender_config_defaults() -> None:
     from TDConfig import TDSenderConfig
 
     cfg = TDSenderConfig()
-    assert cfg.export_sync is True
+    # export_sync stores raw tri-state; None resolves to blocking in _resolve_export_sync.
+    assert cfg.export_sync is None
     assert cfg.export_profile is False
     assert cfg.export_flush_probe is True
     assert cfg.use_graphs is False
-    assert cfg.graphs_deferred is False
     assert cfg.stream_high_prio is False
     assert cfg.init_pace is False
     assert cfg.persist_stream is True
@@ -49,8 +49,26 @@ def test_sender_config_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg == TDSenderConfig()
 
 
+def test_sender_config_from_env_export_sync_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUDALINK_EXPORT_SYNC absent → None (auto-select by topology)."""
+    from TDConfig import TDSenderConfig
+
+    monkeypatch.delenv("CUDALINK_EXPORT_SYNC", raising=False)
+    cfg = TDSenderConfig.from_env()
+    assert cfg.export_sync is None
+
+
+def test_sender_config_from_env_export_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUDALINK_EXPORT_SYNC=1 forces blocking export_sync."""
+    from TDConfig import TDSenderConfig
+
+    monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "1")
+    cfg = TDSenderConfig.from_env()
+    assert cfg.export_sync is True
+
+
 def test_sender_config_from_env_export_sync_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_EXPORT_SYNC=0 disables export_sync."""
+    """CUDALINK_EXPORT_SYNC=0 forces async export_sync."""
     from TDConfig import TDSenderConfig
 
     monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "0")
@@ -214,3 +232,43 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
     assert isinstance(engine._config, TDReceiverConfig), (
         "_make_engine() must pass TDReceiverConfig() to TDReceiverEngine, not TDSenderConfig"
     )
+
+
+# ---------------------------------------------------------------------------
+# export_sync resolution
+# ---------------------------------------------------------------------------
+
+
+def test_export_sync_config_stores_raw_tristate() -> None:
+    """TDSenderConfig stores the raw tri-state export_sync without resolving it.
+
+    Resolution to a strict bool happens later, in TDSenderEngine._resolve_export_sync
+    (None → True: TD Sender BLOCKS by default for source-lifetime safety — see
+    test_tdsender_export_sync_default.py for the resolution table).
+    """
+    from TDConfig import TDSenderConfig
+
+    for raw in (None, True, False):
+        config = TDSenderConfig(export_sync=raw)
+        assert config.export_sync is raw, f"config must store export_sync={raw!r} unresolved"
+
+
+def test_export_sync_resolution_table() -> None:
+    """Export-sync resolution: config.export_sync → effective ExportPolicy.export_sync.
+
+    (None)  → True   (blocking — TD default; the cook-scoped source TOP texture must
+                      outlive the D2D copy, else CUDA 719 under a loaded consumer)
+    (True)  → True   (explicit blocking)
+    (False) → False  (explicit async opt-in; source lifetime is the user's problem)
+    """
+    from TDSender import TDSenderEngine
+
+    table: list[tuple[bool | None, bool]] = [
+        (None, True),  # unset → blocking (TD source-lifetime safety)
+        (True, True),  # explicit True → blocking
+        (False, False),  # explicit False → async
+    ]
+
+    for raw, expected in table:
+        effective = TDSenderEngine._resolve_export_sync(raw)
+        assert effective is expected, f"export_sync={raw!r} → expected {expected}, got {effective}"

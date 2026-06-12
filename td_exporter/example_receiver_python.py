@@ -177,8 +177,12 @@ def main() -> None:
     profile_on = os.environ.get("CUDALINK_IMPORT_PROFILE", "0") == "1"
     frame_count = 0
     no_frame_count = 0
+    doorbell_wake_count = 0  # R2: incremented each time wait_for_doorbell() returns True
     start_time = time.perf_counter()
     last_report = start_time
+    last_report_frame = 0  # frame_count at last status line — for windowed (instantaneous) FPS
+    last_report_gf_s = 0.0  # get_frame_total_s at last status line — for windowed get_frame avg
+    last_report_wait_s = 0.0  # total_wait_event_time at last status line — for windowed wait avg
 
     # Per-call timing accumulators — updated on NEW_FRAME only (excludes NO_FRAME sleeps).
     get_frame_total_s = 0.0
@@ -202,6 +206,7 @@ def main() -> None:
 
             if result.outcome is ImportOutcome.NEW_FRAME:
                 frame = result.frame
+                assert frame is not None  # guaranteed when outcome is NEW_FRAME
                 frame_count += 1
                 no_frame_count = 0
 
@@ -216,29 +221,48 @@ def main() -> None:
 
                 now = time.perf_counter()
                 if frame_count % REPORT_EVERY == 0 or (now - last_report) >= 5.0:
-                    elapsed = now - start_time
-                    fps = frame_count / elapsed if elapsed > 0 else 0.0
+                    # Windowed FPS over the last report interval — reflects the CURRENT
+                    # rate, not the lifetime cumulative average (which only climbs
+                    # asymptotically and stays diluted by the pre-first-frame idle wait).
+                    window_dt = now - last_report
+                    window_frames = frame_count - last_report_frame
+                    fps = window_frames / window_dt if window_dt > 0 else 0.0
                     latency_ms = importer.last_latency
-                    avg_gf_us = (get_frame_total_s / frame_count) * 1e6
+                    # Windowed get_frame avg — reflects the CURRENT call cost over
+                    # the last report interval, not the lifetime cumulative mean
+                    # (which climbs asymptotically during warm-up and never resets).
+                    window_gf_s = get_frame_total_s - last_report_gf_s
+                    avg_gf_us = (window_gf_s / window_frames) * 1e6 if window_frames > 0 else 0.0
+                    cur_wait = 0.0
                     if profile_on:
                         stats = importer.get_stats()
-                        profile_suffix = (
-                            f" | wait={stats.get('total_wait_event_time', 0.0) / max(frame_count, 1):.1f} µs/f"
-                        )
+                        _w = stats.get("total_wait_event_time", 0.0)
+                        cur_wait = _w if isinstance(_w, float) else 0.0
+                        profile_suffix = f" | wait={(cur_wait - last_report_wait_s) / max(window_frames, 1):.1f} µs/f"
                     else:
                         profile_suffix = ""
+                    db_suffix = f" | doorbell_wakes={doorbell_wake_count}" if doorbell_wake_count else ""
                     print(
                         f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
                         f"shape={frame.shape} dtype={frame.dtype} | "
                         f"latency={latency_ms:.2f} ms | "
                         f"get_frame={avg_gf_us:.1f} µs avg"
-                        f"{profile_suffix}"
+                        f"{profile_suffix}{db_suffix}"
                     )
                     last_report = now
+                    last_report_frame = frame_count
+                    last_report_gf_s = get_frame_total_s
+                    last_report_wait_s = cur_wait
 
             elif result.outcome is ImportOutcome.NO_FRAME:
                 no_frame_count += 1
-                time.sleep(0.001)
+                # R2 doorbell: block on the Win32 named event when enabled
+                # (CUDALINK_DOORBELL=1); returns False immediately when disabled
+                # or non-Windows, preserving the existing poll-sleep behaviour.
+                if importer.wait_for_doorbell(2.0):
+                    doorbell_wake_count += 1
+                else:
+                    time.sleep(0.001)
 
             elif result.outcome is ImportOutcome.SHUTDOWN:
                 print("[receiver] TD sender shut down — exiting.")

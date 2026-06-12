@@ -54,6 +54,7 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
     (_SRC / "nvml_observer.py", _TD / "NVMLObserver.py", "byte_identical"),
     (_SRC / "shm_protocol.py", _TD / "SHMProtocol.py", "byte_identical"),
     (_SRC / "activation_barrier.py", _TD / "ActivationBarrier.py", "byte_identical"),
+    (_SRC / "_doorbell.py", _TD / "Doorbell.py", "byte_identical"),
     # ---- rewrite_relative pairs (deep modules + their dependencies) ---------
     (_SRC / "_nvtx.py", _TD / "NVTXShim.py", "rewrite_relative"),
     (_SRC / "_exporter_port.py", _TD / "ExporterPort.py", "rewrite_relative"),
@@ -114,15 +115,17 @@ def rewrite_relative_imports(source: str) -> str:
         if re.match(r"^\s*from \.\.", line):
             raise ValueError(f"Unsupported upward relative import: {line!r}")
 
-        # ``from . import stem`` — bare module import (possibly indented, e.g. inside a method)
-        m = re.match(r"^(\s*)(from \. import )([\w]+)(.*)", line)
+        # ``from . import stem[, stem2, ...]`` — bare module import (possibly indented or
+        # comma-separated when the linter merges adjacent single-stem imports).
+        m = re.match(r"^(\s*)from \. import ([\w ,]+?)(\s*)$", line)
         if m:
             indent = m.group(1)
-            stem = m.group(3)
-            tail = m.group(4)
-            derived = _resolve_name(stem, line)
+            stems = [s.strip() for s in m.group(2).split(",") if s.strip()]
             eol = "\n" if line.endswith("\n") else ""
-            out.append(f"{indent}import {derived} as {stem}{tail}{eol}")
+            # Emit one import statement per stem (black-compatible; avoids E702).
+            for s in stems:
+                derived = _resolve_name(s, line)
+                out.append(f"{indent}import {derived} as {s}{eol}")
             continue
 
         # ``from .stem import ...`` — attribute import (possibly indented; single or multi-line opener)

@@ -59,10 +59,40 @@ class ImportPolicy:
     d2h_num_streams: int = 1
     d2h_stream_high_priority: bool = False
     allow_pageable_fallback: bool = False
+    # opt-in pipelined D2H — enqueue current slot's copy, return previous frame.
+    # First call returns NO_FRAME; steady-state adds +1 frame latency in exchange for
+    # overlapping D2H with consumer CPU work.  Only beneficial when consumer takes
+    # longer than D2H copy time (~0.5–2 ms for 4K RGBA).
+    d2h_pipelined: bool = False
+    # R1: GPU-side wait for get_frame() (torch backend only).
+    # When True and no explicit stream= is passed, issues cudaStreamWaitEvent on
+    # torch.cuda.current_stream() instead of CPU-polling the IPC event.  The CPU
+    # returns immediately; ordering is enforced by the GPU scheduler.  Consequence:
+    # ImportOutcome.TIMEOUT is unreachable on this path (a hung producer stalls the
+    # stream rather than raising TimeoutError).  Opt-in; default=False preserves the
+    # existing CPU-spin/sleep behaviour and TIMEOUT detection.
+    # Enable via CUDALINK_TORCH_GPU_WAIT=1.
+    torch_gpu_wait: bool = False
+    # R1-adaptive: auto-promote to gpu-wait once real sleep-blocking is detected (torch only).
+    # Monitors the cpu-spin/sleep ratio over a sliding window; when the fraction of frames that
+    # fell through to the 1ms sleep reaches gpu_wait_adaptive_sleep_pct% of the window, the
+    # importer latches into GPU-side wait for the rest of the session (one-way — never reverts).
+    # Carries the same TIMEOUT-unreachable consequence as torch_gpu_wait above.
+    # Sensible at 30 fps (measured ~20% sleep) but NOT at 60 fps (0% sleep) — correctly stays
+    # in cpu-spin mode at 60 fps.
+    # Enable via CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1.
+    torch_gpu_wait_adaptive: bool = False
+    gpu_wait_adaptive_window: int = 120  # tumbling window size (frames)
+    gpu_wait_adaptive_sleep_pct: int = 5  # latch threshold (% of window that slept)
     debug: bool = False
     reconnect_enabled: bool = True
     reconnect_max_attempts: int = 20
     reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
+    # R2: Win32 named-event doorbell. When True the consumer opens the named
+    # event published by the producer and blocks on it instead of poll-sleeping
+    # on NO_FRAME. Set the same env var on both sides. Single-consumer only
+    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
+    doorbell: bool = False
 
     @classmethod
     def from_env(cls) -> ImportPolicy:
@@ -72,9 +102,15 @@ class ImportPolicy:
             d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
+            d2h_pipelined=env_bool("CUDALINK_D2H_PIPELINED", default=False),
+            torch_gpu_wait=env_bool("CUDALINK_TORCH_GPU_WAIT", default=False),
+            torch_gpu_wait_adaptive=env_bool("CUDALINK_TORCH_GPU_WAIT_ADAPTIVE", default=False),
+            gpu_wait_adaptive_window=env_int("CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW", default=120),
+            gpu_wait_adaptive_sleep_pct=env_int("CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT", default=5),
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
         )
 
     @classmethod

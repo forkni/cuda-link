@@ -75,6 +75,8 @@ If the sender is not yet running, the receiver retries connection with **exponen
 
 If the upstream texture resolution or format changes, the component detects the mismatch on the next frame, tears down the existing buffers, and re-initializes with the new dimensions. This takes ~50–100 µs (one-time) and is transparent to the connected Python process.
 
+If the Python consumer has `CUDALINK_D2H_PIPELINED=1` enabled, it drains the in-flight D2H copy and re-primes the double-buffer on reconnect — the first `get_frame_numpy()` call of the new session returns `NO_FRAME` (priming), matching fresh-session behavior.
+
 ---
 
 ## Parameters
@@ -84,7 +86,7 @@ If the upstream texture resolution or format changes, the component detects the 
 
 Master enable/disable switch for the CUDA IPC pipeline.
 
-- **On:** The component initializes GPU resources on the first frame and processes every frame thereafter.
+- **On:** The component initializes GPU resources on the first frame and processes every frame thereafter (in Receiver mode, the cook is skipped on idle frames where the producer has not written a new frame — `v1.10.2+`).
 - **Off:** All GPU work stops immediately. `export_frame()` and `import_frame()` return without doing anything. Calling cleanup frees all GPU buffers, destroys IPC events, closes shared memory, and (in Sender mode) signals shutdown to connected consumers. The `Numslots` parameter is re-enabled for editing in Sender mode.
 - **Toggling On** does not re-initialize immediately — GPU resources are re-created lazily on the next frame callback.
 - Hot-swappable: can be toggled at any time without restarting TouchDesigner.
@@ -159,13 +161,22 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
 
 #### Sender mode
 
-- **On:** every ~97 frames, prints an average timing breakdown:
+- **On:** emits two kinds of output:
+
+  **Per-frame `EXPORT_PROFILE` breakdown** (every ~97 frames, only when `CUDALINK_EXPORT_PROFILE=1`):
   - `cudaMemory` — OpenGL→CUDA interop time
   - `memcpy` — D2D memcpy enqueue time
   - `record` — IPC event record time
   - `total` — full `export_frame()` wall-clock time
   - `GPU memcpy` — actual GPU elapsed time measured via CUDA timing events (only available if Debug was On at initialization)
   - `sync mode` — whether GPU-event synchronization or CPU-sync fallback is active
+
+  **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
+  ```
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
+  ```
+  The `export=` figure is a **windowed (~150-frame) average** that resets with each report;
+  it reflects the current session's performance, not a lifetime mean.
 
 The first frame after initialization always prints a detailed timing diagnostic regardless of this setting.
 
@@ -181,8 +192,14 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
   - **FPS** — frames consumed ÷ wall time since the first consumed frame
   - **shape** — texture dimensions in numpy H×W×C order
   - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
-  - **copy** — running average of `copyCUDAMemory` wall time; analogous to `get_frame= µs avg` in the standalone Python receiver
-  - **slot / write_idx** — ring buffer diagnostics
+  - **copy** — windowed (~150-frame) average of `copyCUDAMemory` wall time, covering only the frames in the current report window (in sync with the windowed FPS beside it); analogous to `get_frame= µs avg` in the standalone Python receiver
+  - **slot / write_idx** — ring buffer diagnostics, sampled as a **1-in-N snapshot** of the
+    sender's free-running counter (`slot = (write_idx − 1) % Numslots`). Because the producer
+    advances `write_idx` slightly faster than the consumer reads (latest-frame-wins design),
+    the sampled `slot` lands on a different value almost every report and looks non-sequential
+    — this is expected sampling aliasing, **not** uneven slot usage. On the actual data path
+    every slot is written and read in equal `0→1→2…` rotation; the per-frame `[DIAG]` lines
+    printed for the first 5 frames after each re-init show that clean consecutive rotation.
 
 Hot-swappable in both modes: can be toggled at runtime without affecting the pipeline.
 
@@ -206,7 +223,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.8.1.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.10.3.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -230,12 +247,24 @@ to see all five install modes.
 1. In Python, create an exporter:
    ```python
    from cuda_link import Exporter, FrameSpec, GpuFrame
+   import torch
    exporter = Exporter.open(FrameSpec(shm_name="ai_output", width=1920, height=1080))
-   exporter.export(GpuFrame(ptr=gpu_tensor.data_ptr(), size=gpu_tensor.nbytes))
+   # Pass producer_stream so the D2D copy is ordered after your kernel writes.
+   # PyTorch: torch.cuda.current_stream().cuda_stream
+   exporter.export(GpuFrame(
+       ptr=gpu_tensor.data_ptr(),
+       size=gpu_tensor.nbytes,
+       producer_stream=torch.cuda.current_stream().cuda_stream,
+   ))
    ```
 2. Drop the component into TD and set **Mode** = `Receiver`.
 3. Set **Ipcmemname** to the same name (`ai_output`).
 4. Toggle **Active** = On. The receiver will connect automatically once the Python exporter is running.
+
+**Optional: Pipelined D2H (`CUDALINK_D2H_PIPELINED=1`)** — overlaps the device-to-host copy
+with the consumer's CPU work. Disabled by default. First `get_frame_numpy()` returns `NO_FRAME`
+(priming); re-primes on reconnect (+1-frame latency in steady state). See README Performance
+Tuning table for break-even thresholds (1080p ~0.38 ms workload, 4K ~1.3 ms).
 
 ---
 
@@ -245,7 +274,7 @@ to see all five install modes.
 |-----------|-------------|-------|
 | Per-frame IPC overhead | 0.5–2 µs | GPU event record + `write_idx` update |
 | First-frame initialization | 50–100 µs | One-time GPU buffer allocation + IPC handle creation |
-| D2D texture copy (1080p RGBA float32) | 60–80 µs | Runs fully on GPU |
+| D2D texture copy (1080p RGBA float32) | ~106 µs | Standalone, EXPORT_SYNC=1, RTX 4090 — runs fully on GPU |
 | Receiver `copyCUDAMemory` into TD (1080p) | ~3 ms | Includes CUDA→OpenGL interop inside TD |
 | D2H numpy copy (1080p RGBA float32) | 400–600 µs | Only when using `get_frame_numpy()` |
 
@@ -275,6 +304,15 @@ to see all five install modes.
 
 **Debug shows high `cudaMemory` time (>0.5 ms)**
 - This is the OpenGL→CUDA interop step inside TouchDesigner's `top_op.cudaMemory()` call and is not controllable by this component. It is normal for large textures or when the GPU is under heavy load.
+
+**Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
+- This indicates a producer-side source-buffer lifetime race: the D2D memcpy read the TD
+  texture after TD reclaimed it. From v1.10.1 the TD Sender **blocks by default** (post-copy
+  `stream_synchronize`) so the source is live until `export()` returns — upgrade to
+  `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
+  set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
+  See CHANGELOG 1.10.1 for the full root-cause analysis.  Upgrade to
+  `CUDAIPCLink_v1.10.3.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 

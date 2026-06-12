@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any, Protocol
 
+import Doorbell as _doorbell
 import NVTXShim as _nvtx
 from ImporterPort import (
     ImportOutcome,
@@ -46,6 +47,7 @@ from SHMProtocol import (
     acquire_slot,
     read_num_slots,
     read_version,
+    read_write_idx,
 )
 
 if TYPE_CHECKING:
@@ -63,7 +65,11 @@ _NVTX_CUPY_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_fram
 # timeBeginPeriod/timeEndPeriod return their status directly (TIMERR_NOERROR=0,
 # TIMERR_NOCANDO=97); they do NOT use GetLastError, so use_last_error is omitted.
 _TIMERR_NOCANDO = 97  # mmsystem.h TIMERR_NOCANDO — period granularity unsupported
-if sys.platform == "win32":
+if sys.platform == "win32" and sys.version_info < (3, 11):
+    # CPython 3.11+ uses a high-resolution waitable timer on Windows (100 ns class),
+    # so timeBeginPeriod is unnecessary and the syscall pair would be wasted work.
+    # On 3.10 and earlier, timeBeginPeriod(1) reduces time.sleep()'s floor from ~15 ms
+    # to ~1 ms — see cpython/issues/89592 and What's New in Python 3.11.
     try:
         _winmm = ctypes.WinDLL("winmm")
         _winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
@@ -272,6 +278,8 @@ class IPCConnection:
     layout: object  # SHMLayout
     shutdown_offset: int
     timestamp_offset: int
+    # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
+    doorbell_handle: object = None
 
     def close_ipc_handles(self) -> None:
         """Close IPC mem handles and events. SharedMemory stays open."""
@@ -292,6 +300,11 @@ class IPCConnection:
                 except (RuntimeError, OSError) as e:
                     logger.error("Error destroying event for slot %d: %s", slot, e)
                 self.ipc_events[slot] = None
+
+        # R2: close doorbell handle alongside IPC handles
+        if self.doorbell_handle is not None:
+            _doorbell.close(self.doorbell_handle)
+            self.doorbell_handle = None
 
     def close(self) -> None:
         """Close IPC handles and SharedMemory. Idempotent."""
@@ -410,6 +423,14 @@ class NumpyBuffers:
     d2h_streams: list
     num_streams: int
     chunk_plan: list  # [(offset, size), ...] for multi-stream D2H; empty when num_streams <= 1
+    buffer_ptr: object  # ctypes.c_void_p | None — precomputed dst for D2H copy (fixed for buffer lifetime)
+    # pipelined D2H double-buffer state (all None / False when not pipelined)
+    back_buffer: object = None  # second pinned host buffer
+    back_pinned_ptr: object = None  # CUDA ptr from malloc_host_alloc for back buffer
+    back_host_registered_arr: object = None  # ndarray from cudaHostRegister for back buffer
+    back_buffer_ptr: object = None  # precomputed c_void_p for back_buffer
+    pipelined: bool = False  # pipelined D2H active
+    priming: bool = False  # True before the first copy completes
 
     @classmethod
     def build(
@@ -419,6 +440,7 @@ class NumpyBuffers:
         num_streams: int,
         high_priority: bool = False,
         allow_pageable: bool = False,
+        pipelined: bool = False,
     ) -> NumpyBuffers:
         """Allocate pinned host buffer + D2H streams.
 
@@ -501,6 +523,24 @@ class NumpyBuffers:
                     break
                 chunk_plan.append((offset, size))
 
+        # allocate a second pinned buffer using the same path that succeeded.
+        back_buffer = None
+        back_pinned_ptr = None
+        back_host_registered_arr = None
+        if pipelined:
+            if pinned_ptr is not None:
+                back_pinned_ptr = cuda.malloc_host_alloc(nbytes, flags=0x01)
+                _back_mem = (ctypes.c_ubyte * nbytes).from_address(back_pinned_ptr.value)
+                back_buffer = np.frombuffer(_back_mem, dtype=fmt.numpy_dtype).reshape(fmt.shape)
+            elif host_registered_arr is not None:
+                _back_arr = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+                cuda.host_register(_back_arr.ctypes.data, _back_arr.nbytes)
+                back_host_registered_arr = _back_arr
+                back_buffer = _back_arr
+            else:
+                back_buffer = np.empty(fmt.shape, dtype=fmt.numpy_dtype)
+            logger.debug("Allocated pipelined D2H back buffer: %s %s", fmt.shape, fmt.dtype_str)
+
         return cls(
             cuda=cuda,
             fmt=fmt,
@@ -512,14 +552,40 @@ class NumpyBuffers:
             d2h_streams=d2h_streams,
             num_streams=num_streams,
             chunk_plan=chunk_plan,
+            buffer_ptr=ctypes.c_void_p(buffer.ctypes.data) if buffer is not None else None,
+            back_buffer=back_buffer,
+            back_pinned_ptr=back_pinned_ptr,
+            back_host_registered_arr=back_host_registered_arr,
+            back_buffer_ptr=ctypes.c_void_p(back_buffer.ctypes.data) if back_buffer is not None else None,
+            pipelined=pipelined,
+            priming=pipelined,
         )
 
     def needs_rebuild(self, fmt: Format) -> bool:
         """True when the pre-allocated buffer doesn't match the new format."""
         return self.buffer.shape != fmt.shape or self.buffer.dtype != fmt.numpy_dtype
 
+    def rotate(self) -> None:
+        """Swap front/back buffers and their precomputed pointers (pipelined mode)."""
+        self.buffer, self.back_buffer = self.back_buffer, self.buffer
+        self.buffer_ptr, self.back_buffer_ptr = self.back_buffer_ptr, self.buffer_ptr
+
+    def drain(self) -> None:
+        """Block until every enqueued D2H copy completes. Best-effort, idempotent.
+
+        Pipelined mode leaves one async copy in flight after each materialize();
+        callers must drain before freeing the pinned destination (close) or
+        closing the IPC source mapping (Importer._reinitialize) — otherwise the
+        copy can still be running when its endpoint is released (CUDA 719-class
+        source-lifetime race).
+        """
+        if self.primary_stream is not None:
+            with contextlib.suppress(RuntimeError, OSError):
+                self.cuda.stream_synchronize(self.primary_stream)
+
     def close(self) -> None:
         """Idempotent teardown: free pinned allocation, destroy streams."""
+        self.drain()  # in-flight pipelined copy writes into the buffer freed below
         if self.pinned_ptr is not None:
             try:
                 self.cuda.free_host(self.pinned_ptr)
@@ -532,6 +598,7 @@ class NumpyBuffers:
             # Clearing here ensures post-close access fails loudly (AttributeError on None)
             # instead of silently touching freed GPU memory.
             self.buffer = None
+            self.buffer_ptr = None  # precomputed pointer into freed allocation — clear it
 
         if self.host_registered_arr is not None:
             try:
@@ -556,6 +623,25 @@ class NumpyBuffers:
                 logger.debug("D2H stream destroy skipped (context gone): %s", e)
             self.primary_stream = None
 
+        # free pipelined back buffer.
+        if self.back_pinned_ptr is not None:
+            try:
+                self.cuda.free_host(self.back_pinned_ptr)
+                logger.debug("Freed pipelined back buffer")
+            except (RuntimeError, OSError) as e:
+                logger.debug("free_host(back) skipped: %s", e)
+            self.back_pinned_ptr = None
+            self.back_buffer = None
+            self.back_buffer_ptr = None
+        if self.back_host_registered_arr is not None:
+            try:
+                self.cuda.host_unregister(self.back_host_registered_arr.ctypes.data)
+            except (RuntimeError, OSError) as e:
+                logger.debug("host_unregister(back) failed: %s", e)
+            self.back_host_registered_arr = None
+            self.back_buffer = None
+            self.back_buffer_ptr = None
+
 
 # ---------------------------------------------------------------------------
 # Reconnect state machine
@@ -578,6 +664,26 @@ class _RetryState:
     def request_immediate_reconnect(self) -> None:
         """Force the next get_frame*() call to attempt reconnection without waiting."""
         self.frames_since_last_retry = self.retry_interval_frames
+
+
+# ---------------------------------------------------------------------------
+# IPC-event pointer helper
+# ---------------------------------------------------------------------------
+
+
+def _event_to_int(evt: object) -> int:
+    """Resolve an opened IPC event to its integer cudaEvent_t pointer.
+
+    Normally a CUDAEvent_t (ctypes c_uint64); be robust to a raw bytes handle
+    (8-byte little-endian pointer) or a plain int, so the cupy backend matches
+    the torch/CPU paths that hand the event straight to ctypes.
+    """
+    val = getattr(evt, "value", evt)
+    if isinstance(val, (bytes, bytearray)):
+        return int.from_bytes(val, "little")
+    if isinstance(val, int):
+        return val
+    return int(val)  # type: ignore[arg-type]  # ctypes c_uint64.value is int at runtime
 
 
 # ---------------------------------------------------------------------------
@@ -628,16 +734,43 @@ class _TorchBackend:
     def __init__(self, importer: Importer, stream: object | None) -> None:
         self._imp = importer
         self._stream = stream
+        # Cached raw CUDA stream handle for torch_gpu_wait path.  Populated lazily
+        # on first call to avoid paying the torch.cuda.current_stream() Python→C++
+        # crossing on every frame.  Valid as long as the caller uses a single default
+        # stream per device (the common case).  Pass stream= to get_frame() explicitly
+        # if you switch CUDA streams between calls.
+        self._gpu_wait_cs: int | None = None
 
     def prepare(self, importer: Importer) -> None:  # noqa: ARG002
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
         if self._stream is not None:
+            # Explicit stream= provided: GPU-side wait (existing behaviour).
             cs = self._imp._resolve_stream(self._stream)
-            if conn.ipc_events[read_slot]:
-                conn.cuda.stream_wait_event(cs, conn.ipc_events[read_slot], 0)
+            if evt:
+                conn.cuda.stream_wait_event(cs, evt, 0)
+            else:
+                # No IPC event for this slot — fall back to full sync so the
+                # GPU read is not unordered.
+                self._imp._wait_for_slot(read_slot)
             return 0.0
+        if self._imp._policy.torch_gpu_wait or self._imp._gpu_wait_active:
+            # R1 opt-in (explicit) or R1-adaptive (auto-latched): GPU-side wait on torch.cuda.current_stream().
+            # CPU returns immediately; ordering enforced by the GPU scheduler.
+            # TIMEOUT is unreachable on this path (hung producer = stalled stream).
+            # Stream handle cached after first call to skip repeated Python→C++ crossing.
+            import torch
+
+            if torch.cuda.is_available():
+                if self._gpu_wait_cs is None:
+                    self._gpu_wait_cs = torch.cuda.current_stream().cuda_stream
+                cs = self._gpu_wait_cs
+                if evt:
+                    conn.cuda.stream_wait_event(cs, evt, 0)
+                    return 0.0
+                # No IPC event — fall through to CPU wait.
         return self._imp._wait_for_slot(read_slot)  # may raise TimeoutError
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -665,6 +798,7 @@ class _NumpyBackend:
                 num_streams=importer._policy.d2h_num_streams,
                 high_priority=importer._policy.d2h_stream_high_priority,
                 allow_pageable=importer._policy.allow_pageable_fallback,
+                pipelined=importer._policy.d2h_pipelined,
             )
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
@@ -675,10 +809,39 @@ class _NumpyBackend:
         fmt = self._imp._format
         nbytes = fmt.frame_nbytes
         with _nvtx.verbose_range("cudalink.importer.d2h_copy", self.nvtx_color):
+            if nb.pipelined:
+                if nb.priming:
+                    # First call: enqueue copy into back buffer; no prior data to return.
+                    conn.cuda.memcpy_async(
+                        dst=nb.back_buffer_ptr,
+                        src=conn.dev_ptrs[read_slot],
+                        count=nbytes,
+                        kind=2,
+                        stream=nb.primary_stream,
+                    )
+                    nb.priming = False
+                    # Rotate: back (just filled) becomes new front for next call.
+                    nb.rotate()
+                    conn.cuda.check_sticky_error("get_frame_numpy[pipelined-prime]")
+                    return None  # get_frame_numpy surfaces as NO_FRAME
+                # Steady state: sync the previous call's copy (now in nb.buffer = front),
+                # enqueue this call's copy into nb.back_buffer, then return front.
+                conn.cuda.stream_synchronize(nb.primary_stream)
+                conn.cuda.memcpy_async(
+                    dst=nb.back_buffer_ptr,
+                    src=conn.dev_ptrs[read_slot],
+                    count=nbytes,
+                    kind=2,
+                    stream=nb.primary_stream,
+                )
+                result = nb.buffer
+                nb.rotate()
+                conn.cuda.check_sticky_error("get_frame_numpy[pipelined]")
+                return result
             n_streams = nb.num_streams
             if n_streams <= 1:
                 conn.cuda.memcpy_async(
-                    dst=nb.buffer.ctypes.data_as(ctypes.c_void_p),
+                    dst=nb.buffer_ptr,  # precomputed c_void_p; stable for buffer lifetime
                     src=conn.dev_ptrs[read_slot],
                     count=nbytes,
                     kind=2,  # cudaMemcpyDeviceToHost
@@ -717,14 +880,18 @@ class _CupyBackend:
         pass
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
+        evt = conn.ipc_events[read_slot]
+        if not evt:
+            # No IPC event for this slot — fall back to CPU wait so the GPU
+            # read is not unordered.  TimeoutError may be raised.
+            return self._imp._wait_for_slot(read_slot)
         stream = self._stream
         if stream is None:
             stream = cp.cuda.get_current_stream()
         elif not isinstance(stream, cp.cuda.Stream):
             cuda_stream_ptr = self._imp._resolve_stream(stream)
             stream = cp.cuda.ExternalStream(cuda_stream_ptr)
-        if conn.ipc_events[read_slot]:
-            cp.cuda.runtime.streamWaitEvent(stream.ptr, int(conn.ipc_events[read_slot]), 0)
+        cp.cuda.runtime.streamWaitEvent(stream.ptr, _event_to_int(evt), 0)
         return 0.0  # GPU-side wait — CPU returns immediately; TimeoutError unreachable
 
     def materialize(self, conn: IPCConnection, read_slot: int) -> Any:  # noqa: ARG002
@@ -771,6 +938,13 @@ class Importer:
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
 
+        # Cached backend instances — each holds only a back-ref to this Importer
+        # plus (for torch/cupy) the per-call stream, refreshed in-place rather than
+        # constructing a new object each frame.  Avoids one allocation per get_frame* call.
+        self._numpy_backend: _NumpyBackend | None = None
+        self._torch_backend: _TorchBackend | None = None
+        self._cupy_backend: _CupyBackend | None = None
+
         # Reconnect state machine (None when reconnect_enabled=False)
         self._retry: _RetryState | None = (
             _RetryState(
@@ -797,6 +971,17 @@ class Importer:
         self.total_wait_sleep_us = 0.0
         self.wait_spin_hits = 0
         self.wait_sleep_hits = 0
+
+        # R1-adaptive: one-way latch state
+        # _gpu_wait_active flips True once and stays True for the session.
+        # Precompute the minimum sleeps needed to trigger (ceil of window × pct / 100).
+        self._gpu_wait_active = False
+        self._gpu_wait_latched_frame: int | None = None
+        self._adaptive_frames = 0
+        self._adaptive_sleeps = 0
+        _w = policy.gpu_wait_adaptive_window
+        _p = policy.gpu_wait_adaptive_sleep_pct
+        self._adaptive_min_sleeps: int = max(1, -(-_w * _p // 100))  # ceil without math.ceil
 
     @classmethod
     def open(
@@ -1038,6 +1223,18 @@ class Importer:
             )
 
         logger.info("Opened %d IPC buffer slots", num_slots)
+
+        # R2: open the doorbell event if the policy requests it
+        db_handle = None
+        if self._policy.doorbell:
+            db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
+            if db_handle is not None:
+                logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
+            else:
+                logger.warning(
+                    "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
+                )
+
         return IPCConnection(
             cuda=cuda,
             shm_handle=shm,
@@ -1049,6 +1246,7 @@ class Importer:
             layout=layout,
             shutdown_offset=layout.shutdown_offset,
             timestamp_offset=layout.timestamp_offset,
+            doorbell_handle=db_handle,
         )
 
     # ------------------------------------------------------------------
@@ -1150,6 +1348,25 @@ class Importer:
         self._last_write_idx = result.write_idx
         return result, ImportOutcome.NEW_FRAME
 
+    def _adaptive_observe_wait(self, slept: bool) -> None:
+        """Record one cpu-spin/sleep outcome and latch gpu-wait when the sleep rate crosses the threshold.
+
+        Called from _wait_for_slot only — a no-op once latched or when the feature is disabled.
+        The latch is one-way: once _gpu_wait_active is True it stays True for the session.
+        """
+        if not self._policy.torch_gpu_wait_adaptive or self._gpu_wait_active:
+            return
+        self._adaptive_frames += 1
+        if slept:
+            self._adaptive_sleeps += 1
+        if self._adaptive_sleeps >= self._adaptive_min_sleeps:
+            self._gpu_wait_active = True
+            self._gpu_wait_latched_frame = self.frame_count
+        elif self._adaptive_frames >= self._policy.gpu_wait_adaptive_window:
+            # Full window passed without hitting the threshold — reset and keep watching.
+            self._adaptive_frames = 0
+            self._adaptive_sleeps = 0
+
     def _wait_for_slot(self, slot: int) -> float:
         """CPU-side wait until producer signals the slot event.
 
@@ -1165,17 +1382,26 @@ class Importer:
             query = conn.cuda.query_event
 
             if policy.wait_spin_us > 0:
-                spin_deadline = wait_start + policy.wait_spin_us / 1_000_000
-                while time.perf_counter() < spin_deadline:
+                # Clamp spin_deadline to the overall deadline so the loop needs
+                # only one perf_counter() call per iteration — no inner deadline
+                # check required (spin budget << timeout_ms in all practical cases).
+                spin_deadline = min(
+                    wait_start + policy.wait_spin_us / 1_000_000,
+                    deadline,
+                )
+                while (now := time.perf_counter()) < spin_deadline:
                     if query(evt):
-                        spin_us = (time.perf_counter() - wait_start) * 1_000_000
+                        spin_us = (now - wait_start) * 1_000_000
                         self.total_wait_spin_us += spin_us
                         self.wait_spin_hits += 1
+                        self._adaptive_observe_wait(False)
                         return spin_us
-                    if time.perf_counter() >= deadline:
-                        raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                # If we exited because spin_deadline == deadline, we timed out.
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
 
             phase2_start = time.perf_counter()
+            did_sleep = False
             with _HighResTimer():
                 while True:
                     if query(evt):
@@ -1183,12 +1409,52 @@ class Importer:
                     if time.perf_counter() >= deadline:
                         raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
                     time.sleep(0.0001)
+                    did_sleep = True
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
             self.wait_sleep_hits += 1
+            self._adaptive_observe_wait(did_sleep)
         else:
             conn.cuda.synchronize()
 
         return (time.perf_counter() - wait_start) * 1_000_000
+
+    # ------------------------------------------------------------------
+    # R2: Doorbell wait primitive
+    # ------------------------------------------------------------------
+
+    def wait_for_doorbell(self, timeout_ms: float) -> bool:
+        """Block until the producer signals a new frame or timeout_ms elapses.
+
+        Lost-wakeup-safe: before blocking the function checks whether a new
+        frame has already arrived (write_idx advanced) and returns True
+        immediately if so, consuming no signal from the kernel event.
+
+        Returns:
+            True  — a new frame *may* be waiting; caller should call get_frame().
+            False — timed out, or doorbell is disabled / not opened / non-Windows.
+                    Caller should fall back to its poll-sleep path.
+
+        Notes:
+            * This is a single-consumer primitive (auto-reset event).
+            * The 2 ms default cap in the example loop keeps the lost-wakeup
+              window bounded: worst-case latency is one timeout_ms slice, not
+              infinite.  Caller always re-checks with get_frame() after True.
+            * Returns False immediately when CUDALINK_DOORBELL=0 or on
+              non-Windows — existing behaviour is preserved without any guards
+              in the caller.
+        """
+        conn = self._conn
+        h = conn.doorbell_handle if conn is not None else None
+        if h is None:
+            return False  # disabled / not opened / non-Windows → caller polls
+
+        # Early return: frame already arrived since last get_frame() call.
+        cur = read_write_idx(conn.shm_handle.buf)
+        if cur != 0 and cur != self._last_write_idx:
+            return True
+
+        # Block until signaled; auto-reset clears the event on wake.
+        return _doorbell.wait(h, int(timeout_ms))
 
     # ------------------------------------------------------------------
     # Frame consumers
@@ -1265,8 +1531,19 @@ class Importer:
         Args:
             stream: Optional CUDA stream (torch.cuda.Stream, cupy.cuda.Stream,
                     or int). When provided, issues cudaStreamWaitEvent (GPU-side
-                    ordering, non-blocking CPU). When None, blocks until the
-                    producer event fires.
+                    ordering, non-blocking CPU). When None, the wait mode depends
+                    on ImportPolicy.torch_gpu_wait:
+
+                    False (default): CPU spins on cudaEventQuery then sleeps.
+                        get_frame() blocks until the producer event fires.
+                        ImportOutcome.TIMEOUT is raised after timeout_ms.
+
+                    True (opt-in, CUDALINK_TORCH_GPU_WAIT=1): cudaStreamWaitEvent
+                        on torch.cuda.current_stream(). CPU returns immediately;
+                        the tensor is valid in **stream order**, not at return.
+                        ImportOutcome.TIMEOUT is unreachable on this path —
+                        a hung producer stalls the stream instead of raising.
+                        See get_frame_cupy() for the same trade-off.
 
         Returns:
             ImportResult[torch.Tensor] with outcome NEW_FRAME, NO_FRAME,
@@ -1274,7 +1551,11 @@ class Importer:
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
-        return self._consume_frame(_TorchBackend(self, stream))
+        if self._torch_backend is None:
+            self._torch_backend = _TorchBackend(self, stream)
+        else:
+            self._torch_backend._stream = stream
+        return self._consume_frame(self._torch_backend)
 
     def get_frame_numpy(self) -> ImportResult:
         """Get current frame as a numpy ndarray (CPU; involves D2H copy).
@@ -1282,10 +1563,22 @@ class Importer:
         Returns:
             ImportResult[np.ndarray] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, RECONNECTING, or TIMEOUT.
+
+        When ImportPolicy.d2h_pipelined is True the first call returns NO_FRAME
+        (priming the back buffer) and each subsequent call returns the previous
+        frame with +1 frame latency, hiding D2H copy time behind consumer CPU work.
+        A producer restart re-primes: the first call after RECONNECTING returns
+        NO_FRAME again rather than the previous session's last frame.
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
-        return self._consume_frame(_NumpyBackend(self))
+        if self._numpy_backend is None:
+            self._numpy_backend = _NumpyBackend(self)
+        result = self._consume_frame(self._numpy_backend)
+        # pipelined path signals the priming call with frame=None; surface as NO_FRAME.
+        if self._policy.d2h_pipelined and result.outcome is ImportOutcome.NEW_FRAME and result.frame is None:
+            return ImportResult(outcome=ImportOutcome.NO_FRAME)
+        return result
 
     def get_frame_cupy(self, stream: object | None = None) -> ImportResult:
         """Get current frame as a zero-copy CuPy ndarray on GPU.
@@ -1306,7 +1599,11 @@ class Importer:
         """
         if not CUPY_AVAILABLE:
             raise RuntimeError("cupy is required for get_frame_cupy(). Install: pip install cupy-cuda12x")
-        return self._consume_frame(_CupyBackend(self, stream))
+        if self._cupy_backend is None:
+            self._cupy_backend = _CupyBackend(self, stream)
+        else:
+            self._cupy_backend._stream = stream
+        return self._consume_frame(self._cupy_backend)
 
     # ------------------------------------------------------------------
     # Re-initialization (producer restarted with new IPC handles)
@@ -1316,6 +1613,14 @@ class Importer:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
         old_conn = self._conn
         shm = old_conn.shm_handle
+
+        if self._numpy is not None and self._numpy.pipelined:
+            # The previous get_frame_numpy() left an async D2H copy in flight whose
+            # source is an IPC mapping closed just below — drain before releasing it.
+            self._numpy.drain()
+            # Re-prime so the first call of the new session returns NO_FRAME instead
+            # of surfacing the dead session's last frame as NEW_FRAME.
+            self._numpy.priming = True
 
         old_conn.close_ipc_handles()
 
@@ -1458,6 +1763,8 @@ class Importer:
             "wait_sleep_hits": self.wait_sleep_hits,
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,
             "avg_sleep_us": self.total_wait_sleep_us / self.wait_sleep_hits if self.wait_sleep_hits > 0 else 0.0,
+            "gpu_wait_active": self._gpu_wait_active,
+            "gpu_wait_latched_frame": self._gpu_wait_latched_frame,
         }
         if self._nvml_observer is not None:
             stats["nvml"] = self._nvml_observer.snapshot()
