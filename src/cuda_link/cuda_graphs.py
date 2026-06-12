@@ -261,8 +261,8 @@ class CUDAGraphsMixin:
         (graph_exec_memcpy_node_set_params) returns INVALID_VALUE on 1D nodes.
         Requires CUDA 11.3+.
         """
-        dst_int = int(dst.value)
-        src_int = int(src.value)
+        dst_int = dst.value or 0
+        src_int = src.value or 0
         self.cudart.cudaGraphExecMemcpyNodeSetParams1D(
             graph_exec,
             node,
