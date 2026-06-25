@@ -42,9 +42,10 @@ correct expansion is:
    interchange that simultaneously unlocks Resolume, Unreal, OBS, Notch, Unity,
    MadMapper, vvvv and TD — and it is architecturally the closest cousin to
    cuda-link (Windows, same-machine, GPU texture share).
-3. Treat **NDI** as a *separate, cross-machine* egress adapter — useful for reach
-   (row A), but it breaks the zero-copy/lossless story by construction and should
-   never sit on the latency-critical path.
+3. **NDI is out of scope** (decided 2026-06-25): it is cross-machine and
+   compressed, which cuts directly against cuda-link's same-machine inter-process
+   zero-copy philosophy. The analysis is retained in §4.4 as the record of *why*,
+   but it is not on the roadmap.
 4. Native **Unreal** and **Resolume FFGL** plugins are *phase-2 optimisations* of
    the Spout route, not prerequisites.
 
@@ -159,12 +160,12 @@ Mapping the supplied Scope-advantage table to what this expansion actually moves
 
 | # | Scope advantage | Does plugin/C++ expansion close it? | Notes |
 |---|---|---|---|
-| **A** | Transport breadth (Spout, Syphon, NDI, WebRTC, DMX) | **Partially — the high-value 80%.** | A CUDA↔**Spout** bridge + an **NDI** egress adapter cover the two transports that matter for VJ reach. Syphon is macOS (cuda-link is Windows-only → N/A). WebRTC/DMX are out of scope for a GPU-frame library. |
+| **A** | Transport breadth (Spout, Syphon, NDI, WebRTC, DMX) | **Partially — and deliberately so.** | A CUDA↔**Spout** bridge covers the one transport that matters for *same-machine* VJ reach. **NDI is intentionally skipped** — it is cross-machine, against cuda-link's philosophy (§4.4). Syphon is macOS (cuda-link is Windows-only → N/A). WebRTC/DMX are out of scope for a GPU-frame library. cuda-link does not chase breadth for its own sake; it owns the same-machine GPU lane. |
 | **B** | Cross-app reach (Resolume, Unity, Unreal, OBS) | **Yes — via one move.** | All four speak **Spout**. A single CUDA↔Spout bridge reaches Resolume, Unity, Unreal, OBS, Notch, MadMapper, vvvv *simultaneously*. This is the highest-leverage item in the whole analysis. |
 | **C** | Distribution (desktop app + cloud templates) | **No.** | Product/packaging concern, orthogonal to the transport layer. Out of scope here. |
 | **D** | Modality (native autoregressive video models) | **No.** | Model concern, not a transport concern. |
 | **E** | Model breadth / plugin system | **No.** | Same — cuda-link is plumbing, not a model host. |
-| **F** | Remote/cloud inference | **No** (and arguably anti-thesis). | cuda-link's value *is* local zero-copy. NDI/WebRTC adapters are the only cross-machine concession. |
+| **F** | Remote/cloud inference | **No** (and arguably anti-thesis). | cuda-link's value *is* local zero-copy; cross-machine is a different product. NDI was considered for this and **declined** (§4.4). |
 | **G** | Polished onboarding | **No.** | UX concern. |
 
 **Honest competitive read.** Daydream Scope *already ships Spout/Syphon* and is
@@ -187,7 +188,53 @@ differentiated:
 **So the expansion's job is not to beat Spout — it is to *adopt* Spout as an
 egress while keeping CUDA IPC as the premium ML-grade core.** Position: *"the
 zero-copy bridge between a host app's GPU frames and a Python ML runtime's native
-tensors — then Spout/NDI out to the rest of your rig."*
+tensors — then Spout out to the rest of your rig."*
+
+### 3.1 cuda-link vs Spout — the copy-by-copy proof (when does cuda-link earn its place?)
+
+The blunt truth: **on a leg where both endpoints are graphics/VJ apps, cuda-link
+adds nothing — Spout is already GPU-speed, and routing through a cuda-link↔Spout
+bridge only adds the de-swizzle copy Spout-direct never paid.** cuda-link earns
+its keep **only on a leg where one endpoint is a CUDA/PyTorch process.** Counting
+GPU copies + interop in the Python process for the canonical **TD → AI (Python) →
+Resolume** loop:
+
+**All-Spout pipeline:**
+```
+TD →Spout→ Python:   receive Spout texture → DX/GL→CUDA interop (register+map=array)
+                     → array→linear copy → torch tensor              [interop + 1 copy]
+inference
+Python →Spout→ Resolume: tensor → linear→array copy → Spout          [1 copy]
+```
+…and the Python process must **spin up a GL/D3D context/device** just to receive
+— painful headless / in a container / on RunPod (row F).
+
+**Hybrid (cuda-link in, Spout out):**
+```
+TD →cuda-link→ Python:   open IPC handle → torch tensor              [ZERO copy, ZERO interop]
+inference
+Python →Spout→ Resolume: tensor → linear→array copy → Spout          [1 copy — unavoidable; Resolume wants a texture]
+```
+
+**Where the win lives:** the **input leg into the ML process** (and any CUDA↔CUDA
+leg). The output leg into a VJ app is a wash — one copy either way, because the
+consumer genuinely wants a texture. So the bridge does **not** beat Spout; it lets
+cuda-link's ML-grade core *reach* the Spout world while keeping the input leg
+zero-copy.
+
+The three concrete, defensible advantages (and one non-advantage, stated honestly):
+
+| Advantage | Why Spout can't match it |
+|---|---|
+| **Native tensor, zero interop on input** | Spout delivers a *texture*; becoming a `torch.Tensor` costs DX/GL→CUDA interop + a de-swizzle copy. cuda-link delivers a device pointer that *is* the tensor. Spout cannot hand you a tensor. |
+| **Carries non-display data** | Spout is 4-channel display formats. ML passes **latents (non-RGB, N-channel), depth, optical flow, fp32/fp16 control signals**. You can't push a 16-channel latent through Spout; cuda-link can. |
+| **No graphics context required** | A headless Python ML service uses cuda-link with pure CUDA — no window/GL/DX device. Receiving Spout forces a graphics context to exist. Matters for cloud/container/RunPod. |
+| ~~Lossless~~ (**not** a differentiator) | Spout is *also* an uncompressed texture share — it is lossless too. "Lossless" only differentiates vs **NDI**, not vs Spout. Do not claim it against Spout. |
+
+**Mental model to keep:** cuda-link is the *ML island* (app↔Python, GPU-tensor
+speed, lossless full-precision, headless); Spout is the *VJ ocean* (app↔app,
+GPU-texture speed, universal). The bridge stitches the island to the ocean. Use
+**cuda-link on CUDA↔CUDA legs**, **Spout on CUDA↔graphics-app legs**.
 
 ---
 
@@ -270,7 +317,16 @@ tensors — then Spout/NDI out to the rest of your rig."*
 - **Verdict**: clearly feasible; ship the Spout shim first, invest in the native
   external-memory plugin only when a true single-copy path is demanded.
 
-### 4.4 NDI — a different niche (cross-machine), not part of the core
+### 4.4 NDI — out of scope (cross-machine; against cuda-link's philosophy)
+
+> **Decision (2026-06-25): not on the roadmap.** cuda-link is a *same-machine
+> inter-process zero-copy* library. NDI is the opposite by construction —
+> cross-machine, networked, compressed — so adding it would dilute the project's
+> identity rather than extend it. The findings below are kept as the rationale for
+> *why* it was declined, and as a reference if a cross-machine requirement ever
+> genuinely arrives (in which case NDI is the right tool — but a deliberately
+> separate one, not part of the zero-copy core).
+
 - **Nature**: network video-over-IP, **compressed** (SpeedHQ for "Full"; H.264/HEVC
   for HX/HX2/HX3), **host-memory-bound at the SDK boundary** — `p_data` is a *CPU
   pointer*, and NDI's own docs instruct you to "download it to system memory."
@@ -284,10 +340,11 @@ tensors — then Spout/NDI out to the rest of your rig."*
   *cheapest* part of an NDI bridge (then color-convert + encode + network + decode).
 - **License**: standard SDK royalty-free; Advanced SDK needs a vendor ID for
   commercial use.
-- **Verdict**: support NDI only as an explicit **cross-machine egress/ingress
-  adapter**, with the D2H+encode tax stated up-front. **The moment NDI is in the
-  path, "zero-copy" and "lossless" are gone.** It belongs in transport-breadth
-  (row A), never on the latency-critical core.
+- **Verdict**: **declined.** The moment NDI is in the path, "zero-copy,"
+  "lossless," and "same-machine" are all gone — it is a categorically different
+  product. If a real cross-machine need surfaces later, revisit it as a standalone
+  adapter that is explicitly *not* part of the zero-copy core, so the core's
+  identity stays intact.
 
 ---
 
@@ -300,14 +357,15 @@ tensors — then Spout/NDI out to the rest of your rig."*
 | Phase | Deliverable | Unlocks | Effort | Difficulty | Dependency footprint |
 |---|---|---|---|---|---|
 | **0** | **`cuda-link-spout` bridge** — sidecar (or module) doing CUDA-IPC ↔ D3D11 shared texture ↔ Spout, both directions | Resolume, Unreal, OBS, Notch, Unity, MadMapper, vvvv, TD — *all at once* | M | Moderate | Spout2 (BSD-2), D3D11; optional `SpoutLibrary` C ABI from Python |
-| **1** | **`cuda-link-ndi` egress/ingress adapter** | Cross-machine reach; OBS/Resolume/UE over LAN | S–M | Low–Moderate | NDI SDK (royalty-free) + mandatory D2H |
-| **2a** | **Native UE plugin** (External-Memory: UE-owned shared D3D12 texture + fence; cuda-link learns D3D12/Win32 handle import) | Single-copy UE path; in-editor live tensor texture | L | Med–High | UE C++ per-version build; CUDA external-memory API |
-| **2b** | **Resolume FFGL 2.x source plugin** (in-GL-context CUDA-GL interop) | One fewer hop into Resolume; native layer-graph node | M–L | Med–High | FFGL SDK (C++/OpenGL), CUDA-GL |
-| **3** | (Watch) Generic **DXGI/NT shared-handle export** from cuda-link's exporter (so any D3D app can import without a sidecar) | Direct app import; foundation for 2a/2b | M | Moderate | adds a second handle type to the exporter |
+| **1a** | **Native UE plugin** (External-Memory: UE-owned shared D3D12 texture + fence; cuda-link learns D3D12/Win32 handle import) | Single-copy UE path; in-editor live tensor texture | L | Med–High | UE C++ per-version build; CUDA external-memory API |
+| **1b** | **Resolume FFGL 2.x source plugin** (in-GL-context CUDA-GL interop) | One fewer hop into Resolume; native layer-graph node | M–L | Med–High | FFGL SDK (C++/OpenGL), CUDA-GL |
+| **2** | (Watch) Generic **DXGI/NT shared-handle export** from cuda-link's exporter (so any D3D app can import without a sidecar) | Direct app import; foundation for 1a/1b | M | Moderate | adds a second handle type to the exporter |
+
+*NDI deliberately excluded — see §4.4 (cross-machine, against the same-machine zero-copy philosophy).*
 
 **Why Phase 0 is the keystone:** one bridge, built against the one protocol every
 target shares, converts cuda-link from "TD↔Python only" to "reaches every Windows
-VJ/engine app" — closing the bulk of rows A and B with a single artifact. Phases 2a/2b
+VJ/engine app" — closing the bulk of rows A and B with a single artifact. Phases 1a/1b
 are *latency optimisations* of that same path, justified only by profiling.
 
 ---
@@ -321,8 +379,8 @@ be plugin expansion." The clean way to honour both that and ADR-0006:
   `.tox` mirror intact. Its *defensible niche* (CUDA↔CUDA, GPU→tensor) needs no
   native code.
 - **Bridges**: ship as **separate optional packages/artifacts**
-  (`cuda-link-spout`, `cuda-link-ndi`) and **separate plugin binaries**
-  (`.uplugin`, `.dll` FFGL). They depend on Spout2/NDI/UE — but a user who only
+  (`cuda-link-spout`) and **separate plugin binaries**
+  (`.uplugin`, `.dll` FFGL). They depend on Spout2/UE — but a user who only
   wants TD↔Python never installs them and never pays the dependency cost.
 - This mirrors the existing dual-distribution split (consumer wheel vs TD `.tox`)
   and ADR-0006's own "narrow, optional native extension" escape hatch — extended
@@ -350,13 +408,13 @@ be plugin expansion." The clean way to honour both that and ADR-0006:
    recompile per UE minor + a CUDA-version matrix. Source-plugin drop-in for v1
    sidesteps prebuilt binaries.
 5. **FFGL in-process CUDA (Resolume Design B)** — a CUDA fault can crash Resolume;
-   context/device discipline is unforgiving. Phase-2 only.
-6. **NDI mis-positioning** — if marketed as part of the "zero-copy" story it
-   undermines the brand; it is lossy + networked by construction. Keep it labelled
-   as the cross-machine adapter.
-7. **License hygiene** — Spout2 BSD-2 (fine), NDI SDK terms / Advanced-SDK vendor
-   ID for commercial, Daydream Scope is **CC BY-NC-SA 4.0** (non-commercial — do
-   **not** copy Scope code into cuda-link).
+   context/device discipline is unforgiving. Phase-1b only.
+6. **Scope creep toward cross-machine** — resist re-adding NDI/WebRTC under
+   "transport breadth" pressure; they erode the same-machine zero-copy identity
+   that *is* the product. Breadth that dilutes the core is negative value.
+7. **License hygiene** — Spout2 BSD-2 (fine), Daydream Scope is **CC BY-NC-SA 4.0**
+   (non-commercial — do **not** copy Scope code into cuda-link). (NDI SDK terms no
+   longer relevant — adapter declined.)
 
 ---
 
@@ -367,12 +425,13 @@ be plugin expansion." The clean way to honour both that and ADR-0006:
    more, and is architecturally aligned with cuda-link. Use TD (which speaks *both*
    Spout and cuda-link) as the test harness.
 2. **Reframe the positioning** around the GPU→ML-framework boundary (the
-   uncommoditised moat), with Spout/NDI as egress to the wider rig — not as a
+   uncommoditised moat), with Spout as egress to the wider rig — not as a
    claim to out-zero-copy Spout for app↔app sharing.
-3. **Add Phase 1 (NDI)** for cross-machine reach, clearly labelled as the lossy/
-   networked adapter.
-4. **Defer Phases 2a/2b** (native UE / FFGL) until profiling proves the Spout hop
+3. **Defer Phases 1a/1b** (native UE / FFGL) until profiling proves the Spout hop
    is a real bottleneck for a real user.
+4. **Skip NDI** — it is cross-machine and against the same-machine philosophy
+   (§4.4). Reconsider only if a concrete cross-machine requirement appears, and
+   even then as a deliberately separate adapter outside the zero-copy core.
 5. **Record an ADR** for the optional-native-bridge boundary so the pure-Python
    core stays sacrosanct and the decision is durable.
 
