@@ -177,8 +177,8 @@ std::int64_t create_sender(const std::string& name, int width, int height, int d
     return h;
 }
 
-void send(std::int64_t handle, std::uintptr_t srcPtr, int srcPitch, int width, int height,
-          int bytesPerPixel, std::uintptr_t stream) {
+void spout_send(std::int64_t handle, std::uintptr_t srcPtr, int srcPitch, int width, int height,
+                int bytesPerPixel, std::uintptr_t stream) {
     Sender* s;
     { std::lock_guard<std::mutex> lk(g_mu); s = g_senders.at(handle); }
     auto cuStream = reinterpret_cast<cudaStream_t>(stream);
@@ -297,7 +297,7 @@ std::int64_t adapter_luid(int device) {
 PYBIND11_MODULE(_spout_bridge, m) {
     m.doc() = "cuda-link-spout native CUDA<->D3D11<->Spout bridge";
     m.def("create_sender", &create_sender);
-    m.def("send", &send);
+    m.def("send", &spout_send);
     m.def("close_sender", &close_sender);
     m.def("create_receiver", &create_receiver);
     m.def("receive", &receive);
