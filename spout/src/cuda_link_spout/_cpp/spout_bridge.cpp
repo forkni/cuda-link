@@ -234,13 +234,35 @@ py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch
     Receiver* r;
     { std::lock_guard<std::mutex> lk(g_mu); r = g_receivers.at(handle); }
 
-    if (!r->spout.ReceiveTexture(&r->recvTex) || r->recvTex == nullptr) {
+    // Use the no-argument ReceiveTexture() overload. The `ppTexture` overload requires
+    // the caller to pre-allocate a receiver texture, handle IsUpdated(), and call
+    // IsUpdated() to drain the m_bUpdated flag — a multi-step protocol that silently
+    // returns NOT_CONNECTED on first connection when no texture is pre-allocated.
+    // The no-arg overload handles connection establishment and update-flag lifecycle
+    // internally; GetSenderTexture() then gives us m_pSharedTexture for the CUDA copy.
+    if (!r->spout.ReceiveTexture()) {
         return py::make_tuple(false, false, 0, 0, 0, (std::uintptr_t)0);
     }
     const int w = (int)r->spout.GetSenderWidth();
     const int h = (int)r->spout.GetSenderHeight();
     const DXGI_FORMAT fmt = r->spout.GetSenderFormat();
+
+    // IsUpdated() returns true on first connection and on sender geometry change,
+    // AND resets the flag. Drain it here so subsequent calls flow through to GetNewFrame.
+    // Return (connected=true, new_frame=false) so Python retries next poll.
+    if (r->spout.IsUpdated()) {
+        return py::make_tuple(true, false, w, h, (int)fmt, (std::uintptr_t)0);
+    }
     if (!r->spout.IsFrameNew()) {
+        return py::make_tuple(true, false, w, h, (int)fmt, (std::uintptr_t)0);
+    }
+
+    // GetSenderTexture() returns m_pSharedTexture — the sender's shared DX11 texture that
+    // SpoutDX has opened on the receiver's D3D11 device. ReceiveTexture() already holds
+    // (and releases) the frame mutex above, so we read the texture immediately after return
+    // while the sender is not yet writing the next frame.
+    ID3D11Texture2D* sharedTex = r->spout.GetSenderTexture();
+    if (!sharedTex) {
         return py::make_tuple(true, false, w, h, (int)fmt, (std::uintptr_t)0);
     }
 
@@ -249,11 +271,11 @@ py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch
     // same dimensions (sender restart, a different same-size sender, internal
     // realloc); a registration bound to the old, now-released texture would read
     // freed memory. Keying on the texture pointer — not just geometry — catches that.
-    if (r->cudaRes == nullptr || r->regTex != r->recvTex || r->regW != w || r->regH != h) {
+    if (r->cudaRes == nullptr || r->regTex != sharedTex || r->regW != w || r->regH != h) {
         if (r->cudaRes) { cudaGraphicsUnregisterResource(r->cudaRes); r->cudaRes = nullptr; }
-        cudaCheck(cudaGraphicsD3D11RegisterResource(&r->cudaRes, r->recvTex, cudaGraphicsRegisterFlagsNone),
+        cudaCheck(cudaGraphicsD3D11RegisterResource(&r->cudaRes, sharedTex, cudaGraphicsRegisterFlagsNone),
                   "cudaGraphicsD3D11RegisterResource (receiver)");
-        r->regTex = r->recvTex; r->regW = w; r->regH = h;
+        r->regTex = sharedTex; r->regW = w; r->regH = h;
     }
     // Size the linear destination buffer to the sender's format.
     int bpp = 4;

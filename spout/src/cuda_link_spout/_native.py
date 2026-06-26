@@ -10,7 +10,22 @@ requires the native module, so the pure-Python layer and its tests run anywhere.
 
 from __future__ import annotations
 
+import glob as _glob
+import os as _os
+import sys as _sys
+
 from ._backend import NativeReceiveResult, SpoutBackend
+
+# Python 3.8+ no longer searches PATH for DLL dependencies of extension modules.
+# Explicitly register CUDA bin so cudart64_*.dll is visible when _spout_bridge loads.
+if _sys.platform == "win32":
+    for _cuda_bin in sorted(
+        _glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin"),
+        reverse=True,
+    ):
+        if _os.path.isdir(_cuda_bin):
+            _os.add_dll_directory(_cuda_bin)
+            break
 
 
 def load_native_backend(device: int = 0) -> SpoutBackend:

@@ -42,12 +42,18 @@ _SENDER_NAME = "test_cuda_link_spout_smoke"
 
 
 def _native_module_present() -> bool:
-    """Return True if the compiled _spout_bridge extension is importable."""
-    try:
-        from cuda_link_spout import _spout_bridge  # noqa: F401, PLC0415
+    """Return True if the compiled _spout_bridge extension is importable.
 
+    Goes through load_native_backend() so the os.add_dll_directory() call in
+    _native.py runs first — a direct import of _spout_bridge skips that setup
+    and fails on Python 3.8+ which no longer searches PATH for DLL dependencies.
+    """
+    try:
+        from cuda_link_spout._native import load_native_backend  # noqa: PLC0415
+
+        load_native_backend()
         return True
-    except ImportError:
+    except (ImportError, RuntimeError):
         return False
 
 
