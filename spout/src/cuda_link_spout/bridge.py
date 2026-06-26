@@ -114,8 +114,17 @@ def _exporter_spec_key(frame) -> tuple:  # type: ignore[type-arg]
 
 
 def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link + GPU
-    """spout -> ipc: receive frames from Spout, publish each through cuda-link."""
-    import sys
+    """spout -> ipc: receive frames from Spout, publish each through cuda-link.
+
+    A Spout sender's geometry/format can change at runtime (the sender restarts or
+    reconfigures). The cuda-link Exporter is bound to a fixed FrameSpec, so we track
+    the active (width, height, channels, dtype) and reopen the Exporter whenever it
+    changes — otherwise a size mismatch makes every later export() return FAILED and
+    the bridge silently stops publishing. FAILED is also handled explicitly: it is
+    unrecoverable for the current Exporter, so we drop it and let the next frame
+    reopen one.
+    """
+    import logging
 
     from cuda_link import Exporter, FrameOutcome, FrameSpec, GpuFrame  # lazy
 
@@ -123,17 +132,17 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
     from ._types import ReceiveOutcome
     from .receiver import SpoutReceiver
 
+    log = logging.getLogger(__name__)
     exporter = None
-    active_key = None
-    with SpoutReceiver.open(receiver_spec(args)) as rx:
-        try:
+    active_key = None  # (width, height, channels, dtype) the current Exporter is bound to
+    try:
+        with SpoutReceiver.open(receiver_spec(args)) as rx:
             while True:
                 frame = rx.receive()
                 if frame.outcome is not ReceiveOutcome.NEW_FRAME or frame.fmt is None:
                     continue
                 key = _exporter_spec_key(frame)
-                if exporter is None or key != active_key:
-                    # Sender geometry or format changed — reopen the IPC channel.
+                if key != active_key:
                     if exporter is not None:
                         exporter.close()
                     exporter = Exporter.open(
@@ -147,19 +156,25 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
                         )
                     )
                     active_key = key
-                outcome = exporter.export(GpuFrame(ptr=frame.ptr, size=frame_nbytes(frame.width, frame.height, frame.fmt)))
+                    log.info(
+                        "cuda-link-spout: (re)opened exporter for %dx%d %s",
+                        frame.width, frame.height, frame.fmt.name,
+                    )
+                outcome = exporter.export(
+                    GpuFrame(ptr=frame.ptr, size=frame_nbytes(frame.width, frame.height, frame.fmt))
+                )
                 if outcome is FrameOutcome.FAILED:
-                    print(
-                        f"cuda-link-spout: export() FAILED for frame {frame.width}x{frame.height} "
-                        f"fmt={frame.fmt.name}; reopening Exporter on next frame.",
-                        file=sys.stderr,
+                    # Unrecoverable for this Exporter — close and force a reopen next frame.
+                    log.warning(
+                        "cuda-link-spout: export() FAILED for %dx%d; reopening exporter",
+                        frame.width, frame.height,
                     )
                     exporter.close()
                     exporter = None
                     active_key = None
-        finally:
-            if exporter is not None:
-                exporter.close()
+    finally:
+        if exporter is not None:
+            exporter.close()
 
 
 if __name__ == "__main__":  # pragma: no cover
