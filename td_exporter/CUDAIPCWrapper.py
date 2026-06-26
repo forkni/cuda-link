@@ -225,8 +225,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         hint_126 = (
             (
                 "\nHint: winerror 126 means a *dependent* DLL of cudart was not found, "
-                "not cudart itself.  Run 'dumpbin /dependents cudart64_12.dll' or open "
-                "the DLL in Dependencies.exe to identify the missing dependency."
+                f"not cudart itself.  Run 'dumpbin /dependents {dll_names[0]}' (or whichever "
+                "cudart64_*.dll your CUDA install ships) or open the DLL in Dependencies.exe "
+                "to identify the missing dependency."
             )
             if winerror == 126
             else ""
