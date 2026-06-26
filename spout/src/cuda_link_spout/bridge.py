@@ -103,32 +103,78 @@ def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link 
                 tx.send(res.frame)
 
 
+def _exporter_spec_key(frame) -> tuple:  # type: ignore[type-arg]
+    """Identity tuple that determines whether the inbound Exporter must be reopened.
+
+    Any change in geometry or pixel layout means the live cuda-link FrameSpec no
+    longer matches incoming frames. Duck-typed on the frame's attributes (no GPU,
+    no cuda_link import) so it is unit-testable.
+    """
+    return (frame.width, frame.height, frame.fmt.channels, frame.fmt.dtype)
+
+
 def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link + GPU
-    """spout -> ipc: receive frames from Spout, publish each through cuda-link."""
-    from cuda_link import Exporter, FrameSpec, GpuFrame  # lazy
+    """spout -> ipc: receive frames from Spout, publish each through cuda-link.
+
+    A Spout sender's geometry/format can change at runtime (the sender restarts or
+    reconfigures). The cuda-link Exporter is bound to a fixed FrameSpec, so we track
+    the active (width, height, channels, dtype) and reopen the Exporter whenever it
+    changes — otherwise a size mismatch makes every later export() return FAILED and
+    the bridge silently stops publishing. FAILED is also handled explicitly: it is
+    unrecoverable for the current Exporter, so we drop it and let the next frame
+    reopen one.
+    """
+    import logging
+
+    from cuda_link import Exporter, FrameOutcome, FrameSpec, GpuFrame  # lazy
 
     from ._format import frame_nbytes
     from ._types import ReceiveOutcome
     from .receiver import SpoutReceiver
 
+    log = logging.getLogger(__name__)
     exporter = None
-    with SpoutReceiver.open(receiver_spec(args)) as rx:
-        while True:
-            frame = rx.receive()
-            if frame.outcome is not ReceiveOutcome.NEW_FRAME or frame.fmt is None:
-                continue
-            if exporter is None:
-                exporter = Exporter.open(
-                    FrameSpec(
-                        shm_name=args.ipc,
-                        height=frame.height,
-                        width=frame.width,
-                        channels=frame.fmt.channels,
-                        dtype=frame.fmt.dtype,
-                        device=args.device,
+    active_key = None  # (width, height, channels, dtype) the current Exporter is bound to
+    try:
+        with SpoutReceiver.open(receiver_spec(args)) as rx:
+            while True:
+                frame = rx.receive()
+                if frame.outcome is not ReceiveOutcome.NEW_FRAME or frame.fmt is None:
+                    continue
+                key = _exporter_spec_key(frame)
+                if key != active_key:
+                    if exporter is not None:
+                        exporter.close()
+                    exporter = Exporter.open(
+                        FrameSpec(
+                            shm_name=args.ipc,
+                            height=frame.height,
+                            width=frame.width,
+                            channels=frame.fmt.channels,
+                            dtype=frame.fmt.dtype,
+                            device=args.device,
+                        )
                     )
+                    active_key = key
+                    log.info(
+                        "cuda-link-spout: (re)opened exporter for %dx%d %s",
+                        frame.width, frame.height, frame.fmt.name,
+                    )
+                outcome = exporter.export(
+                    GpuFrame(ptr=frame.ptr, size=frame_nbytes(frame.width, frame.height, frame.fmt))
                 )
-            exporter.export(GpuFrame(ptr=frame.ptr, size=frame_nbytes(frame.width, frame.height, frame.fmt)))
+                if outcome is FrameOutcome.FAILED:
+                    # Unrecoverable for this Exporter — close and force a reopen next frame.
+                    log.warning(
+                        "cuda-link-spout: export() FAILED for %dx%d; reopening exporter",
+                        frame.width, frame.height,
+                    )
+                    exporter.close()
+                    exporter = None
+                    active_key = None
+    finally:
+        if exporter is not None:
+            exporter.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

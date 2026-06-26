@@ -1,11 +1,44 @@
 # CMake build for the cuda-link-spout native module (_spout_bridge).
-# Windows-only: requires CUDA Toolkit (12.x or 13.x), the Windows SDK (D3D11/DXGI),
-# and the Spout2 SDK. Driven by scikit-build-core via pyproject.toml.
+# The native extension is Windows-only: it requires the CUDA Toolkit (12.x or 13.x),
+# the Windows SDK (D3D11/DXGI), and the Spout2 SDK. Driven by scikit-build-core.
+#
+# On any other platform — or when the Spout2 SDK path isn't supplied — the native
+# build is skipped and scikit-build-core packages a pure-Python wheel, so
+# `pip install` succeeds everywhere. The pure-Python API runs against
+# FakeSpoutBackend without the extension; the native backend raises a clear error
+# only if it is actually used without having been built.
 cmake_minimum_required(VERSION 3.24)
-project(cuda_link_spout LANGUAGES CXX CUDA)
+project(cuda_link_spout LANGUAGES CXX)
 
+# Build the native extension only on Windows with a Spout2 SDK present. Force with
+# -DBUILD_SPOUT_NATIVE=ON (then -DSPOUT2_ROOT=... is required, validated below).
+option(BUILD_SPOUT_NATIVE "Build the native _spout_bridge extension (Windows + CUDA + Spout2)" OFF)
+if(WIN32 AND DEFINED SPOUT2_ROOT)
+  set(BUILD_SPOUT_NATIVE ON)
+endif()
+
+if(NOT BUILD_SPOUT_NATIVE)
+  message(STATUS "cuda-link-spout: skipping native _spout_bridge; packaging a pure-Python wheel. "
+                 "To build the extension, configure on Windows with -DSPOUT2_ROOT=path/to/Spout2 "
+                 "(or force -DBUILD_SPOUT_NATIVE=ON).")
+  return()
+endif()
+
+# --- native build (Windows + CUDA + D3D11 + Spout2) -------------------------
+# CUDA is reached purely through the runtime API + CUDA::cudart (no .cu sources),
+# so the CUDA language is intentionally not enabled — only a C++ compiler is needed.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Native _spout_bridge needs Windows + CUDA Toolkit + Spout2 SDK. Default off elsewhere so
+# scikit-build-core can still produce the documented pure-Python wheel (FakeSpoutBackend).
+# Override with -DBUILD_SPOUT_NATIVE=ON/OFF (e.g. cmake.define.BUILD_SPOUT_NATIVE=OFF).
+option(BUILD_SPOUT_NATIVE "Compile the _spout_bridge native module" ${WIN32})
+
+if(NOT BUILD_SPOUT_NATIVE)
+  message(STATUS "cuda-link-spout: native _spout_bridge disabled; building pure-Python wheel (FakeSpoutBackend).")
+  return()
+endif()
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
@@ -14,7 +47,8 @@ find_package(CUDAToolkit REQUIRED)
 # Spout2 SDK location: set -DSPOUT2_ROOT=path/to/Spout2 at configure time.
 # Expected layout: ${SPOUT2_ROOT}/SPOUTSDK/SpoutDirectX/SpoutDX
 if(NOT DEFINED SPOUT2_ROOT)
-  message(FATAL_ERROR "Set -DSPOUT2_ROOT to your Spout2 SDK checkout (github.com/leadedge/Spout2)")
+  message(FATAL_ERROR "BUILD_SPOUT_NATIVE is ON but SPOUT2_ROOT is unset; "
+                      "set -DSPOUT2_ROOT to your Spout2 SDK checkout (github.com/leadedge/Spout2)")
 endif()
 set(SPOUTDX_DIR "${SPOUT2_ROOT}/SPOUTSDK/SpoutDirectX/SpoutDX")
 set(SPOUTGL_DIR "${SPOUT2_ROOT}/SPOUTSDK/SpoutGL")
