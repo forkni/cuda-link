@@ -2,10 +2,20 @@
 # Windows-only: requires CUDA Toolkit (12.x or 13.x), the Windows SDK (D3D11/DXGI),
 # and the Spout2 SDK. Driven by scikit-build-core via pyproject.toml.
 cmake_minimum_required(VERSION 3.24)
-project(cuda_link_spout LANGUAGES CXX CUDA)
+project(cuda_link_spout LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Native _spout_bridge needs Windows + CUDA Toolkit + Spout2 SDK. Default off elsewhere so
+# scikit-build-core can still produce the documented pure-Python wheel (FakeSpoutBackend).
+# Override with -DBUILD_SPOUT_NATIVE=ON/OFF (e.g. cmake.define.BUILD_SPOUT_NATIVE=OFF).
+option(BUILD_SPOUT_NATIVE "Compile the _spout_bridge native module" ${WIN32})
+
+if(NOT BUILD_SPOUT_NATIVE)
+  message(STATUS "cuda-link-spout: native _spout_bridge disabled; building pure-Python wheel (FakeSpoutBackend).")
+  return()
+endif()
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
