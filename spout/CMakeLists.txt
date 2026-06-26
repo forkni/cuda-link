@@ -53,10 +53,14 @@ endif()
 set(SPOUTDX_DIR "${SPOUT2_ROOT}/SPOUTSDK/SpoutDirectX/SpoutDX")
 set(SPOUTGL_DIR "${SPOUT2_ROOT}/SPOUTSDK/SpoutGL")
 
-file(GLOB SPOUTDX_SOURCES
-  "${SPOUTDX_DIR}/*.cpp"
-  "${SPOUTGL_DIR}/*.cpp"
-)
+# SpoutDX-path sources: the D3D11 API class + shared utilities from SpoutGL.
+# SpoutGL.cpp and SpoutGLextensions.cpp are the OpenGL render path — excluded because
+# (a) SpoutDX.cpp does not include them, and (b) they require opengl32.lib / glu32.lib
+# which are unrelated to the CUDA↔D3D11 bridge.
+file(GLOB SPOUTDX_SOURCES "${SPOUTDX_DIR}/*.cpp")
+file(GLOB SPOUTGL_SOURCES "${SPOUTGL_DIR}/*.cpp")
+list(FILTER SPOUTGL_SOURCES EXCLUDE REGEX "(SpoutGL|SpoutGLextensions)\\.cpp$")
+set(SPOUTDX_SOURCES ${SPOUTDX_SOURCES} ${SPOUTGL_SOURCES})
 
 pybind11_add_module(_spout_bridge
   src/cuda_link_spout/_cpp/spout_bridge.cpp
