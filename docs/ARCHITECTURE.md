@@ -436,6 +436,68 @@ automatically re-captured, then replayed for subsequent frames.  Auto-fallback t
 
 ---
 
+### R1: torch GPU-side wait opt-in (v1.11.0)
+
+When `CUDALINK_TORCH_GPU_WAIT=1`, the torch consumer path replaces the host-side
+`cudaEventSynchronize` on the IPC producer event with a GPU-resident dependency edge via
+`cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
+batches into a multi-hundred-microsecond stall.
+
+```
+Default (CUDALINK_TORCH_GPU_WAIT=0):
+  cudaEventSynchronize(ipc_event[slot])              <- CPU blocks until GPU signal, ~50-200 us WDDM-batched
+
+R1 GPU-side wait (CUDALINK_TORCH_GPU_WAIT=1):
+  cudaStreamWaitEvent(consumer_stream, ipc_event[slot])  <- GPU dependency, ~0.5-2 us CPU overhead
+  <tensor copy enqueued after the event on consumer_stream>
+```
+
+Gain: ~50–200 µs/frame depending on WDDM batch timing; safe alongside CUDA Graphs.
+
+**Adaptive latch** (`CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`): monitors per-frame event-wait time and
+permanently enables GPU-side wait after three consecutive frames exceed the heuristic threshold —
+no manual `CUDALINK_TORCH_GPU_WAIT=1` required.  One-way: once latched it stays enabled for the
+session lifetime.
+
+> **Scope**: torch frame path only (`get_frame()` → `torch.Tensor`).  CuPy and numpy paths are
+> unaffected.
+
+---
+
+### R2: Win32 Named-Event Doorbell (v1.11.0)
+
+Opt-in consumer-idle signaling primitive (`CUDALINK_DOORBELL=1`, must be set on **both** producer
+and consumer).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
+call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between frames.
+
+**Flow**:
+
+```
+Producer (after advancing write_idx):
+  SetEvent(doorbell_handle)                      <- ~0.02-0.10 ms, cook-thread safe, no FPS dip
+
+Consumer (idle -- get_frame() returned NO_FRAME):
+  importer.wait_for_doorbell(timeout_secs=2.0)   <- blocks on WaitForSingleObject, wakes on SetEvent
+```
+
+**Lost-wakeup guard**: before blocking, `wait_for_doorbell` re-checks `write_idx`.  If the
+producer advanced `write_idx` between the `get_frame()` poll and the `WaitForSingleObject` call,
+the function returns immediately — preventing a stall of up to `timeout_secs`.
+
+**Measured gains** (TD Sender → Python subprocess, 60 FPS):
+- CPU: ~3-4% → ~0.3-1%
+- Notify latency p95: ~10× tighter (0.02–0.10 ms vs 0.04–1.80 ms poll baseline)
+- Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
+
+**Scope and limitations**:
+- Windows-only (`CreateNamedEvent` / `WaitForSingleObject`).
+- Single consumer only — one `SetEvent` releases exactly one waiter.
+- `TDReceiver.py` (in-TD COMP on the cook thread) is **excluded** from doorbell wiring; it returns
+  immediately on `NO_FRAME` and must not block in a cook context.
+- Env var propagates across `subprocess.Popen` boundaries.
+
+---
+
 ## Lifecycle
 
 ### Phase 1: Initialization
@@ -747,6 +809,15 @@ before `import_buffer.cook(force=True)`.  When the producer has not written a ne
 cook is skipped entirely — saving one Script-TOP cook and all its Python overhead per idle TD
 frame.  Effect is zero when producer ≥ TD frame rate; significant for slow producers (e.g. 30 FPS
 AI inference into a 60 FPS TD project).
+
+### v1.11.0: R1 GPU-side wait + R2 Doorbell + R3/R4 hygiene
+
+See the dedicated subsections in **GPU Synchronization → R1** and **GPU Synchronization → R2** above for full architecture detail.  Summary:
+
+- **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing host-side `cudaEventSynchronize` with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
+- **R2** (`CUDALINK_DOORBELL=1`): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
+- **R3**: pinned-memory f16 fallback in CuPy wait path — prevents dtype mismatch on f16 producers.
+- **R4** (`CUDALINK_TD_GRAPHS_DEFERRED=1`): defers CUDA graph capture to the second cook, avoiding capture on the first cook when TD state may be incomplete.
 
 ---
 

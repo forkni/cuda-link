@@ -6,7 +6,8 @@ Provides ctypes interface to CUDA Runtime API for inter-process communication.
 Compatible with both TouchDesigner and Python processes.
 
 Requirements:
-- CUDA 11.x or 12.x runtime (cudart64_12.dll preferred; cudart64_11.dll / cudart64_110.dll accepted as fallback)
+- CUDA 11.x, 12.x, or 13.x runtime (cudart64_13.dll / cudart64_12.dll preferred;
+  cudart64_11.dll / cudart64_110.dll accepted as fallback)
 - Windows operating system
 - Same GPU visible to both processes
 """
@@ -161,7 +162,19 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         # DLL search-order side-effects (e.g. os.add_dll_directory calls from torch
         # or other venvs added to sys.path via sitecustomize.py).  If the Toolkit is
         # installed, we always prefer its cudart over a bundled copy.
+        #
+        # Ordered newest-major-first (CUDA 13 → 12): on a machine with multiple
+        # toolkits we prefer the highest available, matching the "prefer newest"
+        # convention already used in the bare-name fallback tier below.  CUDA 13 ships
+        # cudart64_13.dll (in ...\CUDA\v13.x\bin); CUDA 12 ships cudart64_12.dll.
+        # The per-instance cudaSetDevice() in __init__ establishes a context for
+        # whichever cudart is loaded, so a dedicated Toolkit cudart coexists safely
+        # with any cudart torch has already loaded (see error-400 note in __init__).
         dll_paths = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\cudart64_13.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\cudart64_13.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\cudart64_13.dll",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin\cudart64_13.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\cudart64_12.dll",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\cudart64_12.dll",
@@ -181,13 +194,15 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
         # Fallback: try by bare name — if cudart is already loaded in this process
         # (e.g., by torch), Windows returns the cached handle, sharing the same runtime
-        # instance and CUDA context.  Probed in this order: prefer CUDA 12.x; fall back
-        # to 11.x for systems that haven't migrated (TouchDesigner ships cudart64_110.dll).
+        # instance and CUDA context.  Probed in this order: prefer CUDA 13.x, then 12.x;
+        # fall back to 11.x for systems that haven't migrated (TouchDesigner ships
+        # cudart64_110.dll).  Probing 13 before 12 means a torch built against CUDA 13
+        # (cudart64_13 already resident) is matched first, sharing its runtime instance.
         # Note: winmode is intentionally omitted here (unlike the absolute-path tier above
         # which uses winmode=0).  For bare-name loads we rely on Windows returning the
         # already-loaded handle from the process DLL cache — not a new DLL search — so
         # the winmode DLL-search-path flags are irrelevant.
-        dll_names = ["cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
+        dll_names = ["cudart64_13.dll", "cudart64_12.dll", "cudart64_11.dll", "cudart64_110.dll"]
         last_name_err: OSError | None = None
         for name in dll_names:
             try:
@@ -210,14 +225,15 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         hint_126 = (
             (
                 "\nHint: winerror 126 means a *dependent* DLL of cudart was not found, "
-                "not cudart itself.  Run 'dumpbin /dependents cudart64_12.dll' or open "
-                "the DLL in Dependencies.exe to identify the missing dependency."
+                f"not cudart itself.  Run 'dumpbin /dependents {dll_names[0]}' (or whichever "
+                "cudart64_*.dll your CUDA install ships) or open the DLL in Dependencies.exe "
+                "to identify the missing dependency."
             )
             if winerror == 126
             else ""
         )
         raise RuntimeError(
-            "Could not load CUDA runtime. Please ensure CUDA 12.x is installed.\n"
+            "Could not load CUDA runtime. Please ensure CUDA 12.x or 13.x is installed.\n"
             f"Tried paths: {dll_paths}\n"
             f"Tried names: {dll_names}"
             f"{err_detail}{hint_126}"
