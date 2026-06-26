@@ -15,6 +15,7 @@
 #include <pybind11/stl.h>
 
 #include <cstdint>
+#include <cstring>  // std::memcmp / std::memcpy (LUID comparison + adapter_luid)
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -92,7 +93,8 @@ struct Receiver {
     ID3D11Device* dev = nullptr;
     ID3D11DeviceContext* ctx = nullptr;
     ID3D11Texture2D* recvTex = nullptr;       // texture Spout hands us
-    cudaGraphicsResource* cudaRes = nullptr;  // registration of recvTex
+    cudaGraphicsResource* cudaRes = nullptr;  // registration of regTex
+    ID3D11Texture2D* regTex = nullptr;        // the exact texture cudaRes is bound to
     void* dstBuf = nullptr;                   // linear device buffer (our copy target)
     size_t dstBytes = 0;
     int regW = 0, regH = 0;                   // geometry the current registration is valid for
@@ -106,6 +108,34 @@ std::int64_t g_next = 0x6000'0000;
 
 std::int64_t allocHandle() { return g_next += 0x10; }
 
+// Release everything a Sender owns and free it. Safe on partially-constructed
+// senders (all fields null-checked), so it doubles as the error-path cleanup in
+// create_sender — every early failure must funnel through here to avoid leaking
+// the D3D11 device / Spout DX context / shared texture / CUDA registration.
+void destroySender(Sender* s) {
+    if (!s) return;
+    if (s->cudaRes) cudaGraphicsUnregisterResource(s->cudaRes);
+    if (s->tex) s->tex->Release();
+    s->spout.ReleaseSender();
+    s->spout.CloseDirectX11();
+    if (s->ctx) s->ctx->Release();
+    if (s->dev) s->dev->Release();
+    delete s;
+}
+
+// Receiver counterpart of destroySender — also the error-path cleanup for
+// create_receiver. Null-checks every field so it is safe on partial construction.
+void destroyReceiver(Receiver* r) {
+    if (!r) return;
+    if (r->cudaRes) cudaGraphicsUnregisterResource(r->cudaRes);
+    if (r->dstBuf) cudaFree(r->dstBuf);
+    r->spout.ReleaseReceiver();
+    r->spout.CloseDirectX11();
+    if (r->ctx) r->ctx->Release();
+    if (r->dev) r->dev->Release();
+    delete r;
+}
+
 }  // namespace
 
 // --- sender -----------------------------------------------------------------
@@ -117,24 +147,29 @@ std::int64_t create_sender(const std::string& name, int width, int height, int d
     s->width = width;
     s->height = height;
     s->format = static_cast<DXGI_FORMAT>(dxgiFormat);
-    s->dev = createDeviceForCudaDevice(device, &s->ctx);
-    if (!s->spout.OpenDirectX11(s->dev)) {  // pin Spout to OUR (CUDA-matched) device
-        delete s;
-        throw std::runtime_error("spoutDX.OpenDirectX11 failed");
-    }
-    s->spout.SetSenderName(name.c_str());
+    // Any failure past this point must release the partially-built Sender; route
+    // every throw site through destroySender via a single catch.
+    try {
+        s->dev = createDeviceForCudaDevice(device, &s->ctx);
+        if (!s->spout.OpenDirectX11(s->dev)) {  // pin Spout to OUR (CUDA-matched) device
+            throw std::runtime_error("spoutDX.OpenDirectX11 failed");
+        }
+        s->spout.SetSenderName(name.c_str());
 
-    D3D11_TEXTURE2D_DESC td{};
-    td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = s->format; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    td.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
-    if (FAILED(s->dev->CreateTexture2D(&td, nullptr, &s->tex))) {
-        delete s;
-        throw std::runtime_error("CreateTexture2D (sender) failed");
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = s->format; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+        if (FAILED(s->dev->CreateTexture2D(&td, nullptr, &s->tex))) {
+            throw std::runtime_error("CreateTexture2D (sender) failed");
+        }
+        cudaCheck(cudaGraphicsD3D11RegisterResource(&s->cudaRes, s->tex, cudaGraphicsRegisterFlagsNone),
+                  "cudaGraphicsD3D11RegisterResource (sender)");
+    } catch (...) {
+        destroySender(s);
+        throw;
     }
-    cudaCheck(cudaGraphicsD3D11RegisterResource(&s->cudaRes, s->tex, cudaGraphicsRegisterFlagsNone),
-              "cudaGraphicsD3D11RegisterResource (sender)");
 
     std::lock_guard<std::mutex> lk(g_mu);
     auto h = allocHandle();
@@ -168,14 +203,7 @@ void close_sender(std::int64_t handle) {
     Sender* s = nullptr;
     { std::lock_guard<std::mutex> lk(g_mu); auto it = g_senders.find(handle);
       if (it != g_senders.end()) { s = it->second; g_senders.erase(it); } }
-    if (!s) return;
-    if (s->cudaRes) cudaGraphicsUnregisterResource(s->cudaRes);
-    if (s->tex) s->tex->Release();
-    s->spout.ReleaseSender();
-    s->spout.CloseDirectX11();
-    if (s->ctx) s->ctx->Release();
-    if (s->dev) s->dev->Release();
-    delete s;
+    destroySender(s);
 }
 
 // --- receiver ---------------------------------------------------------------
@@ -184,12 +212,16 @@ std::int64_t create_receiver(const std::string& name, int device) {
     cudaCheck(cudaSetDevice(device), "cudaSetDevice");
     auto* r = new Receiver();
     r->device = device;
-    r->dev = createDeviceForCudaDevice(device, &r->ctx);
-    if (!r->spout.OpenDirectX11(r->dev)) {
-        delete r;
-        throw std::runtime_error("spoutDX.OpenDirectX11 (receiver) failed");
+    try {
+        r->dev = createDeviceForCudaDevice(device, &r->ctx);
+        if (!r->spout.OpenDirectX11(r->dev)) {
+            throw std::runtime_error("spoutDX.OpenDirectX11 (receiver) failed");
+        }
+        if (!name.empty()) r->spout.SetReceiverName(name.c_str());
+    } catch (...) {
+        destroyReceiver(r);
+        throw;
     }
-    if (!name.empty()) r->spout.SetReceiverName(name.c_str());
 
     std::lock_guard<std::mutex> lk(g_mu);
     auto h = allocHandle();
@@ -212,12 +244,16 @@ py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch
         return py::make_tuple(true, false, w, h, (int)fmt, (std::uintptr_t)0);
     }
 
-    // (Re)register on first frame or geometry change.
-    if (r->cudaRes == nullptr || r->regW != w || r->regH != h) {
+    // (Re)register on first frame, geometry change, OR when Spout hands back a
+    // different texture object. spoutDX can recreate its receive texture at the
+    // same dimensions (sender restart, a different same-size sender, internal
+    // realloc); a registration bound to the old, now-released texture would read
+    // freed memory. Keying on the texture pointer — not just geometry — catches that.
+    if (r->cudaRes == nullptr || r->regTex != r->recvTex || r->regW != w || r->regH != h) {
         if (r->cudaRes) { cudaGraphicsUnregisterResource(r->cudaRes); r->cudaRes = nullptr; }
         cudaCheck(cudaGraphicsD3D11RegisterResource(&r->cudaRes, r->recvTex, cudaGraphicsRegisterFlagsNone),
                   "cudaGraphicsD3D11RegisterResource (receiver)");
-        r->regW = w; r->regH = h;
+        r->regTex = r->recvTex; r->regW = w; r->regH = h;
     }
     // Size the linear destination buffer to the sender's format.
     int bpp = 4;
@@ -247,14 +283,7 @@ void close_receiver(std::int64_t handle) {
     Receiver* r = nullptr;
     { std::lock_guard<std::mutex> lk(g_mu); auto it = g_receivers.find(handle);
       if (it != g_receivers.end()) { r = it->second; g_receivers.erase(it); } }
-    if (!r) return;
-    if (r->cudaRes) cudaGraphicsUnregisterResource(r->cudaRes);
-    if (r->dstBuf) cudaFree(r->dstBuf);
-    r->spout.ReleaseReceiver();
-    r->spout.CloseDirectX11();
-    if (r->ctx) r->ctx->Release();
-    if (r->dev) r->dev->Release();
-    delete r;
+    destroyReceiver(r);
 }
 
 std::int64_t adapter_luid(int device) {
