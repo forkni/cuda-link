@@ -158,7 +158,9 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
                     active_key = key
                     log.info(
                         "cuda-link-spout: (re)opened exporter for %dx%d %s",
-                        frame.width, frame.height, frame.fmt.name,
+                        frame.width,
+                        frame.height,
+                        frame.fmt.name,
                     )
                 outcome = exporter.export(
                     GpuFrame(ptr=frame.ptr, size=frame_nbytes(frame.width, frame.height, frame.fmt))
@@ -167,7 +169,8 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
                     # Unrecoverable for this Exporter — close and force a reopen next frame.
                     log.warning(
                         "cuda-link-spout: export() FAILED for %dx%d; reopening exporter",
-                        frame.width, frame.height,
+                        frame.width,
+                        frame.height,
                     )
                     exporter.close()
                     exporter = None

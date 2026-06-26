@@ -16,6 +16,7 @@ from cuda_link_spout.sender import SpoutSender
 def _native_module_present() -> bool:
     try:
         from cuda_link_spout import _spout_bridge  # noqa: F401
+
         return True
     except ImportError:
         return False

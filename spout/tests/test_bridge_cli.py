@@ -53,8 +53,6 @@ def test_receiver_spec_from_args():
 
 
 def test_bad_fmt_in_out_spec_raises():
-    args = parse_args(
-        ["--dir", "out", "--ipc", "i", "--spout", "s", "--width", "8", "--height", "8", "--fmt", "RGB8"]
-    )
+    args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s", "--width", "8", "--height", "8", "--fmt", "RGB8"])
     with pytest.raises(ValueError):
         sender_spec(args)  # SpoutSenderSpec validates the format

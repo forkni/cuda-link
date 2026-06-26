@@ -74,9 +74,7 @@ class SpoutReceiver:
         if not res.new_frame:
             return ReceivedFrame(ReceiveOutcome.NO_FRAME)
         fmt = format_from_dxgi(res.dxgi_format)
-        return ReceivedFrame(
-            ReceiveOutcome.NEW_FRAME, ptr=res.dst_ptr, width=res.width, height=res.height, fmt=fmt
-        )
+        return ReceivedFrame(ReceiveOutcome.NEW_FRAME, ptr=res.dst_ptr, width=res.width, height=res.height, fmt=fmt)
 
     def close(self) -> None:
         """Release the receiver. Idempotent."""

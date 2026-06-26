@@ -84,7 +84,7 @@ def _make_mock_pynvml() -> MagicMock:
     mem.total = 8192 * 1024 * 1024  # 8 GiB
     mock.nvmlDeviceGetMemoryInfo.return_value = mem
 
-    mock.nvmlDeviceGetClockInfo.side_effect = lambda h, clock_type: (1800 if clock_type == mock.NVML_CLOCK_SM else 7000)
+    mock.nvmlDeviceGetClockInfo.side_effect = lambda h, clock_type: 1800 if clock_type == mock.NVML_CLOCK_SM else 7000
     mock.nvmlDeviceGetPcieThroughput.side_effect = lambda h, direction: (
         50000 if direction == mock.NVML_PCIE_UTIL_TX_BYTES else 80000
     )
