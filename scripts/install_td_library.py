@@ -6,7 +6,8 @@ TouchDesigner's Python environment.  The bootstrap Text DAT (CUDALinkBootstrap.p
 then uses sys.path injection to make the package available without mirror Text DATs.
 
 Pass --spout to also install the cuda-link-spout Spout bridge into the same target.
-The spout wheel must be pre-built with utils\\build_spout_wheel.cmd first.
+The spout wheel is auto-built on demand via utils\\build_spout_wheel.cmd when missing
+(requires the Spout2 SDK, CUDA 12.x/13.x, and a C++17 compiler; see spout/README.md).
 
 Usage (interactive):
     python scripts\\install_td_library.py
@@ -18,7 +19,7 @@ Usage (non-interactive / CI):
     python scripts\\install_td_library.py --mode 4 --python "C:\\Python311\\python.exe"
     python scripts\\install_td_library.py --mode 5 --td-python "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\python.exe"
 
-Spout bridge (optional):
+Spout bridge (optional, auto-builds on demand):
     python scripts\\install_td_library.py --mode 5 --td-python "..." --spout
     python scripts\\install_td_library.py --mode 5 --td-python "..." --no-spout   # suppress interactive prompt
 
@@ -118,6 +119,35 @@ def _build_wheel(dry_run: bool) -> Path:
     return wheel
 
 
+def _build_spout_wheel(dry_run: bool) -> Path:
+    """Run build_spout_wheel.cmd to produce a spout wheel; return its path."""
+    print(_bold("[build] No spout wheel found — building now..."))
+    cmd_path = REPO_ROOT / "utils" / "build_spout_wheel.cmd"
+    if not cmd_path.exists():
+        sys.exit(_red(f"[error] build_spout_wheel.cmd not found at {cmd_path}"))
+    if dry_run:
+        print(_yellow(f"  [dry-run] Would run: {cmd_path}"))
+        return REPO_ROOT / "dist" / "cuda_link_spout-DRY_RUN.whl"
+    # Use ["cmd.exe", "/c", path] instead of shell=True to avoid shell injection.
+    # stdin=DEVNULL prevents build_spout_wheel.cmd's `pause` from blocking mid-flow;
+    # `pause` reads EOF immediately and passes through without waiting.
+    result = subprocess.run(["cmd.exe", "/c", str(cmd_path)], cwd=REPO_ROOT, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        sys.exit(
+            _red(
+                "[error] Spout wheel build failed.\n"
+                "        Common causes: missing Spout2 SDK, CUDA Toolkit, or C++17 compiler.\n"
+                "        See spout/README.md for prerequisites:\n"
+                "          git clone --depth 1 https://github.com/leadedge/Spout2 C:\\src\\Spout2\n"
+                "        Then retry — or run utils\\build_spout_wheel.cmd directly for full output."
+            )
+        )
+    wheel = _find_spout_wheel()
+    if not wheel:
+        sys.exit(_red("[error] Build succeeded but no cuda_link_spout-*.whl found in dist/"))
+    return wheel
+
+
 def resolve_wheel(override: str | None, dry_run: bool) -> Path:
     if override:
         p = Path(override)
@@ -132,7 +162,7 @@ def resolve_wheel(override: str | None, dry_run: bool) -> Path:
 
 
 def resolve_spout_wheel(override: str | None, dry_run: bool) -> Path:
-    """Locate the pre-built spout wheel; error out with guidance if missing."""
+    """Locate or auto-build the spout wheel; return its path."""
     if override:
         p = Path(override)
         if not p.exists():
@@ -140,17 +170,7 @@ def resolve_spout_wheel(override: str | None, dry_run: bool) -> Path:
         return p
     w = _find_spout_wheel()
     if not w:
-        if dry_run:
-            print(_yellow("  [dry-run] No spout wheel in dist/ — would fail here in real run."))
-            return REPO_ROOT / "dist" / "cuda_link_spout-DRY_RUN.whl"
-        sys.exit(
-            _red(
-                "[error] Spout bridge requested but no cuda_link_spout-*.whl found in dist/.\n"
-                "        Build it first:\n"
-                "          utils\\build_spout_wheel.cmd\n"
-                "        (Requires Spout2 SDK; see spout/README.md for details.)"
-            )
-        )
+        w = _build_spout_wheel(dry_run)
     print(f"  Spout wheel: {w.name}")
     return w
 
