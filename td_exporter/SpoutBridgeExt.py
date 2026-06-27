@@ -88,8 +88,9 @@ class SpoutBridgeExt:
         direction = str(self._host.param_value("Direction") or "out").lower()
         spout_name = str(self._host.param_value("Spoutname") or "")
         ipc_name = str(self._host.param_value("Ipcname") or "")
-        device = int(self._host.param_value("Device") or 0)
 
+        # No --device flag: single-GPU workflow; bridge.py defaults to device 0.
+        # The CLI --device flag and library LUID affinity remain intact for direct CLI use.
         return [
             exe,
             "-m",
@@ -100,8 +101,6 @@ class SpoutBridgeExt:
             ipc_name,
             "--spout",
             spout_name,
-            "--device",
-            str(device),
         ]
 
     # ------------------------------------------------------------------

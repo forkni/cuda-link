@@ -29,7 +29,7 @@ def onValueChange(par: object, prev: object) -> None:
         handle_restart_change(ext, new_value, prev)
     elif param_name == "Debug":
         handle_debug_change(ext, new_value, prev)
-    elif param_name in ("Direction", "Spoutname", "Ipcname", "Device", "Pythonexe"):
+    elif param_name in ("Direction", "Spoutname", "Ipcname", "Pythonexe"):
         handle_config_change(ext, param_name, new_value, prev)
 
 
