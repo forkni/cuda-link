@@ -8,11 +8,13 @@ REM Compiles the _spout_bridge pybind11 module (CUDA + D3D11 + Spout2 SDK) into 
 REM platform wheel and places it in dist\ alongside the core wheel:
 REM   dist\cuda_link_spout-<version>-cp311-cp311-win_amd64.whl
 REM
-REM Requirements:
+REM Prerequisites (auto-provisioned where noted):
 REM   - CUDA Toolkit 12.x or 13.x (CUDA_PATH or nvcc on PATH)
-REM   - Windows SDK (D3D11 / DXGI headers)
-REM   - MSVC C++17 compiler (Visual Studio 2019 or newer)
-REM   - Spout2 SDK: git clone https://github.com/leadedge/Spout2 C:\src\Spout2
+REM       [manual -- see https://developer.nvidia.com/cuda-downloads]
+REM   - Windows SDK (D3D11 / DXGI) + MSVC C++17 compiler
+REM       [auto-installed via winget if absent]
+REM   - Spout2 SDK (github.com/leadedge/Spout2)
+REM       [auto-cloned to C:\src\Spout2 if absent]
 REM
 REM Usage:
 REM   build_spout_wheel.cmd                          -- default Spout2 path (C:\src\Spout2)
@@ -27,9 +29,9 @@ echo ========================================
 echo.
 
 REM ----------------------------------------
-REM [1/4] Resolve Python interpreter
+REM [1/6] Resolve Python interpreter
 REM ----------------------------------------
-echo [1/4] Resolving Python interpreter...
+echo [1/6] Resolving Python interpreter...
 
 set "PY="
 py -3 --version >nul 2>&1 && set "PY=py -3"
@@ -70,35 +72,60 @@ echo   !PY_EXE!
 echo.
 
 REM ----------------------------------------
-REM [2/4] Resolve Spout2 SDK root
+REM [2/6] Resolve Spout2 SDK root
 REM ----------------------------------------
-echo [2/4] Resolving Spout2 SDK...
+echo [2/6] Resolving Spout2 SDK...
 
-REM Use SPOUT2_ROOT env var if set; else default to C:\src\Spout2
+REM The correct Spout2 SDK layout (from spout/CMakeLists.txt:53) is:
+REM   SPOUTSDK\SpoutDirectX\SpoutDX\SpoutDX.h
+set "SDK_HEADER_REL=SPOUTSDK\SpoutDirectX\SpoutDX\SpoutDX.h"
+set "SPOUT2_DEFAULT=C:\src\Spout2"
+
 if defined SPOUT2_ROOT (
     echo   Using SPOUT2_ROOT env var: !SPOUT2_ROOT!
     set "SPOUT2_ROOT_RESOLVED=!SPOUT2_ROOT!"
 ) else (
-    if exist "C:\src\Spout2\SpoutDX\SpoutDX.h" (
-        set "SPOUT2_ROOT_RESOLVED=C:\src\Spout2"
-        echo   Found default Spout2 SDK: C:\src\Spout2
-    ) else (
-        echo.
-        echo [ERROR] Spout2 SDK not found.
-        echo         Either:
-        echo           1. Set SPOUT2_ROOT=^<path-to-Spout2^>
-        echo           2. Clone the SDK to the default location:
-        echo                git clone --depth 1 https://github.com/leadedge/Spout2 C:\src\Spout2
-        goto :error
-    )
+    set "SPOUT2_ROOT_RESOLVED=!SPOUT2_DEFAULT!"
 )
 
-REM Verify the header exists at the resolved path
-if not exist "!SPOUT2_ROOT_RESOLVED!\SpoutDX\SpoutDX.h" (
+if exist "!SPOUT2_ROOT_RESOLVED!\!SDK_HEADER_REL!" (
+    echo   Found Spout2 SDK: !SPOUT2_ROOT_RESOLVED!
+) else if defined SPOUT2_ROOT (
     echo.
-    echo [ERROR] SpoutDX.h not found under: !SPOUT2_ROOT_RESOLVED!\SpoutDX\
+    echo [ERROR] SpoutDX.h not found under SPOUT2_ROOT:
+    echo           !SPOUT2_ROOT_RESOLVED!\!SDK_HEADER_REL!
     echo         Make sure SPOUT2_ROOT points to the root of the Spout2 repository.
     goto :error
+) else if exist "!SPOUT2_ROOT_RESOLVED!\." (
+    echo.
+    echo [ERROR] Partial Spout2 clone detected at: !SPOUT2_ROOT_RESOLVED!
+    echo         Header not found: !SDK_HEADER_REL!
+    echo         Delete the directory and re-run to auto-clone a fresh copy:
+    echo           rmdir /s /q "!SPOUT2_ROOT_RESOLVED!"
+    goto :error
+) else (
+    echo   Spout2 SDK not found. Cloning from github.com/leadedge/Spout2 ...
+    where git >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] git not found on PATH. Install git or clone the SDK manually:
+        echo           git clone --depth 1 https://github.com/leadedge/Spout2 "!SPOUT2_ROOT_RESOLVED!"
+        echo         Then set SPOUT2_ROOT or place the clone at the default path.
+        goto :error
+    )
+    git clone --depth 1 https://github.com/leadedge/Spout2 "!SPOUT2_ROOT_RESOLVED!"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] git clone failed. Check your internet connection and retry.
+        goto :error
+    )
+    if not exist "!SPOUT2_ROOT_RESOLVED!\!SDK_HEADER_REL!" (
+        echo.
+        echo [ERROR] Clone succeeded but header still missing: !SPOUT2_ROOT_RESOLVED!\!SDK_HEADER_REL!
+        echo         The Spout2 repository layout may have changed. Check manually.
+        goto :error
+    )
+    echo   Cloned Spout2 SDK to: !SPOUT2_ROOT_RESOLVED!
 )
 
 REM Convert backslashes to forward slashes for CMake config-settings
@@ -107,9 +134,101 @@ echo   SDK root: !SPOUT2_ROOT_RESOLVED!
 echo.
 
 REM ----------------------------------------
-REM [3/4] Remove stale spout wheel(s) from dist\
+REM [3/6] Detect CUDA Toolkit
 REM ----------------------------------------
-echo [3/4] Cleaning stale spout wheel(s)...
+echo [3/6] Detecting CUDA Toolkit...
+
+set "NVCC_FOUND=0"
+if defined CUDA_PATH (
+    if exist "!CUDA_PATH!\bin\nvcc.exe" (
+        set "NVCC_FOUND=1"
+        echo   Found via CUDA_PATH: !CUDA_PATH!
+    )
+)
+if !NVCC_FOUND! equ 0 (
+    where nvcc >nul 2>&1
+    if not errorlevel 1 (
+        set "NVCC_FOUND=1"
+        for /f "tokens=*" %%v in ('nvcc --version 2^>^&1 ^| findstr /i "release"') do echo   Found: %%v
+    )
+)
+
+if !NVCC_FOUND! equ 0 (
+    echo.
+    echo [ERROR] CUDA Toolkit not found. nvcc is required to compile _spout_bridge.
+    echo         Install CUDA 12.x or 13.x from:
+    echo           https://developer.nvidia.com/cuda-downloads
+    echo         Then re-run this script.
+    goto :error
+)
+echo.
+
+REM ----------------------------------------
+REM [4/6] Detect C++ build toolchain (MSVC)
+REM ----------------------------------------
+echo [4/6] Detecting C++ build toolchain (MSVC)...
+
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VC_FOUND=0"
+
+if exist "!VSWHERE!" (
+    for /f "tokens=*" %%p in ('"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
+        if not "%%p"=="" (
+            set "VC_FOUND=1"
+            set "VS_PATH=%%p"
+        )
+    )
+)
+
+if !VC_FOUND! neq 1 goto :vc_install
+echo   Found: !VS_PATH!
+echo.
+goto :vc_done
+
+:vc_install
+echo   MSVC C++ tools not found. Installing Visual Studio 2022 Build Tools via winget...
+echo   (Downloads several GB and may take a few minutes.)
+where winget >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo [ERROR] winget not found. Install Visual Studio Build Tools manually:
+    echo           https://visualstudio.microsoft.com/visual-cpp-build-tools/
+    echo         Select "Desktop development with C++" workload, then re-run.
+    goto :error
+)
+winget install --id Microsoft.VisualStudio.2022.BuildTools --accept-source-agreements --accept-package-agreements --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+if errorlevel 1 (
+    echo.
+    echo [ERROR] winget install failed. Install Visual Studio Build Tools manually:
+    echo           https://visualstudio.microsoft.com/visual-cpp-build-tools/
+    echo         Select "Desktop development with C++" workload, then re-run.
+    goto :error
+)
+REM Re-verify: vswhere may not see the install in the same process tree
+set "VC_FOUND=0"
+if exist "!VSWHERE!" (
+    for /f "tokens=*" %%p in ('"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
+        if not "%%p"=="" (
+            set "VC_FOUND=1"
+            set "VS_PATH=%%p"
+        )
+    )
+)
+if !VC_FOUND! equ 0 (
+    echo.
+    echo [ERROR] Build Tools installed but not yet visible to this session.
+    echo         Open a new terminal window and re-run this script.
+    goto :error
+)
+echo   Installed: !VS_PATH!
+echo.
+
+:vc_done
+
+REM ----------------------------------------
+REM [5/6] Remove stale spout wheel(s) from dist\
+REM ----------------------------------------
+echo [5/6] Cleaning stale spout wheel(s)...
 
 set "stale_removed=0"
 if exist "dist\" (
@@ -128,10 +247,10 @@ if !stale_removed! equ 0 (
 echo.
 
 REM ----------------------------------------
-REM [4/4] Build the native spout wheel
+REM [6/6] Build the native spout wheel
 REM ----------------------------------------
-echo [4/4] Building native spout wheel...
-echo   (This downloads build tools and compiles C++; first run may take several minutes.)
+echo [6/6] Building native spout wheel...
+echo   (Compiles C++ with CUDA; first run may take several minutes.)
 echo.
 
 REM Use pip wheel on the local spout/ subdirectory.
