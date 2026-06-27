@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from cuda_link_spout._format import DXGI_FORMAT_R8G8B8A8_UNORM
+from cuda_link_spout._format import DXGI_FORMAT_R8G8B8A8_UNORM, format_from_dtype
 from cuda_link_spout.bridge import BridgeArgs, parse_args, receiver_spec, sender_spec
 
 
@@ -22,9 +22,11 @@ def test_parse_in_direction_allows_zero_dims():
     assert args.width == 0 and args.height == 0  # geometry learned from the sender
 
 
-def test_out_requires_positive_dims():
-    with pytest.raises(ValueError, match="requires positive"):
-        parse_args(["--dir", "out", "--ipc", "i", "--spout", "s"])  # no width/height
+def test_parse_out_direction_no_dims():
+    """--dir out no longer requires --width/--height; geometry is derived from the IPC frame."""
+    args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s"])
+    assert args.direction == "out"
+    assert args.width == 0 and args.height == 0  # lazy-derive from the first frame
 
 
 def test_missing_required_args_exits():
@@ -56,3 +58,42 @@ def test_bad_fmt_in_out_spec_raises():
     args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s", "--width", "8", "--height", "8", "--fmt", "RGB8"])
     with pytest.raises(ValueError):
         sender_spec(args)  # SpoutSenderSpec validates the format
+
+
+# ---------------------------------------------------------------------------
+# format_from_dtype — auto-geometry helper
+# ---------------------------------------------------------------------------
+
+
+def test_format_from_dtype_uint8_gives_rgba8():
+    fmt = format_from_dtype("uint8")
+    assert fmt.name == "RGBA8"
+    assert fmt.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM
+    assert fmt.bgra is False
+
+
+def test_format_from_dtype_float16_gives_rgba16f():
+    from cuda_link_spout._format import DXGI_FORMAT_R16G16B16A16_FLOAT
+
+    fmt = format_from_dtype("float16")
+    assert fmt.name == "RGBA16F"
+    assert fmt.dxgi_format == DXGI_FORMAT_R16G16B16A16_FLOAT
+
+
+def test_format_from_dtype_float32_gives_rgba32f():
+    from cuda_link_spout._format import DXGI_FORMAT_R32G32B32A32_FLOAT
+
+    fmt = format_from_dtype("float32")
+    assert fmt.name == "RGBA32F"
+    assert fmt.dxgi_format == DXGI_FORMAT_R32G32B32A32_FLOAT
+
+
+def test_format_from_dtype_unknown_raises():
+    with pytest.raises(ValueError, match="Cannot derive Spout format"):
+        format_from_dtype("bfloat16")
+
+
+def test_format_from_dtype_bgra8_not_auto_derivable():
+    """BGRA8 and RGBA8 both use uint8 — channel order is not in IPC metadata."""
+    fmt = format_from_dtype("uint8")
+    assert fmt.name == "RGBA8", "auto-derive never returns BGRA8 (use --fmt BGRA8 explicitly)"

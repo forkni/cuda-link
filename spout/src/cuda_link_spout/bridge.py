@@ -51,13 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str]) -> BridgeArgs:
     """Parse and validate argv into a :class:`BridgeArgs`.
 
+    ``--width`` / ``--height`` default to ``0`` for both directions.  For
+    ``--dir out``, geometry is now derived lazily from the first IPC frame
+    (mirroring ``--dir in``).  Explicit positive values are still accepted and
+    take precedence (back-compat).
+
     Raises:
-        SystemExit: on malformed argv (argparse) — or argparse.ArgumentError-style
-            ``ValueError`` for the cross-field 'out requires width/height' rule.
+        SystemExit: on malformed argv (argparse).
     """
     ns = build_parser().parse_args(argv)
-    if ns.dir == "out" and (ns.width <= 0 or ns.height <= 0):
-        raise ValueError("--dir out requires positive --width and --height")
     return BridgeArgs(
         direction=ns.dir,
         ipc=ns.ipc,
@@ -90,17 +92,66 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link + GPU
-    """ipc -> spout: import frames from cuda-link, publish each to Spout."""
+    """ipc -> spout: import frames from cuda-link, publish each to Spout.
+
+    Geometry (width, height, pixel format) is derived lazily from the first
+    imported IPC frame and whenever the frame geometry changes — mirroring the
+    :func:`_run_in` lazy-reopen pattern for the cuda-link Exporter.
+
+    Explicit ``--width``/``--height`` (both > 0) are honoured as an override for
+    back-compat and force-open the sender before the first frame arrives.  An
+    explicit ``--fmt`` overrides the dtype-derived format in both cases.
+
+    The assumed channel order for auto-derived ``uint8`` frames is **RGBA**.
+    Pass ``--fmt BGRA8`` explicitly to produce a BGRA-ordered sender.
+    """
+    import logging
+
     from cuda_link import Importer, ImportOutcome, ImportSpec  # lazy
 
+    from ._format import format_from_dtype, resolve_format
+    from ._types import SpoutSenderSpec
     from .sender import SpoutSender
 
-    spec = sender_spec(args)
-    with Importer.open(ImportSpec(shm_name=args.ipc, device=args.device)) as imp, SpoutSender.open(spec) as tx:
-        while True:
-            res = imp.get_frame_cupy()
-            if res.outcome is ImportOutcome.NEW_FRAME:
-                tx.send(res.frame)
+    log = logging.getLogger(__name__)
+    sender: SpoutSender | None = None
+    active_key: tuple | None = None  # (width, height, fmt_name) the live sender is bound to
+    explicit_override = args.width > 0 and args.height > 0
+
+    try:
+        with Importer.open(ImportSpec(shm_name=args.ipc, device=args.device)) as imp:
+            while True:
+                res = imp.get_frame_cupy()
+                if res.outcome is not ImportOutcome.NEW_FRAME:
+                    continue
+
+                frame = res.frame
+                # Derive geometry: explicit values win, else read from the cupy tensor.
+                if explicit_override:
+                    w, h = args.width, args.height
+                    fmt = resolve_format(args.fmt)
+                else:
+                    h, w = int(frame.shape[0]), int(frame.shape[1])
+                    fmt = format_from_dtype(str(frame.dtype))
+
+                key = (w, h, fmt.name)
+                if key != active_key:
+                    if sender is not None:
+                        sender.close()
+                    spec = SpoutSenderSpec(name=args.spout, width=w, height=h, fmt=fmt.name, device=args.device)
+                    sender = SpoutSender.open(spec)
+                    active_key = key
+                    log.info(
+                        "cuda-link-spout: (re)opened sender for %dx%d %s",
+                        w,
+                        h,
+                        fmt.name,
+                    )
+
+                sender.send(frame)
+    finally:
+        if sender is not None:
+            sender.close()
 
 
 def _exporter_spec_key(frame) -> tuple:  # type: ignore[type-arg]

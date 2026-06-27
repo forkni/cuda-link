@@ -89,3 +89,41 @@ def row_pitch(width: int, fmt: SpoutFormat) -> int:
 def frame_nbytes(width: int, height: int, fmt: SpoutFormat) -> int:
     """Total tightly-packed byte size of a *width*×*height* frame of *fmt*."""
     return row_pitch(width, fmt) * height
+
+
+def format_from_dtype(dtype: str) -> SpoutFormat:
+    """Derive a :class:`SpoutFormat` from a cuda-link dtype string, assuming RGBA channel order.
+
+    Used by the ``--dir out`` bridge auto-geometry path to open a
+    :class:`~cuda_link_spout.sender.SpoutSender` from the IPC frame's dtype
+    when no explicit ``--fmt`` was supplied.
+
+    Args:
+        dtype: one of ``"uint8"``, ``"float16"``, ``"float32"``.
+
+    Returns:
+        :data:`RGBA8` for ``"uint8"``, :data:`RGBA16F` for ``"float16"``,
+        :data:`RGBA32F` for ``"float32"``.
+
+    Note:
+        BGRA8 cannot be auto-derived — both RGBA8 and BGRA8 share the ``"uint8"``
+        dtype, and channel order is not carried in CUDA-IPC metadata.  Pass
+        ``--fmt BGRA8`` explicitly when a BGRA-ordered sender is required.
+
+    Raises:
+        ValueError: if *dtype* is not a supported auto-derivable dtype.
+    """
+    _dtype_to_fmt: dict[str, str] = {
+        "uint8": "RGBA8",
+        "float16": "RGBA16F",
+        "float32": "RGBA32F",
+    }
+    try:
+        return _FORMATS[_dtype_to_fmt[dtype]]
+    except KeyError:
+        supported = ", ".join(f'"{k}"' for k in _dtype_to_fmt)
+        raise ValueError(
+            f"Cannot derive Spout format from dtype {dtype!r}. "
+            f"Supported dtypes for auto-derivation: {supported}. "
+            "To use BGRA8, pass --fmt BGRA8 explicitly."
+        ) from None
