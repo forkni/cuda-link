@@ -4,12 +4,10 @@ pytest configuration and shared fixtures for CUDA IPC tests.
 
 from __future__ import annotations
 
-import sys
 import time as _time
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass as _dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,20 +15,8 @@ import pytest
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
-# Prepend this repo's src/ ahead of any installed cuda_link package.
-_REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-# Fake doubles — deferred until after sys.path setup
-from _td_fakes import FakeCUDAMemoryRef, FakeTDHost, FakeTOPHandle  # noqa: E402, F401
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Configure pytest with custom markers."""
-    config.addinivalue_line("markers", "requires_cuda: test requires CUDA GPU")
-    config.addinivalue_line("markers", "slow: marks tests as slow (multi-process, etc.)")
+# Fake doubles — available via pythonpath = ["td_exporter"] in pyproject.toml
+from _td_fakes import FakeCUDAMemoryRef, FakeTDHost, FakeTOPHandle  # noqa: F401
 
 
 @pytest.fixture
