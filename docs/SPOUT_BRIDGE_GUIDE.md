@@ -26,9 +26,11 @@ from code. This guide provides manual assembly instructions.
 
 - `cuda_link_spout` installed on the Python interpreter the bridge will run on. Use the Phase 1
   `--spout` installer:
+
   ```
   python scripts\install_td_library.py --mode 5 --td-python "<interp>" --spout
   ```
+
   If `Pythonexe` is left blank the COMP auto-resolves via `py -3`; the resolved path is printed to
   the TD Textport on every Start so you can verify the match.
 - NVIDIA GPU, CUDA 12.x, and Spout 2.x SDK present (required by the sidecar).
@@ -156,9 +158,11 @@ running sets `Status = "Changed — press Restart"` but does NOT respawn automat
 1. Select the `CUDALinkSpoutBridge` Base COMP (the parent COMP, not any DAT inside it).
 2. Open the **Extensions** parameter page.
 3. Set **Extension 1 → Object** to:
+
    ```
-   op('SpoutBridgeExt').module.SpoutBridgeExt(op('TDHost').module.RealTDHost(me))
+   op('./SpoutBridgeExt').module.SpoutBridgeExt(op('./TDHost').module.RealTDHost(me))
    ```
+
 4. Enable **Promote** (creates the `parent().ext.SpoutBridgeExt` accessor the DATs use).
 
 > **Why this expression?** `SpoutBridgeExt.__init__(host)` takes the `TDHost` seam object (not the
@@ -170,9 +174,11 @@ running sets `Status = "Changed — press Restart"` but does NOT respawn automat
 > Both patterns are correct — they reflect different design choices about where the seam lives.
 
 **Verify**: Open the TD Textport (Alt+T) and type:
+
 ```python
 op('/project1/CUDALinkSpoutBridge').ext.SpoutBridgeExt
 ```
+
 Expected: `<SpoutBridgeExt.SpoutBridgeExt object at 0x...>`
 
 ### Step 5: Save as .tox
@@ -219,7 +225,7 @@ respawn with the updated values.
 ## First-launch example / smoke test
 
 This self-contained loopback demo lives in `CUDA_Link_Example.toe` (the numbered save you add the
-COMP to). It proves the full path *TD TOP → CUDA-IPC → sidecar → Spout → back into TD* with no
+COMP to). It proves the full path _TD TOP → CUDA-IPC → sidecar → Spout → back into TD_ with no
 terminal and no external app.
 
 ### Network layout
@@ -247,6 +253,7 @@ source (Noise TOP)
 1. Open `CUDA_Link_Example.toe`. The `source` TOP shows a pattern.
 2. Verify `CUDAIPCLink` `Active = ON` — the COMP writes frames into `cudalink_ipc_spout`.
 3. Set `CUDALinkSpoutBridge` `Active = ON`. A **console window opens**. The Start printout shows:
+
    ```
    [Spout Bridge] Starting bridge...
      Direction : out
@@ -255,6 +262,7 @@ source (Noise TOP)
      Python    : C:\...\python.exe
    [Spout Bridge] Sidecar started (PID 12345).
    ```
+
 4. Within one or two seconds, the native `spout_in` TOP lights up with the `source` pattern. The
    bridge auto-derived the frame geometry from the first IPC frame — no Width/Height/Format was
    configured anywhere.
@@ -262,6 +270,7 @@ source (Noise TOP)
 6. Toggle `Active = OFF`. The console closes; `Status` flips to `Stopped`.
 
 **If `spout_in` stays blank:**
+
 - Open the bridge `spout_bridge_exec` console and look for error lines.
 - Verify `Ipcname` matches the `CUDAIPCLink` `Ipcmemname` exactly (same string, case-sensitive).
 - Verify `cuda_link_spout` is installed on the resolved interpreter (the Start printout shows which
@@ -281,6 +290,7 @@ where `cuda_link_spout` is installed.
 ### `Status = "Exited (code 1)"` immediately after `Active = ON`
 
 One of:
+
 - **Wrong interpreter** — `cuda_link_spout` is not installed there. The sidecar's console (which
   briefly flashes open) shows a `ModuleNotFoundError`. Set `Pythonexe` to the correct interpreter.
 - **`cuda_link_spout` not installed at all** — run the Phase 1 `--spout` installer on the target
@@ -294,10 +304,10 @@ One of:
   same byte-identical string. The Start printout echoes the IPC name the bridge was given.
 - **Producer not running** — the cuda-link sender (`CUDAIPCLink` COMP or Python `Exporter`) must be
   `Active = ON` before or during the bridge start.
-- **BGRA-vs-RGBA order** — the `out` path assumes **RGBA** channel order (auto-derived from dtype
-  only; BGRA8 cannot be distinguished from RGBA8 via CUDA-IPC metadata). If your producer emits BGRA,
-  run the bridge directly from the CLI with `--fmt BGRA8`. This is a known limitation; a future COMP
-  param can expose it.
+- **BGRA-vs-RGBA order** — the `out` path auto-derives **BGRA8** for uint8 frames, matching
+  TouchDesigner's documented `cudaMemory()` channel order (uint8 4ch = BGRA).  If your producer is a
+  **non-TD** uint8 sender that emits RGBA-ordered bytes, run the bridge from the CLI with
+  `--fmt RGBA8`.
 
 ### `Status = "Changed — press Restart"`
 
@@ -306,14 +316,39 @@ sidecar and respawn with the updated values.
 
 ### Extension not found
 
-**Error**: `AttributeError: 'NoneType' object has no attribute 'ext'`
+Two distinct errors can appear, depending on which part of the setup is missing:
 
-Verify Step 4 was completed correctly. The **Object** field on the Extensions page must be exactly:
+**Error A** (most common — extension expression didn't resolve):
+
 ```
-op('SpoutBridgeExt').module.SpoutBridgeExt(op('TDHost').module.RealTDHost(me))
+td.tdAttributeError: 'td.Ext' object has no attribute 'SpoutBridgeExt'
 ```
-Promote must be **ON**. Both Text DATs (`SpoutBridgeExt` and `TDHost`) must be inside the COMP and
-their DAT names must match exactly (case-sensitive).
+
+The `parent()` resolved, but the extension namespace is empty because the Extensions expression
+used bare `op('SpoutBridgeExt')` / `op('TDHost')`, which may not resolve child DATs in the
+extension-expression context. The required form uses explicit relative paths:
+
+```
+op('./SpoutBridgeExt').module.SpoutBridgeExt(op('./TDHost').module.RealTDHost(me))
+```
+
+Fix: update **Extension 1 → Object** to the `./`-prefixed expression above, then right-click the
+COMP → **Re-Init Extensions**.
+
+**Error B** (rare — `parent()` itself is None):
+
+```
+AttributeError: 'NoneType' object has no attribute 'ext'
+```
+
+Verify Step 4 was completed correctly and Promote is **ON**. Both Text DATs (`SpoutBridgeExt` and
+`TDHost`) must be inside the COMP and their DAT names must match exactly (case-sensitive).
+
+**In both cases** — verify with the TD Textport:
+```python
+op('/project1/CUDALinkSpoutBridge').ext.SpoutBridgeExt
+# expected: <SpoutBridgeExt.SpoutBridgeExt object at 0x...>
+```
 
 ---
 

@@ -102,8 +102,9 @@ def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link 
     back-compat and force-open the sender before the first frame arrives.  An
     explicit ``--fmt`` overrides the dtype-derived format in both cases.
 
-    The assumed channel order for auto-derived ``uint8`` frames is **RGBA**.
-    Pass ``--fmt BGRA8`` explicitly to produce a BGRA-ordered sender.
+    Auto-derived ``uint8`` frames use **BGRA8** (matching TD's ``cudaMemory()``
+    uint8=BGRA wire convention).  Pass ``--fmt RGBA8`` explicitly when the IPC
+    source is a non-TD uint8 sender that emits RGBA-ordered bytes.
     """
     import logging
 

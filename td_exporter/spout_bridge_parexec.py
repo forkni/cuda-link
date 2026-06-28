@@ -13,9 +13,28 @@ running sets Status to "Changed — press Restart" but does NOT respawn automati
 """
 
 
+def _resolve_ext() -> object:
+    """Return the SpoutBridgeExt extension, or None with a clear hint if uninitialized.
+
+    `parent().ext.SpoutBridgeExt` *raises* AttributeError when the extension hasn't been
+    registered (the `if ext is None: return` guard would otherwise be dead code).  This
+    wrapper converts that failure into a one-line Textport message + a Status-par update so
+    the user knows exactly how to fix it — without a raw traceback.
+    """
+    try:
+        return parent().ext.SpoutBridgeExt  # type: ignore[name-defined]
+    except AttributeError:
+        import contextlib
+
+        print("[Spout Bridge] ERROR: extension not initialized — right-click the COMP and choose 'Re-Init Extensions'.")
+        with contextlib.suppress(Exception):
+            parent().par.Status = "Error: ext not initialized — Re-Init"  # type: ignore[name-defined]
+        return None
+
+
 def onValueChange(par: object, prev: object) -> None:
     """Called by TD when any monitored parameter changes."""
-    ext = parent().ext.SpoutBridgeExt  # type: ignore[name-defined]
+    ext = _resolve_ext()
     if ext is None:
         return
 
@@ -72,7 +91,7 @@ def handle_config_change(ext: object, name: str, new_value: object, prev: object
 
 def onPulse(par: object) -> None:
     """Called when a pulse parameter is triggered."""
-    ext = parent().ext.SpoutBridgeExt  # type: ignore[name-defined]
+    ext = _resolve_ext()
     if ext is None:
         return
     if par.name == "Restart":  # type: ignore[attr-defined]

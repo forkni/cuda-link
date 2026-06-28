@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from cuda_link_spout._format import DXGI_FORMAT_R8G8B8A8_UNORM, format_from_dtype
+from cuda_link_spout._format import DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, format_from_dtype
 from cuda_link_spout.bridge import BridgeArgs, parse_args, receiver_spec, sender_spec
 
 
@@ -65,11 +65,12 @@ def test_bad_fmt_in_out_spec_raises():
 # ---------------------------------------------------------------------------
 
 
-def test_format_from_dtype_uint8_gives_rgba8():
+def test_format_from_dtype_uint8_gives_bgra8():
+    # TD's cudaMemory() returns BGRA bytes for uint8 4ch; the auto-derived tag must match.
     fmt = format_from_dtype("uint8")
-    assert fmt.name == "RGBA8"
-    assert fmt.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM
-    assert fmt.bgra is False
+    assert fmt.name == "BGRA8"
+    assert fmt.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM
+    assert fmt.bgra is True
 
 
 def test_format_from_dtype_float16_gives_rgba16f():
@@ -93,7 +94,8 @@ def test_format_from_dtype_unknown_raises():
         format_from_dtype("bfloat16")
 
 
-def test_format_from_dtype_bgra8_not_auto_derivable():
-    """BGRA8 and RGBA8 both use uint8 — channel order is not in IPC metadata."""
+def test_format_from_dtype_uint8_matches_td_bgra_convention():
+    """uint8 auto-derives BGRA8 to match TD's cudaMemory() uint8=BGRA wire format."""
     fmt = format_from_dtype("uint8")
-    assert fmt.name == "RGBA8", "auto-derive never returns BGRA8 (use --fmt BGRA8 explicitly)"
+    assert fmt.name == "BGRA8", "uint8 auto-derive must return BGRA8 (TD cudaMemory() convention)"
+    assert fmt.bgra is True
