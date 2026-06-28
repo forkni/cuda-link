@@ -41,7 +41,7 @@ if(NOT BUILD_SPOUT_NATIVE)
 endif()
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 CONFIG REQUIRED)
+find_package(pybind11 2.12 CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 # Spout2 SDK location: set -DSPOUT2_ROOT=path/to/Spout2 at configure time.

@@ -180,7 +180,10 @@ std::int64_t create_sender(const std::string& name, int width, int height, int d
 void spout_send(std::int64_t handle, std::uintptr_t srcPtr, int srcPitch, int width, int height,
                 int bytesPerPixel, std::uintptr_t stream) {
     Sender* s;
-    { std::lock_guard<std::mutex> lk(g_mu); s = g_senders.at(handle); }
+    { std::lock_guard<std::mutex> lk(g_mu);
+      auto it = g_senders.find(handle);
+      if (it == g_senders.end()) throw std::runtime_error("send: invalid or closed sender handle");
+      s = it->second; }
     auto cuStream = reinterpret_cast<cudaStream_t>(stream);
 
     cudaCheck(cudaGraphicsMapResources(1, &s->cudaRes, cuStream), "cudaGraphicsMapResources (send)");
@@ -232,7 +235,10 @@ std::int64_t create_receiver(const std::string& name, int device) {
 // Returns (connected, new_frame, width, height, dxgi_format, dst_ptr).
 py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch*/, std::size_t /*maxBytes*/) {
     Receiver* r;
-    { std::lock_guard<std::mutex> lk(g_mu); r = g_receivers.at(handle); }
+    { std::lock_guard<std::mutex> lk(g_mu);
+      auto it = g_receivers.find(handle);
+      if (it == g_receivers.end()) throw std::runtime_error("receive: invalid or closed receiver handle");
+      r = it->second; }
 
     // Use the no-argument ReceiveTexture() overload. The `ppTexture` overload requires
     // the caller to pre-allocate a receiver texture, handle IsUpdated(), and call
@@ -318,11 +324,17 @@ std::int64_t adapter_luid(int device) {
 
 PYBIND11_MODULE(_spout_bridge, m) {
     m.doc() = "cuda-link-spout native CUDA<->D3D11<->Spout bridge";
-    m.def("create_sender", &create_sender);
-    m.def("send", &spout_send);
-    m.def("close_sender", &close_sender);
-    m.def("create_receiver", &create_receiver);
-    m.def("receive", &receive);
-    m.def("close_receiver", &close_receiver);
-    m.def("adapter_luid", &adapter_luid);
+    // GIL is released for all functions that do not touch Python objects.
+    // `receive` is excluded: it calls py::make_tuple at every return point and must
+    // hold the GIL throughout.  A finer-grained py::gil_scoped_release block
+    // inside receive() is left for a future pass once the code is compile-verified
+    // on a Windows + CUDA + Spout2 box.
+    using rgil = py::call_guard<py::gil_scoped_release>;
+    m.def("create_sender",   &create_sender,   rgil{});
+    m.def("send",            &spout_send,      rgil{});
+    m.def("close_sender",    &close_sender,    rgil{});
+    m.def("create_receiver", &create_receiver, rgil{});
+    m.def("receive",         &receive);  // GIL held — see note above
+    m.def("close_receiver",  &close_receiver,  rgil{});
+    m.def("adapter_luid",    &adapter_luid,    rgil{});
 }
