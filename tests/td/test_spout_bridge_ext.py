@@ -1,7 +1,7 @@
 """
 Characterization tests for SpoutBridgeExt — lock observable behaviour before changes.
 
-All tests use FakeTDHost (from conftest / td_exporter/_td_fakes.py) and mock
+All tests use FakeTDHost (from fakes / td_exporter/_td_fakes.py) and mock
 subprocess.Popen so no real process is spawned.  GPU / Spout / TD not required.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from conftest import FakeTDHost
+from fakes import FakeTDHost
 from SpoutBridgeExt import SpoutBridgeExt
 
 # ---------------------------------------------------------------------------

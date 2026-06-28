@@ -8,7 +8,7 @@ without a real TD runtime.
 from __future__ import annotations
 
 import pytest
-from conftest import FakeTDHost, FakeTOPHandle
+from fakes import FakeTDHost, FakeTOPHandle
 
 # =============================================================================
 # Tests

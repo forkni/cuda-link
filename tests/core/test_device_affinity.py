@@ -12,7 +12,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from conftest import FakeShmAdapter
+from fakes import FakeShmAdapter
 
 from cuda_link import ExportPolicy, FrameSpec, GpuFrame
 from cuda_link._cuda_adapters import FakeCUDAAdapter

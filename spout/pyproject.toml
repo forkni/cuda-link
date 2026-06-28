@@ -49,7 +49,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "--strict-markers --strict-config"
+addopts = "--strict-markers --strict-config --import-mode=importlib"
 markers = [
   "requires_spout: test requires a real Spout runtime + GPU (deselect with -m 'not requires_spout')",
 ]
