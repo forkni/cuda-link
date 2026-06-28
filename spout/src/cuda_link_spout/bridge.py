@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 from ._types import SpoutReceiverSpec, SpoutSenderSpec
 
+_REPORT_EVERY = 150  # frames between stats lines (mirrors example_receiver_python.py)
+
 
 @dataclass(frozen=True)
 class BridgeArgs:
@@ -31,6 +33,7 @@ class BridgeArgs:
     height: int
     fmt: str
     device: int
+    verbose: bool = False  # --verbose / --debug: enable DEBUG-level console output
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--height", type=int, default=0, help="frame height (required for --dir out)")
     p.add_argument("--fmt", default="RGBA8", help="pixel format (out only); one of the supported Spout formats")
     p.add_argument("--device", type=int, default=0, help="CUDA device index")
+    p.add_argument(
+        "--verbose",
+        "--debug",
+        dest="verbose",
+        action="store_true",
+        default=False,
+        help="enable verbose (DEBUG-level) console output",
+    )
     return p
 
 
@@ -68,6 +79,7 @@ def parse_args(argv: list[str]) -> BridgeArgs:
         height=ns.height,
         fmt=ns.fmt,
         device=ns.device,
+        verbose=ns.verbose,
     )
 
 
@@ -81,11 +93,31 @@ def receiver_spec(args: BridgeArgs) -> SpoutReceiverSpec:
     return SpoutReceiverSpec(name=args.spout, device=args.device)
 
 
+def _print_banner(args: BridgeArgs) -> None:  # pragma: no cover
+    """Print the startup banner to stdout (flush=True so it appears immediately in cmd)."""
+    flow = "ipc → spout" if args.direction == "out" else "spout → ipc"
+    print("=" * 56, flush=True)
+    print(f"  CUDA-Link Spout Bridge  --  {flow}", flush=True)
+    print("=" * 56, flush=True)
+    print(f"  ipc    : {args.ipc}", flush=True)
+    print(f"  spout  : {args.spout}", flush=True)
+    print(f"  device : {args.device}", flush=True)
+    if args.direction == "out" and args.fmt != "RGBA8":
+        print(f"  fmt    : {args.fmt}  (explicit override)", flush=True)
+    print(flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Lazily imports cuda_link (and torch/cupy where needed)."""
+    import logging
     import sys
 
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    logging.basicConfig(
+        stream=sys.stdout,
+        format="[bridge] %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+    )
     if args.direction == "out":
         return _run_out(args)
     return _run_in(args)
@@ -107,6 +139,7 @@ def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link 
     source is a non-TD uint8 sender that emits RGBA-ordered bytes.
     """
     import logging
+    import time
 
     from cuda_link import Importer, ImportOutcome, ImportSpec  # lazy
 
@@ -118,6 +151,14 @@ def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link 
     sender: SpoutSender | None = None
     active_key: tuple | None = None  # (width, height, fmt_name) the live sender is bound to
     explicit_override = args.width > 0 and args.height > 0
+
+    _print_banner(args)
+    print("[bridge] Opening IPC channel — waiting for first frame ...\n", flush=True)
+
+    frame_count = 0
+    start_time = time.perf_counter()
+    last_report = start_time
+    last_report_frame = 0
 
     try:
         with Importer.open(ImportSpec(shm_name=args.ipc, device=args.device)) as imp:
@@ -150,9 +191,37 @@ def _run_out(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link 
                     )
 
                 sender.send(frame)
+
+                frame_count += 1
+                now = time.perf_counter()
+                if frame_count % _REPORT_EVERY == 0 or (now - last_report) >= 5.0:
+                    window_dt = now - last_report
+                    window_frames = frame_count - last_report_frame
+                    fps = window_frames / window_dt if window_dt > 0 else 0.0
+                    latency_ms = imp.last_latency
+                    print(
+                        f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
+                        f"shape={frame.shape} dtype={frame.dtype} | "
+                        f"latency={latency_ms:.2f} ms | -> spout {args.spout!r}",
+                        flush=True,
+                    )
+                    last_report = now
+                    last_report_frame = frame_count
+
+    except KeyboardInterrupt:
+        print(f"\n[bridge] Stopped after {frame_count} frames.", flush=True)
     finally:
         if sender is not None:
             sender.close()
+        if args.verbose:
+            total = time.perf_counter() - start_time
+            avg_fps = frame_count / total if total > 0 else 0.0
+            print(
+                f"[bridge] Done — {frame_count} frames in {total:.1f}s ({avg_fps:.1f} FPS avg)",
+                flush=True,
+            )
+
+    return 0
 
 
 def _exporter_spec_key(frame) -> tuple:  # type: ignore[type-arg]
@@ -177,6 +246,7 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
     reopen one.
     """
     import logging
+    import time
 
     from cuda_link import Exporter, FrameOutcome, FrameSpec, GpuFrame  # lazy
 
@@ -187,6 +257,15 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
     log = logging.getLogger(__name__)
     exporter = None
     active_key = None  # (width, height, channels, dtype) the current Exporter is bound to
+
+    _print_banner(args)
+    print("[bridge] Opening Spout receiver — waiting for sender ...\n", flush=True)
+
+    frame_count = 0
+    start_time = time.perf_counter()
+    last_report = start_time
+    last_report_frame = 0
+
     try:
         with SpoutReceiver.open(receiver_spec(args)) as rx:
             while True:
@@ -227,9 +306,36 @@ def _run_in(args: BridgeArgs) -> int:  # pragma: no cover - requires cuda_link +
                     exporter.close()
                     exporter = None
                     active_key = None
+
+                frame_count += 1
+                now = time.perf_counter()
+                if frame_count % _REPORT_EVERY == 0 or (now - last_report) >= 5.0:
+                    window_dt = now - last_report
+                    window_frames = frame_count - last_report_frame
+                    fps = window_frames / window_dt if window_dt > 0 else 0.0
+                    print(
+                        f"  Frame {frame_count:5d} | {fps:5.1f} FPS | "
+                        f"shape={frame.height}x{frame.width}x{frame.fmt.channels} "
+                        f"dtype={frame.fmt.dtype} | -> ipc {args.ipc!r}",
+                        flush=True,
+                    )
+                    last_report = now
+                    last_report_frame = frame_count
+
+    except KeyboardInterrupt:
+        print(f"\n[bridge] Stopped after {frame_count} frames.", flush=True)
     finally:
         if exporter is not None:
             exporter.close()
+        if args.verbose:
+            total = time.perf_counter() - start_time
+            avg_fps = frame_count / total if total > 0 else 0.0
+            print(
+                f"[bridge] Done — {frame_count} frames in {total:.1f}s ({avg_fps:.1f} FPS avg)",
+                flush=True,
+            )
+
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

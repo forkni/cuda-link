@@ -99,3 +99,31 @@ def test_format_from_dtype_uint8_matches_td_bgra_convention():
     fmt = format_from_dtype("uint8")
     assert fmt.name == "BGRA8", "uint8 auto-derive must return BGRA8 (TD cudaMemory() convention)"
     assert fmt.bgra is True
+
+
+# ---------------------------------------------------------------------------
+# --verbose / --debug flag
+# ---------------------------------------------------------------------------
+
+
+def test_verbose_defaults_to_false():
+    args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s"])
+    assert args.verbose is False
+
+
+def test_verbose_flag_sets_verbose_true():
+    args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s", "--verbose"])
+    assert args.verbose is True
+
+
+def test_debug_alias_sets_verbose_true():
+    """--debug is an alias for --verbose."""
+    args = parse_args(["--dir", "in", "--ipc", "i", "--spout", "s", "--debug"])
+    assert args.verbose is True
+
+
+def test_verbose_not_in_bridgeargs_repr_when_false():
+    """BridgeArgs is a frozen dataclass — verbose=False is the default; check field presence."""
+    args = parse_args(["--dir", "out", "--ipc", "i", "--spout", "s"])
+    assert hasattr(args, "verbose")
+    assert args.verbose is False

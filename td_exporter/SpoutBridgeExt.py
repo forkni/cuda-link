@@ -91,7 +91,7 @@ class SpoutBridgeExt:
 
         # No --device flag: single-GPU workflow; bridge.py defaults to device 0.
         # The CLI --device flag and library LUID affinity remain intact for direct CLI use.
-        return [
+        argv = [
             exe,
             "-m",
             "cuda_link_spout.bridge",
@@ -102,6 +102,12 @@ class SpoutBridgeExt:
             "--spout",
             spout_name,
         ]
+        # Propagate the Debug param to the sidecar so it enables verbose logging in the cmd
+        # window.  Read directly from the host (not self._debug) so the flag is always
+        # correct even on project load / Re-Init before any set_debug() change-event fires.
+        if bool(self._host.param_value("Debug")):
+            argv.append("--verbose")
+        return argv
 
     # ------------------------------------------------------------------
     # Lifecycle: start / stop / restart
@@ -116,6 +122,12 @@ class SpoutBridgeExt:
         if self._process is not None and self._process.poll() is None:
             print(f"{_LOG_PREFIX} Already running (PID {self._process.pid}) — call Restart to respawn.")
             return
+
+        # Sync _debug from the Debug param before building argv and printing the banner.
+        # Change-events set _debug on the fly, but on project load / Re-Init the extension
+        # is reconstructed with _debug=False and may never receive a change-event if the
+        # param value hasn't changed.  Reading it here ensures the correct state at spawn.
+        self._debug = bool(self._host.param_value("Debug"))
 
         argv = self._build_argv()
         direction = str(self._host.param_value("Direction") or "out")
