@@ -53,3 +53,14 @@ addopts = "--strict-markers --strict-config --import-mode=importlib --randomly-d
 markers = [
   "requires_spout: test requires a real Spout runtime + GPU (deselect with -m 'not requires_spout')",
 ]
+
+[tool.coverage.run]
+source = ["cuda_link_spout"]
+branch = true
+
+[tool.coverage.report]
+# Soft regression gate: 92% measured 2026-06-29 (54 tests, -m "not requires_spout").
+# fail_under = baseline - 3 cushion for nondeterministic randomized-order line hits.
+# Raise incrementally as coverage grows; never lower without a documented reason.
+fail_under = 89
+show_missing = true

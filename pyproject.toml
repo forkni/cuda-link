@@ -219,6 +219,18 @@ errors = {invalid-inheritance = false}
 matches = "td_exporter/CUDAGraphs.py"
 errors = {bad-argument-type = false}
 
+[tool.coverage.run]
+source = ["cuda_link"]
+branch = true
+
+[tool.coverage.report]
+# Soft regression gate: 74.65% measured 2026-06-29 (733 tests, -m "not requires_cuda",
+# branch=true). Statement-only baseline was 78%; branch coverage adds the denominator.
+# fail_under = floor(74.65) - 3 = 71, rounded up to 72 (still 2.65 pts below measured).
+# Raise incrementally as coverage grows; never lower without a documented reason.
+fail_under = 72
+show_missing = true
+
 # ---- td_exporter/ TD-native engine files ------------------------------------
 
 # Extension facade: self._engine is TDSenderEngine | TDReceiverEngine | None;
