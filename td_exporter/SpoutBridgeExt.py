@@ -14,6 +14,7 @@ from __future__ import annotations
 import shutil
 import signal
 import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -142,15 +143,15 @@ class SpoutBridgeExt:
         if self._debug:
             print(f"  argv      : {argv}")
 
+        # On Windows: open a visible console window (the bridge log) and a new
+        # process group so CTRL_BREAK_EVENT in stop() can reach the sidecar.
+        # On Linux (CI / non-TD environments): run without creationflags — the
+        # subprocess inherits the parent terminal, which is fine for testing.
+        popen_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
-            self._process = subprocess.Popen(
-                argv,
-                # CREATE_NEW_CONSOLE: opens a visible console window for the sidecar.
-                # That console IS the bridge log — no extra logging infrastructure needed.
-                # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on Windows
-                # (CTRL_C_EVENT cannot cross new-process-group boundaries).
-                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
+            self._process = subprocess.Popen(argv, **popen_kwargs)
         except FileNotFoundError:
             msg = f"Interpreter not found: {argv[0]!r}"
             print(f"{_LOG_PREFIX} ERROR: {msg}")
@@ -173,7 +174,10 @@ class SpoutBridgeExt:
         if self._process.poll() is None:
             pid = self._process.pid
             try:
-                self._process.send_signal(signal.CTRL_BREAK_EVENT)
+                # CTRL_BREAK_EVENT is Windows-only; fall back to SIGTERM on
+                # Linux so CI and non-TD environments can reach this path safely.
+                stop_signal = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGTERM
+                self._process.send_signal(stop_signal)
                 self._process.wait(timeout=3)
                 if self._debug:
                     print(f"{_LOG_PREFIX} Sidecar exited gracefully (PID {pid}).")
