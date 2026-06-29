@@ -40,14 +40,16 @@ jobs:
           cache: pip
 
       - name: Install test dependencies
-        # numpy + typing_extensions are required by the no-GPU suite. torch is a
-        # best-effort CPU install: the few tests that need it use
-        # pytest.importorskip, so the suite stays green on any Python version
-        # without a CPU wheel. cupy is omitted (CUDA-only; no test marked
+        # pytest-randomly enables the randomized test ordering configured in
+        # pyproject.toml addopts (--randomly-dont-reset-seed). pytest-cov matches
+        # the dev extra for parity. numpy + typing_extensions are required by the
+        # no-GPU suite. torch is a best-effort CPU install: the few tests that
+        # need it use pytest.importorskip, so the suite stays green on any Python
+        # version without a CPU wheel. cupy is omitted (CUDA-only; no test marked
         # "not requires_cuda" needs it).
         run: |
           python -m pip install --upgrade pip
-          pip install pytest typing_extensions numpy
+          pip install pytest pytest-randomly pytest-cov typing_extensions numpy
           pip install torch --index-url https://download.pytorch.org/whl/cpu \
             || echo "::notice::torch CPU wheel unavailable for Python ${{ matrix.python-version }} — torch-dependent tests will skip"
 

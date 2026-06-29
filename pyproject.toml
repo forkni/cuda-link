@@ -102,10 +102,12 @@ python-version = "3.11.0"
 # type checks against win32 so ctypes.windll / WINFUNCTYPE and other
 # platform-gated code resolve on any developer or CI host.
 python-platform = "win32"
-# Point pyrefly at the project Python so site-packages (numpy, etc.) resolve
-# correctly. On CI (Linux) this path won't exist; pyrefly falls back to the
-# PATH python, which is whatever setup-python@v4 activated — also fine.
-python-interpreter-path = "C:/Users/Fractal01/AppData/Local/Programs/Python/Python311/python.exe"
+# python-interpreter-path is intentionally unset so pyrefly auto-queries
+# python3/python on PATH for site-package-path (numpy, etc.). python-version
+# and python-platform are pinned explicitly above, so the interpreter is only
+# consulted for site-packages — never for version or platform. This works on
+# CI (setup-python@v5 puts the right Python on PATH), local Windows dev envs,
+# and any other host without a machine-specific absolute path.
 # Optional GPU/telemetry deps are imported under try/except and bound to None
 # when absent. Treat them as Any so type-checking does not require a CUDA
 # toolchain in CI; the runtime None-guards remain authoritative.
