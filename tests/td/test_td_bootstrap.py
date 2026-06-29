@@ -10,6 +10,7 @@ Tests:
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import sys
@@ -64,7 +65,37 @@ def _load_sync_script() -> Any:
 
 @pytest.fixture(autouse=True)
 def _isolate_sys_modules():
-    """Remove CUDALinkBootstrap and all alias keys before and after each test."""
+    """Remove CUDALinkBootstrap and all alias keys before and after each test.
+
+    Pre-warms the cuda_link package import BEFORE clearing alias names.
+    Without this, tests that clear sys.modules["cuda_link.*"] (the noops tests
+    below, which do ``for k in sys.modules: sys.modules.pop(k)`` for cuda_link)
+    leave cuda_link absent.  The next _bootstrap() call then triggers a fresh
+    import of cuda_link.cuda_ipc_wrapper, whose bare-name fallback:
+
+        from CUDARuntimeTypes import (...)   # first-try TD flat-namespace path
+
+    finds td_exporter/CUDARuntimeTypes.py on sys.path (pythonpath=["td_exporter"])
+    because CUDARuntimeTypes was cleared by this fixture.  _bootstrap()'s
+    skip-guard (``if bare_name in sys.modules: continue``) then leaves
+    sys.modules["CUDARuntimeTypes"] pointing at the td_exporter module instead
+    of cuda_link.cuda_runtime_types, causing the alias correctness test to fail.
+
+    The pre-warm guarantees cuda_link and cuda_link.cuda_ipc_wrapper are cached
+    before alias names are cleared, so _bootstrap()'s import_module("cuda_link")
+    call returns immediately and never re-executes cuda_ipc_wrapper's bare-name
+    import.  If cuda_link is not importable (mocked ImportError in the noops
+    tests), the pre-warm is silently skipped — the noops tests patch
+    importlib.import_module in the test body, after this fixture runs, so the
+    pre-warm always uses the real import_module.
+    """
+    # Pre-warm: cache cuda_link before alias names are cleared.
+    # Uses a bare importlib.import_module (not the patched version — noops tests
+    # apply monkeypatch inside the test body, which runs after this fixture).
+    with contextlib.suppress(ImportError):
+        importlib.import_module("cuda_link")
+        # Unavailable environment: bootstrap tests skip via _active check.
+
     sync = _load_sync_script()
     alias_names = {dst.stem for _, dst, _ in sync.PAIRS} | {"CUDALinkBootstrap"}
 
@@ -226,10 +257,16 @@ def test_bootstrap_noops_when_import_fails(monkeypatch):
 
     monkeypatch.setattr(_importlib_ref, "import_module", mock_import)
 
-    # Ensure cuda_link is not already in sys.modules
+    # Remove cuda_link from sys.modules so importlib.import_module is actually
+    # called (not short-circuited by the sys.modules cache).
+    # Use monkeypatch.delitem so the entries are automatically RESTORED after
+    # this test — bare sys.modules.pop() leaves cuda_link absent for ALL
+    # subsequent tests, causing patch("cuda_link.xxx.yyy") in later tests to
+    # target a freshly re-imported module while already-imported function/class
+    # objects still reference the original module's __dict__.
     for k in list(sys.modules):
         if k == "cuda_link" or k.startswith("cuda_link."):
-            sys.modules.pop(k)
+            monkeypatch.delitem(sys.modules, k)
 
     bootstrap = _load_bootstrap()
 
@@ -249,9 +286,11 @@ def test_bootstrap_noops_leaves_aliases_unregistered(monkeypatch):
 
     monkeypatch.setattr(_importlib_ref, "import_module", mock_import)
 
+    # Same rationale as test_bootstrap_noops_when_import_fails: use
+    # monkeypatch.delitem so cuda_link.* is restored after this test.
     for k in list(sys.modules):
         if k == "cuda_link" or k.startswith("cuda_link."):
-            sys.modules.pop(k)
+            monkeypatch.delitem(sys.modules, k)
 
     bootstrap = _load_bootstrap()
 
