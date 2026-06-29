@@ -59,7 +59,26 @@ jobs:
         # pytest reads pythonpath = ["src", "tests"] from pyproject.toml, so the
         # package and test helpers import without an editable install.
         # --cov enforces the fail_under gate in [tool.coverage.report] (pyproject.toml).
-        run: pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing -q
+        # --cov-report=xml produces coverage.xml for Codecov upload below.
+        run: pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          flags: main
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # fail_ci_if_error=false: keep CI green while the repo is being activated on
+          # codecov.io (the upload is a no-op until CODECOV_TOKEN secret is set).
+          fail_ci_if_error: false
+
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-main-${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 14
 
   spout-tests:
     name: spout pytest (no GPU)
@@ -91,4 +110,21 @@ jobs:
         # from the spout/ directory (rootdir = spout/).
         # --cov enforces the fail_under gate in [tool.coverage.report] (spout/pyproject.toml).
         # Verified order-independent across 20 randomized seeds (2026-06-29).
-        run: cd spout && pytest tests -m "not requires_spout" --cov=cuda_link_spout --cov-report=term-missing -q
+        # coverage.xml is written to spout/ (pytest runs from there via cd).
+        run: cd spout && pytest tests -m "not requires_spout" --cov=cuda_link_spout --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./spout/coverage.xml
+          flags: spout
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-spout
+          path: spout/coverage.xml
+          retention-days: 14
