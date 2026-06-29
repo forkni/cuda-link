@@ -8,6 +8,8 @@
 
 # cuda-link
 
+[![codecov](https://codecov.io/gh/forkni/cuda-link/branch/development/graph/badge.svg)](https://codecov.io/gh/forkni/cuda-link)
+
 Zero-copy GPU texture transfer between TouchDesigner and Python processes using CUDA IPC.
 
 ## Overview
@@ -306,6 +308,47 @@ pytest tests/ -v
 # Skip slow multi-process tests
 pytest tests/ -v -m "not slow"
 ```
+
+### Randomized ordering
+
+[pytest-randomly](https://github.com/pytest-dev/pytest-randomly) is active via `addopts` — every
+run uses a fresh seed and tests must be order-independent. To reproduce a specific failure:
+
+```bash
+# --randomly-seed prints at the top of each run (e.g. "Using --randomly-seed=12345")
+pytest tests/ -m "not requires_cuda" -p randomly --randomly-seed=12345
+```
+
+Disable for a single run: add `-p no:randomly`.
+
+### Coverage gate
+
+```bash
+pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing
+```
+
+The gate is `fail_under = 72` (branch-coverage-aware, baseline 74.65% measured 2026-06-29)
+in `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
+`--cov-report=html` and open `htmlcov/index.html`.
+
+### Test doubles
+
+Shared fakes are consolidated in `tests/fakes/` and resolved automatically via `pythonpath`
+in `pyproject.toml`. Import them directly:
+
+```python
+from fakes import FakeShmAdapter, FakeTDHost, FakeTOPHandle, make_connected_importer
+```
+
+### Spout suite
+
+```bash
+cd spout && pytest tests -m "not requires_spout" --cov=cuda_link_spout --cov-report=term-missing
+```
+
+Separate coverage gate `fail_under = 89` in `spout/pyproject.toml`. The native
+`_spout_bridge` extension is replaced by `FakeSpoutBackend` for all no-GPU tests.
+CI runs the spout suite in its own `spout-tests` job in `.github/workflows/tests.yml`.
 
 ## Benchmarks
 
