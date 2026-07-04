@@ -1278,9 +1278,20 @@ class Importer:
     def _resolve_wait_backend(self) -> WaitBackend | None:
         """Best-effort resolve the native wait backend (cuda-link-native).
 
-        Returns None on any failure (sidecar not installed, or built but unable
-        to resolve a loaded cudart instance) — callers must treat None as
-        "use the existing Python spin/sleep path", never as an error.
+        Returns None on any failure (sidecar not installed, this CUDA adapter
+        can't supply a cudaEventQuery pointer, or the sidecar rejects it) —
+        callers must treat None as "use the existing Python spin/sleep path",
+        never as an error.
+
+        The resolved function-pointer address is obtained from *this
+        connection's own* CUDA adapter (`self._cuda`) and handed to the
+        native module explicitly, rather than letting the native module
+        rediscover cudart independently — a bare-name GetModuleHandle lookup
+        there is not guaranteed to find the same cudart instance this
+        process is actually using when more than one same-named cudart DLL
+        is loaded from different directories. Diagnosed 2026-07-04 (PLAN-002
+        R5): an earlier version of this seam resolved the wrong instance and
+        silently misreported a genuinely-pending CUDA event as complete.
         """
         try:
             from cuda_link_native._native import load_native_backend  # noqa: PLC0415
@@ -1288,7 +1299,15 @@ class Importer:
             logger.info("cuda-link-native not installed; using Python wait path")
             return None
         try:
-            return load_native_backend()
+            fn_ptr = self._cuda.cudart_event_query_fn_ptr()
+        except AttributeError:
+            # e.g. FakeCUDAAdapter in tests — never expected in practice since
+            # ImportPolicy.for_testing() forces wait_backend="python", but stay
+            # defensive rather than raise.
+            logger.info("CUDA adapter has no cudart_event_query_fn_ptr(); using Python wait path")
+            return None
+        try:
+            return load_native_backend(fn_ptr)
         except RuntimeError as e:
             logger.info("Native wait backend unavailable (%s); using Python wait path", e)
             return None

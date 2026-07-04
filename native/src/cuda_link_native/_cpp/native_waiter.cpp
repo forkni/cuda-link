@@ -1,12 +1,26 @@
 // native_waiter.cpp — native notification-wait accelerator for cuda-link's Importer.
 //
 // Implements the WaitBackend surface (see _backend.py) as a pybind11 module named
-// `_native_waiter`. Windows-only. Unlike cuda-link-spout, this module NEVER links
-// or loads cudart itself: at init it resolves cudaEventQuery via GetModuleHandleW
-// (never LoadLibraryW) + GetProcAddress from whatever cudart the host process has
-// already loaded (mirroring cuda_ipc_wrapper.py's probe order: 13 -> 12 -> 11 ->
-// 110, so a torch build against CUDA 13 shares its already-resident runtime). This
-// keeps the double-context risk at zero and needs no CUDA Toolkit at build time.
+// `_native_waiter`. Windows-only. This module NEVER links or loads cudart itself,
+// and — as of the 2026-07-04 fix below — never independently resolves it either.
+// The resolved cudaEventQuery function-pointer address is handed in explicitly by
+// Python via set_cuda_event_query(), sourced from cuda_link's own CUDARuntimeAPI
+// (CUDARuntimeAPI.cudart_event_query_fn_ptr(), cuda_ipc_wrapper.py), which already
+// knows exactly which cudart instance the rest of the process is using.
+//
+// EARLIER DESIGN (removed — kept as a warning): this module used to resolve cudart
+// itself via GetModuleHandleW(bare name) + GetProcAddress. That is unsafe: a
+// process can have more than one same-named cudart DLL loaded from different
+// directories (e.g. one pulled in transitively by torch, one loaded by
+// cuda_ipc_wrapper.py via an explicit full path), and Windows does not guarantee
+// which instance a bare-name GetModuleHandle lookup returns (confirmed against
+// Microsoft's own docs: "two DLLs that have the same base file name and extension
+// but are found in different directories are not considered to be the same DLL").
+// On this project's own dev machine, the bare-name lookup silently resolved a
+// *different* cudart instance than the one holding the real event state, so
+// cudaEventQuery on a genuinely-pending event spuriously reported "complete."
+// Explicit pointer-passing from Python sidesteps the ambiguity entirely — no
+// rediscovery, no guessing, correct by construction.
 //
 // State machine (wait_slot): spin on cudaEventQuery for spin_us, then block until
 // the deadline, checking (in order) the write_idx lost-wakeup pre-check, then
@@ -32,31 +46,13 @@ namespace py = pybind11;
 namespace {
 
 // ---------------------------------------------------------------------------
-// cudart resolution — GetModuleHandleW only, never LoadLibraryW.
+// cudart dispatch — the function pointer is supplied by Python (see module
+// header comment); this module never resolves it independently.
 // ---------------------------------------------------------------------------
 
 using CudaEventQueryFn = int (*)(void*);  // cudaError_t cudaEventQuery(cudaEvent_t)
 
 CudaEventQueryFn g_cudaEventQuery = nullptr;
-
-CudaEventQueryFn resolve_cuda_event_query() {
-    static const wchar_t* kCudartNames[] = {
-        L"cudart64_13.dll",
-        L"cudart64_12.dll",
-        L"cudart64_11.dll",
-        L"cudart64_110.dll",
-    };
-    for (const wchar_t* name : kCudartNames) {
-        HMODULE h = GetModuleHandleW(name);
-        if (h != nullptr) {
-            auto fn = reinterpret_cast<CudaEventQueryFn>(GetProcAddress(h, "cudaEventQuery"));
-            if (fn != nullptr) {
-                return fn;
-            }
-        }
-    }
-    return nullptr;
-}
 
 // Status codes mirrored in Python's WaitStatus enum (_backend.py) — keep in sync.
 enum WaitStatusCode : int {
@@ -198,15 +194,26 @@ bool cudart_resolved() {
     return g_cudaEventQuery != nullptr;
 }
 
+void set_cuda_event_query(std::uintptr_t fn_ptr) {
+    // fn_ptr is the exact address of the cudaEventQuery symbol Python already
+    // resolved (CUDARuntimeAPI.cudart_event_query_fn_ptr()) — guaranteed to
+    // belong to the same cudart instance the rest of the process is using, no
+    // rediscovery needed. A null/zero pointer explicitly un-resolves (returns
+    // this module to "not usable"; the Python loader treats that as a signal
+    // to fall back to the python wait path).
+    g_cudaEventQuery = fn_ptr != 0 ? reinterpret_cast<CudaEventQueryFn>(fn_ptr) : nullptr;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_native_waiter, m) {
     m.doc() = "Native notification-wait accelerator for cuda-link's Importer wait path.";
 
-    g_cudaEventQuery = resolve_cuda_event_query();
-
+    m.def("set_cuda_event_query", &set_cuda_event_query,
+          "Register the cudaEventQuery function-pointer address resolved by Python's "
+          "CUDARuntimeAPI. Must be called once before wait_slot() is used.");
     m.def("cudart_resolved", &cudart_resolved,
-          "Return True if a loaded cudart's cudaEventQuery was resolved at module init.");
+          "Return True if set_cuda_event_query() has been called with a non-null pointer.");
 
     // GIL released for the whole call: all args are passed by value (ints) before
     // release, and the return value is a plain std::tuple<int,double,int> that

@@ -114,8 +114,8 @@ python-platform = "win32"
 # td is TouchDesigner's built-in module (COMP, TOP, CUDAMemoryShape, ui …);
 # it only exists inside the TD interpreter, so treat all td.* imports as Any.
 # cuda_link_native is the optional R5 sidecar package (native/) — imported only
-# inside Importer._resolve_wait_backend() (try/except ImportError) and under
-# TYPE_CHECKING for the WaitBackend annotation; never installed as a core dep.
+# inside Importer._resolve_wait_backend() (try/except ImportError/AttributeError)
+# and under TYPE_CHECKING for the WaitBackend annotation; never a core dep.
 replace-imports-with-any = [
     "torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes",
     "td", "td.*", "cuda_link_native", "cuda_link_native.*",

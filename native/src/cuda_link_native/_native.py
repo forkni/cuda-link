@@ -11,23 +11,7 @@ its tests run anywhere.
 
 from __future__ import annotations
 
-import glob as _glob
-import os as _os
-import sys as _sys
-
 from ._backend import WaitBackend, WaitResult, WaitStatus
-
-# Python 3.8+ no longer searches PATH for DLL dependencies of extension modules.
-# Explicitly register CUDA bin so cudart64_*.dll is visible for GetModuleHandleW
-# resolution when _native_waiter loads (mirrors cuda_link_spout._native).
-if _sys.platform == "win32":
-    for _cuda_bin in sorted(
-        _glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin"),
-        reverse=True,
-    ):
-        if _os.path.isdir(_cuda_bin):
-            _os.add_dll_directory(_cuda_bin)
-            break
 
 _STATUS_FROM_INT = {
     0: WaitStatus.READY_SPIN,
@@ -37,12 +21,25 @@ _STATUS_FROM_INT = {
 }
 
 
-def load_native_backend() -> WaitBackend:
+def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
     """Import the compiled native module and return a WaitBackend-conforming adapter.
+
+    Args:
+        cuda_event_query_fn_ptr: the raw address of the ``cudaEventQuery`` symbol,
+            as resolved by the caller's own CUDA runtime wrapper (e.g.
+            ``CUDARuntimeAPI.cudart_event_query_fn_ptr()`` in cuda_link's
+            cuda_ipc_wrapper.py). Passed in explicitly rather than resolved
+            independently: a bare-name ``GetModuleHandleW`` lookup here would not
+            reliably find the *same* cudart instance the rest of the process is
+            using when more than one same-named cudart DLL is loaded from
+            different directories (e.g. one pulled in transitively by torch, one
+            loaded via an explicit full path) — diagnosed 2026-07-04 (PLAN-002 R5)
+            after a native module that resolved the wrong instance silently
+            misreported a genuinely-pending CUDA event as complete.
 
     Raises:
         RuntimeError: with actionable guidance if the native module is not built,
-            or if it cannot resolve a cudart instance already loaded by this process.
+            or if ``cuda_event_query_fn_ptr`` is 0 (caller has no cudart loaded yet).
     """
     try:
         from . import _native_waiter  # type: ignore[attr-defined]  # compiled extension
@@ -53,12 +50,13 @@ def load_native_backend() -> WaitBackend:
             "build instructions). (The pure-Python API and tests work without it "
             "via FakeWaitBackend.)"
         ) from e
+    _native_waiter.set_cuda_event_query(cuda_event_query_fn_ptr)
     if not _native_waiter.cudart_resolved():
         raise RuntimeError(
-            "cuda-link-native module (_native_waiter) is built but could not resolve "
-            "a loaded cudart instance (cudart64_13/12/11/110.dll). This process must "
-            "have already loaded a CUDA runtime (e.g. via cuda_link.cuda_ipc_wrapper) "
-            "before the native wait backend is activated."
+            "cuda-link-native module (_native_waiter) is built but "
+            "cuda_event_query_fn_ptr was 0 — the caller has no cudart runtime "
+            "loaded yet (e.g. via cuda_link.cuda_ipc_wrapper.get_cuda_runtime()) "
+            "before the native wait backend was activated."
         )
     return _NativeWaitBackend(_native_waiter)
 
@@ -67,7 +65,8 @@ class _NativeWaitBackend:
     """Thin adapter over the compiled ``_native_waiter`` module.
 
     Kept deliberately thin: forwards 1:1 to the native module, which owns the
-    cudart resolution, the spin/block state machine, and the Win32 doorbell wait.
+    spin/block state machine and the Win32 doorbell wait (cudart dispatch is
+    the fixed function pointer registered by load_native_backend() above).
     Satisfies :class:`WaitBackend` structurally.
     """
 

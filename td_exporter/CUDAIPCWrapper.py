@@ -946,6 +946,22 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.check_error(result, "cudaEventQuery")
         return False
 
+    def cudart_event_query_fn_ptr(self) -> int:
+        """Raw address of the cudaEventQuery symbol this wrapper resolved, as an int.
+
+        Lets other in-process code (e.g. cuda-link-native, R5) call the SAME
+        loaded cudart instance directly, instead of independently rediscovering
+        it via a bare-name GetModuleHandle. That rediscovery is unsafe: this
+        process can have more than one same-named cudart DLL loaded from
+        different directories (e.g. one pulled in transitively by torch, one
+        loaded here via an explicit full path — see _load_cuda_runtime()), and
+        Windows does not guarantee which instance a bare-name GetModuleHandle
+        lookup returns. Diagnosed 2026-07-04 (PLAN-002 R5): a native module
+        that resolved the wrong instance queried a foreign runtime's internal
+        state and silently misreported a pending event as complete.
+        """
+        return ctypes.cast(self.cudart.cudaEventQuery, ctypes.c_void_p).value or 0
+
     def wait_event(self, event: CUDAEvent_t) -> None:
         """Wait for event to complete (blocking).
 

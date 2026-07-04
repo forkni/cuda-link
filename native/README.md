@@ -11,9 +11,18 @@ target p50 < 10 µs, p95 < 50 µs.
 This package **relaxes cuda-link's pure-Python rule** ([ADR-0006](../docs/adr/0006-stay-pure-python-no-rust.md))
 on purpose — the same escape hatch [`cuda-link-spout`](../spout/README.md)
 exercises. Unlike spout, this module needs **no CUDA Toolkit or SDK at build
-time**: it resolves `cudaEventQuery` at runtime from whatever cudart the host
-process has already loaded (`GetModuleHandleW` + `GetProcAddress`, never
-`LoadLibraryW`) — so building it only requires a C++17 compiler (MSVC) + CMake.
+time**: it never links or loads cudart itself at all. The `cudaEventQuery`
+function-pointer address is handed in explicitly by the caller
+(`CUDARuntimeAPI.cudart_event_query_fn_ptr()` in `cuda_ipc_wrapper.py`), which
+already knows exactly which cudart instance the rest of the process is using
+— so building the extension only requires a C++17 compiler (MSVC) + CMake.
+(An earlier design resolved cudart independently via a bare-name
+`GetModuleHandleW` lookup; that is unsafe whenever more than one same-named
+cudart DLL is loaded from different directories in the same process — e.g.
+one pulled in transitively by `torch`, one loaded by `cuda_ipc_wrapper.py` via
+an explicit full path — since Windows does not guarantee which instance a
+bare-name lookup returns. Explicit pointer-passing sidesteps that ambiguity
+entirely.)
 
 The core `cuda_link` wheel is unaffected if this package is absent: `Importer`
 falls back to its existing Python wait automatically
@@ -28,8 +37,9 @@ Importer._wait_for_slot            (pure Python, cuda_link core)
 WaitBackend  (Protocol)            ← seam (ADR-0001 port-adapter pattern)
    ├── FakeWaitBackend             in-memory; drives all CI tests, no GPU
    └── _NativeWaitBackend          wraps the compiled _native_waiter module
-                                    (cudart resolution + spin/block state
-                                    machine + Win32 doorbell wait), Windows-only
+                                    (spin/block state machine + Win32 doorbell
+                                    wait; cudart dispatch is a fixed function
+                                    pointer registered by the caller), Windows-only
 ```
 
 Everything except the actual spin/block timing is behind `WaitBackend`, so the
