@@ -54,7 +54,11 @@ source = ["cuda_link_native"]
 branch = true
 
 [tool.coverage.report]
-# No measured baseline yet (package is new) — gate set conservatively; raise once
-# Phase 1/2 land and a real number is measured (mirrors spout/pyproject.toml's approach).
-fail_under = 80
+# Soft regression gate: 96.23% measured 2026-07-04 (6 tests + 1 skipped, module
+# built, -m "not requires_native", branch=true). Set well below measured (not
+# the usual -3 cushion) because CI (no compiled module) exercises the opposite
+# skip/run pair in test_native_loader.py vs this local run — leaves headroom
+# for that swap without re-measuring on Ubuntu. Raise incrementally as coverage
+# grows; never lower without a documented reason.
+fail_under = 90
 show_missing = true
