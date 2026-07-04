@@ -47,10 +47,16 @@ Each experiment: hypothesis → benchmark command → accept/record. Run on the 
 D2H harness; results land in `docs/BENCHMARKS.md`; default changes land in
 `src/cuda_link/_env.py` / `_importer_port.py`.
 
-1. **Pinned-by-default audit** — enumerate when `CUDALINK_ALLOW_PAGEABLE_FALLBACK`
-   silently engages; make the fallback log at WARNING with the measured throughput
-   delta (pageable typically halves bandwidth). Decide from data whether the fallback
-   default flips to fail-loud (if so: CHANGELOG breaking-change note).
+1. **Pinned-by-default audit** — the default is already fail-loud:
+   `allow_pageable_fallback` defaults to `False` and the pinned-alloc failure path
+   *raises* (`importer.py` ~L487) rather than silently degrading; when opted in
+   (`=True`) the `cudaHostRegister`→pageable path already logs at WARNING
+   (`importer.py` ~L493/L507). So this item does **not** flip a default or ship a
+   breaking change. Instead: (a) enrich that opt-in WARNING with a *measured*
+   throughput delta (it currently says "~2x" qualitatively); (b) confirm no other
+   path (e.g. `malloc_host` in `cuda_ipc_wrapper.py`) engages pageable memory
+   without a WARNING; (c) record the fail-loud default in BENCHMARKS.md so it isn't
+   re-proposed.
 2. **Stream-count sweep** — `CUDALINK_D2H_STREAMS ∈ {1,2,3,4}` ×
    {720p, 1080p, 4K} × {uint8, float16, float32}; expect diminishing returns past 2 on
    one PCIe link; set the measured best as default.

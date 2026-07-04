@@ -73,9 +73,11 @@ wait_slot(event_ptr, doorbell_handle, write_idx_addr, last_write_idx,
 ### D3 — cudart access via `GetModuleHandleW` + `GetProcAddress` (no second runtime)
 
 The module never links or loads cudart. At init it resolves `cudaEventQuery` from the
-**already-loaded** module (`cudart64_12.dll` then `cudart64_13.dll`, matching
-`cuda_ipc_wrapper.py`'s load order); if none is loaded it refuses to activate and the
-Python path is used. Same DLL instance ⇒ same runtime state ⇒ zero double-context risk,
+**already-loaded** module — probing `cudart64_13.dll`, then `cudart64_12.dll`, then the
+`cudart64_11.dll`/`cudart64_110.dll` fallbacks, the same order `cuda_ipc_wrapper.py` uses
+(it deliberately probes CUDA 13 before 12 so a torch built against CUDA 13 shares its
+already-resident runtime); if none is loaded it refuses to activate and the Python path
+is used. Same DLL instance ⇒ same runtime state ⇒ zero double-context risk,
 and no CUDA toolkit is needed at build time (only `windows.h` + a local typedef).
 
 ### D4 — Seam: `ImportPolicy.wait_backend`
