@@ -12,6 +12,9 @@ should be revisited. See `CONTEXT.md §Architecture references` for a richer set
 | [0004](0004-legacy-cuda-ipc-over-vmm.md) | Legacy CUDA Runtime IPC over VMM driver API | Accepted | 2026-05-31 |
 | [0005](0005-static-typing-hardening.md) | Static type-checking hardening (scoped suppression + CI gate) | Accepted | 2026-06-07 |
 | [0006](0006-stay-pure-python-no-rust.md) | Stay pure-Python — do not rewrite in Rust | Accepted | 2026-06-07 |
+| [0007](0007-spout-as-launcher-not-transport.md) | Expose Spout as a sidecar-launcher COMP, not an embedded transport | Accepted | 2026-06-27 |
+| [0008](0008-skip-native-d2h.md) | No native work on the D2H readback path | Accepted | 2026-07-04 |
+| [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
 
 ## Adding a new ADR
 
