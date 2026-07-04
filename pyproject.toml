@@ -113,9 +113,12 @@ python-platform = "win32"
 # toolchain in CI; the runtime None-guards remain authoritative.
 # td is TouchDesigner's built-in module (COMP, TOP, CUDAMemoryShape, ui …);
 # it only exists inside the TD interpreter, so treat all td.* imports as Any.
+# cuda_link_native is the optional R5 sidecar package (native/) — imported only
+# inside Importer._resolve_wait_backend() (try/except ImportError) and under
+# TYPE_CHECKING for the WaitBackend annotation; never installed as a core dep.
 replace-imports-with-any = [
     "torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes",
-    "td", "td.*",
+    "td", "td.*", "cuda_link_native", "cuda_link_native.*",
 ]
 # Add td_exporter/ to the import search path so flat-namespace sibling imports
 # (e.g. `from CUDAIPCWrapper import …`) resolve inside that tree.
@@ -147,11 +150,15 @@ project-excludes = [
 # ---- src/cuda_link/ ----------------------------------------------------------
 
 # Consumer engine: optional libs bound to None (missing-attribute), ctypes
-# c_void_p<->int pointer duality (bad-argument-type), and SharedMemory buffers
-# that are Optional until attached (unsupported-operation).
+# c_void_p<->int pointer duality (bad-argument-type), SharedMemory buffers
+# that are Optional until attached (unsupported-operation), and R5's
+# int(conn.doorbell_handle) — the field is typed `object` (matches shm_handle's
+# pattern) but is always a plain int at runtime (ctypes restype=c_void_p
+# auto-converts); int()'s overload set doesn't statically accept `object`
+# (no-matching-overload), same shape as TDReceiver.py's frombuffer suppression.
 [[tool.pyrefly.sub-config]]
 matches = "src/cuda_link/importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
 
 # Optional NVML telemetry: pynvml bound to None when nvidia-ml-py is absent.
 [[tool.pyrefly.sub-config]]
@@ -192,7 +199,7 @@ errors = {bad-argument-type = false}
 # Consumer engine mirror (same idioms as src/cuda_link/importer.py).
 [[tool.pyrefly.sub-config]]
 matches = "td_exporter/Importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
 
 # Optional NVML telemetry mirror (same as src/cuda_link/nvml_observer.py).
 [[tool.pyrefly.sub-config]]

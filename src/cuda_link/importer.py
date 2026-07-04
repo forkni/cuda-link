@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import logging
+import os
 import struct
 import sys
 import time
@@ -38,6 +39,7 @@ from .shm_protocol import (
     MAGIC_OFFSET,
     MAGIC_SIZE,
     PROTOCOL_MAGIC,
+    WRITE_IDX_OFFSET,
     AcquireResult,
     DtypeCodec,
     Metadata,
@@ -50,6 +52,8 @@ from .shm_protocol import (
 )
 
 if TYPE_CHECKING:
+    from cuda_link_native import WaitBackend
+
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
@@ -944,6 +948,12 @@ class Importer:
         self._torch_backend: _TorchBackend | None = None
         self._cupy_backend: _CupyBackend | None = None
 
+        # R5: resolved native wait backend (cuda-link-native, optional sidecar).
+        # None until/unless _open_ipc_slots resolves one; re-resolved on every
+        # (re)connect, including from _reinitialize(), so a producer restart
+        # never leaves a stale backend/address behind. See _wait_for_slot().
+        self._wait_backend: WaitBackend | None = None
+
         # Reconnect state machine (None when reconnect_enabled=False)
         self._retry: _RetryState | None = (
             _RetryState(
@@ -1223,16 +1233,32 @@ class Importer:
 
         logger.info("Opened %d IPC buffer slots", num_slots)
 
-        # R2: open the doorbell event if the policy requests it
+        # R5: the native wait backend needs the doorbell to reach its <10us target
+        # (its block phase has nothing faster to wait on otherwise) — so wanting
+        # native forces the doorbell open even if policy.doorbell is False.
+        want_native = self._policy.wait_backend in ("auto", "native") and os.name == "nt"
+
+        # R2: open the doorbell event if the policy (or R5 above) requests it
         db_handle = None
-        if self._policy.doorbell:
+        if self._policy.doorbell or want_native:
             db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
             if db_handle is not None:
                 logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
-            else:
+            elif self._policy.doorbell:
                 logger.warning(
                     "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
                 )
+
+        # R5: resolve the native wait backend now, while db_handle is known — a
+        # backend without a doorbell can't beat the Python fallback, so only
+        # resolve when one was actually opened above.
+        self._wait_backend = self._resolve_wait_backend() if (want_native and db_handle is not None) else None
+        if self._wait_backend is None and want_native and not self._policy.doorbell and db_handle is not None:
+            # Doorbell was opened speculatively for native only (policy.doorbell
+            # was False) and native failed to resolve — don't leave a doorbell
+            # handle open that nothing will wait on.
+            _doorbell.close(db_handle)
+            db_handle = None
 
         return IPCConnection(
             cuda=cuda,
@@ -1247,6 +1273,24 @@ class Importer:
             timestamp_offset=layout.timestamp_offset,
             doorbell_handle=db_handle,
         )
+
+    def _resolve_wait_backend(self) -> WaitBackend | None:
+        """Best-effort resolve the native wait backend (cuda-link-native).
+
+        Returns None on any failure (sidecar not installed, or built but unable
+        to resolve a loaded cudart instance) — callers must treat None as
+        "use the existing Python spin/sleep path", never as an error.
+        """
+        try:
+            from cuda_link_native._native import load_native_backend  # noqa: PLC0415
+        except ImportError:
+            logger.info("cuda-link-native not installed; using Python wait path")
+            return None
+        try:
+            return load_native_backend()
+        except RuntimeError as e:
+            logger.info("Native wait backend unavailable (%s); using Python wait path", e)
+            return None
 
     # ------------------------------------------------------------------
     # Reconnect helpers
@@ -1375,6 +1419,43 @@ class Importer:
         policy = self._policy
         wait_start = time.perf_counter()
         deadline = wait_start + self._spec.timeout_ms / 1000
+
+        # R5: native wait backend — only engaged when resolved AND this slot has
+        # both an IPC event and an open doorbell (the backend needs both to reach
+        # its <10us target). Everything below this block is the pre-R5 path,
+        # unchanged, so CUDALINK_WAIT_BACKEND=python (or any resolution failure)
+        # reproduces today's behavior exactly.
+        if self._wait_backend is not None and conn.ipc_events[slot] and conn.doorbell_handle is not None:
+            event_ptr = int(conn.ipc_events[slot].value)
+            db_handle = int(conn.doorbell_handle)
+            # Recomputed fresh every call, never cached: a producer restart tears
+            # down and remaps the SHM segment at a new address (_reinitialize),
+            # and _wait_backend/doorbell are re-resolved at that same point, but
+            # the address itself must still be read live here to be correct even
+            # within a single connection's lifetime (the buffer object is stable
+            # per-connection, but computing it once and reusing it buys nothing
+            # and adds a class of staleness bug for free).
+            write_idx_addr = ctypes.addressof(ctypes.c_char.from_buffer(conn.shm_handle.buf)) + WRITE_IDX_OFFSET
+            result = self._wait_backend.wait_slot(
+                event_ptr,
+                db_handle,
+                write_idx_addr,
+                self._last_write_idx,
+                policy.wait_spin_us,
+                int(self._spec.timeout_ms),
+            )
+            status_name = result.status.name  # avoid importing WaitStatus in core
+            if status_name == "TIMEOUT":
+                raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+            if status_name == "READY_SPIN":
+                self.total_wait_spin_us += result.waited_us
+                self.wait_spin_hits += 1
+                self._adaptive_observe_wait(False)
+            else:  # READY_DOORBELL or READY_LATE both count as the blocked/slept bucket
+                self.total_wait_sleep_us += result.waited_us
+                self.wait_sleep_hits += 1
+                self._adaptive_observe_wait(status_name == "READY_DOORBELL")
+            return result.waited_us
 
         if conn.ipc_events[slot]:
             evt = conn.ipc_events[slot]
