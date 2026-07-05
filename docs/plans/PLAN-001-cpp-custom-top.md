@@ -255,13 +255,24 @@ consumer; if flipped, the fallback is a flip-during-copy surface-object kernel
 
 ```text
 execute():
+  0  diff cached Active/Ipcmemname against current OP_Inputs values (no push-based
+     parameter-change notification exists in the Custom TOP API — see D7)
+       Active Off->On     -> full teardown first: close cached IPC handles, drop output
+                              binding, reset last_write_idx/last_version to 0 (Off->On
+                              behaves as a fresh connection, never resumes stale state)
+       Ipcmemname changed -> reset retry state, attempt connection immediately next cook
+                              (mirrors request_immediate_reconnect())
   1  Active? open SHM if absent (OpenFileMappingW; missing -> "Waiting for producer"
      info status, return — reconnect is simply "try again next cook")
   2  ring_reader.acquire(last_write_idx, last_version)
        NO_FRAME        -> return (previous output persists)
        SHUTDOWN        -> close handles, status badge, return
-       VERSION_CHANGED -> cudaIpcCloseMemHandle all, reopen handles + metadata
-                          (mirrors _refresh_on_version_change), fall through
+       VERSION_CHANGED -> cudaIpcCloseMemHandle all; re-read num_slots from the wire
+                          header and rebuild SHMLayout fresh (never reuse the prior
+                          session's N — the sender can pick a different Numslots value
+                          each run); resize the handle cache to match; reopen handles +
+                          metadata (mirrors _refresh_on_version_change); update the
+                          read-only Numslots display parameter (D7); fall through
        NEW_FRAME       -> read_slot = (write_idx-1) % N
   3  open-once-per-version: cudaIpcOpenMemHandle / cudaIpcOpenEventHandle (cached)
   4  outputInfo.stream = myStream; textureDesc from metadata (width/height/pixelFormat
@@ -277,10 +288,24 @@ execute():
 No CPU wait anywhere: `cudaStreamWaitEvent` is the R1-style GPU-side ordering
 (cross-process use of imported events is explicitly documented: "cudaEventRecord,
 cudaEventSynchronize, cudaStreamWaitEvent and cudaEventQuery may be used in either
-process"), and TD's bracket serializes the stream against the Vulkan consumer of the
-output texture. Resolution/format changes arrive via metadata and drive `textureDesc`
-per cook — the Script-TOP `pending_resolution`/`pending_format` dance in
-`script_top_callbacks.py` disappears entirely.
+process"), and TD's SDK documents the purpose of the begin/end bracket directly —
+`CPlusPlus_Common.h`: "All CUDA operations must occur on the main thread, and between
+calls to these functions. This is needed to ensure the order of operations between
+Vulkan and CUDA is properly managed." — confirming, not just inferring, that TD
+serializes the Vulkan consumer of the output texture against work enqueued on `myStream`
+inside the bracket. (This is a stronger guarantee than D5's analogous stream-sync
+question, which is about source-buffer *lifetime*, not ordering — see D5's Phase-0 gate;
+the two are related but not interchangeable.) Resolution/format changes arrive via
+metadata and drive `textureDesc` per cook — the Script-TOP `pending_resolution`/
+`pending_format` dance in `script_top_callbacks.py` disappears entirely.
+
+`NO_FRAME` returning without touching the output relies on the same pattern used
+throughout Derivative's own shipped samples and in third-party Custom TOPs:
+`SpectrumTOP.cpp`'s `execute()` has five separate early-`return;` paths (bad input,
+wrong format, failed `createCUDAArray`, unmapped CUDA memory, empty frame) that skip
+output entirely, and `PyTorchTOP.cpp` (an unrelated, community-authored CUDA-interop
+Custom TOP) does the same for missing inputs / geometry mismatches — this is confirmed,
+sample-verified TD Custom TOP behavior, not an unverified assumption.
 
 **Teardown ordering (CUDA-documented UB to avoid)**: using an imported IPC event after
 the exporter destroys the original is undefined behavior, and `cudaEventQuery` on a
@@ -292,10 +317,58 @@ sender destructor follows the same order (step "destroy" in D5).
 ### D7 — Parameters, status, stats (parity with the COMP)
 
 Custom parameters via `OP_ParameterManager`, page "CUDA Link", **same names** as the
-.tox COMP so swaps are node replacements: `Ipcmemname` (string), `Active` (toggle),
-`Numslots` (int 2–5, sender only), `Cudadevice` (int — guarded by
-`TOP_Context::getCUDADeviceIndex()`; mismatch = error badge, never `cudaSetDevice`
-away), `Debug` (toggle), `Reconnect` (pulse, receiver → `pulsePressed`).
+.tox COMP so swaps are node replacements — but the real parameter surface
+(`td_exporter/HELP_DOC.md`) differs from an earlier draft of this plan in several ways
+worth recording explicitly:
+
+- `Ipcmemname` (string), `Active` (toggle), `Debug` (toggle) — unchanged, direct mirrors.
+- `Numslots` — **Integer Menu, options {2, 3, 4}** (not a free 2–5 int as an earlier
+  draft had it), editable on the sender only while `Active=Off`. On the **receiver**,
+  `Numslots` is a **new, read-only display parameter** — sourced from the wire header on
+  every VERSION_CHANGED (D6) and shown for reference, matching the real `.tox` exactly.
+- **No `Mode` parameter.** The real `.tox` has a Sender/Receiver menu because one COMP
+  hosts both engines; D1's two-DLL split (`Cudalinkout`/`Cudalinkin`) makes it
+  structurally unnecessary — each DLL *is* one mode.
+- **No `Reconnect` pulse, and no `Cudadevice` parameter or diagnostic** — neither exists
+  in the real `.tox` (confirmed: `HELP_DOC.md`'s full parameter list is
+  `Active, Mode, Ipcmemname, Numslots, Status, Debug, Hide Built-In`; `Cudadevice` is
+  read internally by `CUDAIPCExtension.py` but has no C++ analogue — see below). The
+  real manual-recovery UX today is **`Active` Off→On** (per the `.tox`'s own
+  Troubleshooting doc: "Toggle the receiver's Active Off → On to force reconnection"),
+  which D6 now implements explicitly as a full-teardown step.
+
+  `Cudadevice` deserves a specific note rather than a silent drop: Python's version calls
+  `cudaSetDevice(N)` on an **independent ctypes CUDA context** the process owns
+  (`cuda_ipc_wrapper.py:1316-1331` — "a single process context can only be bound to one
+  device... must match across all callers"). A Custom TOP has no independent context to
+  redirect — `TOP_Context::getCUDADeviceIndex()` is a **read-only** query of whichever
+  device TD's own textures already live on; there is no "choice" left to expose as a
+  parameter. Given this project currently targets a single-GPU environment (`Cudadevice`
+  would always read 0), v1 skips both a settable parameter and a read-only diagnostic
+  display — keep only the internal `getCUDADeviceIndex()` mismatch guard (error badge on
+  mismatch) as free correctness. This matches independent community practice, not just
+  this project's pragmatism: `PyTorchTOP.cpp` (an unrelated CUDA-interop Custom TOP) also
+  has zero device-index/`cudaSetDevice` handling — "uses `torch::kCUDA` globally without
+  per-device management." Revisit-if: expose the diagnostic once multi-GPU testing is a
+  real scenario.
+
+**Parameter-change detection has no native push mechanism.** The Custom TOP API exposes
+exactly one change callback, `pulsePressed()`, for pulse-type parameters — confirmed
+against `docs.derivative.ca/Write_a_CPlusPlus_Plugin`/`Write_a_CPlusPlus_TOP` and a direct
+grep of the vendored `CPlusPlus_Common.h` for change/dirty/cookCount tracking (the only
+hit, `makeNodeDirty()`, is the reverse direction — plugin tells TD to recook, not TD
+telling the plugin something changed). Toggles, menus, and strings (`Active`,
+`Ipcmemname`) have no equivalent of the Python `.tox`'s `parexecute` DAT callbacks
+(`onValueChange` → `reconfigure_and_reinit()` / `request_immediate_reconnect()`,
+`CUDAIPCExtension.py:360-376`). The only option — and the confirmed real-world pattern,
+independently verified in `PyTorchTOP.cpp::setModelParameters()`
+(`if (Refinemode != myRefineMode) { ...; myRefineMode = Refinemode; }`) — is to **cache
+each parameter's previous value on the instance and diff against the current `OP_Inputs`
+read at the top of every `execute()`**, achieving by polling what Python gets from an
+event. D6 applies this to `Active`/`Ipcmemname` on the receiver; the sender (D5) will need
+the identical treatment for its own parameter set in a future revision of this plan (not
+applied here).
+
 Status text → `getErrorString` / `getWarningString` / `getInfoPopupString` (replaces
 the `Status` par + `warning_emitter` Script TOP). Stats → `getInfoCHOPChan` (`frames`,
 `cook_us`, `copy_us`, `write_idx`/`read_slot`, `ipc_version`) and `getInfoDATEntries`
