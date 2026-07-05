@@ -87,6 +87,22 @@ revisit-if, not a current direction.
   static-typing hardening rather than a rewrite.
 - Future "should we use Rust?" explorations can start from this record and the
   benchmarks rather than re-deriving the conclusion.
+- **PLAN-002 (R5, 2026-07-04) exercised this ADR's escape hatch** — "narrow
+  optional extension for a consumer-side hot path" — with a C++/pybind11
+  native notification-wait backend (`cuda-link-native`, cloning the `spout/`
+  sidecar pattern). This is a real, non-obvious trade-off worth recording
+  explicitly rather than letting it pass silently: the native sidecar is now
+  a **default** installer-driven component on Windows (`install_td_library.py`'s
+  `--native` flag defaults **on**, not merely available via opt-in `pip
+  install`), so most Windows users end up with the accelerated path without
+  deliberately choosing it. The *core* `cuda-link` wheel remains pure-Python
+  and zero-dependency — this ADR's headline property is unchanged — but the
+  practical, as-shipped default experience for this project's actual
+  distribution channel is no longer "pure Python unless you ask otherwise."
+  See [PLAN-002](../plans/PLAN-002-native-waiter.md) for the full design and
+  measured results (the 10µs/50µs accept gate did not pass on the measured
+  hardware; the escape hatch was still worth taking because native never
+  regresses relative to the existing doorbell path).
 
 ## Reopen condition
 

@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
+  (opt-in via the `cuda-link-native` sidecar; `ImportPolicy.wait_backend`:
+  `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
+  Replaces the Python spin/sleep poll with one native (C++/pybind11) call that
+  spins on `cudaEventQuery` then blocks on the R2 doorbell's Win32 event;
+  activating native forces the doorbell open even if `CUDALINK_DOORBELL` is
+  unset, since the native block phase has nothing faster to wait on
+  otherwise. Ships as a **default** installer-driven component on Windows
+  (`install_td_library.py --native`, default on) rather than an opt-in `pip
+  install` — see [PLAN-002](docs/plans/PLAN-002-native-waiter.md) and the
+  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md) consequences
+  amendment. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
+  frames/arm, 30+60 fps): native's own re-check-after-wake latency
+  (`avg_spin_us`) is genuinely fast (~0.02–6.5 µs), but the accept gate
+  (p50<10µs, p95<50µs, measured as cross-process publish→detect latency via
+  `imp.last_latency`) **MISSes at both fps** — native (p50≈66–67µs,
+  p95≈139–140µs) is not measurably faster than plain doorbell here, likely
+  because the dominant cost is the Windows kernel's own
+  `WaitForSingleObject` wake/scheduling floor, which neither backend
+  controls. Recorded honestly per PLAN-002's own accept-gate framing; R5
+  still ships because it never regresses relative to doorbell-only and the
+  seam is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
+
+### Fixed
+
+- **`bench_r1_wait.py` R5 accept-gate measured the wrong metric.** The
+  PASS/MISS check compared `get_frame()` total wall-clock time (spin + tensor
+  materialization + Python overhead) against PLAN-002's gate, which is
+  defined on publish→detect notification latency — a metric this script
+  never measures. Replaced the gate line with a detection-profile line
+  (`avg_spin_us`/pacing-block breakdown) and a pointer to
+  `bench_doorbell.py`'s new native arm as the authoritative venue.
+- **`bench_doorbell.py`'s poll/doorbell arms did not pin `wait_backend`**,
+  defaulting to `ImportPolicy`'s own `"auto"` — with `cuda-link-native`
+  installed, the "doorbell" arm would silently engage the native backend,
+  contaminating the R2 poll-vs-doorbell comparison (same bug class as the
+  `bench_r1_wait.py` fix above). Every arm now pins `wait_backend`
+  explicitly.
+- **`bench_r1_wait.py`'s per-arm frame budget was still insufficient after
+  its initial fix.** `OVERHEAD_FRAMES=100` (~1.67s at 60fps) let 4/5 arms
+  succeed but the 5th (cupy, last in sequence) still exhausted the shared
+  producer's budget before its turn — real per-arm overhead (subprocess
+  spawn + import + CUDA context init + SHM discovery) runs closer to 4–5s.
+  Bumped to `overhead_frames=400`.
+
 ## [1.11.0] - 2026-06-12
 
 ### Added
