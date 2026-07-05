@@ -2,7 +2,8 @@
 
 This directory contains ADRs for load-bearing design decisions in `cuda-link`. Each ADR records
 why a decision was made, what alternatives were considered, and under what conditions the decision
-should be revisited. See `CONTEXT.md §Architecture references` for a richer set of cross-links.
+should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-decisions)
+§Design Decisions for a richer set of cross-links.
 
 | # | Title | Status | Date |
 |---|-------|--------|------|
@@ -20,4 +21,5 @@ should be revisited. See `CONTEXT.md §Architecture references` for a richer set
 
 Copy the structure from an existing ADR (title / status / date / applies-to / context / decision /
 rejected alternatives / consequences / reopen condition). Number sequentially. Add a row to the
-table above and a bullet to `CONTEXT.md §Architecture references`.
+table above and a bullet to the ADR list in
+[`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-decisions) §Design Decisions.
