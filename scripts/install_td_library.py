@@ -39,6 +39,13 @@ Common flags:
     --wheel <path>      Override core wheel path (skips auto-detect + build).
     --native-wheel <path>  Override native wheel path (implies --native).
     --spout-wheel <path>  Override spout wheel path (implies --spout).
+
+Environment variables (persisted via `setx`, current user, on by default):
+    CUDALINK_DOORBELL=1 is set after ANY successful install (all modes).
+    CUDALINK_RECEIVER_PYTHON_EXE=<python_exe> is also set after mode 4 (the
+    interpreter example_receiver_launcher.py's standalone receiver should use).
+    Pass --no-set-env to skip both. Note: setx only affects NEW processes —
+    restart your terminal / TouchDesigner before the change applies.
 """
 
 from __future__ import annotations
@@ -278,6 +285,53 @@ def _run_pip(pip_args: list[str], dry_run: bool) -> None:
     result = subprocess.run(pip_args, cwd=REPO_ROOT)
     if result.returncode != 0:
         sys.exit(_red("[error] pip install failed — see output above."))
+
+
+def _setx_user(name: str, value: str, dry_run: bool) -> bool:
+    """Persist a current-user Windows environment variable via `setx` (no admin needed).
+
+    Soft-failure like the native wheel auto-build: a setx problem (e.g. the
+    combined-length limit, or setx being unavailable on a non-Windows dev
+    environment) warns and returns False rather than aborting the whole install.
+
+    NOTE: setx only affects NEW processes started after it runs — the current
+    shell/TD session will not see the new value until restarted. Callers are
+    responsible for telling the user this (see _print_env_vars_set below).
+    """
+    cmd_str = f'setx {name} "{value}"'
+    print(f"  Running: {cmd_str}")
+    if dry_run:
+        print(_yellow("    [dry-run] Command not executed."))
+        return True
+    if sys.platform != "win32":
+        print(_yellow(f"    [skip] setx is Windows-only; not setting {name} on this platform."))
+        return False
+    try:
+        result = subprocess.run(["setx", name, value], capture_output=True, text=True)
+    except OSError as e:
+        print(_yellow(f"    [warn] Could not run setx for {name}: {e}"))
+        return False
+    if result.returncode != 0:
+        print(_yellow(f"    [warn] setx {name} failed (exit {result.returncode}): {result.stderr.strip()}"))
+        return False
+    return True
+
+
+def _print_env_vars_set(set_vars: dict[str, str]) -> None:
+    """Print a clearly-labeled confirmation block for env vars just persisted via setx.
+
+    Deliberately separate from _print_activation's CUDALINK_LIB_PATH instructions
+    so it isn't mistaken for them — these are a different mechanism (already
+    done, not something the user needs to do) for a different purpose.
+    """
+    if not set_vars:
+        return
+    print()
+    print(_bold("  Environment variables set (current user):"))
+    for name, value in set_vars.items():
+        print(_green(f"    {name}={value}"))
+    print(_yellow("  Note: these only take effect in NEW processes — restart your terminal"))
+    print(_yellow("  and/or TouchDesigner before they apply. Use --no-set-env to skip this."))
 
 
 def _find_site_packages_in(base: Path) -> Path | None:
@@ -553,7 +607,9 @@ def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: boo
         print("  then add the 'site-packages' entry to TD Preferences.")
 
 
-def mode_4_system_python(wheels: list[Path], python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_4_system_python(
+    wheels: list[Path], python_exe: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True
+) -> None:
     """Install into a system / parallel Python installation (the official TD docs approach)."""
     if not python_exe:
         if non_interactive:
@@ -610,6 +666,19 @@ def mode_4_system_python(wheels: list[Path], python_exe: str | None, non_interac
     _print_activation(
         site_pkgs, "Python site-packages", td_preferences_only=True, extra_packages=_extra_packages_from_wheels(wheels)
     )
+
+    if set_env:
+        # CUDALINK_RECEIVER_PYTHON_EXE: the interpreter example_receiver_launcher.py's
+        # standalone receiver subprocess should use — this IS that interpreter, since
+        # mode 4 just installed cuda_link into it. Without this, the launcher falls
+        # back to `py -3` resolution, which may pick a DIFFERENT Python 3 install.
+        # (CUDALINK_DOORBELL is set centrally in main() after any mode succeeds.)
+        print()
+        print(_bold("  Persisting environment variable for the standalone receiver:"))
+        set_vars: dict[str, str] = {}
+        if _setx_user("CUDALINK_RECEIVER_PYTHON_EXE", str(py_path), dry_run):
+            set_vars["CUDALINK_RECEIVER_PYTHON_EXE"] = str(py_path)
+        _print_env_vars_set(set_vars)
 
 
 def mode_5_td_python(wheels: list[Path], td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
@@ -755,6 +824,13 @@ def main() -> None:
     )
     parser.add_argument("--non-interactive", action="store_true", help="Require explicit flags; skip all prompts.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
+    parser.add_argument(
+        "--no-set-env",
+        action="store_true",
+        default=False,
+        help="Don't persist CUDALINK_DOORBELL (any mode) / CUDALINK_RECEIVER_PYTHON_EXE (mode 4) as "
+        "current-user Windows environment variables via setx (set by default otherwise).",
+    )
     args = parser.parse_args()
 
     # --spout-wheel implies --spout
@@ -806,6 +882,9 @@ def main() -> None:
     if install_spout:
         wheels.append(resolve_spout_wheel(args.spout_wheel, args.dry_run))
 
+    # Set unconditionally by --no-set-env: True unless the user opted out.
+    set_env = not args.no_set_env
+
     # Dispatch
     if mode == 1:
         mode_1_external_folder(wheels, args.target, args.non_interactive, args.dry_run)
@@ -814,9 +893,18 @@ def main() -> None:
     elif mode == 3:
         mode_3_conda(wheels, args.conda, args.non_interactive, args.dry_run)
     elif mode == 4:
-        mode_4_system_python(wheels, args.python, args.non_interactive, args.dry_run)
+        mode_4_system_python(wheels, args.python, args.non_interactive, args.dry_run, set_env)
     elif mode == 5:
         mode_5_td_python(wheels, args.td_python, args.non_interactive, args.dry_run)
+
+    # CUDALINK_DOORBELL: persisted here (not a library code default) after ANY
+    # successful mode above — a mode function that hit sys.exit() on error never
+    # reaches this point, so a failed install correctly skips it too.
+    if set_env:
+        print()
+        print(_bold("  Persisting environment variable for the R2 doorbell:"))
+        if _setx_user("CUDALINK_DOORBELL", "1", args.dry_run):
+            _print_env_vars_set({"CUDALINK_DOORBELL": "1"})
 
 
 if __name__ == "__main__":
