@@ -90,6 +90,16 @@ def _policy_has_gpu_wait() -> bool:
         return False
 
 
+def _policy_has_wait_backend() -> bool:
+    """Return True if ImportPolicy has a 'wait_backend' field (R5 implemented)."""
+    try:
+        from cuda_link._importer_port import ImportPolicy
+
+        return any(f.name == "wait_backend" for f in dataclasses.fields(ImportPolicy))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Worker functions (module-level so they can be pickled by spawn)
 # ---------------------------------------------------------------------------
@@ -101,11 +111,19 @@ def _worker_producer(
     producer_fps: float,
     result_q: object,
 ) -> None:
-    """Export synthetic GPU frames at a fixed cadence."""
+    """Export synthetic GPU frames at a fixed cadence.
+
+    doorbell=True unconditionally: harmless for arms that don't use it
+    (SetEvent is ~sub-microsecond per publish, CHANGELOG 1.11.0), and required
+    for the torch/native (R5) arm to reach its real target -- the native wait
+    backend's block phase cannot beat the Python fallback without a doorbell
+    to actually block on (see ImportPolicy.wait_backend docstring / D4).
+    """
     import ctypes
 
     try:
         from cuda_link import FrameSpec, GpuFrame
+        from cuda_link._exporter_port import ExportPolicy
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
         from cuda_link.exporter import Exporter
 
@@ -118,7 +136,8 @@ def _worker_producer(
                 channels=CHANNELS,
                 dtype=DTYPE,
                 num_slots=2,
-            )
+            ),
+            policy=ExportPolicy(doorbell=True),
         )
 
         nbytes = exporter.data_size
@@ -137,8 +156,24 @@ def _worker_producer(
         exporter.record_source_sync(0)
 
         producer_sleep_s = 1.0 / producer_fps
-        # Extra frames: warmup + 3 arms * (warmup + frames) with headroom
-        total = WARMUP_FRAMES + num_frames * 5 + 20  # cpu-spin + R1 + adaptive + cupy + headroom
+        # Each arm opens a FRESH Importer connection and independently needs
+        # its own (WARMUP_FRAMES + num_frames) budget from this shared
+        # producer stream -- arms do not share/reuse already-consumed frames.
+        # N_ARMS = cpu-spin + native(R5) + gpu-wait(R1) + adaptive(R1-auto) +
+        # cupy = 5. Diagnosed 2026-07-04: the previous formula added
+        # WARMUP_FRAMES only ONCE for all arms combined (already marginal at
+        # 4 arms; a 5th arm made it fail outright -- the native (R5) arm
+        # measured 0 samples over its full 60s deadline because the shared
+        # producer had exhausted its under-sized budget and gone silent).
+        # OVERHEAD_FRAMES accounts for the roughly-constant per-arm cost of
+        # process spawn + CUDA context init + SHM discovery (measured ~1-2s,
+        # i.e. ~60-120 frames at 60fps) BEFORE an arm's measurement loop even
+        # starts -- this is wall-clock overhead, not frame-count-proportional,
+        # so a frame-count-only budget silently runs out on real hardware even
+        # when the math "should" have enough frames left.
+        n_arms = 5
+        overhead_frames = 100
+        total = (WARMUP_FRAMES + num_frames + overhead_frames) * n_arms + 50
         for _ in range(total):
             exporter.export(GpuFrame(ptr=int(src_ptr.value), size=nbytes))
             time.sleep(producer_sleep_s)
@@ -159,9 +194,16 @@ def _worker_consumer_torch(
     spin_us: int,
     gpu_wait: bool,
     producer_fps: float,
+    wait_backend: str,
     result_q: object,
 ) -> None:
-    """Torch get_frame() consumer — CPU spin or GPU-side wait."""
+    """Torch get_frame() consumer — CPU spin, GPU-side wait, or R5 native wait.
+
+    wait_backend="native" targets the same torch-CPU-wait scenario as the
+    cpu-spin baseline (gpu_wait=False) — R5 is explicitly scoped to
+    numpy/cupy/torch-CPU, not the torch GPU-wait path, which already
+    short-circuits before ever reaching _wait_for_slot.
+    """
     try:
         from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
         from cuda_link.importer import Importer
@@ -178,6 +220,13 @@ def _worker_consumer_torch(
         }
         if gpu_wait and _policy_has_gpu_wait():
             policy_kwargs["torch_gpu_wait"] = True
+        if _policy_has_wait_backend():
+            # Always set explicitly (never omitted): ImportPolicy()'s own
+            # default is wait_backend="auto", not "python" -- on a machine
+            # with cuda-link-native installed, omitting this would let every
+            # non-R5 arm silently pick up the native backend via "auto",
+            # contaminating the baseline/R1/cupy comparisons.
+            policy_kwargs["wait_backend"] = wait_backend
 
         policy = ImportPolicy(**policy_kwargs)
         spec = ImportSpec(
@@ -267,11 +316,17 @@ def _worker_consumer_torch_adaptive(
 
         time.sleep(0.4)
 
-        policy = ImportPolicy(
-            wait_spin_us=spin_us,
-            torch_gpu_wait_adaptive=True,
-            debug=True,
-        )
+        policy_kwargs: dict = {
+            "wait_spin_us": spin_us,
+            "torch_gpu_wait_adaptive": True,
+            "debug": True,
+        }
+        if _policy_has_wait_backend():
+            # Pin explicitly -- ImportPolicy()'s default is "auto", which would
+            # silently pick up cuda-link-native if installed (see the note in
+            # _worker_consumer_torch above).
+            policy_kwargs["wait_backend"] = "python"
+        policy = ImportPolicy(**policy_kwargs)
         spec = ImportSpec(shm_name=shm_name, shape=(HEIGHT, WIDTH, CHANNELS), dtype=DTYPE)
         imp = Importer.open(spec, policy=policy)
 
@@ -357,7 +412,13 @@ def _worker_consumer_cupy(
 
         time.sleep(0.4)
 
-        policy = ImportPolicy(debug=True)
+        policy_kwargs: dict = {"debug": True}
+        if _policy_has_wait_backend():
+            # Pin explicitly -- CuPy's backend also routes through
+            # _wait_for_slot (R5's scope includes cupy), so "auto" would
+            # silently engage the native backend here too if installed.
+            policy_kwargs["wait_backend"] = "python"
+        policy = ImportPolicy(**policy_kwargs)
         spec = ImportSpec(
             shm_name=shm_name,
             shape=(HEIGHT, WIDTH, CHANNELS),
@@ -475,6 +536,7 @@ def _run_scenario(
     frames: int,
     spin_us: int,
     has_gpu_wait: bool,
+    has_wait_backend: bool,
     ctx: object,
 ) -> dict[str, dict]:
     """Start a producer at producer_fps and run all consumer arms against it."""
@@ -500,18 +562,31 @@ def _run_scenario(
     r = _run_arm(
         label="torch/cpu-spin",
         target=_worker_consumer_torch,
-        args=(shm_name, frames, spin_us, False, producer_fps),
+        args=(shm_name, frames, spin_us, False, producer_fps, "python"),
         ctx=ctx,
         producer_fps=producer_fps,
     )
     if r:
         results["torch_cpu_spin"] = r
 
+    if has_wait_backend:
+        r = _run_arm(
+            label="torch/native (R5)",
+            target=_worker_consumer_torch,
+            args=(shm_name, frames, spin_us, False, producer_fps, "native"),
+            ctx=ctx,
+            producer_fps=producer_fps,
+        )
+        if r:
+            results["torch_native"] = r
+    else:
+        print("  [torch/native (R5)] SKIPPED -- ImportPolicy.wait_backend not present yet")
+
     if has_gpu_wait:
         r = _run_arm(
             label="torch/gpu-wait (R1)",
             target=_worker_consumer_torch,
-            args=(shm_name, frames, spin_us, True, producer_fps),
+            args=(shm_name, frames, spin_us, True, producer_fps, "python"),
             ctx=ctx,
             producer_fps=producer_fps,
         )
@@ -570,6 +645,7 @@ def main() -> int:
     args = parser.parse_args()
 
     has_gpu_wait = _policy_has_gpu_wait()
+    has_wait_backend = _policy_has_wait_backend()
 
     print("=" * 72)
     print("R1 wait-path benchmark")
@@ -577,6 +653,9 @@ def main() -> int:
     print(f"  Frames/arm : {args.frames}  Warmup: {WARMUP_FRAMES}")
     print(f"  Spin budget: {args.spin_us} us")
     print(f"  R1 (torch_gpu_wait): {'PRESENT -- gpu-wait arm enabled' if has_gpu_wait else 'ABSENT -- baseline only'}")
+    print(
+        f"  R5 (wait_backend)  : {'PRESENT -- native arm enabled' if has_wait_backend else 'ABSENT -- baseline only'}"
+    )
     print("=" * 72)
 
     ctx = multiprocessing.get_context("spawn")
@@ -598,12 +677,14 @@ def main() -> int:
             frames=args.frames,
             spin_us=args.spin_us,
             has_gpu_wait=has_gpu_wait,
+            has_wait_backend=has_wait_backend,
             ctx=ctx,
         )
 
     # --- Summary ---
     labels = {
         "torch_cpu_spin": "torch / cpu-spin (baseline)",
+        "torch_native": "torch / native (R5 opt-in)",
         "torch_gpu_wait": "torch / gpu-wait (R1 opt-in)",
         "cupy_gpu_wait": "cupy  / gpu-wait (reference)",
     }
@@ -647,6 +728,23 @@ def main() -> int:
         elif "torch_gpu_wait" not in results:
             print("  [R1 comparison not available -- run again after implementing R1]")
 
+        if "torch_cpu_spin" in results and "torch_native" in results:
+            baseline_wait = results["torch_cpu_spin"]["avg_wait_us"]
+            native_wait = results["torch_native"]["avg_wait_us"]
+            delta_wait = baseline_wait - native_wait
+            baseline_p50 = results["torch_cpu_spin"]["p50_us"]
+            native_p50 = results["torch_native"]["p50_us"]
+            native_p95 = results["torch_native"]["p95_us"]
+            delta_p50 = baseline_p50 - native_p50
+            print(f"  R5 wait component : {baseline_wait:.1f} us -> {native_wait:.1f} us  (delta {delta_wait:+.1f} us)")
+            print(f"  R5 get_frame p50  : {baseline_p50:.1f} us -> {native_p50:.1f} us  (delta {delta_p50:+.1f} us)")
+            gate = "PASS" if native_p50 < 10.0 and native_p95 < 50.0 else "MISS"
+            print(f"  R5 accept gate    : p50<10us p95<50us -- p50={native_p50:.1f}us p95={native_p95:.1f}us [{gate}]")
+        elif "torch_native" not in results and has_wait_backend:
+            print("  [R5 native arm ran but produced no comparable result this scenario]")
+        elif not has_wait_backend:
+            print("  [R5 comparison not available -- run again after installing cuda-link-native]")
+
     print()
     out = Path(args.outfile)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -661,6 +759,7 @@ def main() -> int:
             "warmup_frames": WARMUP_FRAMES,
             "spin_us": args.spin_us,
             "r1_present": has_gpu_wait,
+            "r5_present": has_wait_backend,
         },
         "results": all_results,
     }
