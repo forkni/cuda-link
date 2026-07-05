@@ -26,9 +26,10 @@ class WaitStatus(Enum):
     """How ``wait_slot`` discovered the frame was ready (or that it timed out)."""
 
     READY_SPIN = auto()  # caught by the native busy-spin phase
-    READY_DOORBELL = auto()  # woken by WaitForSingleObject on the doorbell event
-    READY_LATE = auto()  # write_idx pre-check caught a frame the doorbell already missed
+    READY_DOORBELL = auto()  # block phase caught it with a doorbell in play
+    READY_LATE = auto()  # retired 2026-07-04 (torn-frame fix) -- never emitted anymore, kept for ABI
     TIMEOUT = auto()  # deadline exceeded with no frame
+    READY_POLL = auto()  # block phase caught it with no doorbell available (bare-Sleep polling)
 
 
 @dataclass(frozen=True)
@@ -62,14 +63,16 @@ class WaitBackend(Protocol):
         """Wait for the per-slot CUDA event or the doorbell, whichever fires first.
 
         *event_ptr* — the per-slot ``cudaEvent_t`` (as an int) to poll via
-        ``cudaEventQuery``. *doorbell_handle* — the Win32 event HANDLE (as an int)
-        opened for this SHM channel; 0 if the doorbell is unavailable (block phase
-        falls back to a bounded ``cudaEventQuery`` poll only). *write_idx_addr* — the
-        raw address of the 4-byte ``write_idx`` field inside the SHM header, read
-        with a lost-wakeup pre-check before blocking. *last_write_idx* — the value
-        the caller observed at the start of this wait. *spin_us* — the busy-spin
-        budget before falling into the blocking phase. *timeout_ms* — the overall
-        deadline for the call.
+        ``cudaEventQuery`` — the only valid "this slot is ready" signal; see the
+        2026-07-04 torn-frame fix note in ``native_waiter.cpp`` for why nothing
+        else (e.g. ``write_idx`` alone) may be treated as ready. *doorbell_handle*
+        — the Win32 event HANDLE (as an int) opened for this SHM channel; 0 if the
+        doorbell is unavailable (block phase falls back to a bounded
+        ``cudaEventQuery`` poll only). *write_idx_addr* / *last_write_idx* — kept
+        for interface stability; no longer consulted by the real implementation
+        (retained only so a stale/unrebuilt native module still accepts the same
+        call shape). *spin_us* — the busy-spin budget before falling into the
+        blocking phase. *timeout_ms* — the overall deadline for the call.
         """
         ...
 

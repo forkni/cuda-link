@@ -1,9 +1,10 @@
 # CMake build for the cuda-link-native module (_native_waiter).
 # The native extension is Windows-only. Unlike cuda-link-spout, it requires
-# NEITHER the CUDA Toolkit NOR any SDK at build time: it resolves cudaEventQuery
-# from the cudart already loaded by the host process via GetModuleHandleW +
-# GetProcAddress (see _cpp/native_waiter.cpp) — it never links or loads cudart
-# itself. Only a C++17 compiler + the Windows SDK (for synchapi.h) are needed.
+# NEITHER the CUDA Toolkit NOR any SDK at build time: the cudaEventQuery
+# function pointer is handed in explicitly by Python (CUDARuntimeAPI's own
+# resolved symbol, via set_cuda_event_query() — see _cpp/native_waiter.cpp) —
+# this module never links, loads, or independently resolves cudart itself.
+# Only a C++17 compiler + the Windows SDK (for synchapi.h) are needed.
 #
 # On any other platform, the native build is skipped and scikit-build-core
 # packages a pure-Python wheel, so `pip install` succeeds everywhere. The

@@ -1470,7 +1470,7 @@ class Importer:
                 self.total_wait_spin_us += result.waited_us
                 self.wait_spin_hits += 1
                 self._adaptive_observe_wait(False)
-            else:  # READY_DOORBELL or READY_LATE both count as the blocked/slept bucket
+            else:  # READY_DOORBELL / READY_POLL / READY_LATE(retired) all count as the blocked/slept bucket
                 self.total_wait_sleep_us += result.waited_us
                 self.wait_sleep_hits += 1
                 self._adaptive_observe_wait(status_name == "READY_DOORBELL")

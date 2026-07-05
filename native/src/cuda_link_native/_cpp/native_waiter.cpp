@@ -23,11 +23,25 @@
 // rediscovery, no guessing, correct by construction.
 //
 // State machine (wait_slot): spin on cudaEventQuery for spin_us, then block until
-// the deadline, checking (in order) the write_idx lost-wakeup pre-check, then
-// cudaEventQuery, then WaitForSingleObject on the doorbell event for a bounded
-// slice. The spin/block loop core is written as a template over the polling
-// functions so a test harness can inject fakes without touching real CUDA/Win32
-// state (see test_state_machine in native/tests).
+// the deadline, checking cudaEventQuery, then WaitForSingleObject on the doorbell
+// event for a bounded slice. The spin/block loop core is written as a template
+// over the polling functions so a test harness can inject fakes without touching
+// real CUDA/Win32 state (see native/tests/test_state_machine.py, which drives it
+// through the wait_slot_test() pybind entry point below).
+//
+// FIXED (2026-07-04, torn-frame race): the block phase used to pre-check the SHM
+// write_idx before cudaEventQuery and return READY_LATE as soon as write_idx
+// advanced past last_write_idx, treating "a newer frame landed" as equivalent to
+// "this slot's own event fired." That reuse of wait_for_doorbell's arrival-
+// detection pre-check (any new frame is a valid wake reason there) was wrong for
+// _wait_for_slot, which needs THIS slot's cudaEventQuery to actually succeed
+// before its GPU copy is guaranteed complete. Under the Python Exporter's async
+// default (ExportPolicy.export_sync=False), write_idx can advance several frames
+// ahead of a still-in-flight D2D copy on this slot, so exiting on write_idx alone
+// risked handing the consumer a torn frame. cudaEventQuery() is now the only
+// valid "ready" exit from the block phase; READY_LATE (value 2) stays in the
+// status enum for numeric stability but the real implementation never emits it
+// again. See docs/plans/PLAN-002-native-waiter.md D2 for the full writeup.
 //
 // Build: see native/CMakeLists.txt. This file is intentionally not compiled in CI
 // on Linux; the pure-Python layer is tested via FakeWaitBackend. Validate on a
@@ -58,8 +72,9 @@ CudaEventQueryFn g_cudaEventQuery = nullptr;
 enum WaitStatusCode : int {
     kReadySpin = 0,
     kReadyDoorbell = 1,
-    kReadyLate = 2,
+    kReadyLate = 2,  // retired 2026-07-04 (torn-frame fix) — never emitted anymore, kept for ABI.
     kTimeout = 3,
+    kReadyPoll = 4,  // block phase caught it with no doorbell in play (bare-Sleep polling).
 };
 
 double qpc_now_us(double freq_inv_us) {
@@ -75,16 +90,17 @@ double qpc_freq_inv_us() {
 }
 
 // Small bounded slice for the block-phase WaitForSingleObject call: bounds how
-// stale the write_idx/cudaEventQuery pre-checks can get before re-running them,
-// without busy-spinning. Matches the doorbell design's existing bounded
-// lost-wakeup window (see _doorbell.py / wait_for_doorbell).
+// stale the cudaEventQuery re-check can get before it runs again, without
+// busy-spinning. Matches the doorbell design's existing bounded lost-wakeup
+// window (see _doorbell.py / wait_for_doorbell).
 constexpr DWORD kBlockSliceMs = 2;
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // The spin/block state machine, parameterized over the polling primitives so a
-// test harness can inject fakes (see native/tests for the injected-fn variant).
+// test harness can inject fakes (see wait_slot_test() below and
+// native/tests/test_state_machine.py).
 // ---------------------------------------------------------------------------
 
 template <typename EventQueryFn, typename ReadWriteIdxFn, typename WaitDoorbellFn, typename NowUsFn>
@@ -99,6 +115,14 @@ std::tuple<int, double, int> wait_slot_impl(
     std::uint32_t last_write_idx,
     int spin_us,
     int timeout_ms) {
+    // write_idx_addr / last_write_idx / read_write_idx are retained in the
+    // signature for interface stability with the Python WaitBackend Protocol
+    // (importer.py still passes them) but are no longer read here — see the
+    // torn-frame fix note in this file's header comment for why the write_idx
+    // pre-check that used to consume them was removed.
+    (void)write_idx_addr;
+    (void)last_write_idx;
+    (void)read_write_idx;
     const double start = now_us();
     const double deadline = start + static_cast<double>(timeout_ms) * 1000.0;
     const double spin_deadline = (spin_us > 0) ? (start + static_cast<double>(spin_us)) : start;
@@ -114,32 +138,34 @@ std::tuple<int, double, int> wait_slot_impl(
     }
 
     // --- block phase ---------------------------------------------------------
+    // cudaEventQuery is the only valid "ready" exit here (see the torn-frame fix
+    // note above the enum). The doorbell wake — or, absent a doorbell, the
+    // bounded Sleep — is purely a hint to re-check sooner; a missed/late signal
+    // costs at most one kBlockSliceMs slice before the next event_query, never a
+    // correctness issue.
     while (true) {
         const double t = now_us();
         if (t >= deadline) {
             return {kTimeout, t - start, 0};
         }
 
-        // Lost-wakeup pre-check (mirrors importer.py's wait_for_doorbell pre-check):
-        // a frame may have already landed since last_write_idx was captured, even
-        // if the doorbell signal itself was missed.
-        if (write_idx_addr != 0) {
-            const std::uint32_t cur = read_write_idx(write_idx_addr);
-            if (cur != 0 && cur != last_write_idx) {
-                return {kReadyLate, now_us() - start, 1};
-            }
-        }
-
         if (event_ptr != 0 && event_query(event_ptr)) {
-            return {kReadyDoorbell, now_us() - start, 2};
+            // doorbell_handle != 0 means a doorbell was genuinely in play for this
+            // wait — kReadyDoorbell, even if this particular check happened right
+            // after a bounded slice elapsed rather than an exact wake (the two are
+            // not worth distinguishing further: both mean "the block phase, not
+            // the spin phase, caught it"). doorbell_handle == 0 means there was
+            // never a doorbell to wake on at all — kReadyPoll, so telemetry never
+            // implies a wake that couldn't have happened.
+            const bool had_doorbell = doorbell_handle != 0;
+            return {had_doorbell ? kReadyDoorbell : kReadyPoll, now_us() - start, had_doorbell ? 2 : 3};
         }
 
         if (doorbell_handle != 0) {
-            if (wait_doorbell(doorbell_handle, kBlockSliceMs)) {
-                // Woken by the doorbell; loop back around to re-check write_idx /
-                // event above rather than trusting the wake blindly.
-                continue;
-            }
+            wait_doorbell(doorbell_handle, kBlockSliceMs);
+            // Whether this returned true (genuine wake) or false (slice elapsed),
+            // loop back and re-check the event above -- a wake is only a hint,
+            // never a substitute for cudaEventQuery.
         } else {
             // No doorbell available — bounded sleep so we don't busy-spin forever
             // (this degrades to roughly the block-phase floor the Python fallback
@@ -190,6 +216,40 @@ std::tuple<int, double, int> wait_slot(
         event_ptr, doorbell_handle, write_idx_addr, last_write_idx, spin_us, timeout_ms);
 }
 
+// ---------------------------------------------------------------------------
+// Test-only entry point: drives the REAL wait_slot_impl template with
+// Python-injected fake polling functions, so native/tests/test_state_machine.py
+// can exercise the actual state machine (including the torn-frame regression
+// test) without any real CUDA/Win32 state. Not used by the production wait_slot()
+// path above, and — unlike it — does NOT release the GIL: calling back into
+// Python callables requires holding it throughout.
+// ---------------------------------------------------------------------------
+
+std::tuple<int, double, int> wait_slot_test(
+    py::function event_query,       // (event_ptr: int) -> bool
+    py::function read_write_idx,    // (write_idx_addr: int) -> int
+    py::function wait_doorbell,     // (doorbell_handle: int, slice_ms: int) -> bool
+    py::function now_us,            // () -> float, microseconds, caller-controlled clock
+    std::uintptr_t event_ptr,
+    std::uintptr_t doorbell_handle,
+    std::uintptr_t write_idx_addr,
+    std::uint32_t last_write_idx,
+    int spin_us,
+    int timeout_ms) {
+    auto event_query_wrap = [&](std::uintptr_t ptr) -> bool { return event_query(ptr).cast<bool>(); };
+    auto read_write_idx_wrap = [&](std::uintptr_t addr) -> std::uint32_t {
+        return read_write_idx(addr).cast<std::uint32_t>();
+    };
+    auto wait_doorbell_wrap = [&](std::uintptr_t handle, DWORD slice_ms) -> bool {
+        return wait_doorbell(handle, static_cast<int>(slice_ms)).cast<bool>();
+    };
+    auto now_us_wrap = [&]() -> double { return now_us().cast<double>(); };
+
+    return wait_slot_impl(
+        event_query_wrap, read_write_idx_wrap, wait_doorbell_wrap, now_us_wrap,
+        event_ptr, doorbell_handle, write_idx_addr, last_write_idx, spin_us, timeout_ms);
+}
+
 bool cudart_resolved() {
     return g_cudaEventQuery != nullptr;
 }
@@ -224,5 +284,18 @@ PYBIND11_MODULE(_native_waiter, m) {
     m.def("wait_slot", &wait_slot, py::call_guard<py::gil_scoped_release>(),
           "Wait for the per-slot CUDA event or the doorbell, whichever fires first. "
           "Returns (status_int, waited_us, method) where status_int is "
-          "0=READY_SPIN 1=READY_DOORBELL 2=READY_LATE 3=TIMEOUT.");
+          "0=READY_SPIN 1=READY_DOORBELL 2=READY_LATE(retired, never emitted) "
+          "3=TIMEOUT 4=READY_POLL.");
+
+    // Test-only entry point (see the docstring on wait_slot_test's definition
+    // above). GIL held throughout -- not used by the production wait_slot() path.
+    // Named py::arg()s so native/tests/test_state_machine.py can call it with
+    // keyword arguments.
+    m.def("wait_slot_test", &wait_slot_test, py::arg("event_query"), py::arg("read_write_idx"),
+          py::arg("wait_doorbell"), py::arg("now_us"), py::arg("event_ptr"), py::arg("doorbell_handle"),
+          py::arg("write_idx_addr"), py::arg("last_write_idx"), py::arg("spin_us"), py::arg("timeout_ms"),
+          "TEST ONLY: drive the real wait_slot_impl state machine with injected "
+          "Python fake polling functions (event_query, read_write_idx, "
+          "wait_doorbell, now_us). Same return contract as wait_slot(). Used by "
+          "native/tests/test_state_machine.py; not part of the production API.");
 }

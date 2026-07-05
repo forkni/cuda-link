@@ -53,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer's budget before its turn — real per-arm overhead (subprocess
   spawn + import + CUDA context init + SHM discovery) runs closer to 4–5s.
   Bumped to `overhead_frames=400`.
+- **R5 native waiter: torn-frame race in the block phase's `write_idx`
+  pre-check.** `native_waiter.cpp`'s block phase pre-checked the SHM
+  `write_idx` before `cudaEventQuery` and returned success (`READY_LATE`,
+  bucketed as a success by `importer.py`) as soon as `write_idx` advanced
+  past the value captured at wait-start — treating "a newer frame landed"
+  as equivalent to "this slot's own event fired." Under the Python
+  `Exporter`'s async default (`export_sync=False`), `write_idx` can advance
+  several frames ahead of a still-in-flight D2D copy on *this* slot, so a
+  consumer could read a torn (still-copying) GPU buffer. Not reachable via
+  the TD Sender (blocking export since v1.10.1 guarantees the copy is done
+  before publish); reachable via the Python `Exporter`'s async default under
+  GPU load. `cudaEventQuery` is now the only valid "ready" exit from the
+  block phase — the doorbell wake (or, absent a doorbell, a bounded `Sleep`)
+  is purely a hint to re-check sooner, never a substitute. `READY_LATE`
+  stays in the status enum for ABI stability but is never emitted again.
+  Added `READY_POLL` alongside (block phase caught it with no doorbell
+  available, vs. `READY_DOORBELL` genuinely having one in play) — a related
+  telemetry-accuracy fix bundled in since it's the same code region. New
+  `native/tests/test_state_machine.py` drives the real C++ state machine
+  with injected Python fakes (via a new test-only `wait_slot_test()` pybind
+  entry point) to regression-test this, including the specific "`write_idx`
+  advances while this slot's event stays not-ready" scenario the bug needed.
 
 ## [1.11.0] - 2026-06-12
 

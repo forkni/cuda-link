@@ -76,12 +76,25 @@ wait_slot(event_ptr, doorbell_handle, write_idx_addr, last_write_idx,
 2. **Spin phase**: tight loop on `cudaEventQuery(event)` + `QueryPerformanceCounter`
    until `spin_us` — native iterations are tens of ns, so the event is caught within
    ~1 µs of the GPU signal.
-3. **Block phase**: loop { volatile read of `write_idx` (lost-wakeup guard, same
-   pre-check as `wait_for_doorbell`) → `cudaEventQuery` →
-   `WaitForSingleObject(doorbell, slice_ms)` } until ready or deadline.
-4. Status enum `READY_SPIN | READY_DOORBELL | READY_LATE | TIMEOUT`, mapped onto the
-   existing `wait_spin_hits` / `wait_sleep_hits` counters and
-   `_adaptive_observe_wait` bookkeeping.
+3. **Block phase**: loop { `cudaEventQuery` → `WaitForSingleObject(doorbell, slice_ms)`
+   (or a bounded `Sleep` when no doorbell is available) } until ready or deadline.
+   **Bug found and fixed (2026-07-04, torn-frame race):** an earlier version of
+   this phase pre-checked the SHM `write_idx` *before* `cudaEventQuery` (mirroring
+   `wait_for_doorbell`'s lost-wakeup guard) and returned success as soon as
+   `write_idx` advanced past the value captured at wait-start — treating "a newer
+   frame landed" as equivalent to "this slot's own event fired." That reuse was
+   wrong here: under the Python `Exporter`'s async default (`export_sync=False`),
+   `write_idx` can advance several frames ahead of a still-in-flight D2D copy on
+   *this* slot, so exiting on `write_idx` alone risked handing the consumer a torn
+   frame. `cudaEventQuery` is now the only valid "ready" exit from the block
+   phase; the doorbell wake (or bounded `Sleep`) is purely a hint to re-check
+   sooner, never a substitute.
+4. Status enum `READY_SPIN | READY_DOORBELL | READY_LATE (retired, never emitted) |
+   TIMEOUT | READY_POLL` (added to distinguish "block phase caught it via a
+   genuine doorbell wake/slice" from "no doorbell was ever available, this was
+   bare polling" — a minor telemetry-accuracy fix bundled with the race fix
+   above), mapped onto the existing `wait_spin_hits` / `wait_sleep_hits` counters
+   and `_adaptive_observe_wait` bookkeeping.
 
 ### D3 — cudart access via an explicit function-pointer handoff (no second runtime, no bare-name lookup)
 
@@ -128,7 +141,13 @@ late) run the existing importer suite on Ubuntu; a loader test verifies the
 graceful-degradation matrix (no module / no cudart / no doorbell / non-Windows). A
 marked native smoke test (Windows + GPU, manual) mirrors spout's
 `test_native_smoke.py`. The C++ spin/block state machine takes injected function
-pointers so a fake "event" function unit-tests it without CUDA.
+pointers, exposed via a test-only `wait_slot_test()` pybind entry point, so
+`native/tests/test_state_machine.py` (added 2026-07-04 alongside the torn-frame
+fix above) drives the *real* state machine with Python fakes for `cudaEventQuery`
+/ the doorbell / the clock — Windows-only (needs the compiled extension) but
+GPU/cudart-free, a lighter bar than the smoke test. **Caveat**: like the smoke
+test, `native-tests` CI (ubuntu-latest, never builds the Windows-only extension)
+does not run it — both are manual-verification-only today.
 
 ## Phases
 

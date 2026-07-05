@@ -16,8 +16,9 @@ from ._backend import WaitBackend, WaitResult, WaitStatus
 _STATUS_FROM_INT = {
     0: WaitStatus.READY_SPIN,
     1: WaitStatus.READY_DOORBELL,
-    2: WaitStatus.READY_LATE,
+    2: WaitStatus.READY_LATE,  # retired 2026-07-04 (torn-frame fix) -- kept for ABI
     3: WaitStatus.TIMEOUT,
+    4: WaitStatus.READY_POLL,
 }
 
 
