@@ -10,6 +10,16 @@ Measures per-frame get_frame() CPU time for the torch backend (zero-copy path):
              serialises in stream order.  Auto-detected: runs only when
              ImportPolicy has a 'torch_gpu_wait' field (i.e. R1 is implemented).
 
+  native     R5 opt-in: native (C++) notification-wait backend. Auto-detected:
+             runs only when ImportPolicy has a 'wait_backend' field (i.e. R5 is
+             implemented). NOTE: the printed p50/p95 for this arm are total
+             get_frame() wall-clock time (spin + tensor materialization +
+             Python overhead), NOT the publish->detect notification latency
+             that PLAN-002's accept gate (p50<10us, p95<50us) is defined on.
+             This script has no cross-process publish timestamp to compare
+             against, so it cannot itself evaluate the gate -- see
+             scripts/profiling/bench_doorbell.py's native arm for that.
+
   cupy       Reference: CuPy already defaults to GPU-side wait.
              Runs if cupy is importable.
 
@@ -166,13 +176,22 @@ def _worker_producer(
         # measured 0 samples over its full 60s deadline because the shared
         # producer had exhausted its under-sized budget and gone silent).
         # OVERHEAD_FRAMES accounts for the roughly-constant per-arm cost of
-        # process spawn + CUDA context init + SHM discovery (measured ~1-2s,
-        # i.e. ~60-120 frames at 60fps) BEFORE an arm's measurement loop even
-        # starts -- this is wall-clock overhead, not frame-count-proportional,
-        # so a frame-count-only budget silently runs out on real hardware even
-        # when the math "should" have enough frames left.
+        # process spawn + CUDA context init + SHM discovery BEFORE an arm's
+        # measurement loop even starts -- this is wall-clock overhead, not
+        # frame-count-proportional, so a frame-count-only budget silently runs
+        # out on real hardware even when the math "should" have enough frames
+        # left. Diagnosed again 2026-07-04: 100 frames/arm (~1.67s at 60fps)
+        # was still insufficient -- 4/5 arms succeeded but the 5th arm (cupy,
+        # last in sequence) still hit "Too few samples: 0" because the
+        # producer's total runtime (~1000 frames = 16.7s + 2s teardown sleep)
+        # was exhausted before cupy's turn; measured real per-arm overhead
+        # (subprocess spawn + torch/cupy import + CUDA context init + SHM
+        # discovery + the 0.4s IPC-handle settle sleep) runs closer to 4-5s,
+        # not the originally-assumed ~1-2s. Bumped to 400 frames/arm (~6.7s)
+        # for real headroom; re-verify against wall-clock arm duration if a
+        # 6th arm is ever added.
         n_arms = 5
-        overhead_frames = 100
+        overhead_frames = 400
         total = (WARMUP_FRAMES + num_frames + overhead_frames) * n_arms + 50
         for _ in range(total):
             exporter.export(GpuFrame(ptr=int(src_ptr.value), size=nbytes))
@@ -734,12 +753,22 @@ def main() -> int:
             delta_wait = baseline_wait - native_wait
             baseline_p50 = results["torch_cpu_spin"]["p50_us"]
             native_p50 = results["torch_native"]["p50_us"]
-            native_p95 = results["torch_native"]["p95_us"]
             delta_p50 = baseline_p50 - native_p50
             print(f"  R5 wait component : {baseline_wait:.1f} us -> {native_wait:.1f} us  (delta {delta_wait:+.1f} us)")
             print(f"  R5 get_frame p50  : {baseline_p50:.1f} us -> {native_p50:.1f} us  (delta {delta_p50:+.1f} us)")
-            gate = "PASS" if native_p50 < 10.0 and native_p95 < 50.0 else "MISS"
-            print(f"  R5 accept gate    : p50<10us p95<50us -- p50={native_p50:.1f}us p95={native_p95:.1f}us [{gate}]")
+            native_spin_hits = results["torch_native"]["wait_spin_hits"]
+            native_sleep_hits = results["torch_native"]["wait_sleep_hits"]
+            native_avg_spin = results["torch_native"]["avg_spin_us"]
+            native_avg_sleep_ms = results["torch_native"]["avg_sleep_us"] / 1000.0
+            print(
+                f"  R5 detection      : avg_spin={native_avg_spin:.3f}us over {native_spin_hits} frame-pending"
+                f" wait(s); {native_sleep_hits} pacing block(s) avg {native_avg_sleep_ms:.1f}ms (consumer"
+                " arrived before next frame -- excluded from gate)"
+            )
+            print(
+                "  R5 accept gate    : p50<10us p95<50us is publish->detect latency -- run"
+                " scripts/profiling/bench_doorbell.py (native arm) for the authoritative measurement"
+            )
         elif "torch_native" not in results and has_wait_backend:
             print("  [R5 native arm ran but produced no comparable result this scenario]")
         elif not has_wait_backend:

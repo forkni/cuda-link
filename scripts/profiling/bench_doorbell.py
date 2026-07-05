@@ -11,12 +11,28 @@ against a fixed-rate GPU producer:
             event that the producer signals after each publish_frame().
             Falls back to 1 ms sleep only on the 2 s safety timeout.
 
+  native    R5 opt-in: native (C++) notification-wait backend, engaged via
+            ImportPolicy(wait_backend="native"). Added only when
+            cuda-link-native is importable on this host (Windows + sidecar
+            installed). This is the authoritative venue for PLAN-002's accept
+            gate (p50<10us, p95<50us) because imp.last_latency here is real
+            cross-process publish->detect latency -- unlike
+            bench_r1_wait.py's get_frame() wall-clock time, which includes
+            tensor materialization and can never satisfy a 10us bound.
+
 Both arms run at 30 fps and 60 fps.  At 30 fps the inter-frame gap is
 ~33 ms — the idle-CPU difference between the two strategies is largest here.
 
 CPU % is measured via Win32 GetProcessTimes (kernel32 ctypes, no psutil).
 Notify latency is imp.last_latency: producer publish_frame timestamp to
 consumer _begin_frame, in milliseconds.
+
+Every arm's ImportPolicy pins wait_backend explicitly (poll/doorbell -> "python",
+native -> "native") when the field exists. ImportPolicy()'s own default is
+wait_backend="auto", not "python" -- leaving it unset would let the poll/doorbell
+arms silently pick up the native backend on any host with cuda-link-native
+installed, contaminating the R2 poll-vs-doorbell comparison (same bug class
+fixed for bench_r1_wait.py in commit 0942985).
 
 Usage
 -----
@@ -36,6 +52,7 @@ Options
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import multiprocessing
 import os
@@ -131,6 +148,34 @@ def _wait_for_shm(shm_name: str, timeout_s: float = 20.0) -> bool:
     return False
 
 
+def _policy_has_wait_backend() -> bool:
+    """Return True if ImportPolicy has a 'wait_backend' field (R5 implemented)."""
+    try:
+        from cuda_link._importer_port import ImportPolicy
+
+        return any(f.name == "wait_backend" for f in dataclasses.fields(ImportPolicy))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _native_backend_available() -> bool:
+    """Return True if the R5 native wait backend can actually be engaged here.
+
+    Requires: Windows (the native sidecar is Windows-only), ImportPolicy has the
+    'wait_backend' field (R5 implemented), and cuda_link_native is importable
+    (the sidecar package is installed on this host).
+    """
+    if os.name != "nt":
+        return False
+    if not _policy_has_wait_backend():
+        return False
+    try:
+        import cuda_link_native  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Worker functions — module-level so multiprocessing spawn can pickle them.
 # ---------------------------------------------------------------------------
@@ -202,6 +247,7 @@ def _worker_consumer(
     shm_name: str,
     num_frames: int,
     doorbell_on: bool,
+    wait_backend: str,
     result_q: object,
 ) -> None:
     """Consume frames; capture idle CPU % and frame notify latency."""
@@ -215,7 +261,16 @@ def _worker_consumer(
 
         time.sleep(0.4)  # let producer write IPC handles into the SHM header
 
-        policy = ImportPolicy(doorbell=doorbell_on, debug=True)
+        policy_kwargs: dict = {"doorbell": doorbell_on, "debug": True}
+        if _policy_has_wait_backend():
+            # ImportPolicy()'s own default is wait_backend="auto", not "python" --
+            # omitting this would let the poll/doorbell arms silently pick up the
+            # native backend via "auto" on any host with cuda-link-native
+            # installed, contaminating the R2 poll-vs-doorbell comparison (same
+            # bug class fixed for bench_r1_wait.py in 0942985). The native arm
+            # passes wait_backend="native" explicitly instead.
+            policy_kwargs["wait_backend"] = wait_backend
+        policy = ImportPolicy(**policy_kwargs)
         spec = ImportSpec(shm_name=shm_name, shape=(HEIGHT, WIDTH, CHANNELS), dtype=DTYPE)
         imp = Importer.open(spec, policy=policy)
 
@@ -237,6 +292,15 @@ def _worker_consumer(
                     time.sleep(0.001)
             elif r.outcome in (ImportOutcome.SHUTDOWN, ImportOutcome.TIMEOUT):
                 break
+
+        # R5: verify the native backend actually engaged before measuring. Checked
+        # here -- after warmup, not immediately after Importer.open() -- because
+        # open() defers _connect() when reconnect_enabled (default True) and the
+        # producer races the consumer; by now warmup frames have flowed so the
+        # connection (and backend resolution, importer.py:1255) has settled.
+        if wait_backend == "native" and getattr(imp, "_wait_backend", None) is None:
+            result_q.put(("ERROR", "native wait_backend requested but did not engage (see importer logs)"))
+            return
 
         # ------------------------------------------------------------------
         # Measurement phase: collect get_frame timing, notify latency, CPU%.
@@ -323,6 +387,7 @@ def _run_cell(
     fps: float,
     num_frames: int,
     doorbell_on: bool,
+    wait_backend: str,
     ctx: object,
 ) -> dict | None:
     """Spawn one producer + one consumer; return the consumer result dict or None on failure."""
@@ -338,7 +403,7 @@ def _run_cell(
     )
     cons = ctx.Process(
         target=_worker_consumer,
-        args=(shm_name, num_frames, doorbell_on, cons_q),
+        args=(shm_name, num_frames, doorbell_on, wait_backend, cons_q),
         daemon=True,
     )
 
@@ -416,9 +481,14 @@ def main() -> int:
         print(f"\n--- Scenario: {fps_label} ---\n")
         scenario: dict[str, dict] = {}
 
-        for doorbell_on, arm_key in [(False, "poll"), (True, "doorbell")]:
+        arms: list[tuple[bool, str, str]] = [(False, "poll", "python"), (True, "doorbell", "python")]
+        if _native_backend_available():
+            arms.append((True, "native", "native"))
+        else:
+            print("  [native arm skipped -- cuda-link-native not importable on this host]")
+        for doorbell_on, arm_key, wait_backend in arms:
             label = f"{fps_label}/{arm_key}"
-            r = _run_cell(label, fps, args.frames, doorbell_on, ctx)
+            r = _run_cell(label, fps, args.frames, doorbell_on, wait_backend, ctx)
             if r is not None:
                 scenario[arm_key] = r
 
@@ -435,7 +505,7 @@ def main() -> int:
         hdr = f"  {'Arm':<12} {'CPU%':>6} {'lat-p50':>9} {'lat-p95':>9} {'lat-p99':>9} {'NO_FRAME':>9} {'n':>5}"
         print(hdr)
         print("  " + "-" * 63)
-        for arm_key, arm_label in [("poll", "poll"), ("doorbell", "doorbell")]:
+        for arm_key, arm_label in [("poll", "poll"), ("doorbell", "doorbell"), ("native", "native (R5)")]:
             if arm_key not in scenario:
                 continue
             r = scenario[arm_key]
@@ -465,11 +535,37 @@ def main() -> int:
                 f"  NO_FRAME count  : {p['no_frame_count']} -> {d['no_frame_count']}  ({noframe_ratio:.0f}x reduction)"
             )
 
+        if "doorbell" in scenario and "native" in scenario:
+            d = scenario["doorbell"]
+            n = scenario["native"]
+            native_p50_us = n["latency_p50_ms"] * 1000.0
+            native_p95_us = n["latency_p95_ms"] * 1000.0
+            doorbell_p50_us = d["latency_p50_ms"] * 1000.0
+            doorbell_p95_us = d["latency_p95_ms"] * 1000.0
+            cpu_delta_r5 = d["cpu_pct"] - n["cpu_pct"]
+            gate = "PASS" if native_p50_us < 10.0 and native_p95_us < 50.0 else "MISS"
+            print()
+            print(
+                f"  R5 CPU (doorbell->native)     : {d['cpu_pct']:.1f}% -> {n['cpu_pct']:.1f}%  ({cpu_delta_r5:+.1f} pp)"
+            )
+            print(
+                f"  R5 latency p50 (doorbell->native): {doorbell_p50_us:.1f}us -> {native_p50_us:.1f}us"
+                f"  (delta {doorbell_p50_us - native_p50_us:+.1f}us)"
+            )
+            print(
+                f"  R5 latency p95 (doorbell->native): {doorbell_p95_us:.1f}us -> {native_p95_us:.1f}us"
+                f"  (delta {doorbell_p95_us - native_p95_us:+.1f}us)"
+            )
+            print(
+                f"  R5 accept gate (publish->detect) : p50<10us p95<50us -- "
+                f"p50={native_p50_us:.1f}us p95={native_p95_us:.1f}us [{gate}]"
+            )
+
     print()
     out = Path(args.outfile)
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": "1",
+        "version": "2",
         "config": {
             "height": HEIGHT,
             "width": WIDTH,
@@ -478,6 +574,7 @@ def main() -> int:
             "frames": args.frames,
             "warmup_frames": WARMUP_FRAMES,
             "fps_list": fps_list,
+            "r5_present": _native_backend_available(),
         },
         "results": all_results,
     }
