@@ -42,8 +42,9 @@ Common flags:
 
 Environment variables (persisted via `setx`, current user, on by default):
     CUDALINK_DOORBELL=1 is set after ANY successful install (all modes).
-    CUDALINK_RECEIVER_PYTHON_EXE=<python_exe> is also set after mode 4 (the
-    interpreter example_receiver_launcher.py's standalone receiver should use).
+    CUDALINK_RECEIVER_PYTHON_EXE=<python_exe> is also set after modes 2 (venv)
+    and 4 (system/parallel Python) — whichever interpreter
+    example_receiver_launcher.py's standalone receiver subprocess should use.
     Pass --no-set-env to skip both. Note: setx only affects NEW processes —
     restart your terminal / TouchDesigner before the change applies.
 """
@@ -532,7 +533,9 @@ def mode_1_external_folder(wheels: list[Path], target: str | None, non_interacti
     _print_activation(dest, "Install folder", extra_packages=_extra_packages_from_wheels(wheels))
 
 
-def mode_2_venv(wheels: list[Path], venv_dir: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_2_venv(
+    wheels: list[Path], venv_dir: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True
+) -> None:
     """Install into an existing venv's site-packages."""
     if not venv_dir:
         if non_interactive:
@@ -542,10 +545,12 @@ def mode_2_venv(wheels: list[Path], venv_dir: str | None, non_interactive: bool,
             sys.exit(_red("[error] No venv path specified."))
 
     venv = Path(venv_dir)
-    # Locate pip inside the venv
+    # Locate pip (and python) inside the venv
     pip_exe = venv / "Scripts" / "pip.exe"
+    python_exe = venv / "Scripts" / "python.exe"
     if not pip_exe.exists():
         pip_exe = venv / "bin" / "pip"
+        python_exe = venv / "bin" / "python"
     if not pip_exe.exists():
         sys.exit(_red(f"[error] pip not found in venv at {venv / 'Scripts'} or {venv / 'bin'}"))
 
@@ -555,6 +560,17 @@ def mode_2_venv(wheels: list[Path], venv_dir: str | None, non_interactive: bool,
     _print_activation(
         site_pkgs, "venv site-packages", td_preferences_only=True, extra_packages=_extra_packages_from_wheels(wheels)
     )
+
+    if set_env and python_exe.exists():
+        # Same rationale as mode 4: this venv's python.exe is the interpreter
+        # example_receiver_launcher.py's standalone receiver subprocess should
+        # use, since cuda_link was just installed into it.
+        print()
+        print(_bold("  Persisting environment variable for the standalone receiver:"))
+        set_vars: dict[str, str] = {}
+        if _setx_user("CUDALINK_RECEIVER_PYTHON_EXE", str(python_exe), dry_run):
+            set_vars["CUDALINK_RECEIVER_PYTHON_EXE"] = str(python_exe)
+        _print_env_vars_set(set_vars)
 
 
 def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
@@ -828,7 +844,7 @@ def main() -> None:
         "--no-set-env",
         action="store_true",
         default=False,
-        help="Don't persist CUDALINK_DOORBELL (any mode) / CUDALINK_RECEIVER_PYTHON_EXE (mode 4) as "
+        help="Don't persist CUDALINK_DOORBELL (any mode) / CUDALINK_RECEIVER_PYTHON_EXE (modes 2, 4) as "
         "current-user Windows environment variables via setx (set by default otherwise).",
     )
     args = parser.parse_args()
@@ -889,7 +905,7 @@ def main() -> None:
     if mode == 1:
         mode_1_external_folder(wheels, args.target, args.non_interactive, args.dry_run)
     elif mode == 2:
-        mode_2_venv(wheels, args.venv, args.non_interactive, args.dry_run)
+        mode_2_venv(wheels, args.venv, args.non_interactive, args.dry_run, set_env)
     elif mode == 3:
         mode_3_conda(wheels, args.conda, args.non_interactive, args.dry_run)
     elif mode == 4:
