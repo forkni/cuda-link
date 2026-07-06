@@ -4,7 +4,6 @@
 #include <cstring>
 
 namespace cudalink::core {
-    // PROBE: deliberately mis-indented line to verify the CI format gate fails red.
 
 AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
                            uint64_t last_version) noexcept {
