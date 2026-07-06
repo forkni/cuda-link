@@ -65,7 +65,7 @@ double now_seconds() {
 // this protocol uses in practice (matches CudaLinkInTOP::openSHM's identical technique;
 // names are verbatim and unprefixed).
 std::wstring widen(const char* s) {
-    return std::wstring(s, s + std::strlen(s));
+    return {s, s + std::strlen(s)};
 }
 } // namespace
 
@@ -169,9 +169,16 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
 }
 
 CudaLinkOutTOP::~CudaLinkOutTOP() {
-    teardown();
-    if (myStream) {
-        cudaStreamDestroy(myStream);
+    // A destructor is implicitly noexcept -- anything escaping here (e.g. a std::string
+    // std::bad_alloc from teardown()'s debugLog()/myError plumbing) would call
+    // std::terminate() and crash the whole TD host process, not just this plugin. Same ABI
+    // fence discipline as the other catch (...) sites in this file.
+    try {
+        teardown();
+        if (myStream) {
+            cudaStreamDestroy(myStream);
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -187,7 +194,7 @@ void CudaLinkOutTOP::setupParameters(TD::OP_ParameterManager* manager, void*) {
     // ABI back into TD.
     try {
         Parameters::setup(manager);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -268,7 +275,7 @@ void CudaLinkOutTOP::teardown() {
         Sleep(kIpcCloseGracePeriodMs);
     }
 
-    for (auto evt : mySlotEvents) {
+    for (auto* evt : mySlotEvents) {
         if (evt) {
             cudaEventDestroy(evt);
         }
@@ -434,9 +441,14 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
             myError = std::string("cudaIpcGetEventHandle failed: ") + cudaGetErrorString(st);
             return false;
         }
-        write_slot_handle(view, layout, static_cast<uint32_t>(slot),
-                          reinterpret_cast<const uint8_t*>(&memHandle),
-                          reinterpret_cast<const uint8_t*>(&eventHandle));
+        // Wire-protocol serialization: both handle structs are trivially-copyable, fixed-size
+        // CUDA IPC types (opaque byte blobs by design) written verbatim into the SHM byte
+        // buffer -- same category as ring_reader.cpp/ring_writer.cpp's atomic_ref casts.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        const auto* memHandleBytes = reinterpret_cast<const uint8_t*>(&memHandle);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        const auto* eventHandleBytes = reinterpret_cast<const uint8_t*>(&eventHandle);
+        write_slot_handle(view, layout, static_cast<uint32_t>(slot), memHandleBytes, eventHandleBytes);
     }
 
     Metadata newMetadata{width,
@@ -497,7 +509,7 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     myAllocated = true;
 
     Sleep(kIpcCloseGracePeriodMs);
-    for (auto evt : oldEvents) {
+    for (auto* evt : oldEvents) {
         if (evt) cudaEventDestroy(evt);
     }
     for (auto* p : oldDevPtrs) {
@@ -791,7 +803,7 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
             default:
                 break;
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -820,7 +832,7 @@ void CudaLinkOutTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEnt
             entries->values[0]->setString("last_error_frame");
             entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -834,7 +846,7 @@ void CudaLinkOutTOP::getErrorString(TD::OP_String* error, void*) {
         }
         error->setString(myError.c_str());
         myError.clear();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -846,7 +858,7 @@ void CudaLinkOutTOP::getWarningString(TD::OP_String* warning, void*) {
         }
         warning->setString(myWarning.c_str());
         myWarning.clear();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 

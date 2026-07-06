@@ -118,9 +118,16 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
 }
 
 CudaLinkInTOP::~CudaLinkInTOP() {
-    teardown();
-    if (myStream) {
-        cudaStreamDestroy(myStream);
+    // A destructor is implicitly noexcept -- anything escaping here (e.g. a std::string
+    // std::bad_alloc from teardown()'s debugLog()/myError plumbing) would call
+    // std::terminate() and crash the whole TD host process, not just this plugin. Same ABI
+    // fence discipline as the other catch (...) sites in this file.
+    try {
+        teardown();
+        if (myStream) {
+            cudaStreamDestroy(myStream);
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -136,7 +143,7 @@ void CudaLinkInTOP::setupParameters(TD::OP_ParameterManager* manager, void*) {
     // back into TD.
     try {
         Parameters::setup(manager);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -189,7 +196,7 @@ void CudaLinkInTOP::closeHandles() {
         }
     }
     mySlotDevPtrs.clear();
-    for (auto evt : mySlotEvents) {
+    for (auto* evt : mySlotEvents) {
         if (evt) {
             cudaEventDestroy(evt);
         }
@@ -625,7 +632,7 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
             default:
                 break;
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -656,7 +663,7 @@ void CudaLinkInTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEntr
             entries->values[0]->setString("last_error_frame");
             entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -670,7 +677,7 @@ void CudaLinkInTOP::getErrorString(TD::OP_String* error, void*) {
         }
         error->setString(myError.c_str());
         myError.clear();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
@@ -682,7 +689,7 @@ void CudaLinkInTOP::getWarningString(TD::OP_String* warning, void*) {
         }
         warning->setString(myWarning.c_str());
         myWarning.clear();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
 
