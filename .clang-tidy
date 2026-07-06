@@ -110,5 +110,16 @@ FormatStyle: none
 # above cannot fix this -- it only filters which diagnostics are *displayed*, not which headers
 # get *compiled*, and a hard compile error anywhere in the translation unit still aborts the
 # whole invocation.
+#
+# _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH works around a CI-runner-only skew: the
+# windows-latest image's VS toolset can be newer than the LLVM 19.1.5 this repo's
+# .clang-format/.clang-tidy are calibrated against (matching the developer's local VS 2022
+# install), and MSVC STL's <yvals_core.h> hard-errors via static_assert (STL1000) when it
+# sees a clang version older than the toolset's minimum-required Clang. clang-tidy always
+# runs as a clang frontend (unlike the actual DLL build, which is pinned to cl.exe in CI and
+# never hits this), so it always hits this gate on a newer runner image. This macro is MSVC
+# STL's own documented escape hatch for exactly this compiler/STL version mismatch -- it does
+# not change which checks run, only lets clang-tidy parse the STL headers at all.
 ExtraArgsBefore:
   - '-D_CRT_USE_BUILTIN_OFFSETOF'
+  - '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH'
