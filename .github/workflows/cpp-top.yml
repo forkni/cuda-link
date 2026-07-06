@@ -44,11 +44,14 @@ jobs:
 
       # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll and
       # CudaLinkOutTOP.dll (D2D memcpy path, no .cu kernels yet) -- no GPU/driver required.
+      # 12.6.2 (not 12.8.x, the local dev target -- see cpp_top/CMakeLists.txt) is the
+      # newest 12.x this pinned action version (v0.2.19) can install on Windows;
+      # CMakeLists.txt only checks the CUDA *major* version, so this is compatible.
       - name: Install CUDA toolkit (cudart + nvcc only)
         id: cuda-toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
-          cuda: '12.8.0'
+          cuda: '12.6.2'
           sub-packages: '["cudart","nvcc"]'
           method: network
 
