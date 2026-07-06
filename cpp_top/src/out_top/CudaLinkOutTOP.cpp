@@ -9,9 +9,13 @@
 
 #include "Parameters.h"
 #include "../common/cuda_check.h"
+#include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
 #include "../common/raii_handles.h"
+#include "../common/win_util.h"
 
+using cudalink::common::asHandle;
+using cudalink::common::widen;
 using cudalink::core::Metadata;
 using cudalink::core::SHMLayout;
 using cudalink::core::clear_shutdown;
@@ -25,10 +29,6 @@ using cudalink::out_top::WireFormat;
 using cudalink::out_top::mapFromPixelFormat;
 
 namespace {
-HANDLE asHandle(void* h) {
-    return static_cast<HANDLE>(h);
-}
-
 // Names the Sleep(100) grace-period literal used at both teardown() and reallocate()'s
 // old-resource-free sites -- a timing-based grace period that gives a receiver time to
 // close its imported IPC handles before this process frees the memory they reference
@@ -59,13 +59,6 @@ constexpr int32_t kNumInfoDATRows = 4;
 double now_seconds() {
     using namespace std::chrono;
     return duration<double>(steady_clock::now().time_since_epoch()).count();
-}
-
-// Naive byte-widening, not a general UTF-8 decoder -- correct for the ASCII SHM names
-// this protocol uses in practice (matches CudaLinkInTOP::openSHM's identical technique;
-// names are verbatim and unprefixed).
-std::wstring widen(const char* s) {
-    return {s, s + std::strlen(s)};
 }
 } // namespace
 
@@ -113,59 +106,16 @@ void DestroyTOPInstance(TD::TOP_CPlusPlusBase* instance, TD::TOP_Context* contex
 } // extern "C"
 
 CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) : myContext(context) {
-    // Align the runtime's current device with TD's own CUDA device selection before
-    // creating a stream/allocating/exporting any IPC handles, so nothing here silently
-    // lands on whatever device happens to be "current" by default (matters on multi-GPU
-    // hosts). getCUDADeviceIndex() returns -1 when this node isn't in CUDA execute mode --
-    // shouldn't happen for a TOP_ExecuteMode::CUDA plugin, handled defensively rather than
-    // asserted against.
-    const int cudaDevice = context->getCUDADeviceIndex(nullptr);
-    if (cudaDevice >= 0 && cudaSetDevice(cudaDevice) != cudaSuccess) {
-        myError = "cudaSetDevice(" + std::to_string(cudaDevice) + ") failed";
-        myFatal = true;
-        return;
-    }
-
-    // Verify the current device actually supports CUDA IPC before this TOP ever attempts
-    // to export an IPC handle -- avoids a confusing failure deep inside reallocate() the
-    // first time this node cooks. CUDA Runtime API docs: "Users can test their device for
-    // IPC functionality by calling cudaDeviceGetAttribute with cudaDevAttrIpcEventSupport."
-    int current = 0;
-    if (cudaGetDevice(&current) == cudaSuccess) {
-        int ipcSupport = 0;
-        if (cudaDeviceGetAttribute(&ipcSupport, cudaDevAttrIpcEventSupport, current) == cudaSuccess &&
-            ipcSupport == 0) {
-            myError = "device " + std::to_string(current) +
-                      " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
-            myFatal = true;
-            return;
-        }
-    }
-
-    // Stream creation is checked: an unchecked failure here would leave myStream null,
-    // which CUDA silently treats as the default stream (0) instead of surfacing an error.
-    //
-    // High-priority parity with the Python exporter (exporter.py's high_priority_stream
-    // policy creates its IPC stream via cudaStreamCreateWithPriority(..., greatest)): query the
-    // device's priority range and request the greatest (numerically least) priority. Per the
-    // CUDA docs this is only a scheduling *hint* for pending work -- it cannot preempt work
-    // already running and "may not be respected for memory transfers" -- so it is not expected
-    // to move the cook-time numbers on its own; it is restored purely for consistency with the
-    // original design. Falls back to the plain non-priority creation if the range query fails
-    // (older/limited drivers), so this can never turn a working device into a non-functional one.
-    cudaError_t st = cudaErrorUnknown;
-    int leastPriority = 0;
-    int greatestPriority = 0;
-    if (cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority) == cudaSuccess) {
-        st = cudaStreamCreateWithPriority(&myStream, cudaStreamNonBlocking, greatestPriority);
-    }
-    if (st != cudaSuccess) {
-        st = cudaStreamCreateWithFlags(&myStream, cudaStreamNonBlocking);
-    }
-    if (st != cudaSuccess) {
-        myError = std::string("cudaStreamCreateWithFlags failed: ") + cudaGetErrorString(st);
-        myFatal = true;
-    }
+    // Device alignment + IPC-capability probe + stream creation is shared with CudaLinkInTOP
+    // (see cuda_device_session.h) -- only the stream-creation policy differs between the two,
+    // which CudaDeviceSession's 'highPriorityStream' parameter captures. High-priority parity
+    // with the Python exporter (exporter.py's high_priority_stream policy creates its IPC
+    // stream via cudaStreamCreateWithPriority(..., greatest)) is why the sender passes true
+    // here; see cuda_device_session.h for the receiver's non-priority policy.
+    const cudalink::common::CudaDeviceSession session(context, /*highPriorityStream=*/true);
+    myStream = session.stream;
+    myError = session.error;
+    myFatal = session.fatal;
 }
 
 CudaLinkOutTOP::~CudaLinkOutTOP() {
@@ -749,22 +699,7 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
     // reporting cadence): gives an offline average cook_us/copy_us/begin_us/end_us number
     // without needing to wire and eyeball an Info CHOP live.
     if (myDebugLog.enabled()) {
-        mySumCookUs += myCookUs;
-        mySumCopyUs += myCopyUs;
-        mySumBeginUs += myBeginUs;
-        mySumEndUs += myEndUs;
-        if (++myBenchSamples >= 97) {
-            debugLog("bench: avg_cook_us=" + std::to_string(mySumCookUs / myBenchSamples) +
-                     " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
-                     " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
-                     " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) + " samples=" +
-                     std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
-            mySumCookUs = 0.0f;
-            mySumCopyUs = 0.0f;
-            mySumBeginUs = 0.0f;
-            mySumEndUs = 0.0f;
-            myBenchSamples = 0;
-        }
+        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myFrameCount, myDebugLog);
     }
 }
 

@@ -10,9 +10,13 @@
 #include "Parameters.h"
 #include "pixel_format_map.h"
 #include "../common/cuda_check.h"
+#include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
 #include "../common/raii_handles.h"
+#include "../common/win_util.h"
 
+using cudalink::common::asHandle;
+using cudalink::common::widen;
 using cudalink::core::AcquireResult;
 using cudalink::core::Metadata;
 using cudalink::core::PROTOCOL_MAGIC;
@@ -24,10 +28,6 @@ using cudalink::core::read_num_slots;
 using cudalink::core::read_version;
 
 namespace {
-HANDLE asHandle(void* h) {
-    return static_cast<HANDLE>(h);
-}
-
 // Names the Info CHOP/DAT counts returned by getNumInfoCHOPChans()/getInfoDATSize() --
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
@@ -80,41 +80,13 @@ void DestroyTOPInstance(TD::TOP_CPlusPlusBase* instance, TD::TOP_Context* contex
 } // extern "C"
 
 CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) : myContext(context) {
-    // Align the runtime's current device with TD's own CUDA device selection before creating
-    // a stream/opening any IPC handles, so nothing here silently lands on whatever device
-    // happens to be "current" by default (matters on multi-GPU hosts). getCUDADeviceIndex()
-    // returns -1 when this node isn't in CUDA execute mode -- shouldn't happen for a
-    // TOP_ExecuteMode::CUDA plugin, handled defensively rather than asserted against.
-    const int cudaDevice = context->getCUDADeviceIndex(nullptr);
-    if (cudaDevice >= 0 && cudaSetDevice(cudaDevice) != cudaSuccess) {
-        myError = "cudaSetDevice(" + std::to_string(cudaDevice) + ") failed";
-        myFatal = true;
-        return;
-    }
-
-    // Verify the current device actually supports CUDA IPC before this TOP ever attempts to
-    // open an IPC handle -- avoids a confusing failure deep inside openSlotHandlesIfNeeded()
-    // the first time a producer connects. CUDA Runtime API docs: "Users can test their device
-    // for IPC functionality by calling cudaDeviceGetAttribute with cudaDevAttrIpcEventSupport."
-    int current = 0;
-    if (cudaGetDevice(&current) == cudaSuccess) {
-        int ipcSupport = 0;
-        if (cudaDeviceGetAttribute(&ipcSupport, cudaDevAttrIpcEventSupport, current) == cudaSuccess &&
-            ipcSupport == 0) {
-            myError = "device " + std::to_string(current) +
-                      " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
-            myFatal = true;
-            return;
-        }
-    }
-
-    // An unchecked failure here previously left myStream null, which CUDA silently treats
-    // as the default stream (0) instead of surfacing an error.
-    const cudaError_t st = cudaStreamCreateWithFlags(&myStream, cudaStreamNonBlocking);
-    if (st != cudaSuccess) {
-        myError = std::string("cudaStreamCreateWithFlags failed: ") + cudaGetErrorString(st);
-        myFatal = true;
-    }
+    // Device alignment + IPC-capability probe + stream creation is shared with
+    // CudaLinkOutTOP (see cuda_device_session.h) -- the receiver has no need for a
+    // priority stream (no Python-exporter-parity concern on this side), hence false here.
+    const cudalink::common::CudaDeviceSession session(context, /*highPriorityStream=*/false);
+    myStream = session.stream;
+    myError = session.error;
+    myFatal = session.fatal;
 }
 
 CudaLinkInTOP::~CudaLinkInTOP() {
@@ -246,11 +218,10 @@ bool CudaLinkInTOP::openSHM(const char* name) {
     if (myShmView) {
         return true; // already open
     }
-    // Naive byte-widening, not a general UTF-8 decoder -- correct for the ASCII SHM
-    // names this protocol uses in practice (matches Python's CreateFileMapping tagname
-    // verbatim-and-unprefixed contract).
-    HANDLE h =
-        OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, std::wstring(name, name + std::strlen(name)).c_str());
+    // widen() is a naive byte-widening, not a general UTF-8 decoder -- correct for the
+    // ASCII SHM names this protocol uses in practice (matches Python's CreateFileMapping
+    // tagname verbatim-and-unprefixed contract). Shared with CudaLinkOutTOP (win_util.h).
+    HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, widen(name).c_str());
     if (!h) {
         myStatus = "Waiting for producer";
         return false;
@@ -574,22 +545,7 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
     // cadence): gives an offline avg cook_us/copy_us/begin_us/end_us number without
     // needing to wire and eyeball an Info CHOP live.
     if (myDebugLog.enabled()) {
-        mySumCookUs += myCookUs;
-        mySumCopyUs += myCopyUs;
-        mySumBeginUs += myBeginUs;
-        mySumEndUs += myEndUs;
-        if (++myBenchSamples >= 97) {
-            debugLog("bench: avg_cook_us=" + std::to_string(mySumCookUs / myBenchSamples) +
-                     " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
-                     " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
-                     " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) + " samples=" +
-                     std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
-            mySumCookUs = 0.0f;
-            mySumCopyUs = 0.0f;
-            mySumBeginUs = 0.0f;
-            mySumEndUs = 0.0f;
-            myBenchSamples = 0;
-        }
+        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myFrameCount, myDebugLog);
     }
 }
 

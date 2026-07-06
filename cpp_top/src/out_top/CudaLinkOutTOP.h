@@ -13,6 +13,7 @@
 #include "CPlusPlus_Common.h"
 #include "TOP_CPlusPlusBase.h"
 
+#include "../common/bench_accumulator.h"
 #include "../common/debug_log.h"
 #include "../core/ring_writer.h"
 #include "../core/shm_layout.h"
@@ -138,11 +139,7 @@ private:
     float myBeginUs = 0.0f;
     float myEndUs = 0.0f;
 
-    // Periodic bench-log accumulators (Debug-gated, reported every 97 frames -- matches
-    // the Python exporter's reporting cadence).
-    float mySumCookUs = 0.0f;
-    float mySumCopyUs = 0.0f;
-    float mySumBeginUs = 0.0f;
-    float mySumEndUs = 0.0f;
-    uint32_t myBenchSamples = 0;
+    // Periodic bench-log accumulator (Debug-gated, reported every 97 frames -- matches the
+    // Python exporter's reporting cadence). Shared with CudaLinkInTOP (see bench_accumulator.h).
+    cudalink::common::BenchAccumulator myBench;
 };

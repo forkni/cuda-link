@@ -59,13 +59,23 @@ add_library(cudalink_topcore STATIC
 )
 target_include_directories(cudalink_topcore PUBLIC src/core)
 
+# --- cudalink_topcommon -- shared, header-only helpers for both TOP DLLs ---
+# TD/CUDA-dependent (CudaDeviceSession touches TD::TOP_Context and cuda_runtime.h), so this is
+# a sibling to cudalink_topcore (protocol-core, TD/CUDA-free) rather than folded into it.
+# INTERFACE, not STATIC: every helper here (cuda_check.h, cuda_op_scope.h, debug_log.h,
+# raii_handles.h, cuda_device_session.h, bench_accumulator.h, param_util.h, win_util.h) is
+# header-only -- there is no .cpp to compile.
+add_library(cudalink_topcommon INTERFACE)
+target_include_directories(cudalink_topcommon INTERFACE src/common)
+target_link_libraries(cudalink_topcommon INTERFACE CUDA::cudart)
+
 # --- CudaLinkInTOP -- the receiver Custom TOP DLL (D6/D7) ---
 add_library(CudaLinkInTOP MODULE
     src/in_top/CudaLinkInTOP.cpp
     src/in_top/Parameters.cpp
 )
 target_include_directories(CudaLinkInTOP PRIVATE ${TD_VENDOR_DIR} src/common)
-target_link_libraries(CudaLinkInTOP PRIVATE cudalink_topcore CUDA::cudart)
+target_link_libraries(CudaLinkInTOP PRIVATE cudalink_topcore cudalink_topcommon CUDA::cudart)
 target_compile_definitions(CudaLinkInTOP PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 # TD loads Custom Operator DLLs from a Plugins folder with no "lib" prefix expected.
@@ -77,7 +87,7 @@ add_library(CudaLinkOutTOP MODULE
     src/out_top/Parameters.cpp
 )
 target_include_directories(CudaLinkOutTOP PRIVATE ${TD_VENDOR_DIR} src/common)
-target_link_libraries(CudaLinkOutTOP PRIVATE cudalink_topcore CUDA::cudart)
+target_link_libraries(CudaLinkOutTOP PRIVATE cudalink_topcore cudalink_topcommon CUDA::cudart)
 target_compile_definitions(CudaLinkOutTOP PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 set_target_properties(CudaLinkOutTOP PROPERTIES PREFIX "" SUFFIX ".dll")

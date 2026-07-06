@@ -13,6 +13,7 @@
 #include "CPlusPlus_Common.h"
 #include "TOP_CPlusPlusBase.h"
 
+#include "../common/bench_accumulator.h"
 #include "../common/debug_log.h"
 #include "../core/ring_reader.h"
 #include "../core/shm_layout.h"
@@ -156,14 +157,10 @@ private:
     float myBeginUs = 0.0f;
     float myEndUs = 0.0f;
 
-    // Periodic bench-log accumulators (Debug-gated, reported every 97 frames -- mirrors
+    // Periodic bench-log accumulator (Debug-gated, reported every 97 frames -- mirrors
     // CudaLinkOutTOP's cadence so sender and receiver logs line up for a side-by-side
-    // comparison).
-    float mySumCookUs = 0.0f;
-    float mySumCopyUs = 0.0f;
-    float mySumBeginUs = 0.0f;
-    float mySumEndUs = 0.0f;
-    uint32_t myBenchSamples = 0;
+    // comparison). Shared with CudaLinkOutTOP (see bench_accumulator.h).
+    cudalink::common::BenchAccumulator myBench;
 
     uint32_t myReadSlot = 0;
 };
