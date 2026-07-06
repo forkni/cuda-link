@@ -863,5 +863,9 @@ void CudaLinkOutTOP::getWarningString(TD::OP_String* warning, void*) {
 }
 
 void CudaLinkOutTOP::getInfoPopupString(TD::OP_String* info, void*) {
-    info->setString(myStatus.c_str());
+    // string copy/setString() may allocate; a std::bad_alloc must not cross the ABI.
+    try {
+        info->setString(myStatus.c_str());
+    } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
+    }
 }
