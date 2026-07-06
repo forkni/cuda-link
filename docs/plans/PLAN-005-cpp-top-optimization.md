@@ -112,6 +112,10 @@ Lei Mao PyTorch-CUDA-Graph-Capture (full capture beats partial); project's own P
 
 ### 2.3 Treat `reallocate()`/`teardown()` stalls as a documented design constraint
 
+> **Status (2026-07-06):** done — constraint documented in
+> [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) §Lifecycle Phase 3 (Re-initialization), with
+> measured ~100–140 ms stall figures from live debug logs.
+
 *Sources: BPG §10.3; Aussie AI (cudaMallocAsync reminder).*
 
 - `cudaMalloc`/`cudaFree` perform implicit **device-wide synchronization** — on a resolution
@@ -133,6 +137,13 @@ Lei Mao PyTorch-CUDA-Graph-Capture (full capture beats partial); project's own P
   verify with Nsight under real TD render load before keeping any change.
 
 ### 2.5 Hygiene items
+
+> **Status (2026-07-06):** `CUDA_LAUNCH_BLOCKING` documented in
+> [`docs/PROFILING.md`](../PROFILING.md) §2 ("Field debugging") — no standalone troubleshooting
+> guide exists, and the profiling workflow is where the switch is reached for in practice.
+> Debug-build GPU timing landed as the `GpuTimerRing` channels (`gpu_copy_us` etc.);
+> one-submitting-thread-per-stream remains true in the current code (standing rule, no doc
+> change needed).
 
 - **Document `CUDA_LAUNCH_BLOCKING=1`** in the troubleshooting guide as the field-debugging switch
   for localizing async CUDA errors — and warn it makes every launch synchronous **process-wide**

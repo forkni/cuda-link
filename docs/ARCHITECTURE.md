@@ -577,6 +577,18 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 **Performance**: Re-initialization takes ~50-100μs (one-time cost), does NOT disrupt frame flow.
 
+**C++ TOP resize stalls are an accepted design constraint (PLAN-005 §2.3).** The numbers above
+are the Python producer's. The Out TOP's `reallocate()` instead frees and re-allocates the slot
+ring with `cudaFree`/`cudaMalloc` — both perform an implicit **device-wide synchronization** —
+and `reallocate()`/`teardown()` deliberately hold a 100 ms grace period
+(`kIpcCloseGracePeriodMs`) so receivers can drop their IPC mappings before the allocation
+disappears. A live resolution/format change therefore stalls TD's entire render pipeline for
+~100–140 ms (measured 2026-07-06 from `reallocate: complete, elapsed=...` debug-log lines at
+1080p→4K). The modern fix — stream-ordered pools (`cudaMemPoolCreate` + shareable Win32 handles
++ `cudaMemPoolExportPointer`) — is incompatible with the 64-byte `cudaIpcMemHandle_t` wire
+protocol: adopting it is a protocol revision, not a tweak. Accepted as-is; revisit only if
+users report resize hitches in practice.
+
 ### Phase 4: Shutdown
 
 **Producer**:

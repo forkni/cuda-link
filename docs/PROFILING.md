@@ -103,6 +103,28 @@ masks the issue.
 Fix any violations before proceeding. CUDA IPC uses cross-process device pointers; a single
 out-of-bounds write can corrupt another process's GPU allocation without triggering a page fault.
 
+### Field debugging: `CUDA_LAUNCH_BLOCKING=1`
+
+When an async CUDA error surfaces far from its origin — the classic symptom is a `cudaMemcpy`
+or `cudaEventRecord` reporting `invalid argument`/`illegal address` that was actually raised by
+an earlier asynchronous call — set the switch in the shell that launches TouchDesigner or
+Python **before** starting the process:
+
+```
+:: cmd.exe
+SET CUDA_LAUNCH_BLOCKING=1
+```
+
+Every launch and async call becomes synchronous, so the **first** failing call is the one that
+reports the error — turning "an error somewhere in the last N frames" into an exact call site.
+
+Two warnings (PLAN-005 §2.5):
+
+- The switch is **process-wide**: every submission round-trips to the GPU, and TD cook times
+  explode while it is set. Expect the app to be barely interactive.
+- **Never ship or benchmark with it enabled.** Unset it as soon as the call site is found; any
+  timing captured under it is meaningless.
+
 ### Step 2 — System timeline
 
 ```powershell
