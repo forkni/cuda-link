@@ -17,6 +17,7 @@
 #include "../common/cadence_counters.h"
 #include "../common/debug_log.h"
 #include "../common/gpu_timer.h"
+#include "../common/raii_handles.h"
 #include "../core/ring_reader.h"
 #include "../core/shm_layout.h"
 
@@ -100,6 +101,22 @@ private:
     // set) on rejection.
     bool validateMetadata(const cudalink::core::Metadata& metadata);
 
+    // CUDA Graphs path (opt-in via CUDALINK_CPP_USE_GRAPHS, PLAN-005 task #13 / ADR-0011):
+    // folds the per-cook waitEvent + memcpy2DToArray pair into one cudaGraphLaunch via a
+    // keyed graph-exec cache. Never calls cudaGraphExecMemcpyNodeSetParams -- exec-level
+    // memcpy updates require 1D operands on BOTH sides (see cuda_graphs.py:249's docstring),
+    // and this copy's destination is a TD-owned cudaArray_t, so both operands are instead
+    // baked into a captured graph per (slot, dstArray) key. On cache hit: launch. On miss:
+    // capture+instantiate+launch this cook. Any failure (or cache-cap breach, the signal
+    // that TD's output arrays are NOT stable) latches myGraphsDisabled and the caller falls
+    // through to the legacy pair the same cook -- no dropped frame, ever.
+    bool tryGraphedCopy(uint32_t slot, cudaArray_t dstArray, size_t rowBytes, uint32_t height);
+
+    // Destroys every cached graph exec. Called from closeHandles() (the single funnel for
+    // VERSION_CHANGED and teardown()) because every cached exec bakes a slot device pointer
+    // AND a slot event that closeHandles() is about to invalidate.
+    void destroyGraphs();
+
     // Debug-gated diagnostics: the receiver's own transient error badge (e.g. during a
     // sender format/resolution switch) can disappear before it's read, so this gives an
     // opt-in persistent trace. Forwards to myDebugLog, which handles the lazy
@@ -141,6 +158,28 @@ private:
     // Per-slot IPC resources, sized to myLayout.num_slots() once handles are open.
     std::vector<void*> mySlotDevPtrs;
     std::vector<cudaEvent_t> mySlotEvents;
+
+    // CUDA Graphs keyed-exec cache (see tryGraphedCopy()). Outer index = ring slot; each
+    // entry bakes that slot's devptr+event plus one observed TD output array. The per-slot
+    // cap is deliberately small: TD gives no cross-cook stability guarantee for the output
+    // cudaArray_t (TOP_CPlusPlusBase.h's createCUDAArray docs), and a cache that keeps
+    // growing past a plausible swap-chain depth means the pointer-identity assumption has
+    // failed -- hard-disable (never evict) so that failure surfaces instead of being masked.
+    struct GraphCacheEntry {
+        cudaArray_t dstArray = nullptr;
+        cudalink::common::CudaGraphExecGuard exec;
+    };
+    static constexpr size_t kGraphCacheCapPerSlot = 4;
+    bool myGraphsRequested = false; // CUDALINK_CPP_USE_GRAPHS, read once in the ctor
+    bool myGraphsDisabled = false;  // sticky latch -> legacy path for the rest of the session
+    std::vector<std::vector<GraphCacheEntry>> myGraphCache;
+
+    // Session-lifetime graph counters (Debug-gated increments, mirroring myTotalNoFrame):
+    // builds should plateau at (num_slots x observed output arrays) within seconds; a
+    // climbing count is the live pre-signal of the cache-cap latch. Feed the
+    // graph_hits/graph_builds Info CHOP channels.
+    uint64_t myGraphHits = 0;
+    uint64_t myGraphBuilds = 0;
 
     cudalink::core::Metadata myMetadata;
 

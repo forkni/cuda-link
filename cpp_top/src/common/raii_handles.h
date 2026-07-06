@@ -137,6 +137,46 @@ private:
     cudaEvent_t myEvent = nullptr;
 };
 
+// Owns a single instantiated CUDA graph exec (from cudaGraphInstantiate); destroys it with
+// cudaGraphExecDestroy() unless released. Destroying an exec only frees the exec's own
+// graph/node bookkeeping -- it never dereferences the memory operands baked into its nodes,
+// so a guard may safely outlive (and destroy after) the buffers/arrays its graph copies
+// between.
+class CudaGraphExecGuard {
+public:
+    CudaGraphExecGuard() = default;
+    ~CudaGraphExecGuard() { reset(); }
+
+    CudaGraphExecGuard(const CudaGraphExecGuard&) = delete;
+    CudaGraphExecGuard& operator=(const CudaGraphExecGuard&) = delete;
+    CudaGraphExecGuard(CudaGraphExecGuard&& other) noexcept : myExec(other.release()) {}
+    CudaGraphExecGuard& operator=(CudaGraphExecGuard&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
+
+    void reset(cudaGraphExec_t exec = nullptr) {
+        if (myExec) {
+            cudaGraphExecDestroy(myExec);
+        }
+        myExec = exec;
+    }
+
+    [[nodiscard]] cudaGraphExec_t release() noexcept {
+        cudaGraphExec_t e = myExec;
+        myExec = nullptr;
+        return e;
+    }
+
+    [[nodiscard]] cudaGraphExec_t get() const noexcept { return myExec; }
+    explicit operator bool() const noexcept { return myExec != nullptr; }
+
+private:
+    cudaGraphExec_t myExec = nullptr;
+};
+
 // Owns a paired Win32 file-mapping HANDLE + its MapViewOfFile() pointer. Both halves are always
 // torn down together (UnmapViewOfFile before CloseHandle) since a mapping is useless once its
 // view is gone and vice versa -- callers never need one without the other.
