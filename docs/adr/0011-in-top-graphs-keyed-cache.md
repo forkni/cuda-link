@@ -1,6 +1,6 @@
 # ADR-0011: Port CUDA Graphs to the In TOP via a keyed graph-exec cache
 
-**Status**: Accepted (implementation merged, default OFF; live A/B verdict pending — see
+**Status**: Accepted (implementation merged, default OFF; live-validated 2026-07-06 — see
 "Live-test results")
 **Date**: 2026-07-06
 **Applies to**: the env-gated CUDA-Graphs submission collapse in the In TOP
@@ -116,14 +116,39 @@ artifact is grounds to re-park. This is the standing reopen/re-park trigger.
   memcpy2DToArray) into one `cudaGraphLaunch` — a WDDM-submission-overhead play, not a
   bandwidth one. Honest expectation from Python P3: single-digit µs per cook.
 
-## Live-test results
+## Live-test results (2026-07-06, `CUDALINK_CPP_USE_GRAPHS=1`, Debug ON, ninja DLLs)
 
-*Pending — to be filled in by a follow-up docs edit after the first
-`CUDALINK_CPP_USE_GRAPHS=1` TD session:*
+7,932 frames over ~143 s (~55.5 FPS), 3-slot ring. Zero `graphs:` failures, zero disable
+events, no visual artifacts reported.
 
-- IPC-event-wait capture probe: **TBD** (built vs `graphs: ... disabling` on first capture)
-- `graph_builds` plateau value and dst-array stability verdict: **TBD**
-- A/B (`avg_cook_us`, graph `gpu_copy_us` vs legacy `gpu_copy_us + event_wait_us`): **TBD**
+- **IPC-event-wait capture probe: PASSED.** Every capture of the
+  `cudaStreamWaitEvent(imported IPC event, cudaEventWaitExternal)` + memcpy pair built and
+  instantiated first try — 21/21 builds across the session, no `disabling` line ever.
+- **dst-array stability: CONFIRMED (per SHM session segment).** Within each segment TD handed
+  back the *same* `cudaArray_t` pointer every cook: each slot's cache held exactly one entry
+  (`1/4`), so `graph_builds` plateaued at 3 (= num_slots × 1 array) within 3 frames of each
+  (re)connect. The cap was never approached. The pointer changed only across
+  VERSION_CHANGED boundaries — and only 3 distinct values appeared across 7 segments, i.e.
+  TD even reuses addresses (which is also why the ABA caveat stays documented).
+- **Lifecycle: exercised 7×.** Six mid-session VERSION_CHANGED events (producer restarts)
+  plus final teardown each logged `destroyGraphs: dropping 3 cached graph exec(s)` via the
+  `closeHandles()` funnel and rebuilt within 1–3 frames. No crash, no leak, no stall.
+- **A/B vs the immediately preceding legacy session** (env unset, 42k frames, same 3-slot
+  setup): CPU `avg_cook_us` p50 **384 µs (graphs) vs 451 µs (legacy)** (~15 % lower); means
+  413 vs 436 µs; p25 230 vs 282 µs. Direction is positive, but the two sessions were not
+  load-controlled, so treat the magnitude as indicative, not measured-in-isolation.
+- **GPU-side channels are not a clean instrument here**: graph-mode `gpu_copy_us` fuses the
+  producer wait into the copy (avg 723 µs, spikes to ~2.5 ms), and the legacy comparison
+  (`gpu_copy_us + event_wait_us` avg ≈ 1356 µs) is equally dominated by producer timing
+  (legacy `event_wait_us` swung 3 µs → 2.5 ms across windows). Both numbers measure "how
+  long the GPU sat waiting for the producer," not submission overhead. `avg_cook_us` is the
+  usable A/B metric.
+- The Out TOP exhibited exactly its documented ADR-0010 behavior under the shared env var:
+  built slots 0–2, `graphs: node update failed: invalid argument` at frame 3, latched off,
+  clean legacy session thereafter.
+
+**Verdict: the port works and is safe. Default stays OFF** per the decision above — the win
+is real but modest, and the path remains opt-in diagnostics/perf tooling.
 
 ## Reopen / re-park conditions
 
