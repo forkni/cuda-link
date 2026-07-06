@@ -365,6 +365,120 @@ def _make_receiver_with_float16_state(use_cupy: bool = False) -> object:
     return engine
 
 
+def _make_receiver_for_diag_test(verbose: bool) -> tuple[object, list[str]]:
+    """Build a minimal TDReceiverEngine (plain uint8 format, non-float16 path) with a
+    log-capturing ``log_fn``, for exercising the ``[DIAG] import_frame`` Debug gate.
+
+    Returns (engine, logs) where ``logs`` accumulates every message passed through
+    the engine's ``_log`` (mirrors CUDAIPCExtension._log's ``force or verbose`` gate,
+    since TDReceiverEngine's own ``_log`` *is* the injected ``log_fn`` — see
+    TDReceiver.py's constructor, which sets ``self._log = log_fn`` directly).
+    """
+    from unittest.mock import MagicMock
+
+    from CUDAIPCExtension import FORMAT_KIND_UNSIGNED
+    from TDConfig import TDSenderConfig
+    from TDReceiver import ReceiverConnection, RetryState, TDReceiverEngine
+
+    from cuda_link.importer import Format
+    from cuda_link.shm_protocol import Metadata, SHMLayout
+
+    HEIGHT, WIDTH, COMPS = 4, 4, 4
+    NUM_SLOTS = 2
+    DATA_SIZE = HEIGHT * WIDTH * COMPS  # uint8 = 1 byte/elem
+
+    buf = SHMLayout(NUM_SLOTS).build_buffer(version=1, write_idx=1)
+
+    logs: list[str] = []
+
+    def _capture_log(msg: str, force: bool = False) -> None:
+        # Mirrors CUDAIPCExtension._log's real gate: force or verbose.
+        if force or verbose:
+            logs.append(msg)
+
+    fake_host = MagicMock()
+    fake_host.is_active.return_value = True
+
+    engine = TDReceiverEngine(
+        host=fake_host,
+        config=TDSenderConfig(),
+        cuda=MagicMock(),
+        log_fn=_capture_log,
+        num_slots=NUM_SLOTS,
+        device=0,
+        shm_name="test_shm",
+        verbose=verbose,
+    )
+
+    engine._initialized = True
+    engine.frame_count = 0
+    engine._diag_frames_since_reinit = 0
+
+    mock_dev_ptrs = [MagicMock() for _ in range(NUM_SLOTS)]
+    mock_dev_ptrs[0].value = 0xDEAD0000
+    mock_stream = MagicMock()
+    mock_stream.value = 0x1234
+    mock_shm = MagicMock()
+    mock_shm.buf = buf
+
+    layout = SHMLayout(NUM_SLOTS)
+    engine._connection = ReceiverConnection(
+        shm_handle=mock_shm,
+        dev_ptrs=mock_dev_ptrs,
+        ipc_handles=[None] * NUM_SLOTS,
+        ipc_events=[MagicMock(), MagicMock()],
+        stream=mock_stream,
+        layout=layout,
+        num_slots=NUM_SLOTS,
+        ipc_version=1,
+        shutdown_offset=layout.shutdown_offset,
+        last_write_idx=0,
+    )
+
+    engine._format = Format.from_metadata(
+        Metadata(
+            width=WIDTH,
+            height=HEIGHT,
+            num_comps=COMPS,
+            format_kind=FORMAT_KIND_UNSIGNED,
+            bits_per_comp=8,
+            flags=0,
+            data_size=DATA_SIZE,
+        )
+    )
+    engine._retry = RetryState(connect_attempts=0, frames_since_last_retry=0)
+    engine._cached_shape = MagicMock()
+
+    return engine, logs
+
+
+def test_diag_not_emitted_when_debug_off() -> None:
+    """[DIAG] import_frame must NOT print when the Debug toggle (verbose) is off.
+
+    Regression test: _diag was previously gated only on a "first 5 frames since
+    reinit" counter, independent of the Debug flag, and emitted via force=True —
+    bypassing the verbosity gate entirely (TDReceiver.py's import_frame()).
+    """
+    engine, logs = _make_receiver_for_diag_test(verbose=False)
+    handle = FakeTOPHandle()
+
+    result = engine.import_frame(handle)
+
+    assert result is True
+    assert not any("[DIAG]" in line for line in logs), f"[DIAG] leaked with Debug off: {logs}"
+
+
+def test_diag_emitted_when_debug_on() -> None:
+    """[DIAG] import_frame DOES print for the first frames after reinit when Debug is on."""
+    engine, logs = _make_receiver_for_diag_test(verbose=True)
+    handle = FakeTOPHandle()
+
+    result = engine.import_frame(handle)
+
+    assert result is True
+    assert any("[DIAG] import_frame #1" in line for line in logs), f"[DIAG] missing with Debug on: {logs}"
+
+
 def test_float16_receiver_uses_cpu_fallback_when_cupy_unavailable() -> None:
     """import_frame() uses copy_numpy_array (CPU path) when CuPy is not available."""
     from unittest.mock import patch
