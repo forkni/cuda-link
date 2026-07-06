@@ -313,9 +313,22 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     const size_t itemsize = fmt.bits_per_comp / cudalink::core::BITS_PER_BYTE;
     const size_t bufferSize = static_cast<size_t>(width) * height * fmt.num_comps * itemsize;
 
+    // cudaIpcGetMemHandle shares the ENTIRE underlying allocation block, and cudaMalloc may
+    // sub-allocate 'bufferSize' from a larger block -- NVIDIA's IPC guidance (Programming Guide
+    // Sec 6.2.11) is to only IPC-share allocations rounded to a 2 MiB multiple, closing a
+    // documented cross-process information-disclosure hazard. Only the allocation rounds; the
+    // wire 'data_size' (Metadata below) stays the tight 'bufferSize' -- the receiver derives its
+    // copy extent from width/height/format, not from data_size, so rounding it would be a
+    // protocol-visible change. Matches the Python exporter's split (buffer_size rounded for
+    // cudaMalloc, data_size tight on the wire -- src/cuda_link/exporter.py).
+    constexpr size_t kIpcAllocAlignment = 2 * 1024 * 1024;
+    const size_t allocSize =
+        ((bufferSize + kIpcAllocAlignment - 1) / kIpcAllocAlignment) * kIpcAllocAlignment;
+    debugLog("reallocate: sizing data=" + std::to_string(bufferSize) + " alloc=" + std::to_string(allocSize));
+
     for (int slot = 0; slot < numSlots; ++slot) {
         void* rawDevPtr = nullptr;
-        cudaError_t st = cudaMalloc(&rawDevPtr, bufferSize);
+        cudaError_t st = cudaMalloc(&rawDevPtr, allocSize);
         if (st != cudaSuccess) {
             myError = std::string("cudaMalloc failed: ") + cudaGetErrorString(st);
             return false;
