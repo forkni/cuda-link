@@ -98,6 +98,54 @@ def _find_spout_wheel() -> Path | None:
     return wheels[0] if wheels else None
 
 
+# Repo-relative source roots whose changes should invalidate each wheel.
+_CORE_SOURCE_ROOTS = ("src/cuda_link", "pyproject.toml")
+_SPOUT_SOURCE_ROOTS = ("spout/src", "spout/CMakeLists.txt", "spout/pyproject.toml")
+
+# Build artifact dirs to skip when walking source roots for mtimes — a wheel must
+# never be able to count itself (or a stale build/ copy) as its own source.
+_ARTIFACT_DIRS = {"build", "build_ninja", "dist", "__pycache__"}
+
+
+def _newest_source_mtime(roots: tuple[str, ...], _root: Path = REPO_ROOT) -> float:
+    """Newest mtime (epoch secs) across source files under the given repo-relative roots.
+
+    Directories are walked recursively; build artifacts (build/, build_ninja/, dist/,
+    __pycache__/, *.egg-info/) are skipped. Returns 0.0 when nothing matches, which
+    callers treat as "not newer than the wheel" — i.e. no spurious rebuild.
+
+    `_root` overrides the repo root; only tests should pass it (production callers
+    always resolve against the real REPO_ROOT).
+    """
+    newest = 0.0
+    for rel in roots:
+        p = _root / rel
+        if p.is_file():
+            newest = max(newest, p.stat().st_mtime)
+        elif p.is_dir():
+            for f in p.rglob("*"):
+                if not f.is_file():
+                    continue
+                parts = set(f.relative_to(p).parts)
+                if parts & _ARTIFACT_DIRS or f.parent.name.endswith(".egg-info"):
+                    continue
+                newest = max(newest, f.stat().st_mtime)
+    return newest
+
+
+def _wheel_is_stale(wheel: Path, roots: tuple[str, ...], _root: Path = REPO_ROOT) -> bool:
+    """True if any source file under `roots` is newer than the built `wheel`.
+
+    mtime is a pragmatic signal, not a content hash: a `git checkout`/clone can
+    rewrite source mtimes and trigger a spurious rebuild, but that is safe
+    (correct-but-slower) — never a wrong install. Use the --wheel/--spout-wheel
+    override flags to force-reuse a specific wheel unconditionally.
+
+    `_root` overrides the repo root; only tests should pass it.
+    """
+    return _newest_source_mtime(roots, _root=_root) > wheel.stat().st_mtime
+
+
 def _build_wheel(dry_run: bool) -> Path:
     """Run build_wheel.cmd to produce a wheel; return its path."""
     print(_bold("[build] No wheel found — building now..."))
@@ -157,6 +205,9 @@ def resolve_wheel(override: str | None, dry_run: bool) -> Path:
     w = _find_wheel()
     if not w:
         w = _build_wheel(dry_run)
+    elif _wheel_is_stale(w, _CORE_SOURCE_ROOTS):
+        print(_yellow(f"  [stale] {w.name} predates src/cuda_link changes — rebuilding..."))
+        w = _build_wheel(dry_run)
     print(f"  Wheel: {w.name}")
     return w
 
@@ -170,6 +221,9 @@ def resolve_spout_wheel(override: str | None, dry_run: bool) -> Path:
         return p
     w = _find_spout_wheel()
     if not w:
+        w = _build_spout_wheel(dry_run)
+    elif _wheel_is_stale(w, _SPOUT_SOURCE_ROOTS):
+        print(_yellow(f"  [stale] {w.name} predates spout/ changes — rebuilding..."))
         w = _build_spout_wheel(dry_run)
     print(f"  Spout wheel: {w.name}")
     return w
