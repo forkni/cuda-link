@@ -240,6 +240,16 @@ std::int64_t create_receiver(const std::string& name, int device) {
 }
 
 // Returns (connected, new_frame, width, height, dxgi_format, dst_ptr).
+//
+// Lifetime contract for dst_ptr: it points at this Receiver's single reusable device
+// buffer (r->dstBuf), NOT a fresh per-frame allocation. It is valid for the caller to
+// read only until this receive() is called again on the same handle -- the very next
+// call either (a) overwrites the same buffer in place via cudaMemcpy2DFromArray (below)
+// when the sender's byte size hasn't grown, or (b) cudaFree()s it outright and mallocs a
+// new, differently-addressed block when the sender's geometry/format grows the required
+// size (see the `need > r->dstBytes` growth check below). Callers must finish consuming
+// (or copy out of) dst_ptr before requesting the next frame; holding onto it across a
+// subsequent receive() call risks a stale read or a use-after-free.
 py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch*/, std::size_t /*maxBytes*/) {
     std::shared_ptr<Receiver> r;
     { std::lock_guard<std::mutex> lk(g_mu);
