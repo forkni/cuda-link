@@ -340,16 +340,6 @@ in `pyproject.toml`. Import them directly:
 from fakes import FakeShmAdapter, FakeTDHost, FakeTOPHandle, make_connected_importer
 ```
 
-### Spout suite
-
-```bash
-cd spout && pytest tests -m "not requires_spout" --cov=cuda_link_spout --cov-report=term-missing
-```
-
-Separate coverage gate `fail_under = 89` in `spout/pyproject.toml`. The native
-`_spout_bridge` extension is replaced by `FakeSpoutBackend` for all no-GPU tests.
-CI runs the spout suite in its own `spout-tests` job in `.github/workflows/tests.yml`.
-
 ## Benchmarks
 
 All results on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. RGBA (4-channel) frames.
