@@ -67,8 +67,17 @@ jobs:
         # CUDAToolkit_ROOT is undefined -- pass the runner's actual install location
         # explicitly rather than relying on find_package(CUDAToolkit)'s CUDA_PATH
         # env-var fallback.
+        #
+        # CMAKE_C/CXX_COMPILER=cl is required here: with both cl.exe (via msvc-dev-cmd
+        # above) and clang++.exe (via install-llvm-action above) on PATH and no compiler
+        # pinned, CMake's Ninja-generator compiler search picks clang++ over cl -- and
+        # the standalone LLVM 19.1.5 we install for format/tidy is too old for this
+        # runner image's MSVC STL (which demands Clang 20+ when compiled with clang).
+        # The shipping build target is MSVC only (see CMakeLists.txt); clang is used here
+        # solely for the separate format/tidy steps, never for the actual compile.
         run: >
           cmake -S cpp_top -B cpp_top/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
           "-DCUDAToolkit_ROOT=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
 
       - name: Build both Custom TOP DLLs
