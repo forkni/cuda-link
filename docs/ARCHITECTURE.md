@@ -834,6 +834,7 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0007** — Spout as a sidecar-launcher COMP, not an embedded transport
 - **ADR-0008** — No native work on the D2H readback path
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
+- **ADR-0010** — Park the Out TOP CUDA-Graphs path (array-source node update rejected)
 
 ---
 

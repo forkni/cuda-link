@@ -16,6 +16,7 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0007](0007-spout-as-launcher-not-transport.md) | Expose Spout as a sidecar-launcher COMP, not an embedded transport | Accepted | 2026-06-27 |
 | [0008](0008-skip-native-d2h.md) | No native work on the D2H readback path | Accepted | 2026-07-04 |
 | [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
+| [0010](0010-park-out-top-graphs.md) | Park the Out TOP CUDA-Graphs path (array-source node update rejected) | Accepted | 2026-07-06 |
 
 ## Adding a new ADR
 
