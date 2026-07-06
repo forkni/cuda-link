@@ -38,8 +38,8 @@ constexpr DWORD kIpcCloseGracePeriodMs = 100;
 
 // Names the Info CHOP channel count returned by getNumInfoCHOPChans() -- must stay in
 // sync with the number of `case` labels in getInfoCHOPChan()'s switch below (frames, cook_us,
-// copy_us, begin_us, end_us, write_idx, num_slots).
-constexpr int32_t kNumInfoCHOPChans = 7;
+// copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us).
+constexpr int32_t kNumInfoCHOPChans = 9;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
@@ -781,6 +781,27 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
 
+            // Debug-gated GPU-side timing (see gpu_timer.h): read the interval recorded
+            // kRingSize cooks ago (its GPU work has long completed -- never this cook's own,
+            // never a sync), then arm this cook's start event before the IPC copy. The stop
+            // event is recorded after the graph/legacy branch below, so the interval brackets
+            // either path uniformly (a cudaGraphLaunch is just another enqueue on myStream).
+            uint32_t ipcTimerIdx = 0;
+            bool ipcTimerArmed = false;
+            if (myDebugLog.enabled()) {
+                if (myIpcTimer.ensureCreated()) {
+                    float us = 0.0f;
+                    if (myIpcTimer.tryRead(myIpcTimer.peekReadIdx(), &us)) {
+                        myGpuIpcUs = us;
+                    }
+                    ipcTimerIdx = myIpcTimer.recordStart(myStream);
+                    ipcTimerArmed = true;
+                } else if (!myGpuTimingUnavailable) {
+                    myGpuTimingUnavailable = true;
+                    debugLog("gpu timing unavailable: cudaEventCreate failed");
+                }
+            }
+
             // CUDA Graphs (env-gated, PLAN-005 §2.1): collapses the IPC-slot copy + the
             // interprocess event-record below into a single cudaGraphLaunch submission.
             // tryGraphCopy() does the exact same two ops as the 'else' branch (see its
@@ -800,6 +821,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 // pass-through copy below, so the receiver's cudaStreamWaitEvent isn't delayed
                 // by work this TOP does purely for its own on-screen display.
                 CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
+            }
+
+            if (ipcTimerArmed) {
+                myIpcTimer.recordStop(ipcTimerIdx, myStream);
             }
 
             // Pass-through output (this TOP's own display, per explicit request -- see the
@@ -825,10 +850,29 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             // ...) shape the receiver (CudaLinkInTOP.cpp) already uses successfully in
             // production. Same-stream ordering guarantees the IPC-slot write above completes
             // before this read -- no extra event/wait needed.
+            // Same deferred-read timing discipline as the IPC bracket above, for the
+            // pass-through copy alone -- keeping the two intervals separate is what lets the
+            // A/B log discriminate "IPC export got slower" from "the display copy is what is
+            // backing up the stream" (stutter hypothesis H1).
+            uint32_t passTimerIdx = 0;
+            bool passTimerArmed = false;
+            if (ipcTimerArmed && myPassTimer.ensureCreated()) {
+                float us = 0.0f;
+                if (myPassTimer.tryRead(myPassTimer.peekReadIdx(), &us)) {
+                    myGpuPassUs = us;
+                }
+                if (selfOut) {
+                    passTimerIdx = myPassTimer.recordStart(myStream);
+                    passTimerArmed = true;
+                }
+            }
             if (selfOut) {
                 cudaError_t passThroughStatus =
                     cudaMemcpy2DToArrayAsync(selfOut->cudaArray, 0, 0, mySlotDevPtrs[slot], rowBytes,
                                              rowBytes, myMetadata.height, cudaMemcpyDeviceToDevice, myStream);
+                if (passTimerArmed) {
+                    myPassTimer.recordStop(passTimerIdx, myStream);
+                }
                 if (passThroughStatus != cudaSuccess) {
                     myWarning = std::string("pass-through output copy failed: ") +
                                 cudaGetErrorString(passThroughStatus);
@@ -881,7 +925,8 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
     // reporting cadence): gives an offline average cook_us/copy_us/begin_us/end_us number
     // without needing to wire and eyeball an Info CHOP live.
     if (myDebugLog.enabled()) {
-        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myFrameCount, myDebugLog);
+        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myGpuIpcUs, "gpu_ipc_us", myGpuPassUs,
+                       "gpu_pass_us", myFrameCount, myDebugLog);
     }
 }
 
@@ -890,7 +935,8 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 // ---------------------------------------------------------------------------
 
 int32_t CudaLinkOutTOP::getNumInfoCHOPChans(void*) {
-    return kNumInfoCHOPChans; // frames, cook_us, copy_us, begin_us, end_us, write_idx, num_slots
+    // frames, cook_us, copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us
+    return kNumInfoCHOPChans;
 }
 
 void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, void*) {
@@ -926,6 +972,17 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
             case 6:
                 chan->name->setString("num_slots");
                 chan->value = static_cast<float>(myLayout.num_slots());
+                break;
+            case 7:
+                // GPU-side (cudaEventElapsedTime) duration of the IPC-slot copy + interprocess
+                // event-record, read one ring-lap late; 0.0 until Debug is turned on.
+                chan->name->setString("gpu_ipc_us");
+                chan->value = myGpuIpcUs;
+                break;
+            case 8:
+                // GPU-side duration of the pass-through display copy; 0.0 until Debug is on.
+                chan->name->setString("gpu_pass_us");
+                chan->value = myGpuPassUs;
                 break;
             default:
                 break;

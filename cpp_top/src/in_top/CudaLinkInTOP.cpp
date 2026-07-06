@@ -32,7 +32,8 @@ namespace {
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
 constexpr int32_t kNumInfoCHOPChans =
-    8; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
+    12; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots,
+        // event_wait_us, gpu_copy_us, noframe_count, version_changed_count
 constexpr int32_t kNumInfoDATRows = 4; // ipc_version, status, last_error, last_error_frame
 } // namespace
 
@@ -424,12 +425,27 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
 
         switch (result.state) {
             case SlotState::NoFrame:
-                return; // previous output persists (matches the SpectrumTOP.cpp / PyTorchTOP.cpp samples)
+                // Previous output persists (matches the SpectrumTOP.cpp / PyTorchTOP.cpp
+                // samples) -- which is exactly a repeat frame at the display, so tally it:
+                // a rising noframe_ratio in the cadence log is the signature of a producer
+                // running below display rate (stutter hypothesis H3/H4), invisible to every
+                // timing channel because this cook does no CUDA work at all.
+                if (myDebugLog.enabled()) {
+                    ++myTotalNoFrame;
+                    myCadence.tally(cudalink::common::CadenceCounters::Kind::NoFrame, myFrameCount,
+                                    myDebugLog);
+                }
+                return;
             case SlotState::Shutdown:
                 teardown();
                 myStatus = "Producer exited";
                 return;
             case SlotState::VersionChanged:
+                if (myDebugLog.enabled()) {
+                    ++myTotalVersionChanged;
+                    myCadence.tally(cudalink::common::CadenceCounters::Kind::VersionChanged, myFrameCount,
+                                    myDebugLog);
+                }
                 debugLog("VERSION_CHANGED: new_version=" + std::to_string(result.new_version));
                 closeHandles(); // re-derive layout from a freshly-read num_slots
                 myLastVersion = result.new_version;
@@ -441,6 +457,10 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 myLastWriteIdx = 0;
                 break; // fall through to handle-opening below
             case SlotState::NewFrame:
+                if (myDebugLog.enabled()) {
+                    myCadence.tally(cudalink::common::CadenceCounters::Kind::NewFrame, myFrameCount,
+                                    myDebugLog);
+                }
                 break;
         }
 
@@ -513,8 +533,39 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 return;
             }
 
+            // Debug-gated GPU-side timing (see gpu_timer.h): a three-point A->B->C bracket
+            // via two rings -- myWaitTimer spans A->B (how long the cudaStreamWaitEvent below
+            // actually stalls this stream, i.e. how late the producer's interprocess event
+            // fired: the receiver-visible stutter suspect), myCopyTimer spans B->C (the real
+            // GPU cost of the D2D copy, which scales ~4x on float32). Reads are of the pair
+            // recorded kRingSize cooks ago -- never this cook's own, never a sync.
+            uint32_t waitTimerIdx = 0;
+            uint32_t copyTimerIdx = 0;
+            bool timersArmed = false;
+            if (myDebugLog.enabled()) {
+                if (myWaitTimer.ensureCreated() && myCopyTimer.ensureCreated()) {
+                    float us = 0.0f;
+                    if (myWaitTimer.tryRead(myWaitTimer.peekReadIdx(), &us)) {
+                        myEventWaitUs = us;
+                    }
+                    if (myCopyTimer.tryRead(myCopyTimer.peekReadIdx(), &us)) {
+                        myGpuCopyUs = us;
+                    }
+                    waitTimerIdx = myWaitTimer.recordStart(myStream); // event A
+                    timersArmed = true;
+                } else if (!myGpuTimingUnavailable) {
+                    myGpuTimingUnavailable = true;
+                    debugLog("gpu timing unavailable: cudaEventCreate failed");
+                }
+            }
+
             CUDALINK_CUDA_CHECK_FATAL(cudaStreamWaitEvent(myStream, mySlotEvents[myReadSlot], 0), myError,
                                       myFatal);
+
+            if (timersArmed) {
+                myWaitTimer.recordStop(waitTimerIdx, myStream);   // event B
+                copyTimerIdx = myCopyTimer.recordStart(myStream); // event B' (back-to-back with B)
+            }
 
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
@@ -522,9 +573,13 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, mySlotDevPtrs[myReadSlot], rowBytes,
                                          rowBytes, myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
                 myError, myFatal);
-            // CPU-side enqueue cost only (the copy itself is async on myStream) -- a true
-            // GPU-side copy_us would need cudaEvent-based timing; deferred, not required
-            // for correctness.
+
+            if (timersArmed) {
+                myCopyTimer.recordStop(copyTimerIdx, myStream); // event C
+            }
+            // myCopyUs below stays CPU-side enqueue cost only (the copy itself is async on
+            // myStream); the true GPU-side numbers are the event_wait_us/gpu_copy_us pair
+            // recorded just above.
             workEnd = std::chrono::steady_clock::now();
             myCopyUs = std::chrono::duration<float, std::micro>(workEnd - beginEnd).count();
         }
@@ -545,7 +600,8 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
     // cadence): gives an offline avg cook_us/copy_us/begin_us/end_us number without
     // needing to wire and eyeball an Info CHOP live.
     if (myDebugLog.enabled()) {
-        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myFrameCount, myDebugLog);
+        myBench.record(myCookUs, myCopyUs, myBeginUs, myEndUs, myEventWaitUs, "event_wait_us", myGpuCopyUs,
+                       "gpu_copy_us", myFrameCount, myDebugLog);
     }
 }
 
@@ -596,6 +652,30 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
                 // rather than as a parameter (see CudaLinkInTOP.h).
                 chan->name->setString("num_slots");
                 chan->value = static_cast<float>(myLayout.num_slots());
+                break;
+            case 8:
+                // GPU-side (cudaEventElapsedTime) stall of the cudaStreamWaitEvent on the
+                // producer's ready-event, read one ring-lap late; 0.0 until Debug is on.
+                chan->name->setString("event_wait_us");
+                chan->value = myEventWaitUs;
+                break;
+            case 9:
+                // GPU-side duration of the D2D copy into the output array; 0.0 until Debug
+                // is on.
+                chan->name->setString("gpu_copy_us");
+                chan->value = myGpuCopyUs;
+                break;
+            case 10:
+                // Session-lifetime count of NoFrame cooks (repeat frames at the display);
+                // only advances while Debug is on.
+                chan->name->setString("noframe_count");
+                chan->value = static_cast<float>(myTotalNoFrame);
+                break;
+            case 11:
+                // Session-lifetime count of VersionChanged cooks (also frameless); only
+                // advances while Debug is on.
+                chan->name->setString("version_changed_count");
+                chan->value = static_cast<float>(myTotalVersionChanged);
                 break;
             default:
                 break;

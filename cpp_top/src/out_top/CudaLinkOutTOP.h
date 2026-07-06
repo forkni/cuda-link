@@ -15,6 +15,7 @@
 
 #include "../common/bench_accumulator.h"
 #include "../common/debug_log.h"
+#include "../common/gpu_timer.h"
 #include "../core/ring_writer.h"
 #include "../core/shm_layout.h"
 #include "pixel_format_map.h"
@@ -167,4 +168,17 @@ private:
     // Periodic bench-log accumulator (Debug-gated, reported every 97 frames -- matches the
     // Python exporter's reporting cadence). Shared with CudaLinkInTOP (see bench_accumulator.h).
     cudalink::common::BenchAccumulator myBench;
+
+    // Debug-gated GPU-side timing (see gpu_timer.h): the CPU-side channels above only time
+    // async enqueues, so the actual GPU copy cost (4x bigger on float32) is invisible to them.
+    // myIpcTimer brackets the IPC-slot copy + interprocess event-record (or, on the graph
+    // path, the single cudaGraphLaunch replacing both); myPassTimer brackets the optional
+    // pass-through display copy. Both are lazily created on the first Debug-on cook and are
+    // slot-independent local events, untouched by reallocate(). When Debug is off, none of
+    // this is created or recorded -- the hot path is byte-identical to before.
+    cudalink::common::GpuTimerRing myIpcTimer;
+    cudalink::common::GpuTimerRing myPassTimer;
+    float myGpuIpcUs = 0.0f;
+    float myGpuPassUs = 0.0f;
+    bool myGpuTimingUnavailable = false; // sticky once-only "timing unavailable" log guard
 };

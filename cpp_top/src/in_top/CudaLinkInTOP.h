@@ -14,7 +14,9 @@
 #include "TOP_CPlusPlusBase.h"
 
 #include "../common/bench_accumulator.h"
+#include "../common/cadence_counters.h"
 #include "../common/debug_log.h"
+#include "../common/gpu_timer.h"
 #include "../core/ring_reader.h"
 #include "../core/shm_layout.h"
 
@@ -161,6 +163,28 @@ private:
     // CudaLinkOutTOP's cadence so sender and receiver logs line up for a side-by-side
     // comparison). Shared with CudaLinkOutTOP (see bench_accumulator.h).
     cudalink::common::BenchAccumulator myBench;
+
+    // Debug-gated GPU-side timing (see gpu_timer.h). myWaitTimer brackets the
+    // cudaStreamWaitEvent on the producer's interprocess ready-event -- event_wait_us is
+    // how long that wait actually stalled this stream on the GPU, i.e. how late the
+    // producer's event fired (the receiver-visible stutter suspect that no CPU-side channel
+    // can see). myCopyTimer brackets the D2D copy into the output array (gpu_copy_us).
+    // Both are lazily created on the first Debug-on cook; local, slot-independent events,
+    // unrelated to the imported interprocess mySlotEvents (which disable timing).
+    cudalink::common::GpuTimerRing myWaitTimer;
+    cudalink::common::GpuTimerRing myCopyTimer;
+    float myEventWaitUs = 0.0f;
+    float myGpuCopyUs = 0.0f;
+    bool myGpuTimingUnavailable = false; // sticky once-only "timing unavailable" log guard
+
+    // Debug-gated frame-cadence tally (see cadence_counters.h): counts every classified
+    // cook -- including the NoFrame/VersionChanged early returns that BenchAccumulator never
+    // sees -- because a NoFrame cook re-displays the previous texture (a repeat frame, the
+    // visible-stutter mechanism the timing channels can't show). The running totals feed the
+    // noframe_count/version_changed_count Info CHOP channels.
+    cudalink::common::CadenceCounters myCadence;
+    uint64_t myTotalNoFrame = 0;
+    uint64_t myTotalVersionChanged = 0;
 
     uint32_t myReadSlot = 0;
 };
