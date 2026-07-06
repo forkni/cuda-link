@@ -13,16 +13,6 @@
 // Every latched string carries file+line, matching NVIDIA's own checkCudaErrors pattern --
 // otherwise a failure surfaced only via myError/myLastError can't be traced back to which of
 // several CUDA_CHECK call sites in the same function fired.
-#define CUDALINK_CUDA_CHECK(call, err_var)                                                                   \
-    do {                                                                                                     \
-        cudaError_t _cudalink_status = (call);                                                               \
-        if (_cudalink_status != cudaSuccess) {                                                               \
-            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
-                        __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
-            return;                                                                                          \
-        }                                                                                                    \
-    } while (0)
-
 #define CUDALINK_CUDA_CHECK_BOOL(call, err_var)                                                              \
     do {                                                                                                     \
         cudaError_t _cudalink_status = (call);                                                               \
