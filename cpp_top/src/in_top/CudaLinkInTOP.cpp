@@ -32,8 +32,8 @@ namespace {
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
 constexpr int32_t kNumInfoCHOPChans =
-    12; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots,
-        // event_wait_us, gpu_copy_us, noframe_count, version_changed_count
+    13; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots,
+        // event_wait_us, gpu_copy_us, noframe_count, version_changed_count, rescued_count
 constexpr int32_t kNumInfoDATRows = 4; // ipc_version, status, last_error, last_error_frame
 } // namespace
 
@@ -201,6 +201,10 @@ void CudaLinkInTOP::teardown() {
         CloseHandle(asHandle(myShmHandle));
         myShmHandle = nullptr;
     }
+    if (myDoorbellHandle) {
+        CloseHandle(asHandle(myDoorbellHandle));
+        myDoorbellHandle = nullptr;
+    }
     myLastVersion = 0;
     myLastWriteIdx = 0;
     myLayout = SHMLayout(0);
@@ -264,6 +268,69 @@ bool CudaLinkInTOP::openSHM(const char* name) {
     myShmMappedSize = mbi.RegionSize;
     guard.release(); // ownership transferred to myShmHandle/myShmView above
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// C4 stutter fix: bounded doorbell wait on NoFrame cooks (opt-in via Framewaitms).
+//
+// Root cause being addressed: producer and receiver TD processes both cook vsync-locked at
+// the same rate, so the publish-vs-read phase offset inside each display frame is
+// quasi-stationary. When the producer's publish lands just *after* this cook's
+// acquire_slot() poll, ordinary ms-level jitter flips the classification between repeat
+// and skip cook after cook -- a continuous judder that a producer restart re-rolls
+// (live-confirmed 2026-07-06: noframe_ratio 9-31% on 32F dropped to 0.000 across 8
+// consecutive windows after re-enabling the producer). Waiting a few ms for the publish
+// doorbell converts those repeats into slightly-later fresh frames, which is phase-immune.
+//
+// Caveats, all deliberate:
+// - The doorbell is an auto-reset event, so a stale signal from a publish this side already
+//   consumed can wake the wait spuriously; the loop re-polls acquire_slot() after every
+//   wake and re-waits with the remaining budget.
+// - Auto-reset also wakes exactly ONE waiter: if a Python consumer waits on the same
+//   doorbell, this TOP can consume signals that consumer was counting on (and vice versa).
+//   That is why the wait is opt-in (Framewaitms defaults to 0) -- enable it only when this
+//   TOP is the doorbell's sole waiter.
+// - This blocks TD's cook thread for up to waitMs (<= kFramewaitMax, 8 ms) -- the entire
+//   point of the fix: trade a bounded CPU wait for a fresh frame instead of a repeat.
+// ---------------------------------------------------------------------------
+
+cudalink::core::AcquireResult CudaLinkInTOP::waitForFreshFrame(cudalink::core::AcquireResult result,
+                                                               int waitMs) {
+    // Lazy open, retried on every waiting cook until the producer has created the event
+    // (CudaLinkOutTOP::reallocate() creates it before its first commit_version; a producer
+    // DLL predating the doorbell never will, in which case this stays null and the classic
+    // instant-repeat path below is preserved). Name construction mirrors the producer's
+    // verbatim (win_util.h widen() contract).
+    if (!myDoorbellHandle) {
+        const std::wstring wDoorbell = L"Local\\cudalink_db_" + widen(myCachedIpcmemname.c_str());
+        myDoorbellHandle = OpenEventW(SYNCHRONIZE, FALSE, wDoorbell.c_str());
+        if (myDoorbellHandle) {
+            debugLog("doorbell opened (Framewaitms=" + std::to_string(waitMs) + ")");
+        }
+    }
+    if (!myDoorbellHandle) {
+        return result;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+    while (result.state == SlotState::NoFrame) {
+        const auto remainingMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                .count();
+        if (remainingMs <= 0) {
+            break; // budget exhausted -- this cook stays a repeat frame
+        }
+        const DWORD wake = WaitForSingleObject(asHandle(myDoorbellHandle), static_cast<DWORD>(remainingMs));
+        if (wake != WAIT_OBJECT_0) {
+            break; // WAIT_TIMEOUT (or FAILED/ABANDONED): give up until the next cook
+        }
+        // Doorbell rang -- could be the publish this cook is hoping for, or a stale signal
+        // from one already consumed (auto-reset semantics). Re-classify and either return a
+        // fresh state (NewFrame/VersionChanged/Shutdown, handled by execute()'s switch) or
+        // loop back into the wait with whatever budget is left.
+        result = acquire_slot(myShmView, myLayout, myLastWriteIdx, myLastVersion);
+    }
+    return result;
 }
 
 bool CudaLinkInTOP::validateNumSlots(uint32_t numSlots) {
@@ -423,6 +490,20 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         // Step 2: classify SHM state.
         AcquireResult result = acquire_slot(myShmView, myLayout, myLastWriteIdx, myLastVersion);
 
+        // C4 stutter fix (opt-in, Framewaitms > 0): an initially-frameless cook gets one
+        // bounded chance to pick up a publish that is about to land, instead of instantly
+        // committing to a repeat frame -- see waitForFreshFrame() for the full rationale
+        // and caveats. 'rescued' only steers the cadence tally below; the rescued frame
+        // itself flows through the ordinary NewFrame path.
+        bool rescued = false;
+        if (result.state == SlotState::NoFrame) {
+            const int waitMs = Parameters::evalFramewaitms(inputs);
+            if (waitMs > 0) {
+                result = waitForFreshFrame(result, waitMs);
+                rescued = (result.state == SlotState::NewFrame);
+            }
+        }
+
         switch (result.state) {
             case SlotState::NoFrame:
                 // Previous output persists (matches the SpectrumTOP.cpp / PyTorchTOP.cpp
@@ -458,8 +539,12 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 break; // fall through to handle-opening below
             case SlotState::NewFrame:
                 if (myDebugLog.enabled()) {
-                    myCadence.tally(cudalink::common::CadenceCounters::Kind::NewFrame, myFrameCount,
-                                    myDebugLog);
+                    if (rescued) {
+                        ++myTotalRescued;
+                    }
+                    myCadence.tally(rescued ? cudalink::common::CadenceCounters::Kind::Rescued
+                                            : cudalink::common::CadenceCounters::Kind::NewFrame,
+                                    myFrameCount, myDebugLog);
                 }
                 break;
         }
@@ -676,6 +761,13 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
                 // advances while Debug is on.
                 chan->name->setString("version_changed_count");
                 chan->value = static_cast<float>(myTotalVersionChanged);
+                break;
+            case 12:
+                // Session-lifetime count of doorbell-rescued frames (NoFrame cooks the
+                // Framewaitms wait converted into fresh frames -- see waitForFreshFrame());
+                // only advances while Debug is on.
+                chan->name->setString("rescued_count");
+                chan->value = static_cast<float>(myTotalRescued);
                 break;
             default:
                 break;

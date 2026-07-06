@@ -22,7 +22,11 @@ namespace cudalink::common {
 
 class CadenceCounters {
 public:
-    enum class Kind : uint8_t { NewFrame, NoFrame, VersionChanged };
+    // Rescued: a cook first classified NoFrame that the doorbell wait (CudaLinkInTOP::
+    // waitForFreshFrame, opt-in via Framewaitms) converted into a fresh frame within its
+    // budget -- displays like a NewFrame (excluded from noframe_ratio) but tracked
+    // separately so the log shows how many repeats the wait is actually absorbing.
+    enum class Kind : uint8_t { NewFrame, NoFrame, VersionChanged, Rescued };
 
     // Call once per classified cook (any Kind), only from inside the caller's own
     // `if (myDebugLog.enabled())` gate -- mirrors BenchAccumulator::record()'s contract.
@@ -33,16 +37,19 @@ public:
             ++myNoFrame;
         } else if (kind == Kind::VersionChanged) {
             ++myVersionChanged;
+        } else if (kind == Kind::Rescued) {
+            ++myRescued;
         }
         if (myTotal >= kWindowSize) {
             const float ratio = static_cast<float>(myNoFrame) / static_cast<float>(myTotal);
             logger.log("cadence: total=" + std::to_string(myTotal) + " noframe=" + std::to_string(myNoFrame) +
-                           " version_changed=" + std::to_string(myVersionChanged) +
-                           " noframe_ratio=" + std::to_string(ratio),
+                           " version_changed=" + std::to_string(myVersionChanged) + " rescued=" +
+                           std::to_string(myRescued) + " noframe_ratio=" + std::to_string(ratio),
                        frameCount);
             myTotal = 0;
             myNoFrame = 0;
             myVersionChanged = 0;
+            myRescued = 0;
         }
     }
 
@@ -54,6 +61,7 @@ private:
     uint32_t myTotal = 0;
     uint32_t myNoFrame = 0;
     uint32_t myVersionChanged = 0;
+    uint32_t myRescued = 0;
 };
 
 } // namespace cudalink::common

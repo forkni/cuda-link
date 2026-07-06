@@ -67,6 +67,14 @@ private:
     // producer") if the mapping doesn't exist yet -- normal, retried every cook.
     bool openSHM(const char* name);
 
+    // C4 stutter fix (opt-in via Framewaitms > 0): bounded wait on the producer's publish
+    // doorbell when acquire_slot() classified this cook as NoFrame. Re-polls acquire_slot()
+    // after every doorbell wake and returns the latest classification -- NewFrame if the
+    // producer published within the budget (a "rescued" frame that would otherwise have
+    // been a visible repeat), or the original NoFrame on timeout. See the .cpp definition
+    // for the auto-reset/stale-signal and single-waiter caveats.
+    cudalink::core::AcquireResult waitForFreshFrame(cudalink::core::AcquireResult result, int waitMs);
+
     // Reads num_slots + metadata from the currently-mapped view, (re)builds mLayout,
     // and opens cudaIpcMemHandle/cudaIpcEventHandle for every slot. Covers both the
     // true first-connect case and the VERSION_CHANGED fall-through case uniformly --
@@ -116,6 +124,13 @@ private:
 
     // SHM connection state.
     void* myShmHandle = nullptr; // HANDLE, void* to avoid <windows.h> in the header
+
+    // Producer's publish doorbell (named auto-reset event, "Local\cudalink_db_<Ipcmemname>"),
+    // opened lazily by waitForFreshFrame() on the first Framewaitms-enabled NoFrame cook and
+    // held until teardown(). The name depends only on Ipcmemname, so it deliberately survives
+    // VERSION_CHANGED (closeHandles()) -- a restarted producer re-creates/reuses the same
+    // named object. HANDLE as void*, same convention as myShmHandle.
+    void* myDoorbellHandle = nullptr;
     uint8_t* myShmView = nullptr;
     size_t myShmMappedSize = 0; // actual mapped region size (VirtualQuery), for bounds checks
     cudalink::core::SHMLayout myLayout{0};
@@ -185,6 +200,12 @@ private:
     cudalink::common::CadenceCounters myCadence;
     uint64_t myTotalNoFrame = 0;
     uint64_t myTotalVersionChanged = 0;
+
+    // Session-lifetime count of doorbell-rescued frames: cooks initially classified NoFrame
+    // that waitForFreshFrame() converted into a fresh NewFrame within the Framewaitms budget
+    // (each one a repeat frame the viewer never saw). Debug-gated increments, mirroring
+    // myTotalNoFrame; feeds the rescued_count Info CHOP channel.
+    uint64_t myTotalRescued = 0;
 
     uint32_t myReadSlot = 0;
 };
