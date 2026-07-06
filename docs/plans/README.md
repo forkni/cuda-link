@@ -16,6 +16,7 @@ Recommended execution order is by dependency and risk, **not** by number:
 | 2 | [PLAN-002](PLAN-002-native-waiter.md) | Native notification waiter for the Python consumer | M (1–2 wk) | Implemented (this branch; accept gate MISS documented — see the doc) | — |
 | 3 | [PLAN-003](PLAN-003-cuda-bindings-adapter.md) | Optional `cuda.bindings` adapter (benchmark-gated) | M (1–2 wk) | Proposed | — |
 | 4 | [PLAN-001](PLAN-001-cpp-custom-top.md) | C++ Custom TOP sender/receiver inside TouchDesigner | L (4–6 wk) | Proposed (v2, verified — this branch) | soft: PLAN-002 |
+| 5 | [PLAN-005](PLAN-005-cpp-top-optimization.md) | C++ Custom TOP optimization backlog (CUDA Graphs port, 2 MiB IPC alignment, fused copy kernel) | S–M | Proposed (research complete) | PLAN-001 |
 
 Rationale for the order:
 
@@ -29,6 +30,10 @@ Rationale for the order:
 - **PLAN-001 last** — biggest win, biggest surface; benefits from PLAN-002's CI
   experience, and its protocol-core golden tests are designed so later native components
   can share the layout constants.
+- **PLAN-005 depends on PLAN-001** — it optimizes the C++ Custom TOP that PLAN-001
+  delivers; its Tier-1 items (2 MiB IPC rounding, CUDA Graphs submission collapse) are
+  actionable now that PLAN-001's Phase 0/1 tooling and polish have landed on
+  `feat/cpp-custom-top`.
 
 ## Related ADRs
 
