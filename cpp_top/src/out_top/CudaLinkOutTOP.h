@@ -67,6 +67,19 @@ private:
     bool reallocate(uint32_t width, uint32_t height, const cudalink::out_top::WireFormat& fmt, int numSlots,
                     const char* name);
 
+    // Frees all per-slot graph execs and resets myGraphBuilt -- called before rebuilding
+    // device buffers/events in reallocate() (the graphs reference them) and from teardown().
+    void destroyGraphs();
+
+    // Attempts the CUDA-Graphs launch path for 'slot' using this cook's srcArray as the
+    // IPC-copy source: captures (first use after (re)allocation) or updates-and-relaunches
+    // (subsequent cooks) a 2-node graph (memcpy + interprocess event-record) that replaces
+    // those two ops' separate WDDM submissions with one cudaGraphLaunch. See the capture-site
+    // comment in CudaLinkOutTOP.cpp for the full design/rationale (PLAN-005 §2.1). Returns
+    // false and latches myGraphsDisabled on ANY failure -- caller must run the legacy per-op
+    // path for this cook instead (a failed capture performs none of the enclosed work).
+    bool tryGraphCopy(uint32_t slot, cudaArray_t srcArray, size_t rowBytes, uint32_t height);
+
     // Debug-gated diagnostics: neither the error/warning badges nor GPU% are enough to
     // diagnose a transient failure (see getErrorString/getWarningString for the sticky
     // myLastError capture, and this for the deeper opt-in trace). Forwards to myDebugLog,
@@ -109,6 +122,18 @@ private:
     // Per-slot device resources, sized to myLayout.num_slots() once allocated.
     std::vector<void*> mySlotDevPtrs;
     std::vector<cudaEvent_t> mySlotEvents;
+
+    // CUDA Graphs (env-gated PLAN-005 §2.1, default OFF; see the capture-site comment in
+    // CudaLinkOutTOP.cpp for the full design). myGraphsRequested is latched once from
+    // CUDALINK_CPP_USE_GRAPHS at construction; myGraphsDisabled latches permanently (for the
+    // rest of the session) on the first graph-path failure, falling back to the always-correct
+    // legacy path. The three vectors are one-per-slot and stay empty until the first
+    // reallocate(), which sizes them alongside mySlotDevPtrs/mySlotEvents.
+    bool myGraphsRequested = false;
+    bool myGraphsDisabled = false;
+    std::vector<cudaGraphExec_t> myGraphExecs;
+    std::vector<cudaGraphNode_t> myGraphCopyNodes;
+    std::vector<bool> myGraphBuilt;
 
     // Status/error/warning surfaces.
     std::string myError;

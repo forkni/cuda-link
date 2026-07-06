@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include "Parameters.h"
@@ -116,6 +117,14 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+
+    // CUDA Graphs opt-in (PLAN-005 §2.1, default OFF). Read once at construction --
+    // checkParameterChanges() already refreshes myDebugLog per cook the same way Parameters
+    // exposes toggles, but this one is an env var (no UI parameter) precisely so it can stay
+    // off by default with zero exposure in the shipped .tox until proven live (see the
+    // capture-site comment in tryGraphCopy() for the full rationale and residual risk).
+    const char* graphsEnv = std::getenv("CUDALINK_CPP_USE_GRAPHS");
+    myGraphsRequested = graphsEnv && graphsEnv[0] != '\0' && graphsEnv[0] != '0';
 }
 
 CudaLinkOutTOP::~CudaLinkOutTOP() {
@@ -225,6 +234,9 @@ void CudaLinkOutTOP::teardown() {
         Sleep(kIpcCloseGracePeriodMs);
     }
 
+    // Graph execs reference mySlotDevPtrs/mySlotEvents below -- destroy them first.
+    destroyGraphs();
+
     for (auto* evt : mySlotEvents) {
         if (evt) {
             // Non-fatal: teardown must run to completion and reset state regardless of a
@@ -268,6 +280,140 @@ void CudaLinkOutTOP::teardown() {
     myWriteIdx = 0;
     myStatus = "Idle";
     debugLog("teardown: complete");
+}
+
+void CudaLinkOutTOP::destroyGraphs() {
+    // cudaGraphExecDestroy (like cudaEventDestroy/cudaFree elsewhere in this file) is safe to
+    // call without first draining in-flight work on myStream -- the driver defers actual
+    // resource release until any launch already queued completes. Non-fatal on failure: same
+    // rationale as the cudaEventDestroy/cudaFree loops below it in teardown() -- logged only,
+    // never latched into myError, since a stuck exec isn't user-actionable and latching would
+    // block the state reset callers rely on.
+    for (auto& exec : myGraphExecs) {
+        if (exec) {
+            const cudaError_t err = cudaGraphExecDestroy(exec);
+            if (err != cudaSuccess) {
+                debugLog(std::string("destroyGraphs: cudaGraphExecDestroy failed: ") +
+                         cudaGetErrorString(err));
+            }
+        }
+    }
+    myGraphExecs.clear();
+    myGraphCopyNodes.clear();
+    myGraphBuilt.clear();
+}
+
+bool CudaLinkOutTOP::tryGraphCopy(uint32_t slot, cudaArray_t srcArray, size_t rowBytes, uint32_t height) {
+    // Deliberately captures only the two ops this function itself performs -- the IPC-slot
+    // copy and the interprocess event-record -- NOT the pass-through display copy that
+    // follows it in execute(). That copy's destination ('selfOut->cudaArray') is optional
+    // and best-effort (null when output->createCUDAArray() fails) and non-fatal by existing
+    // design, unlike this pair, which is this TOP's actual job. Folding an optional,
+    // possibly-absent node into the graph would compound node-update risk for a copy this
+    // path doesn't need to guarantee. Mirrors the Python reference's shape
+    // (src/cuda_link/cuda_graphs.py + exporter.py's _build_export_graphs) minus that one op.
+    //
+    // extent is in the SOURCE ARRAY's own element units, not raw bytes: 'width' (not
+    // rowBytes) x 'height' x depth=1. This holds because the array was created by TD from
+    // the same pixel format this TOP reads out of Metadata, so its element size already
+    // equals num_comps*itemsize -- rowBytes/width recovers exactly that.
+    cudaMemcpy3DParms params{};
+    params.srcArray = srcArray;
+    params.srcPos = make_cudaPos(0, 0, 0);
+    params.dstArray = nullptr;
+    params.dstPtr = make_cudaPitchedPtr(mySlotDevPtrs[slot], rowBytes, rowBytes, height);
+    params.dstPos = make_cudaPos(0, 0, 0);
+    params.extent = make_cudaExtent(myMetadata.width, height, 1);
+    params.kind = cudaMemcpyDeviceToDevice;
+
+    if (!myGraphBuilt[slot]) {
+        // First use after (re)allocation for this slot: capture the two-op sequence once,
+        // using this cook's real srcArray as the capture-time template (there is no
+        // always-valid placeholder source here the way Python's dev_ptrs[0] is for its
+        // linear buffers -- see the header comment on myGraphBuilt).
+        cudaError_t st = cudaStreamBeginCapture(myStream, cudaStreamCaptureModeRelaxed);
+        if (st != cudaSuccess) {
+            debugLog(std::string("graphs: stream_begin_capture failed: ") + cudaGetErrorString(st));
+            myGraphsDisabled = true;
+            return false;
+        }
+
+        st = cudaMemcpy3DAsync(&params, myStream);
+        if (st == cudaSuccess) {
+            // MUST use cudaEventRecordWithFlags(..., cudaEventRecordExternal), NOT plain
+            // cudaEventRecord, to record an INTERPROCESS event inside a capture region --
+            // confirmed via src/cuda_link/cuda_ipc_wrapper.py's own comment: plain
+            // cudaEventRecord is rejected with cudaErrorStreamCaptureUnsupported (900) here.
+            st = cudaEventRecordWithFlags(mySlotEvents[slot], myStream, cudaEventRecordExternal);
+        }
+        if (st != cudaSuccess) {
+            debugLog(std::string("graphs: capture body failed: ") + cudaGetErrorString(st));
+            cudaGraph_t abandoned = nullptr;
+            cudaStreamEndCapture(myStream, &abandoned); // must still end capture even on failure
+            if (abandoned) {
+                cudaGraphDestroy(abandoned);
+            }
+            myGraphsDisabled = true;
+            return false;
+        }
+
+        cudaGraph_t templateGraph = nullptr;
+        st = cudaStreamEndCapture(myStream, &templateGraph);
+        if (st != cudaSuccess || !templateGraph) {
+            debugLog(std::string("graphs: stream_end_capture failed: ") + cudaGetErrorString(st));
+            myGraphsDisabled = true;
+            return false;
+        }
+
+        size_t nodeCount = 0;
+        cudaGraphGetNodes(templateGraph, nullptr, &nodeCount);
+        std::vector<cudaGraphNode_t> nodes(nodeCount);
+        cudaGraphGetNodes(templateGraph, nodes.data(), &nodeCount);
+        if (nodeCount != 2) {
+            // Validate the shape before instantiating -- an unexpected node count means the
+            // capture picked up something other than the two ops we expect (e.g. a driver
+            // difference), and updating node[0] as "the memcpy" below would be unsafe to
+            // assume blindly.
+            debugLog("graphs: unexpected node count " + std::to_string(nodeCount) + " (expected 2)");
+            cudaGraphDestroy(templateGraph);
+            myGraphsDisabled = true;
+            return false;
+        }
+
+        cudaGraphExec_t graphExec = nullptr;
+        st = cudaGraphInstantiate(&graphExec, templateGraph, 0);
+        cudaGraphDestroy(templateGraph); // the exec owns its own copy; the template is done
+        if (st != cudaSuccess) {
+            debugLog(std::string("graphs: instantiate failed: ") + cudaGetErrorString(st));
+            myGraphsDisabled = true;
+            return false;
+        }
+
+        myGraphExecs[slot] = graphExec;
+        myGraphCopyNodes[slot] = nodes[0]; // capture order above: [MemcpyNode, EventRecordNode]
+        myGraphBuilt[slot] = true;
+        debugLog("graphs: built for slot " + std::to_string(slot));
+    } else {
+        // Subsequent cook for this slot: unlike Python's dev-pointer cache
+        // (exporter.py's _graph_last_src), there is no cheap way here to tell whether TD
+        // handed back the same cudaArray_t this cook, so the copy node's params are always
+        // refreshed before launch -- no skip-if-unchanged optimization in this first pass.
+        cudaError_t st =
+            cudaGraphExecMemcpyNodeSetParams(myGraphExecs[slot], myGraphCopyNodes[slot], &params);
+        if (st != cudaSuccess) {
+            debugLog(std::string("graphs: node update failed: ") + cudaGetErrorString(st));
+            myGraphsDisabled = true;
+            return false;
+        }
+    }
+
+    const cudaError_t launchStatus = cudaGraphLaunch(myGraphExecs[slot], myStream);
+    if (launchStatus != cudaSuccess) {
+        debugLog(std::string("graphs: launch failed: ") + cudaGetErrorString(launchStatus));
+        myGraphsDisabled = true;
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +617,16 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     for (auto& guard : newEvents) {
         mySlotEvents.push_back(guard.release());
     }
+
+    // Old graph execs (if any) captured a copy referencing the OLD device buffers/events
+    // above -- destroy them now, before those buffers are freed below, and size fresh
+    // per-slot graph state for the new slot count. Graphs rebuild lazily (see
+    // tryGraphCopy()) on each slot's next cook.
+    destroyGraphs();
+    myGraphExecs.assign(numSlots, nullptr);
+    myGraphCopyNodes.assign(numSlots, nullptr);
+    myGraphBuilt.assign(numSlots, false);
+
     myShmView = view;
     myShmHandle = mapping;
     newMapping.release(); // ownership transferred to myShmHandle/myShmView above
@@ -624,14 +780,27 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             const uint32_t slot = myWriteIdx % myLayout.num_slots(); // next slot to (over)write
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
-            CUDALINK_CUDA_CHECK_FATAL(
-                cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0, rowBytes,
-                                           myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
-                myError, myFatal);
-            // Record the IPC-ready event right after the IPC-slot copy, before the
-            // pass-through copy below, so the receiver's cudaStreamWaitEvent isn't delayed
-            // by work this TOP does purely for its own on-screen display.
-            CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
+
+            // CUDA Graphs (env-gated, PLAN-005 §2.1): collapses the IPC-slot copy + the
+            // interprocess event-record below into a single cudaGraphLaunch submission.
+            // tryGraphCopy() does the exact same two ops as the 'else' branch (see its
+            // definition) -- on ANY failure it latches myGraphsDisabled and returns false,
+            // performing none of the enclosed work, so falling through to the legacy path
+            // below is required, not optional.
+            bool usedGraph = false;
+            if (myGraphsRequested && !myGraphsDisabled) {
+                usedGraph = tryGraphCopy(slot, arr->cudaArray, rowBytes, myMetadata.height);
+            }
+            if (!usedGraph) {
+                CUDALINK_CUDA_CHECK_FATAL(
+                    cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0, rowBytes,
+                                               myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
+                    myError, myFatal);
+                // Record the IPC-ready event right after the IPC-slot copy, before the
+                // pass-through copy below, so the receiver's cudaStreamWaitEvent isn't delayed
+                // by work this TOP does purely for its own on-screen display.
+                CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
+            }
 
             // Pass-through output (this TOP's own display, per explicit request -- see the
             // comment above execute()). Non-fatal on failure -- the IPC export above is this
