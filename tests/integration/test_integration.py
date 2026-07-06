@@ -12,7 +12,9 @@ from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 
-from cuda_link.shm_protocol import SHMLayout
+from cuda_link import FrameOutcome, FrameSpec, GpuFrame
+from cuda_link.exporter import Exporter
+from cuda_link.shm_protocol import Metadata, SHMLayout, read_num_slots, read_version, read_write_idx
 
 _HEADER_SIZE = 20  # kept for slot-offset arithmetic in test body
 _SLOT_SIZE = 128
@@ -27,83 +29,70 @@ def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: in
 @pytest.mark.requires_cuda
 @pytest.mark.slow
 def test_producer_consumer_basic(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: list[str]) -> None:
-    """Test basic producer allocates memory, consumer opens IPC handle."""
-
+    """Real Exporter publishes handles + metadata; verify the live SHM matches its own state."""
     shared_memory_cleanup.append(temp_shm_name)
 
-    # Producer: Allocate GPU memory and create IPC handle
-    size = 1024 * 1024  # 1 MB
-    ptr = cuda_runtime.malloc(size)
-    handle = cuda_runtime.ipc_get_mem_handle(ptr)
+    spec = FrameSpec(shm_name=temp_shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2)
+    exporter = Exporter.open(spec)
+    try:
+        src_ptr = cuda_runtime.malloc(exporter.data_size)
+        try:
+            outcome = exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
+            assert outcome is FrameOutcome.PUBLISHED
 
-    # Create SharedMemory with v0.5.0 layout
-    # 20 (header) + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
-    num_slots = 3
-    shm_size = _HEADER_SIZE + num_slots * _SLOT_SIZE + 1 + 20 + 8
-    shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
+            buf = exporter.shm_handle.buf
+            assert read_num_slots(buf) == spec.num_slots
+            assert read_version(buf) >= 1
+            assert read_write_idx(buf) == exporter.write_idx
 
-    # Write header
-    _write_header(shm, version=1, num_slots=num_slots, write_idx=1)
+            layout = SHMLayout(spec.num_slots)
+            metadata = Metadata.read_from(buf, layout)
+            assert metadata.data_size == exporter.data_size
+            assert metadata.expected_size == exporter.data_size
 
-    # Write IPC handle to slot 0
-    shm.buf[_HEADER_SIZE : _HEADER_SIZE + 64] = bytes(handle.internal)
-
-    # Consumer: Open IPC handle in same process (Windows limitation)
-    # Note: On Windows, same process IPC may fail, so we just verify the handle is valid
-    assert len(bytes(handle.internal)) == 64
-
-    # Cleanup
-    cuda_runtime.free(ptr)
-    shm.close()
-    shm.unlink()
+            # The slot just written must carry the exact handle bytes Exporter recorded
+            # for it — the real proof that publish wrote to live SHM, not a copy.
+            slot = (exporter.write_idx - 1) % spec.num_slots
+            offset = layout.mem_handle_offset(slot)
+            expected_handle = bytes(exporter.ipc_handles[slot].internal)
+            assert bytes(buf[offset : offset + 64]) == expected_handle
+        finally:
+            cuda_runtime.free(src_ptr)
+    finally:
+        exporter.close()
 
 
 @pytest.mark.requires_cuda
 @pytest.mark.slow
 def test_ring_buffer_slot_cycling(cuda_runtime: object, temp_shm_name: str, shared_memory_cleanup: list[str]) -> None:
-    """Test producer writes to slots 0,1,2,0,1,2 and consumer reads correct slots."""
+    """Real Exporter cycles frames through its ring slots; verify live SHM tracks each publish."""
     shared_memory_cleanup.append(temp_shm_name)
 
-    # Setup SharedMemory with 3 slots (v0.5.0 layout)
-    num_slots = 3
-    shm_size = _HEADER_SIZE + num_slots * _SLOT_SIZE + 1 + 20 + 8
-    shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
+    spec = FrameSpec(shm_name=temp_shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=3)
+    exporter = Exporter.open(spec)
+    layout = SHMLayout(spec.num_slots)
+    try:
+        src_ptr = cuda_runtime.malloc(exporter.data_size)
+        try:
+            num_frames = 6  # two full cycles through 3 slots
+            for frame_idx in range(num_frames):
+                outcome = exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
+                assert outcome is FrameOutcome.PUBLISHED
 
-    # Write header
-    _write_header(shm, version=1, num_slots=num_slots)
+                assert exporter.write_idx == frame_idx + 1
+                assert read_write_idx(exporter.shm_handle.buf) == exporter.write_idx
 
-    # Allocate buffers and create handles for all slots
-    buffers = []
-    for slot in range(num_slots):
-        ptr = cuda_runtime.malloc(1024)
-        buffers.append(ptr)
-        handle = cuda_runtime.ipc_get_mem_handle(ptr)
-
-        base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
-        shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
-
-    # Simulate producer writing frames
-    write_sequence = [0, 1, 2, 3, 4, 5]  # 6 frames
-    expected_slots = [0, 1, 2, 0, 1, 2]  # Expected slot usage
-
-    for write_idx in write_sequence:
-        # Producer writes to this slot
-        slot = write_idx % num_slots
-        assert slot == expected_slots[write_idx]
-
-        # Update write_idx (at offset 16 in v0.5.0 header)
-        shm.buf[16:20] = struct.pack("<I", write_idx + 1)
-
-        # Consumer reads from (write_idx) slot (after increment)
-        current_write_idx = struct.unpack("<I", bytes(shm.buf[16:20]))[0]
-        read_slot = 0 if current_write_idx == 0 else (current_write_idx - 1) % num_slots
-        assert read_slot == slot
-
-    # Cleanup
-    for ptr in buffers:
-        cuda_runtime.free(ptr)
-    shm.close()
-    shm.unlink()
+                slot = frame_idx % spec.num_slots
+                offset = layout.mem_handle_offset(slot)
+                expected_handle = bytes(exporter.ipc_handles[slot].internal)
+                actual_handle = bytes(exporter.shm_handle.buf[offset : offset + 64])
+                assert actual_handle == expected_handle, (
+                    f"slot {slot} handle in SHM diverged from Exporter's own record after frame {frame_idx}"
+                )
+        finally:
+            cuda_runtime.free(src_ptr)
+    finally:
+        exporter.close()
 
 
 @pytest.mark.requires_cuda

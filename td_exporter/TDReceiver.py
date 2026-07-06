@@ -456,7 +456,7 @@ class TDReceiverEngine:
                 # Session baseline for windowed FPS (frame_count is never reset).
                 self._rx_window.start(time.perf_counter(), self.frame_count)
 
-            _diag = self._diag_frames_since_reinit < 5
+            _diag = self.verbose_performance and self._diag_frames_since_reinit < 5
             _t_event = _t_copy = 0.0  # pre-init for static analyzers; only read when _diag is True
             if _diag:
                 self._diag_frames_since_reinit += 1
@@ -542,7 +542,6 @@ class TDReceiverEngine:
                     f"[DIAG] import_frame #{self._diag_frames_since_reinit}: "
                     f"slot={read_slot} write_idx={write_idx} addr=0x{address:x} "
                     f"stream_wait={_event_ms:.2f}ms copyCUDAMemory={_copy_ms:.2f}ms",
-                    force=True,
                 )
 
             self.frame_count += 1

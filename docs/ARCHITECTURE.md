@@ -831,6 +831,9 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0004** — Legacy CUDA IPC over VMM driver API
 - **ADR-0005** — Static typing hardening (per-file suppression policy, no category blankets)
 - **ADR-0006** — Stay pure-Python (Rust `cuda-oxide`/`cudarc` evaluated and deferred)
+- **ADR-0007** — Spout as a sidecar-launcher COMP, not an embedded transport
+- **ADR-0008** — No native work on the D2H readback path
+- **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
 
 ---
 
@@ -843,4 +846,4 @@ See `docs/adr/` for the full Architecture Decision Record index:
 ---
 
 **Last Updated**: 2026-07-06
-**Version**: 1.11.1
+**Version**: 1.12.0
