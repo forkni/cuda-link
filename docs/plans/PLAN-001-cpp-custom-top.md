@@ -135,7 +135,7 @@ refuse to cook.
 
 ### D4 — Protocol core: TD-free, CUDA-free, golden-byte-pinned
 
-`src/core/shm_layout.hpp` transcribes the constants from `shm_protocol.py` **verbatim**
+`src/core/shm_layout.h` transcribes the constants from `shm_protocol.py` **verbatim**
 (the Python file stays the single source of truth; the header cites it and golden tests
 enforce equality):
 
@@ -388,7 +388,7 @@ cpp_top/
   CMakePresets.json         #          protocol_dump, topcore_tests; legs cu118/cu128
   README.md                 # build, deploy, dev loop (PluginBuilder), gotchas checklist
   vendor/td/2025/ …2023/    # TOP_CPlusPlusBase.h, CPlusPlus_Common.h (+ license note)
-  src/core/                 # shm_layout.hpp ring_writer ring_reader ipc_ring
+  src/core/                 # shm_layout.h ring_writer ring_reader ipc_ring
                             # doorbell_win cuda_check dtype_map
   src/out_top/              # CudaLinkOutTOP.{h,cpp} Parameters.{h,cpp} [array_copy.cu]
   src/in_top/               # CudaLinkInTOP.{h,cpp}  Parameters.{h,cpp}

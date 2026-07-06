@@ -1,14 +1,15 @@
 // OP_PixelFormat -> wire (format_kind, bits_per_comp, flags, num_comps) for the sender's
-// input texture. Inverse of PLAN-001 D6's receiver-side wire -> OP_PixelFormat table
+// input texture. Inverse of the receiver-side wire -> OP_PixelFormat table
 // (in_top/pixel_format_map.h); verified 1:1 against the same OP_PixelFormat enum values
 // in the vendored CPlusPlus_Common.h.
 //
-// Channel order (RGBA vs BGRA) is not carried by the protocol -- BGRA8Fixed maps to the
-// same uint8/4-comp wire representation as RGBA8Fixed (matches existing Python-side /
-// D5-documented behavior; the receiver always reconstructs as RGBA order).
+// Channel order for 8-bit 4-channel data is carried via FLAGS_BGRA: BGRA8Fixed (TD's
+// preferred/default 4-channel 8-bit format) sets the flag so the receiver reconstructs
+// BGRA8Fixed instead of assuming RGBA order. Float/uint16 4-channel formats are always
+// RGBA on both sides and never set the flag.
 // Alpha-only (A*Fixed/A*Float) and Mono (Mono*Fixed/Float) are indistinguishable on the
-// wire (both are num_comps=1); D5 documents this as an accepted ambiguity, same as the
-// receiver's inverse table.
+// wire (both are num_comps=1); this is an accepted ambiguity, same as the receiver's
+// inverse table.
 // RGB10A2Fixed / RGB11Float (packed formats) and signed-integer formats have no wire
 // representation -- rejected (kResult.supported=false); execute() must skip the frame
 // with a warning badge (mirrors TDSender.py::_is_unsupported_format).
@@ -16,7 +17,7 @@
 #pragma once
 
 #include "CPlusPlus_Common.h"
-#include "../core/shm_layout.hpp"
+#include "../core/shm_layout.h"
 
 namespace cudalink::out_top {
 
@@ -29,6 +30,7 @@ struct WireFormat {
 };
 
 inline WireFormat mapFromPixelFormat(TD::OP_PixelFormat fmt) {
+    using cudalink::core::FLAGS_BGRA;
     using cudalink::core::FLAGS_MONO_ALPHA;
     using cudalink::core::FORMAT_KIND_FLOAT;
     using cudalink::core::FORMAT_KIND_UNSIGNED;
@@ -88,8 +90,10 @@ inline WireFormat mapFromPixelFormat(TD::OP_PixelFormat fmt) {
 
         // --- uint8 ---
         case TD::OP_PixelFormat::RGBA8Fixed:
-        case TD::OP_PixelFormat::BGRA8Fixed: // channel order not carried by the protocol
             w = {true, FORMAT_KIND_UNSIGNED, 8, 0, 4};
+            break;
+        case TD::OP_PixelFormat::BGRA8Fixed: // TD's preferred 4-channel 8-bit format
+            w = {true, FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, 4};
             break;
         case TD::OP_PixelFormat::RG8Fixed:
             w = {true, FORMAT_KIND_UNSIGNED, 8, 0, 2};
@@ -104,7 +108,7 @@ inline WireFormat mapFromPixelFormat(TD::OP_PixelFormat fmt) {
             w = {true, FORMAT_KIND_UNSIGNED, 8, FLAGS_MONO_ALPHA, 2};
             break;
 
-        // --- rejected: packed / no wire representation (v1 scope, D5) ---
+        // --- rejected: packed / no wire representation (v1 scope) ---
         case TD::OP_PixelFormat::RGB10A2Fixed:
         case TD::OP_PixelFormat::RGB11Float:
         default:

@@ -6,7 +6,7 @@
 namespace cudalink::core {
 
 AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
-                            uint64_t last_version) {
+                            uint64_t last_version) noexcept {
     // shutdown_flag is still read with a plain load, mirroring the Python producer's
     // actual synchronization discipline today (an OS-level release fence via
     // threading.Lock, not C++ atomics -- see shm_protocol.py's _release_fence comment).
@@ -22,6 +22,12 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
     // num_slots/handle/metadata stores were visible, letting a receiver try to open IPC
     // handles to memory the producer had already reallocated/freed. const_cast is safe:
     // this is a load-only operation, never a store.
+    // VERSION_OFFSET is only 4-byte-aligned (see shm_layout.h) -- paired guard with
+    // ring_writer.cpp's commit_version(): a lock-free, address-free atomic_ref needs no
+    // alignment-keyed side table, so it degrades safely to a plain cacheable load/store
+    // rather than silently taking a locking slow path.
+    static_assert(std::atomic_ref<uint64_t>::is_always_lock_free,
+                  "SHM header 'version' atomic_ref must be lock-free/address-free for cross-process use");
     auto* version_ptr = const_cast<uint64_t*>(reinterpret_cast<const uint64_t*>(buf + VERSION_OFFSET));
     const uint64_t version = std::atomic_ref<uint64_t>(*version_ptr).load(std::memory_order_acquire);
     if (version != last_version && last_version != 0) {
@@ -31,9 +37,9 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
         return result;
     }
 
-    // Paired acquire load to the writer's release store on write_idx (D4's C3 ordering
-    // contract) -- the only formally correct way to observe this field cross-process.
-    // const_cast is safe here: this is a load-only operation, never a store.
+    // Paired acquire load to the writer's release store on write_idx -- the only
+    // formally correct way to observe this field cross-process. const_cast is safe here:
+    // this is a load-only operation, never a store.
     auto* write_idx_ptr = const_cast<uint32_t*>(reinterpret_cast<const uint32_t*>(buf + WRITE_IDX_OFFSET));
     const uint32_t write_idx = std::atomic_ref<uint32_t>(*write_idx_ptr).load(std::memory_order_acquire);
 

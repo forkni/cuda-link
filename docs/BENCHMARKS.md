@@ -216,6 +216,68 @@ python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
 
 ---
 
+## TD-in-the-loop: Original (TOX) vs C++ Custom TOP
+
+First head-to-head with TouchDesigner actually in the loop, comparing the pre-existing
+pure-Python **Original** path (`CUDAIPCExtension` Sender/Receiver, `.tox`) against the native
+**C++ Custom TOP** operators (`CudaLinkOutTOP` / `CudaLinkInTOP`). Measured 2026-07-05,
+RTX 4090 / driver 596.36, 1920×1080 RGBA uint8, 60 FPS target, windowed (~97–150-frame)
+averages. **TD→TD uses two separate TD instances** (same topology as the C++ TOPs' own
+cross-process design), not an in-process loopback.
+
+```
+Direction      Metric                    Original (TOX)              C++ Custom TOP
+-----------    ----------------------    -------------------------   ------------------------
+TD -> Python   FPS                       59.7                        60.0
+               consumer read             get_frame 39.9 us avg       get_frame 72.2 us avg
+               latency                   0.01-1.50 ms                0.03-1.53 ms
+
+Python -> TD   FPS                       ~58.7                       58.6-58.8
+               transfer                  TD copy 77-100 us           In TOP copy_us ~21 us [1]
+               sender export             not captured this run       4693-6213 us [2]
+               latency (TD side)         1.33 -> 11.8 ms (drifts)    not captured
+
+TD -> TD       FPS                       57-60                       ~57-60
+               transfer copy             83-167 us                   ~21 us (In) / ~28 us (Out)
+               latency                   13.5-15.8 ms                not logged by C++ path [3]
+
+Python<->Python  export / get_numpy /    873 us / 2.54 ms / 179 us   N/A -- C++ TOPs are TD
+                 IPC-notify p50          (see Full IPC Roundtrip      operators only, no
+                                          Sweep above)                Python<->Python mode
+```
+
+[1] Different measurement domain than the Original's Python-side `copy=` — the In TOP's
+`copy_us` is the op's own D2D-copy timing, not a Python-process read.
+
+[2] Per `td_exporter/example_sender_python.py:274`, this window (`export_us = (now - t0) * 1e6`)
+bundles the synchronous H2D staging fill (`_fill_ctypes`) *and* `exporter.export()`, excluding
+the frame-pacing sleep. It is **not** comparable to the Original's TD-side `export=` line, which
+only times the extension's own export path.
+
+[3] The C++ TOPs' `bench:` telemetry (`avg_cook_us` / `avg_copy_us` / `avg_begin_us` /
+`avg_end_us`, from `%TEMP%\cudalink_{in,out}_top_debug.log` when Debug is enabled) has no
+end-to-end wire-timestamp latency field, unlike the Original's `latency=` (producer-publish →
+consumer-detect delta). This is a known instrumentation gap, not a zero.
+
+**Headline 1 — raw GPU transfer is ~4-8x faster on the C++ TOPs.** The one clean
+apples-to-apples number in this table: TD→TD `copy` drops from 83–167 µs (Original) to ~21 µs
+(C++ In TOP). Both `cook_us`/`copy_us` values sit well under one frame period even at 60 FPS.
+
+**Headline 2 — the ~14 ms TD→TD latency is a cook-cadence artifact, not a transport cost.**
+The Original's TD receiver is frame-loop-polled (checks for a new frame once per TD cook), so
+its latency floors near one 16.7 ms frame period regardless of how fast the underlying copy is
+— the `copy` itself is still only 83–167 µs. Python receivers instead event-wait
+(`WaitForSingleObject`) and see 0–1.5 ms latency for the same producer cadence. The C++ TOPs
+almost certainly share this same TD-side cook-cadence floor for TD→TD (both are driven by TD's
+cook loop), but it isn't measured above since the C++ `bench:` line doesn't carry an end-to-end
+latency field (see [3]).
+
+**Known gaps** (not filled with invented numbers): C++ TD→TD end-to-end latency; a single run
+that captures both the Python-sender and TD-receiver halves of Python→TD for the same
+implementation; Original Python-sender `export=` for its own Python→TD run.
+
+---
+
 ## vs CPU SharedMemory
 
 End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU

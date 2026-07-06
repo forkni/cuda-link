@@ -1,11 +1,11 @@
 // CudaLinkOutTOP custom parameters — page "CUDA Link".
 //
-// Per PLAN-001 D7: Ipcmemname, Active, Debug are direct mirrors of the receiver's (and
-// the real .tox's) parameters of the same name. Unlike the receiver, the sender is the
-// side that actually owns Numslots on the wire (D7: "editable on the sender only while
-// Active=Off"), so it is a real, settable Integer Menu parameter here -- options {2, 3,
-// 4}, matching the real .tox's Numslots menu (td_exporter/HELP_DOC.md) exactly. No Mode
-// (two-DLL split, D1) and no Reconnect/Cudadevice (D7 -- same reasoning as the receiver).
+// Ipcmemname, Active, Debug are direct mirrors of the receiver's (and the real .tox's)
+// parameters of the same name. Unlike the receiver, the sender is the side that actually
+// owns Numslots on the wire ("editable on the sender only while Active=Off"), so it is a
+// real, settable Integer Menu parameter here -- options {2, 3, 4}, matching the real
+// .tox's Numslots menu (td_exporter/HELP_DOC.md) exactly. No Mode (the two-DLL split
+// makes it unnecessary) and no Reconnect/Cudadevice (same reasoning as the receiver).
 
 #pragma once
 
@@ -43,9 +43,9 @@ public:
     // Returns the actual slot count (2, 3, or 4), not the raw menu index.
     static int evalNumslots(const TD::OP_Inputs* inputs);
 
-    // D7: Numslots is only meaningful/editable while the sender is not actively holding
-    // an open SHM segment (changing it mid-run would desync a running consumer without a
+    // Numslots is only meaningful/editable while the sender is not actively holding an
+    // open SHM segment (changing it mid-run would desync a running consumer without a
     // VERSION_CHANGED-style reinit, which the sender always performs anyway on Active
-    // Off->On -- see D6/D7's "editable on the sender only while Active=Off").
+    // Off->On -- "editable on the sender only while Active=Off").
     static void setNumslotsEnabled(const TD::OP_Inputs* inputs, bool enabled);
 };

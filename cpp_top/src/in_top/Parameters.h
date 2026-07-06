@@ -1,10 +1,10 @@
 // CudaLinkInTOP custom parameters — page "CUDA Link".
 //
-// Per PLAN-001 D7 (as reconciled against the real .tox parameter surface,
-// td_exporter/HELP_DOC.md): Ipcmemname, Active, Debug are direct mirrors. There is no
-// Mode (two-DLL split makes it unnecessary, D1), no Reconnect (doesn't exist in the
-// real .tox -- Active Off->On is the real manual-recovery UX), and no Cudadevice
-// (structurally inapplicable to a Custom TOP; single-GPU scope for now).
+// Reconciled against the real .tox parameter surface (td_exporter/HELP_DOC.md):
+// Ipcmemname, Active, Debug are direct mirrors. There is no Mode (the two-DLL split
+// makes it unnecessary), no Reconnect (doesn't exist in the real .tox -- Active
+// Off->On is the real manual-recovery UX), and no Cudadevice (structurally
+// inapplicable to a Custom TOP; single-GPU scope for now).
 //
 // Numslots is intentionally NOT a parameter here: the Custom TOP API has no mechanism
 // for a plugin to write a parameter's displayed value (OP_Inputs is getter-only;

@@ -1,9 +1,29 @@
 #include "Parameters.h"
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include <array>
 #include <cstddef>
+#include <string>
 
 #include "CPlusPlus_Common.h"
+
+namespace {
+// C++ Guidelines audit LOW/cosmetic item: setup() previously used assert() to check each
+// appendString/appendToggle/appendMenu result, but assert() compiles out entirely under
+// NDEBUG (i.e. every Release build, which is all TD ever loads) -- so a parameter-registration
+// failure here was silently ignored in production with zero observability. setup() itself is
+// void and runs before any TOP instance exists, so there's no myError/status field to latch
+// into; OutputDebugStringA is the cheapest guard that's actually observable (via a debugger or
+// DebugView) in every build configuration, not just Debug.
+void checkParamAppend(TD::OP_ParAppendResult res, const char* paramName) {
+    if (res != TD::OP_ParAppendResult::Success) {
+        OutputDebugStringA((std::string("CudaLinkOutTOP: failed to register parameter '") + paramName + "'\n").c_str());
+    }
+}
+} // namespace
 
 const char* Parameters::evalIpcmemname(const TD::OP_Inputs* inputs) {
     return inputs->getParString(IpcmemnameName);
@@ -42,7 +62,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.defaultValue = "cudalink_ipc_TD>>Python";
 
         TD::OP_ParAppendResult res = manager->appendString(p);
-        assert(res == TD::OP_ParAppendResult::Success);
+        checkParamAppend(res, IpcmemnameName);
     }
 
     {
@@ -53,7 +73,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.defaultValues[0] = 1.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
-        assert(res == TD::OP_ParAppendResult::Success);
+        checkParamAppend(res, ActiveName);
     }
 
     {
@@ -64,7 +84,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.defaultValues[0] = 0.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
-        assert(res == TD::OP_ParAppendResult::Success);
+        checkParamAppend(res, DebugName);
     }
 
     {
@@ -78,6 +98,6 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
 
         TD::OP_ParAppendResult res =
             manager->appendMenu(p, static_cast<int32_t>(names.size()), names.data(), labels.data());
-        assert(res == TD::OP_ParAppendResult::Success);
+        checkParamAppend(res, NumslotsName);
     }
 }

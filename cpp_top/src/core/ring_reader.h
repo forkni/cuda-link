@@ -1,11 +1,11 @@
 // Receiver-side frame acquisition — mirrors shm_protocol.py::acquire_slot() exactly.
-// TD-free, CUDA-free. C++20 required for std::atomic_ref (D4).
+// TD-free, CUDA-free. C++20 required for std::atomic_ref.
 
 #pragma once
 
 #include <cstdint>
 
-#include "shm_layout.hpp"
+#include "shm_layout.h"
 
 namespace cudalink::core {
 
@@ -35,8 +35,12 @@ struct AcquireResult {
 // 'buf' must point at byte 0 of the mapped SHM region.
 // write_idx is read via std::atomic_ref with acquire ordering — this is the paired
 // operation to publish_frame()'s release store (shm_protocol.py) and is the only
-// formally-correct way to observe it cross-process (see D4's C3 ordering contract).
-AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
-                            uint64_t last_version);
+// formally-correct way to observe it cross-process.
+// [[nodiscard]]/noexcept: the returned AcquireResult is the entire point of the call --
+// discarding it would silently drop a Shutdown/VersionChanged/NewFrame classification the
+// caller must act on. noexcept is accurate: every path below is atomic_ref loads, memcpy,
+// and aggregate returns -- nothing that can throw.
+[[nodiscard]] AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
+                                          uint64_t last_version) noexcept;
 
 } // namespace cudalink::core

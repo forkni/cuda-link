@@ -1,7 +1,7 @@
 // SHM protocol v0.5.0 layout — verbatim transcription of src/cuda_link/shm_protocol.py.
 //
 // The Python file is the single source of truth. Any change there must be mirrored
-// here; golden-byte tests (docs/plans/PLAN-001-cpp-custom-top.md D4) enforce equality.
+// here; golden-byte tests enforce equality.
 // TD-free, CUDA-free: no TD or cudart includes anywhere in this file.
 //
 // Binary layout (total = SHMLayout(num_slots).total_size()):
@@ -12,7 +12,7 @@
 //   [20 + slot*128 ...]   IPC handles (64B mem + 64B event per slot, N slots)
 //   [20 + N*128]          shutdown_flag uint8
 //   [21 + N*128 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
-//   [41 + N*128 ...]      timestamp float64 LE (producer wall-clock time)
+//   [41 + N*128 ...]      timestamp float64 LE (producer monotonic timestamp, perf_counter seconds)
 
 #pragma once
 
@@ -25,6 +25,15 @@ constexpr uint32_t PROTOCOL_MAGIC = 0x43495044; // "CIPD"
 
 constexpr uint32_t MAGIC_OFFSET = 0;
 constexpr uint32_t MAGIC_SIZE = 4;
+// Deliberately 4-byte-aligned (not 8), matching shm_protocol.py's packed layout exactly --
+// re-aligning this field would break golden-byte wire parity with the Python side. This
+// means ring_reader.cpp/ring_writer.cpp's std::atomic_ref<uint64_t> over this field runs
+// under 4-byte alignment, one short of atomic_ref<uint64_t>::required_alignment (8) --
+// formally UB per [atomics.ref.generic]. In practice this is benign on the x86-64 targets
+// this project ships for: bytes [4,12) sit entirely inside the first 64-byte cache line
+// (offsets 0-63), and the x86-64 SDM guarantees cacheable, naturally-contained unaligned
+// 8-byte loads/stores are atomic. See the static_assert next to each atomic_ref<uint64_t>
+// use for the accompanying lock-free/address-free compile-time guard.
 constexpr uint32_t VERSION_OFFSET = 4;
 constexpr uint32_t VERSION_SIZE = 8;
 constexpr uint32_t NUM_SLOTS_OFFSET = 12;
@@ -40,12 +49,18 @@ constexpr uint32_t SHUTDOWN_FLAG_SIZE = 1;
 constexpr uint32_t METADATA_SIZE = 20; // 4B w + 4B h + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
 constexpr uint32_t TIMESTAMP_SIZE = 8;
 
+// Names the `/ 8` in every bits_per_comp -> bytes-per-component conversion
+// (Metadata::expected_size below; CudaLinkOutTOP/InTOP's itemsize computations), rather
+// than a bare magic literal repeated at each call site.
+constexpr uint32_t BITS_PER_BYTE = 8;
+
 // DtypeCodec constants (cudaChannelFormatKind)
 constexpr uint8_t FORMAT_KIND_SIGNED = 0;
 constexpr uint8_t FORMAT_KIND_UNSIGNED = 1;
 constexpr uint8_t FORMAT_KIND_FLOAT = 2;
 constexpr uint16_t FLAGS_BFLOAT16 = 0x0001;    // bit0: bfloat16 (kind=Float, bits=16)
 constexpr uint16_t FLAGS_MONO_ALPHA = 0x0002;  // bit1: 2-channel source is mono+alpha, not RG
+constexpr uint16_t FLAGS_BGRA = 0x0004;        // bit2: 4-channel uint8 source is BGRA-ordered, not RGBA
 
 // Pre-computed byte offsets for a SHM region with num_slots IPC slots.
 // Mirrors shm_protocol.py::SHMLayout exactly.
@@ -99,7 +114,7 @@ struct Metadata {
 
     // width * height * num_comps * (bits_per_comp / 8)
     [[nodiscard]] constexpr uint64_t expected_size() const noexcept {
-        return static_cast<uint64_t>(width) * height * num_comps * (bits_per_comp / 8);
+        return static_cast<uint64_t>(width) * height * num_comps * (bits_per_comp / BITS_PER_BYTE);
     }
 
     // Writes this metadata into a mapped SHM buffer at layout.metadata_offset(). 'buf'
@@ -134,7 +149,7 @@ struct Metadata {
 
 // Header field readers — plain (non-atomic) reads for fields other than write_idx.
 // write_idx itself must always be read via std::atomic_ref (see ring_reader.h) — never
-// through these helpers, to preserve the acquire/release ordering contract (D4/C3).
+// through these helpers, to preserve the acquire/release ordering contract.
 
 inline uint32_t read_magic(const uint8_t* buf) noexcept {
     uint32_t v;

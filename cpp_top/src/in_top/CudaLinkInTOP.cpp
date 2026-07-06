@@ -10,15 +10,8 @@
 #include "Parameters.h"
 #include "pixel_format_map.h"
 #include "../common/cuda_check.h"
-
-namespace {
-// Wall-clock seconds as a double -- used only for debug-log timestamps here (unlike the
-// sender, the receiver never writes the wire timestamp field).
-double now_seconds() {
-    using namespace std::chrono;
-    return duration<double>(system_clock::now().time_since_epoch()).count();
-}
-} // namespace
+#include "../common/cuda_op_scope.h"
+#include "../common/raii_handles.h"
 
 using cudalink::core::AcquireResult;
 using cudalink::core::Metadata;
@@ -32,6 +25,12 @@ using cudalink::core::read_version;
 
 namespace {
 HANDLE asHandle(void* h) { return static_cast<HANDLE>(h); }
+
+// Names the Info CHOP/DAT counts returned by getNumInfoCHOPChans()/getInfoDATSize() --
+// must stay in sync with the number of `case` labels / index branches in
+// getInfoCHOPChan()/getInfoDATEntries() below.
+constexpr int32_t kNumInfoCHOPChans = 8; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
+constexpr int32_t kNumInfoDATRows = 4;   // ipc_version, status, last_error, last_error_frame
 } // namespace
 
 extern "C" {
@@ -59,18 +58,59 @@ void FillTOPPluginInfo(TD::TOP_PluginInfo* info) {
 
 DLLEXPORT
 TD::TOP_CPlusPlusBase* CreateTOPInstance(const TD::OP_NodeInfo* info, TD::TOP_Context* context) {
-    return new CudaLinkInTOP(info, context);
+    // A std::bad_alloc (or any other exception) out of the constructor must not cross the
+    // ABI back into TD -- report failure as null rather than let it propagate.
+    try {
+        return new CudaLinkInTOP(info, context);
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 DLLEXPORT
 void DestroyTOPInstance(TD::TOP_CPlusPlusBase* instance, TD::TOP_Context* context) {
-    delete (CudaLinkInTOP*)instance;
+    // static_cast, not a C-style cast -- this is a safe downcast to the concrete type
+    // CreateTOPInstance actually returned.
+    delete static_cast<CudaLinkInTOP*>(instance);
 }
 
 } // extern "C"
 
 CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) : myContext(context) {
-    cudaStreamCreateWithFlags(&myStream, cudaStreamNonBlocking);
+    // Align the runtime's current device with TD's own CUDA device selection before creating
+    // a stream/opening any IPC handles, so nothing here silently lands on whatever device
+    // happens to be "current" by default (matters on multi-GPU hosts). getCUDADeviceIndex()
+    // returns -1 when this node isn't in CUDA execute mode -- shouldn't happen for a
+    // TOP_ExecuteMode::CUDA plugin, handled defensively rather than asserted against.
+    const int cudaDevice = context->getCUDADeviceIndex(nullptr);
+    if (cudaDevice >= 0 && cudaSetDevice(cudaDevice) != cudaSuccess) {
+        myError = "cudaSetDevice(" + std::to_string(cudaDevice) + ") failed";
+        myFatal = true;
+        return;
+    }
+
+    // Verify the current device actually supports CUDA IPC before this TOP ever attempts to
+    // open an IPC handle -- avoids a confusing failure deep inside openSlotHandlesIfNeeded()
+    // the first time a producer connects. CUDA Runtime API docs: "Users can test their device
+    // for IPC functionality by calling cudaDeviceGetAttribute with cudaDevAttrIpcEventSupport."
+    int current = 0;
+    if (cudaGetDevice(&current) == cudaSuccess) {
+        int ipcSupport = 0;
+        if (cudaDeviceGetAttribute(&ipcSupport, cudaDevAttrIpcEventSupport, current) == cudaSuccess &&
+            ipcSupport == 0) {
+            myError = "device " + std::to_string(current) + " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
+            myFatal = true;
+            return;
+        }
+    }
+
+    // An unchecked failure here previously left myStream null, which CUDA silently treats
+    // as the default stream (0) instead of surfacing an error.
+    const cudaError_t st = cudaStreamCreateWithFlags(&myStream, cudaStreamNonBlocking);
+    if (st != cudaSuccess) {
+        myError = std::string("cudaStreamCreateWithFlags failed: ") + cudaGetErrorString(st);
+        myFatal = true;
+    }
 }
 
 CudaLinkInTOP::~CudaLinkInTOP() {
@@ -83,16 +123,22 @@ CudaLinkInTOP::~CudaLinkInTOP() {
 void CudaLinkInTOP::getGeneralInfo(TD::TOP_GeneralInfo* ginfo, const TD::OP_Inputs*, void*) {
     // The producer is external to TD; nothing in TD's dependency graph (no inputs, no
     // changing parameters most cooks) would otherwise trigger a re-cook when a new
-    // frame arrives. Must poll every frame while Active (D1).
+    // frame arrives. Must poll every frame while Active.
     ginfo->cookEveryFrame = true;
 }
 
 void CudaLinkInTOP::setupParameters(TD::OP_ParameterManager* manager, void*) {
-    Parameters::setup(manager);
+    // Parameters::setup() builds parameter strings; a std::bad_alloc must not cross the ABI
+    // back into TD.
+    try {
+        Parameters::setup(manager);
+    } catch (...) {
+    }
 }
 
 // ---------------------------------------------------------------------------
-// D6 step 0 -- parameter-change detection (no push notification exists, D7)
+// Parameter-change detection -- the Custom TOP API has no push notification for
+// parameter edits, so this diffs the values we care about against last cook's cache.
 // ---------------------------------------------------------------------------
 
 void CudaLinkInTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
@@ -100,9 +146,9 @@ void CudaLinkInTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
     const char* ipcmemnameRaw = Parameters::evalIpcmemname(inputs);
     const std::string ipcmemname = ipcmemnameRaw ? ipcmemnameRaw : "";
 
-    // Cached once per cook so other methods can check it without needing OP_Inputs
-    // threaded through (mirrors the same addition on the sender side).
-    myDebugEnabled = Parameters::evalDebug(inputs);
+    // Refreshed once per cook so other methods pick up the current Debug toggle
+    // without needing OP_Inputs threaded through (mirrors the sender side).
+    myDebugLog.setEnabled(Parameters::evalDebug(inputs));
 
     if (myFirstCook) {
         myCachedActive = active;
@@ -112,8 +158,7 @@ void CudaLinkInTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
     }
 
     // Active edge (either direction): full teardown. Off->On must behave as a fresh
-    // connection, never resuming stale state (D6/D7); On->Off must free everything
-    // immediately (matches the real .tox's documented Active=Off behavior).
+    // connection, never resuming stale state; On->Off must free everything immediately.
     if (active != myCachedActive) {
         teardown();
     }
@@ -127,28 +172,6 @@ void CudaLinkInTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
 
     myCachedActive = active;
     myCachedIpcmemname = ipcmemname;
-}
-
-// ---------------------------------------------------------------------------
-// Debug logging (opt-in, Debug parameter) -- live-test finding: the transient error
-// badge alone wasn't enough to diagnose what was actually failing during the sender's
-// resolution/format switch (VERSION_CHANGED window).
-// ---------------------------------------------------------------------------
-
-void CudaLinkInTOP::debugLog(const std::string& msg) {
-    if (!myDebugEnabled) return;
-    if (!myDebugLogFile.is_open()) {
-        char tempPath[MAX_PATH] = {};
-        GetTempPathA(MAX_PATH, tempPath);
-        myDebugLogFile.open(std::string(tempPath) + "cudalink_in_top_debug.log", std::ios::app);
-        if (!myDebugLogFile.is_open()) return;
-    }
-    // Milliseconds since epoch as an integer -- see CudaLinkOutTOP.cpp::debugLog for why
-    // (printing the raw double lost all sub-second precision: every line showed the
-    // identical "1.78324e+09").
-    const int64_t ms = static_cast<int64_t>(now_seconds() * 1000.0);
-    myDebugLogFile << "[t=" << ms << " frame=" << myFrameCount << "] " << msg << "\n";
-    myDebugLogFile.flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -190,53 +213,60 @@ void CudaLinkInTOP::teardown() {
     debugLog("teardown: complete");
 }
 
+// This function's CUDA calls (cudaIpcOpenMemHandle, cudaEventCreate, cudaIpcOpenEventHandle)
+// never touch a TD-owned Vulkan-interop cudaArray, so they don't need a
+// begin/endCUDAOperations() bracket -- same reasoning and same primary-source confirmation
+// (TD's vendored CudaTOP sample) as documented at CudaLinkOutTOP.cpp's reallocate().
+// execute()'s Step 5 (the actual interop copy) is the only place that needs -- and has --
+// the bracket.
 bool CudaLinkInTOP::openSHM(const char* name) {
     if (myShmView) {
         return true; // already open
     }
     // Naive byte-widening, not a general UTF-8 decoder -- correct for the ASCII SHM
     // names this protocol uses in practice (matches Python's CreateFileMapping tagname
-    // verbatim-and-unprefixed contract, D5's SHM naming interop note).
+    // verbatim-and-unprefixed contract).
     HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, std::wstring(name, name + std::strlen(name)).c_str());
     if (!h) {
         myStatus = "Waiting for producer";
         return false;
     }
-    // Map generously; the mapping size is not stored anywhere on the wire (SHM naming
-    // interop note, D5), so Python attachers observe a page-rounded size and this side
-    // does the same by mapping 0 bytes (maps the whole underlying section).
-    void* view = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-    if (!view) {
+    // Map generously; the mapping size is not stored anywhere on the wire, so Python
+    // attachers observe a page-rounded size and this side does the same by mapping 0 bytes
+    // (maps the whole underlying section).
+    void* v = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    if (!v) {
         CloseHandle(h);
         myError = "MapViewOfFile failed";
         return false;
     }
+    // From here on, every remaining failure path below returns through this guard's
+    // destructor instead of a hand-duplicated UnmapViewOfFile+CloseHandle pair (see
+    // src/common/raii_handles.h).
+    cudalink::common::ShmViewGuard guard(h, static_cast<uint8_t*>(v));
 
     // Real .tox's own Troubleshooting doc documents this exact failure mode: "another
     // process is using the same Ipcmemname for a different purpose."
-    if (read_magic(static_cast<const uint8_t*>(view)) != PROTOCOL_MAGIC) {
-        UnmapViewOfFile(view);
-        CloseHandle(h);
+    if (read_magic(guard.view()) != PROTOCOL_MAGIC) {
         myError = "Protocol magic mismatch -- Ipcmemname is in use by an unrelated process";
         return false;
     }
 
-    // Query the mapping's actual accessible size (same technique D5's SHM-naming note
-    // describes Python attachers using -- the mapping size is not stored anywhere on
-    // the wire). Used to bounds-check a wire-sourced num_slots before trusting it
+    // Query the mapping's actual accessible size (same technique Python attachers use --
+    // the mapping size is not stored anywhere on the wire). Used to bounds-check a
+    // wire-sourced num_slots before trusting it
     // (validateNumSlots): named SHM is attachable by any process that knows the name,
     // so its contents -- including num_slots -- are treated as untrusted input.
     MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(view, &mbi, sizeof(mbi)) == 0) {
-        UnmapViewOfFile(view);
-        CloseHandle(h);
+    if (VirtualQuery(guard.view(), &mbi, sizeof(mbi)) == 0) {
         myError = "VirtualQuery failed";
         return false;
     }
 
-    myShmHandle = h;
-    myShmView = static_cast<uint8_t*>(view);
+    myShmHandle = guard.mapping();
+    myShmView = guard.view();
     myShmMappedSize = mbi.RegionSize;
+    guard.release(); // ownership transferred to myShmHandle/myShmView above
     return true;
 }
 
@@ -261,6 +291,22 @@ bool CudaLinkInTOP::validateNumSlots(uint32_t numSlots) {
     return true;
 }
 
+bool CudaLinkInTOP::validateMetadata(const cudalink::core::Metadata& metadata) {
+    if (metadata.width == 0 || metadata.height == 0 || metadata.num_comps == 0 || metadata.bits_per_comp == 0) {
+        myError = "invalid metadata on wire (width=" + std::to_string(metadata.width) +
+                  " height=" + std::to_string(metadata.height) + " num_comps=" + std::to_string(metadata.num_comps) +
+                  " bits=" + std::to_string(metadata.bits_per_comp) + ")";
+        return false;
+    }
+    const uint64_t expected = metadata.expected_size();
+    if (expected == 0 || expected != metadata.data_size) {
+        myError = "metadata data_size mismatch on wire (data_size=" + std::to_string(metadata.data_size) +
+                  " expected=" + std::to_string(expected) + ")";
+        return false;
+    }
+    return true;
+}
+
 bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
     if (myHandlesOpen) {
         return true;
@@ -272,26 +318,50 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
     }
     myLayout = SHMLayout(numSlots);
     if (myLastVersion == 0) {
-        // True first connect (never adopted a version yet, D6 step 3 discussion):
-        // acquire_slot() deliberately does not report VERSION_CHANGED when
-        // last_version==0, so this is the only place the initial version gets adopted.
+        // True first connect (never adopted a version yet): acquire_slot() deliberately
+        // does not report VERSION_CHANGED when last_version==0, so this is the only place
+        // the initial version gets adopted.
         myLastVersion = read_version(myShmView);
     }
 
     myMetadata = Metadata::read_from(myShmView, myLayout);
+    if (!validateMetadata(myMetadata)) {
+        return false;
+    }
 
-    mySlotDevPtrs.assign(numSlots, nullptr);
-    mySlotEvents.assign(numSlots, nullptr);
+    // Build into local guards first and only commit to the class members
+    // (mySlotDevPtrs/mySlotEvents) on full-loop success. Previously
+    // this loop wrote straight into the class members via .assign(), so a mid-loop
+    // CUDALINK_CUDA_CHECK_BOOL failure (e.g. slot 2 of 4) left slots 0-1's already-opened IPC
+    // imports dangling in the members -- silently leaked on the next retry's .assign()
+    // overwrite. Local guards make that leak structurally impossible: on early return here,
+    // every guard already constructed in newDevPtrs/newEvents destructs and closes its handle.
+    std::vector<cudalink::common::CudaIpcMemGuard> newDevPtrs(numSlots);
+    std::vector<cudalink::common::CudaEventGuard> newEvents(numSlots);
 
     for (uint32_t slot = 0; slot < numSlots; ++slot) {
         cudaIpcMemHandle_t memHandle;
         std::memcpy(&memHandle, myShmView + myLayout.mem_handle_offset(slot), sizeof(memHandle));
-        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenMemHandle(&mySlotDevPtrs[slot], memHandle, cudaIpcMemLazyEnablePeerAccess),
-                                  myError);
+        void* rawDevPtr = nullptr;
+        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess), myError);
+        newDevPtrs[slot].reset(rawDevPtr);
 
         cudaIpcEventHandle_t eventHandle;
         std::memcpy(&eventHandle, myShmView + myLayout.event_handle_offset(slot), sizeof(eventHandle));
-        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenEventHandle(&mySlotEvents[slot], eventHandle), myError);
+        cudaEvent_t rawEvent = nullptr;
+        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenEventHandle(&rawEvent, eventHandle), myError);
+        newEvents[slot].reset(rawEvent);
+    }
+
+    mySlotDevPtrs.clear();
+    mySlotDevPtrs.reserve(newDevPtrs.size());
+    for (auto& guard : newDevPtrs) {
+        mySlotDevPtrs.push_back(guard.release());
+    }
+    mySlotEvents.clear();
+    mySlotEvents.reserve(newEvents.size());
+    for (auto& guard : newEvents) {
+        mySlotEvents.push_back(guard.release());
     }
 
     myHandlesOpen = true;
@@ -299,7 +369,9 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
 }
 
 // ---------------------------------------------------------------------------
-// execute() -- D6
+// execute() -- per-cook: detect parameter changes, open/reopen the SHM connection as
+// needed, classify the current wire state, then wait-and-copy the current slot into the
+// output texture.
 // ---------------------------------------------------------------------------
 
 void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void*) {
@@ -307,6 +379,17 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
     try {
         myError.clear();
         myWarning.clear();
+
+        // Once a fatal CUDA error has latched (ctor's device/IPC checks, or a
+        // CUDALINK_CUDA_CHECK_FATAL failure below), stop retrying CUDA calls every cook --
+        // the stream/context may now be corrupted for the rest of the process. Recreating
+        // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
+        // option (it would tear down TD's own CUDA state too).
+        if (myFatal) {
+            myError = "fatal CUDA error latched -- recreate this node or restart TouchDesigner "
+                      "to recover (see last_error in the Info DAT)";
+            return;
+        }
 
         // Step 0: cached-diff parameter-change detection (no push notification exists).
         checkParameterChanges(inputs);
@@ -342,14 +425,14 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
 
         switch (result.state) {
             case SlotState::NoFrame:
-                return; // previous output persists (D6/R5 -- SpectrumTOP.cpp / PyTorchTOP.cpp precedent)
+                return; // previous output persists (matches the SpectrumTOP.cpp / PyTorchTOP.cpp samples)
             case SlotState::Shutdown:
                 teardown();
                 myStatus = "Producer exited";
                 return;
             case SlotState::VersionChanged:
                 debugLog("VERSION_CHANGED: new_version=" + std::to_string(result.new_version));
-                closeHandles(); // re-derive layout from a freshly-read num_slots (R8)
+                closeHandles(); // re-derive layout from a freshly-read num_slots
                 myLastVersion = result.new_version;
                 // A new producer session's write_idx also restarts at 0 (SHMLayout::
                 // build_buffer's default); without this reset, a stale myLastWriteIdx
@@ -406,122 +489,190 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
             return;
         }
 
-        // Step 5: GPU-side wait + D2D copy, no CPU block (R6 -- confirmed by
-        // CPlusPlus_Common.h's documented begin/end bracket purpose, not just inferred).
-        if (!myContext->beginCUDAOperations(nullptr)) {
-            myError = "beginCUDAOperations failed";
-            return;
+        // Step 5: GPU-side wait + D2D copy, no CPU block -- confirmed by
+        // CPlusPlus_Common.h's documented begin/end bracket purpose, not just inferred.
+        // CudaOpScope ties endCUDAOperations() to the closing brace of this nested block --
+        // scoped tightly to just the CUDA-ops region (matching where the original explicit
+        // endCUDAOperations() call sat, right after the D2D copy and before the non-CUDA
+        // copy_us/Step 6 bookkeeping) so a CUDALINK_CUDA_CHECK_FATAL early `return` -- or an
+        // exception unwinding through the catch(...) below -- can never leave the bracket
+        // unbalanced, and the bracket isn't held open longer than TD's contract actually
+        // requires.
+        // myBeginUs/myCopyUs/myEndUs isolate begin-bracket, actual-CUDA-call, and
+        // end-bracket cost (see CudaLinkOutTOP.cpp's Step 5 comment for the shared
+        // rationale). 'workEnd' is captured just before the closing brace and read again
+        // immediately after it; every early-return path below exits execute() entirely
+        // before the post-block myEndUs line, so it's never read unset.
+        const auto beginStart = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point workEnd;
+        {
+            cudalink::common::CudaOpScope cudaOps(myContext);
+            const auto beginEnd = std::chrono::steady_clock::now();
+            myBeginUs = std::chrono::duration<float, std::micro>(beginEnd - beginStart).count();
+            if (!cudaOps) {
+                myError = "beginCUDAOperations failed";
+                return;
+            }
+
+            CUDALINK_CUDA_CHECK_FATAL(cudaStreamWaitEvent(myStream, mySlotEvents[myReadSlot], 0), myError, myFatal);
+
+            const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
+            const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
+            CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, mySlotDevPtrs[myReadSlot],
+                                                                rowBytes, rowBytes, myMetadata.height,
+                                                                cudaMemcpyDeviceToDevice, myStream),
+                                      myError, myFatal);
+            // CPU-side enqueue cost only (the copy itself is async on myStream) -- a true
+            // GPU-side copy_us would need cudaEvent-based timing; deferred, not required
+            // for correctness.
+            workEnd = std::chrono::steady_clock::now();
+            myCopyUs = std::chrono::duration<float, std::micro>(workEnd - beginEnd).count();
         }
-
-        CUDALINK_CUDA_CHECK(cudaStreamWaitEvent(myStream, mySlotEvents[myReadSlot], 0), myError);
-
-        const auto copyStart = std::chrono::steady_clock::now();
-        const size_t itemsize = myMetadata.bits_per_comp / 8;
-        const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
-        CUDALINK_CUDA_CHECK(cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, mySlotDevPtrs[myReadSlot], rowBytes,
-                                                       rowBytes, myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
-                            myError);
-        myContext->endCUDAOperations(nullptr);
-        // CPU-side enqueue cost only (the copy itself is async on myStream) -- a true
-        // GPU-side copy_us would need cudaEvent-based timing; deferred, not required for
-        // correctness.
-        myCopyUs = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - copyStart).count();
+        myEndUs = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
 
         // Step 6.
         myLastWriteIdx = result.write_idx;
         ++myFrameCount;
         myStatus = std::to_string(myMetadata.width) + "x" + std::to_string(myMetadata.height);
     } catch (...) {
-        // No exception ever crosses the ABI (D7 error policy).
+        // No exception ever crosses the ABI.
         myError = "unexpected exception in execute()";
     }
     myCookUs = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - cookStart).count();
+
+    // Periodic bench log (Debug-gated, every 97 frames -- mirrors CudaLinkOutTOP's
+    // cadence): gives an offline avg cook_us/copy_us/begin_us/end_us number without
+    // needing to wire and eyeball an Info CHOP live.
+    if (myDebugLog.enabled()) {
+        mySumCookUs += myCookUs;
+        mySumCopyUs += myCopyUs;
+        mySumBeginUs += myBeginUs;
+        mySumEndUs += myEndUs;
+        if (++myBenchSamples >= 97) {
+            debugLog("bench: avg_cook_us=" + std::to_string(mySumCookUs / myBenchSamples) +
+                      " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
+                      " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
+                      " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) +
+                      " samples=" + std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
+            mySumCookUs = 0.0f;
+            mySumCopyUs = 0.0f;
+            mySumBeginUs = 0.0f;
+            mySumEndUs = 0.0f;
+            myBenchSamples = 0;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Info CHOP / DAT / status (D7)
+// Info CHOP / DAT / status
 // ---------------------------------------------------------------------------
 
 int32_t CudaLinkInTOP::getNumInfoCHOPChans(void*) {
-    return 6; // frames, cook_us, copy_us, write_idx, read_slot, num_slots
+    return kNumInfoCHOPChans; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
 }
 
 void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, void*) {
-    switch (index) {
-        case 0:
-            chan->name->setString("frames");
-            chan->value = static_cast<float>(myFrameCount);
-            break;
-        case 1:
-            chan->name->setString("cook_us");
-            chan->value = myCookUs;
-            break;
-        case 2:
-            chan->name->setString("copy_us");
-            chan->value = myCopyUs;
-            break;
-        case 3:
-            chan->name->setString("write_idx");
-            chan->value = static_cast<float>(myLastWriteIdx);
-            break;
-        case 4:
-            chan->name->setString("read_slot");
-            chan->value = static_cast<float>(myReadSlot);
-            break;
-        case 5:
-            // The real .tox's read-only Numslots display, sourced from the wire header
-            // (R2/R8) -- surfaced here rather than as a parameter (see CudaLinkInTOP.h).
-            chan->name->setString("num_slots");
-            chan->value = static_cast<float>(myLayout.num_slots());
-            break;
-        default:
-            break;
+    // setString() may allocate; a std::bad_alloc must not cross the ABI.
+    try {
+        switch (index) {
+            case 0:
+                chan->name->setString("frames");
+                chan->value = static_cast<float>(myFrameCount);
+                break;
+            case 1:
+                chan->name->setString("cook_us");
+                chan->value = myCookUs;
+                break;
+            case 2:
+                chan->name->setString("copy_us");
+                chan->value = myCopyUs;
+                break;
+            case 3:
+                // beginCUDAOperations() cost (CudaOpScope construction).
+                chan->name->setString("begin_us");
+                chan->value = myBeginUs;
+                break;
+            case 4:
+                // endCUDAOperations() cost (~CudaOpScope() destructor).
+                chan->name->setString("end_us");
+                chan->value = myEndUs;
+                break;
+            case 5:
+                chan->name->setString("write_idx");
+                chan->value = static_cast<float>(myLastWriteIdx);
+                break;
+            case 6:
+                chan->name->setString("read_slot");
+                chan->value = static_cast<float>(myReadSlot);
+                break;
+            case 7:
+                // Read-only Numslots display, sourced from the wire header -- surfaced here
+                // rather than as a parameter (see CudaLinkInTOP.h).
+                chan->name->setString("num_slots");
+                chan->value = static_cast<float>(myLayout.num_slots());
+                break;
+            default:
+                break;
+        }
+    } catch (...) {
     }
 }
 
 bool CudaLinkInTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows = 4; // ipc_version, status, last_error, last_error_frame
+    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
 }
 
 void CudaLinkInTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEntries* entries, void*) {
-    if (index == 0) {
-        entries->values[0]->setString("ipc_version");
-        entries->values[1]->setString(std::to_string(myLastVersion).c_str());
-    } else if (index == 1) {
-        entries->values[0]->setString("status");
-        entries->values[1]->setString(myStatus.c_str());
-    } else if (index == 2) {
-        // Sticky (never auto-cleared, only overwritten) -- see getErrorString(). Survives
-        // across cooks, unlike the transient error badge (live-test finding: a real error
-        // during the sender's VERSION_CHANGED window flashed and disappeared too fast to
-        // read).
-        entries->values[0]->setString("last_error");
-        entries->values[1]->setString(myLastError.c_str());
-    } else if (index == 3) {
-        entries->values[0]->setString("last_error_frame");
-        entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
+    // std::to_string()/setString() may allocate; a std::bad_alloc must not cross the ABI.
+    try {
+        if (index == 0) {
+            entries->values[0]->setString("ipc_version");
+            entries->values[1]->setString(std::to_string(myLastVersion).c_str());
+        } else if (index == 1) {
+            entries->values[0]->setString("status");
+            entries->values[1]->setString(myStatus.c_str());
+        } else if (index == 2) {
+            // Sticky (never auto-cleared, only overwritten) -- see getErrorString(). Survives
+            // across cooks, unlike the transient error badge (live-test finding: a real error
+            // during the sender's VERSION_CHANGED window flashed and disappeared too fast to
+            // read).
+            entries->values[0]->setString("last_error");
+            entries->values[1]->setString(myLastError.c_str());
+        } else if (index == 3) {
+            entries->values[0]->setString("last_error_frame");
+            entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
+        }
+    } catch (...) {
     }
 }
 
 void CudaLinkInTOP::getErrorString(TD::OP_String* error, void*) {
-    if (!myError.empty()) {
-        myLastError = myError;
-        myLastErrorFrame = myFrameCount;
-        debugLog("ERROR: " + myError);
+    // string copy/setString() may allocate; a std::bad_alloc must not cross the ABI.
+    try {
+        if (!myError.empty()) {
+            myLastError = myError;
+            myLastErrorFrame = myFrameCount;
+            debugLog("ERROR: " + myError);
+        }
+        error->setString(myError.c_str());
+        myError.clear();
+    } catch (...) {
     }
-    error->setString(myError.c_str());
-    myError.clear();
 }
 
 void CudaLinkInTOP::getWarningString(TD::OP_String* warning, void*) {
-    if (!myWarning.empty()) {
-        debugLog("WARNING: " + myWarning);
+    // string copy/setString() may allocate; a std::bad_alloc must not cross the ABI.
+    try {
+        if (!myWarning.empty()) {
+            debugLog("WARNING: " + myWarning);
+        }
+        warning->setString(myWarning.c_str());
+        myWarning.clear();
+    } catch (...) {
     }
-    warning->setString(myWarning.c_str());
-    myWarning.clear();
 }
 
 void CudaLinkInTOP::getInfoPopupString(TD::OP_String* info, void*) { info->setString(myStatus.c_str()); }

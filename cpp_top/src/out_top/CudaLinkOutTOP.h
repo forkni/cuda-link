@@ -1,4 +1,5 @@
-// CudaLinkOutTOP -- sender TOP per PLAN-001 D5.
+// CudaLinkOutTOP -- sender TOP: publishes a texture into shared memory for zero-copy
+// CUDA IPC consumption by other processes/TOPs.
 // opType "Cudalinkout", 1 input, TOP_ExecuteMode::CUDA.
 
 #pragma once
@@ -6,21 +7,30 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
-#include <fstream>
 #include <string>
 #include <vector>
 
 #include "CPlusPlus_Common.h"
 #include "TOP_CPlusPlusBase.h"
 
+#include "../common/debug_log.h"
 #include "../core/ring_writer.h"
-#include "../core/shm_layout.hpp"
+#include "../core/shm_layout.h"
 #include "pixel_format_map.h"
 
 class CudaLinkOutTOP : public TD::TOP_CPlusPlusBase {
 public:
     CudaLinkOutTOP(const TD::OP_NodeInfo* info, TD::TOP_Context* context);
     ~CudaLinkOutTOP() override;
+
+    // This class owns raw HANDLE/cudaStream_t/IPC resources with a user-declared
+    // destructor -- an implicitly-defaulted copy would shallow-copy those and double-free
+    // them in ~CudaLinkOutTOP(). TD constructs this class exactly once and never copies or
+    // moves it, so deleting all four is correct, not just defensive.
+    CudaLinkOutTOP(const CudaLinkOutTOP&) = delete;
+    CudaLinkOutTOP& operator=(const CudaLinkOutTOP&) = delete;
+    CudaLinkOutTOP(CudaLinkOutTOP&&) = delete;
+    CudaLinkOutTOP& operator=(CudaLinkOutTOP&&) = delete;
 
     void getGeneralInfo(TD::TOP_GeneralInfo* ginfo, const TD::OP_Inputs* inputs, void* reserved1) override;
     void execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void* reserved1) override;
@@ -37,10 +47,10 @@ public:
     void setupParameters(TD::OP_ParameterManager* manager, void* reserved1) override;
 
 private:
-    // D7 (sender's own copy of the receiver's cached-diff pattern, flagged as follow-up
-    // there and implemented here): diffs Active/Ipcmemname/Numslots against their cached
-    // values at the top of every execute() -- no push-based parameter-change notification
-    // exists in the Custom TOP API (same reasoning as CudaLinkInTOP::checkParameterChanges).
+    // Diffs Active/Ipcmemname/Numslots against their cached values at the top of every
+    // execute() -- no push-based parameter-change notification exists in the Custom TOP
+    // API, so this is the only way to detect an edit (same approach as
+    // CudaLinkInTOP::checkParameterChanges).
     void checkParameterChanges(const TD::OP_Inputs* inputs);
 
     // Publishes shutdown_flag=1 (if a segment is open) and frees every IPC/device/SHM
@@ -55,18 +65,25 @@ private:
     bool reallocate(uint32_t width, uint32_t height, const cudalink::out_top::WireFormat& fmt, int numSlots,
                     const char* name);
 
-    // Debug-gated diagnostics (live-test finding: neither error/warning badges nor GPU%
-    // are enough to diagnose transient failures -- see getErrorString/getWarningString
-    // for the sticky myLastError capture, and this for the deeper opt-in trace). Opens
-    // %TEMP%\cudalink_out_top_debug.log lazily on first use, appends, flushes every line.
-    // No-op when myDebugEnabled is false (cached from Parameters::evalDebug at the top of
-    // each execute(), since reallocate()/teardown() don't otherwise see OP_Inputs).
-    void debugLog(const std::string& msg);
+    // Debug-gated diagnostics: neither the error/warning badges nor GPU% are enough to
+    // diagnose a transient failure (see getErrorString/getWarningString for the sticky
+    // myLastError capture, and this for the deeper opt-in trace). Forwards to myDebugLog,
+    // which handles the lazy file-open/gating itself; this wrapper just supplies the
+    // current frame number so call sites don't have to.
+    void debugLog(const std::string& msg) { myDebugLog.log(msg, myFrameCount); }
 
     TD::TOP_Context* myContext;
     cudaStream_t myStream = nullptr;
 
-    // Cached parameter values for the D7 change-detection diff.
+    // Latched fatal-error flag: set once by the ctor's device/IPC-capability checks or by
+    // a CUDALINK_CUDA_CHECK_FATAL failure on the per-frame hot path. Once set,
+    // execute() short-circuits every subsequent cook instead of retrying CUDA calls against a
+    // stream/context that documented behavior says may now be corrupted for the rest of the
+    // process (cudaDeviceReset() is NOT an option here -- it destroys all CUDA resources in
+    // this process, which would also kill TD's own CUDA state).
+    bool myFatal = false;
+
+    // Cached parameter values for the change-detection diff above.
     bool myFirstCook = true;
     bool myCachedActive = false;
     std::string myCachedIpcmemname;
@@ -82,7 +99,7 @@ private:
     bool myAllocated = false;
 
     // Cached geometry/format this allocation was built for -- a change in any of these
-    // (or Numslots) triggers reallocate() (D5 step 3).
+    // (or Numslots) triggers reallocate().
     uint32_t myWidth = 0;
     uint32_t myHeight = 0;
     cudalink::core::Metadata myMetadata;
@@ -91,7 +108,7 @@ private:
     std::vector<void*> mySlotDevPtrs;
     std::vector<cudaEvent_t> mySlotEvents;
 
-    // Status/error/warning surfaces (D7).
+    // Status/error/warning surfaces.
     std::string myError;
     std::string myWarning;
     std::string myStatus = "Idle";
@@ -103,20 +120,28 @@ private:
     std::string myLastError;
     uint64_t myLastErrorFrame = 0;
 
-    // Debug-gated diagnostics (see debugLog()). Cached once per cook from
-    // Parameters::evalDebug() so reallocate()/teardown() can check it without needing
+    // Debug-gated diagnostics (see debugLog()). Enabled state is refreshed once per cook
+    // from Parameters::evalDebug() so reallocate()/teardown() can check it without needing
     // OP_Inputs threaded through.
-    bool myDebugEnabled = false;
-    std::ofstream myDebugLogFile;
+    cudalink::common::DebugLogger myDebugLog{"cudalink_out_top_debug.log"};
 
-    // Stats (D7 Info CHOP channels): frames, cook_us, copy_us, write_idx, num_slots.
+    // Stats (Info CHOP channels): frames, cook_us, copy_us, begin_us, end_us,
+    // write_idx, num_slots.
     uint64_t myFrameCount = 0;
     float myCookUs = 0.0f;
     float myCopyUs = 0.0f;
 
+    // myCopyUs measures only the CUDA-call enqueues inside the CUDA-ops bracket;
+    // myBeginUs/myEndUs separately time entering/leaving that bracket
+    // (beginCUDAOperations()/endCUDAOperations()) so the two costs can be told apart.
+    float myBeginUs = 0.0f;
+    float myEndUs = 0.0f;
+
     // Periodic bench-log accumulators (Debug-gated, reported every 97 frames -- matches
-    // exporter.py's FrameProfile cadence).
+    // the Python exporter's reporting cadence).
     float mySumCookUs = 0.0f;
     float mySumCopyUs = 0.0f;
+    float mySumBeginUs = 0.0f;
+    float mySumEndUs = 0.0f;
     uint32_t myBenchSamples = 0;
 };
