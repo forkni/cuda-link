@@ -13,6 +13,7 @@ import pytest
 
 from cuda_link.shm_protocol import (
     FLAGS_BFLOAT16,
+    FLAGS_BGRA,
     FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
     FORMAT_KIND_SIGNED,
@@ -142,6 +143,32 @@ def test_metadata_roundtrip(width: int, height: int, num_comps: int, dtype: str)
     assert meta_out == meta_in
     # Size invariant
     assert meta_out.width * meta_out.height * meta_out.num_comps * (meta_out.bits_per_comp // 8) == data_size
+
+
+def test_metadata_roundtrip_bgra_flag() -> None:
+    """FLAGS_BGRA must survive pack_into/read_from — this is the wire bit that lets the
+    receiver reconstruct BGRA8Fixed instead of assuming RGBA order for 4-channel uint8
+    frames (fix for the R/B channel-swap bug on TD's default 8-bit pixel format)."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+
+    kind, bits, flags = DtypeCodec.encode("uint8")
+    flags |= FLAGS_BGRA
+    data_size = 256 * 256 * 4 * (bits // 8)
+    meta_in = Metadata(
+        width=256,
+        height=256,
+        num_comps=4,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=data_size,
+    )
+    meta_in.pack_into(buf, layout)
+    meta_out = Metadata.read_from(buf, layout)
+
+    assert meta_out == meta_in
+    assert meta_out.flags & FLAGS_BGRA
 
 
 # ---------------------------------------------------------------------------
@@ -564,11 +591,14 @@ def test_set_version_fixes_version_collision() -> None:
         (FORMAT_KIND_UNSIGNED, 16, FLAGS_MONO_ALPHA, "uint16"),
         # bfloat16 + mono_alpha (both bits set) — bfloat16 still wins
         (FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16 | FLAGS_MONO_ALPHA, "bfloat16"),
+        # FLAGS_BGRA is channel-semantic (order), not dtype-relevant — must NOT change
+        # the dtype or itemsize (fix for the R/B channel-swap bug)
+        (FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, "uint8"),
     ],
 )
 def test_dtype_codec_decode_mono_alpha_masked(kind: int, bits: int, flags: int, expected_dtype: str) -> None:
-    """FLAGS_MONO_ALPHA (bit1) is channel-semantic; decode returns the correct
-    dtype regardless of whether the mono+alpha bit is set.
+    """FLAGS_MONO_ALPHA (bit1) and FLAGS_BGRA (bit2) are channel-semantic; decode
+    returns the correct dtype regardless of whether either bit is set.
 
     Before the fix, (UNSIGNED, 8, FLAGS_MONO_ALPHA) fell back to "float32"
     producing a 4× oversized itemsize for monoalpha8fixed frames.

@@ -31,7 +31,6 @@ import contextlib
 import logging
 import threading
 import time
-import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
@@ -745,9 +744,8 @@ class Exporter:
 
             return FrameOutcome.PUBLISHED
 
-        except (OSError, RuntimeError) as e:
-            logger.error("Export failed: %s", e)
-            traceback.print_exc()
+        except (OSError, RuntimeError):
+            logger.exception("Export failed")
             return FrameOutcome.FAILED
         finally:
             _nvtx.pop_range()

@@ -107,13 +107,16 @@ echo [3/4] Cleaning old artifacts...
 
 set "cleaned=0"
 
+REM Remove only stale CORE wheels — never touch sibling native/spout wheels in dist\.
+REM "cuda_link-*.whl" matches cuda_link-1.11.0-... but NOT cuda_link_native-*/cuda_link_spout-*
+REM (underscore after "cuda_link", not a dash) — same invariant _find_wheel() relies on.
 if exist "dist\" (
-    rmdir /s /q "dist"
-    if !errorlevel! equ 0 (
-        echo   Removed dist\
-        set /a cleaned+=1
-    ) else (
-        echo   [WARN] Could not remove dist\ - continuing anyway
+    for %%f in ("dist\cuda_link-*.whl") do (
+        if exist "%%f" (
+            del /q "%%f"
+            echo   Removed dist\%%~nxf
+            set /a cleaned+=1
+        )
     )
 )
 

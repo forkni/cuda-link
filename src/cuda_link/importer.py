@@ -321,6 +321,13 @@ class IPCConnection:
             self.shm_handle = None
 
 
+class CUDAArrayWrapper:
+    """Adapts a raw __cuda_array_interface__ dict for torch.as_tensor()."""
+
+    def __init__(self, interface: dict) -> None:
+        self.__cuda_array_interface__ = interface
+
+
 @dataclass
 class TorchBuffers:
     """Per-slot zero-copy torch.Tensor views of GPU memory (built eagerly at init)."""
@@ -355,10 +362,6 @@ class TorchBuffers:
                 "version": 3,
                 "strides": None,
             }
-
-            class CUDAArrayWrapper:
-                def __init__(self, interface: dict) -> None:
-                    self.__cuda_array_interface__ = interface
 
             wrapper = CUDAArrayWrapper(cuda_array_interface)
             tensor = torch.as_tensor(wrapper, device="cuda")
@@ -1125,8 +1128,14 @@ class Importer:
     def _connect(self) -> None:
         """Open SHM, read IPC handles, build buffer views. Called once by open()."""
         shm, num_slots, ipc_version = self._open_and_validate_shm()
-        fmt, provisional = self._resolve_format(shm, num_slots)
-        conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
+        try:
+            fmt, provisional = self._resolve_format(shm, num_slots)
+            conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
+        except BaseException:
+            # shm is still ours here — _open_ipc_slots only rolls back the
+            # per-slot resources it opened, not the SharedMemory it was handed.
+            shm.close()
+            raise
         self._adopt_connection(
             conn,
             fmt,
@@ -1222,7 +1231,12 @@ class Importer:
         ipc_version: int,
         fmt: Format,
     ) -> IPCConnection:
-        """Open all IPC mem + event handles; return a live IPCConnection."""
+        """Open all IPC mem + event handles; return a live IPCConnection.
+
+        Caller (``_connect`` / ``_reinitialize``) owns ``shm`` — on failure this
+        method rolls back only the resources it opened itself (dev_ptrs, ipc_events,
+        doorbell), so a partial slot-open never leaks a GPU IPC mapping.
+        """
         from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
 
         cuda = self._cuda
@@ -1230,59 +1244,77 @@ class Importer:
         dev_ptrs: list = [None] * num_slots
         ipc_events: list = [None] * num_slots
         layout = SHMLayout(num_slots)
-
-        for slot in range(num_slots):
-            mem_off = layout.mem_handle_offset(slot)
-            evt_off = layout.event_handle_offset(slot)
-
-            mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
-            logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
-            ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-            dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
-
-            event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
-            if any(event_handle_bytes):
-                try:
-                    ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                    ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
-                except (RuntimeError, OSError) as e:
-                    logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
-
-            logger.info(
-                "Slot %d: GPU ptr=0x%016x, event=%s",
-                slot,
-                dev_ptrs[slot].value,
-                "YES" if ipc_events[slot] else "NO",
-            )
-
-        logger.info("Opened %d IPC buffer slots", num_slots)
-
-        # R5: the native wait backend needs the doorbell to reach its <10us target
-        # (its block phase has nothing faster to wait on otherwise) — so wanting
-        # native forces the doorbell open even if policy.doorbell is False.
-        want_native = self._policy.wait_backend in ("auto", "native") and os.name == "nt"
-
-        # R2: open the doorbell event if the policy (or R5 above) requests it
         db_handle = None
-        if self._policy.doorbell or want_native:
-            db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
-            if db_handle is not None:
-                logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
-            elif self._policy.doorbell:
-                logger.warning(
-                    "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
+
+        try:
+            for slot in range(num_slots):
+                mem_off = layout.mem_handle_offset(slot)
+                evt_off = layout.event_handle_offset(slot)
+
+                mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
+                logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
+                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+                dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
+
+                event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
+                if any(event_handle_bytes):
+                    try:
+                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
+                        ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
+                    except (RuntimeError, OSError) as e:
+                        logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
+
+                logger.info(
+                    "Slot %d: GPU ptr=0x%016x, event=%s",
+                    slot,
+                    dev_ptrs[slot].value,
+                    "YES" if ipc_events[slot] else "NO",
                 )
 
-        # R5: resolve the native wait backend now, while db_handle is known — a
-        # backend without a doorbell can't beat the Python fallback, so only
-        # resolve when one was actually opened above.
-        self._wait_backend = self._resolve_wait_backend() if (want_native and db_handle is not None) else None
-        if self._wait_backend is None and want_native and not self._policy.doorbell and db_handle is not None:
-            # Doorbell was opened speculatively for native only (policy.doorbell
-            # was False) and native failed to resolve — don't leave a doorbell
-            # handle open that nothing will wait on.
-            _doorbell.close(db_handle)
-            db_handle = None
+            logger.info("Opened %d IPC buffer slots", num_slots)
+
+            # R5: the native wait backend needs the doorbell to reach its <10us target
+            # (its block phase has nothing faster to wait on otherwise) — so wanting
+            # native forces the doorbell open even if policy.doorbell is False.
+            want_native = self._policy.wait_backend in ("auto", "native") and os.name == "nt"
+
+            # R2: open the doorbell event if the policy (or R5 above) requests it
+            if self._policy.doorbell or want_native:
+                db_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
+                if db_handle is not None:
+                    logger.info("Doorbell opened: %r", _doorbell.doorbell_event_name(self._spec.shm_name))
+                elif self._policy.doorbell:
+                    logger.warning(
+                        "Doorbell event not found (producer not ready or not Windows); falling back to poll-sleep"
+                    )
+
+            # R5: resolve the native wait backend now, while db_handle is known — a
+            # backend without a doorbell can't beat the Python fallback, so only
+            # resolve when one was actually opened above.
+            self._wait_backend = self._resolve_wait_backend() if (want_native and db_handle is not None) else None
+            if self._wait_backend is None and want_native and not self._policy.doorbell and db_handle is not None:
+                # Doorbell was opened speculatively for native only (policy.doorbell
+                # was False) and native failed to resolve — don't leave a doorbell
+                # handle open that nothing will wait on.
+                _doorbell.close(db_handle)
+                db_handle = None
+        except BaseException:
+            # Roll back whatever this call opened so far — shm itself is not ours
+            # to close (the caller owns it and may retry against the same mapping).
+            IPCConnection(
+                cuda=cuda,
+                shm_handle=None,
+                ipc_version=ipc_version,
+                num_slots=num_slots,
+                ipc_handles=ipc_handles,
+                dev_ptrs=dev_ptrs,
+                ipc_events=ipc_events,
+                layout=layout,
+                shutdown_offset=layout.shutdown_offset,
+                timestamp_offset=layout.timestamp_offset,
+                doorbell_handle=db_handle,
+            ).close_ipc_handles()
+            raise
 
         return IPCConnection(
             cuda=cuda,
@@ -1791,25 +1823,33 @@ class Importer:
 
         old_conn.close_ipc_handles()
 
-        new_ipc_version = read_version(shm.buf)
-        new_num_slots = read_num_slots(shm.buf)
+        # self._conn still points at old_conn here (handles closed, shm still open)
+        # until _open_ipc_slots succeeds below — on failure, fall through to the
+        # same partial-cleanup path used for producer shutdown rather than leaving
+        # self._conn referencing a connection whose dev_ptrs/events are all None.
+        try:
+            new_ipc_version = read_version(shm.buf)
+            new_num_slots = read_num_slots(shm.buf)
 
-        # Route through Format.from_shm — same decoder used at connect time.
-        # Falls back to current format if SHM metadata is absent or all-zeros.
-        resolved_fmt = Format.from_shm(shm.buf, new_num_slots)
-        new_fmt = resolved_fmt or self._format
+            # Route through Format.from_shm — same decoder used at connect time.
+            # Falls back to current format if SHM metadata is absent or all-zeros.
+            resolved_fmt = Format.from_shm(shm.buf, new_num_slots)
+            new_fmt = resolved_fmt or self._format
 
-        new_conn = self._open_ipc_slots(shm, new_num_slots, new_ipc_version, new_fmt)
-        self._conn = new_conn
+            new_conn = self._open_ipc_slots(shm, new_num_slots, new_ipc_version, new_fmt)
+            self._conn = new_conn
 
-        self._apply_format_change(new_fmt)
-        if resolved_fmt is not None:
-            # A1: a genuine SHM read (not the "still absent, kept old format" fallback
-            # above) means geometry is now authoritative — clear any stale provisional
-            # flag from the original connect so _try_acquire() doesn't re-resolve again.
-            self._format_provisional = False
+            self._apply_format_change(new_fmt)
+            if resolved_fmt is not None:
+                # A1: a genuine SHM read (not the "still absent, kept old format" fallback
+                # above) means geometry is now authoritative — clear any stale provisional
+                # flag from the original connect so _try_acquire() doesn't re-resolve again.
+                self._format_provisional = False
 
-        logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
+            logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
+        except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
+            logger.info("Reinitialize failed (%s) — waiting for producer restart", e)
+            self._partial_cleanup_for_reconnect()
 
     # ------------------------------------------------------------------
     # Teardown

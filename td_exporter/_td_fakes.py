@@ -68,6 +68,9 @@ class FakeTOPHandle(TOPHandle):
         height: int = 64,
         channels: int = 4,
         gpu_ptr: int = 0xDEADBEEF,
+        cuda_size: int | None = None,
+        cuda_channels: int | None = None,
+        cuda_data_type: Any = None,
     ) -> None:
         self._pixel_format = pixel_format
         self._pixel_format_name = pixel_format_name
@@ -75,21 +78,31 @@ class FakeTOPHandle(TOPHandle):
         self._height = height
         self._channels = channels
         self._gpu_ptr = gpu_ptr
+        # Opt-in overrides for cuda_memory()'s reported size/channels/data_type — None (the
+        # default) preserves the original fixed float32-sized behavior byte-for-byte. Tests
+        # that need to simulate a TD source whose reported CUDA allocation size disagrees
+        # with width*height*channels*4 (grow/shrink races, RGBA-padded mono, etc.) set these.
+        self._cuda_size = cuda_size
+        self._cuda_channels = cuda_channels
+        self._cuda_data_type = cuda_data_type
         self.format_set: list[str] = []
         self.copy_cuda_calls: list[tuple] = []
         self.copy_numpy_calls: list[Any] = []
         self.resolution_set: list[tuple[int, int]] = []
+        self.cook_calls: list[bool] = []
 
     def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> FakeCUDAMemoryRef:
         # pixel_format is intentionally ignored in the fake — channel expansion is a TD runtime
         # behaviour that the in-process test double cannot replicate.
-        size = self._width * self._height * self._channels * 4
+        channels = self._cuda_channels if self._cuda_channels is not None else self._channels
+        size = self._cuda_size if self._cuda_size is not None else self._width * self._height * self._channels * 4
         return FakeCUDAMemoryRef(
             ptr=self._gpu_ptr,
             width=self._width,
             height=self._height,
-            channels=self._channels,
+            channels=channels,
             size=size,
+            data_type=self._cuda_data_type,
         )
 
     @property
@@ -101,7 +114,7 @@ class FakeTOPHandle(TOPHandle):
         return self._pixel_format_name
 
     def cook(self, force: bool = False) -> None:
-        pass  # no-op in tests; use cook_calls list to assert if needed
+        self.cook_calls.append(force)
 
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
@@ -137,6 +150,10 @@ class FakeTDHost(TDHost):
         self.custom_only_calls: list[bool] = []
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
+        # Records every status/tint side-effect call as (kind, msg); kind is one of
+        # "warning" / "error" / "info" / "clear" (msg is None for clear). Additive —
+        # existing callers that ignore the return value (always None) are unaffected.
+        self.status_calls: list[tuple[str, str | None]] = []
 
     def param_value(self, name: str) -> Any:
         return self._params.get(name)
@@ -171,13 +188,13 @@ class FakeTDHost(TDHost):
         return shape
 
     def set_warning_status(self, msg: str) -> None:
-        pass
+        self.status_calls.append(("warning", msg))
 
     def set_error_status(self, msg: str) -> None:
-        pass
+        self.status_calls.append(("error", msg))
 
     def clear_status(self) -> None:
-        pass
+        self.status_calls.append(("clear", None))
 
     def set_info_status(self, msg: str) -> None:
-        pass
+        self.status_calls.append(("info", msg))
