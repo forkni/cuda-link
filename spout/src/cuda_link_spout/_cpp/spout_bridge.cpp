@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>  // std::memcmp / std::memcpy (LUID comparison + adapter_luid)
 #include <map>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -102,8 +103,13 @@ struct Receiver {
 };
 
 std::mutex g_mu;
-std::map<std::int64_t, Sender*> g_senders;
-std::map<std::int64_t, Receiver*> g_receivers;
+// Values are shared_ptr (custom deleter = destroySender/destroyReceiver below) so a
+// send/receive in flight after unlocking g_mu keeps the object alive even if
+// close_sender/close_receiver erases the map entry concurrently on another thread —
+// both send/receive and close_* run with the GIL released (see PYBIND11_MODULE) and
+// would otherwise race a delete against an in-progress CUDA/Spout call.
+std::map<std::int64_t, std::shared_ptr<Sender>> g_senders;
+std::map<std::int64_t, std::shared_ptr<Receiver>> g_receivers;
 std::int64_t g_next = 0x6000'0000;
 
 std::int64_t allocHandle() { return g_next += 0x10; }
@@ -173,13 +179,13 @@ std::int64_t create_sender(const std::string& name, int width, int height, int d
 
     std::lock_guard<std::mutex> lk(g_mu);
     auto h = allocHandle();
-    g_senders[h] = s;
+    g_senders[h] = std::shared_ptr<Sender>(s, destroySender);
     return h;
 }
 
 void spout_send(std::int64_t handle, std::uintptr_t srcPtr, int srcPitch, int width, int height,
                 int bytesPerPixel, std::uintptr_t stream) {
-    Sender* s;
+    std::shared_ptr<Sender> s;
     { std::lock_guard<std::mutex> lk(g_mu);
       auto it = g_senders.find(handle);
       if (it == g_senders.end()) throw std::runtime_error("send: invalid or closed sender handle");
@@ -203,10 +209,11 @@ void spout_send(std::int64_t handle, std::uintptr_t srcPtr, int srcPitch, int wi
 }
 
 void close_sender(std::int64_t handle) {
-    Sender* s = nullptr;
-    { std::lock_guard<std::mutex> lk(g_mu); auto it = g_senders.find(handle);
-      if (it != g_senders.end()) { s = it->second; g_senders.erase(it); } }
-    destroySender(s);
+    // Erasing the map entry drops our reference; the shared_ptr's deleter
+    // (destroySender) only runs once every in-flight spout_send() also releases
+    // its copy, so a concurrent send never touches a freed Sender.
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_senders.erase(handle);
 }
 
 // --- receiver ---------------------------------------------------------------
@@ -228,13 +235,13 @@ std::int64_t create_receiver(const std::string& name, int device) {
 
     std::lock_guard<std::mutex> lk(g_mu);
     auto h = allocHandle();
-    g_receivers[h] = r;
+    g_receivers[h] = std::shared_ptr<Receiver>(r, destroyReceiver);
     return h;
 }
 
 // Returns (connected, new_frame, width, height, dxgi_format, dst_ptr).
 py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch*/, std::size_t /*maxBytes*/) {
-    Receiver* r;
+    std::shared_ptr<Receiver> r;
     { std::lock_guard<std::mutex> lk(g_mu);
       auto it = g_receivers.find(handle);
       if (it == g_receivers.end()) throw std::runtime_error("receive: invalid or closed receiver handle");
@@ -308,10 +315,10 @@ py::tuple receive(std::int64_t handle, std::uintptr_t /*dstPtr*/, int /*dstPitch
 }
 
 void close_receiver(std::int64_t handle) {
-    Receiver* r = nullptr;
-    { std::lock_guard<std::mutex> lk(g_mu); auto it = g_receivers.find(handle);
-      if (it != g_receivers.end()) { r = it->second; g_receivers.erase(it); } }
-    destroyReceiver(r);
+    // Same shared_ptr handoff as close_sender: erase drops our reference, the
+    // deleter runs once any in-flight receive() also releases its copy.
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_receivers.erase(handle);
 }
 
 std::int64_t adapter_luid(int device) {
