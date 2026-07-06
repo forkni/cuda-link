@@ -147,8 +147,39 @@ events, no visual artifacts reported.
   built slots 0–2, `graphs: node update failed: invalid argument` at frame 3, latched off,
   clean legacy session thereafter.
 
+### Controlled A/B (scripted Python producer → TD, 2026-07-06)
+
+The TD→TD comparison above was not load-controlled, so the A/B was re-run against the
+scripted Python producer (512×512 RGBA uint8, 60 FPS target, 3-slot ring, sender graphs ON
+via `CUDALINK_USE_GRAPHS` default in both legs) with the receiver's
+`CUDALINK_CPP_USE_GRAPHS` as the **only** variable. Both legs ran Debug ON on the same .toe,
+and each happened to include one benign TD-side SHM reconnect (leg A frame 1089, leg B frame
+1345 — recovered within ~10 frames both times).
+
+| In TOP metric | Leg A — legacy (env unset) | Leg B — graphs ON | Delta |
+|---|---|---|---|
+| Receiver cooks / bench windows | 1,455 / 15 | 1,746 / 17 | — |
+| `avg_cook_us` (mean of windows) | **482.3 µs** | **412.6 µs** | **−14.5 %** |
+| NoFrame ratio | 2.27 % | 2.18 % | comparable load |
+| Rescued cooks | 17.0 % | 16.3 % | comparable load |
+| Legacy `event_wait + gpu_copy` vs fused graph `gpu_copy` | 43.0 + 25.3 = 68.3 µs | 203.2 µs (fused) | not comparable |
+
+- **CPU cook time dropped 14.5 % (482.3 → 412.6 µs) under identical producer load** —
+  excluding each leg's reconnect-straddling windows the graphs mean is 389.0 µs (−19 %).
+  This upgrades the TD→TD ~15 % figure from indicative to measured: the win is real and
+  lives where the design predicted, in per-cook CPU submission overhead.
+- The GPU channels failed as an instrument again, this time in the opposite direction from
+  the TD→TD run: the fused graph bracket (203 µs) and the legacy split-sum (68 µs) measure
+  different spans, both dominated by where the cook lands in the producer's 16.7 ms cadence
+  rather than by submission cost. `avg_cook_us` remains the only A/B-valid channel.
+- Graphs behavior was identical to the TD→TD session: builds plateaued at 3 (`1/4` per
+  slot), the same dst-array address appeared in both segments (address reuse again), zero
+  capture/launch failures, and `destroyGraphs: dropping 3 cached graph exec(s)` fired
+  cleanly at both the mid-session reconnect and final teardown.
+
 **Verdict: the port works and is safe. Default stays OFF** per the decision above — the win
-is real but modest, and the path remains opt-in diagnostics/perf tooling.
+is real (−14.5 % CPU cook, confirmed under a controlled producer) but modest, and the path
+remains opt-in diagnostics/perf tooling.
 
 ## Reopen / re-park conditions
 
