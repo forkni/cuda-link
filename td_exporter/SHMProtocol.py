@@ -13,7 +13,7 @@ Binary layout (total = SHMLayout(num_slots).total_size):
   [20 + slot*128 ...]   IPC handles (64B mem + 64B event per slot, N slots)
   [20 + N*128]          shutdown_flag uint8
   [21 + N*128 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
-  [41 + N*128 ...]      timestamp float64 LE (producer wall-clock time)
+  [41 + N*128 ...]      timestamp float64 LE (producer monotonic timestamp, perf_counter seconds)
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ IPC_HANDLE_SIZE: int = 64  # cudaIpc{Mem,Event}Handle_t are each 64 bytes
 
 SHUTDOWN_FLAG_SIZE: int = 1
 METADATA_SIZE: int = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE: int = 8  # float64 LE producer wall-clock time
+TIMESTAMP_SIZE: int = 8  # float64 LE producer monotonic timestamp (perf_counter seconds)
 
 # ---------------------------------------------------------------------------
 # DtypeCodec constants (cudaChannelFormatKind)
@@ -56,6 +56,7 @@ FORMAT_KIND_UNSIGNED: int = 1  # cudaChannelFormatKindUnsigned
 FORMAT_KIND_FLOAT: int = 2  # cudaChannelFormatKindFloat
 FLAGS_BFLOAT16: int = 0x0001  # bit0: bfloat16 (kind=Float, bits=16)
 FLAGS_MONO_ALPHA: int = 0x0002  # bit1: 2-channel source is mono+alpha, not RG
+FLAGS_BGRA: int = 0x0004  # bit2: 4-channel uint8 source is BGRA-ordered, not RGBA
 
 
 class _DtypeEntry(NamedTuple):
@@ -257,10 +258,11 @@ class DtypeCodec:
 
         Returns "float32" for unknown triples (forward-compat fallback).
 
-        Only FLAGS_BFLOAT16 is dtype-relevant; FLAGS_MONO_ALPHA (bit1) describes
-        channel semantics (R+A vs R+G) and does NOT change the element dtype or
-        itemsize.  Masking ensures e.g. (UNSIGNED, 8, FLAGS_MONO_ALPHA) → "uint8"
-        rather than falling back to "float32" with a 4× oversized itemsize.
+        Only FLAGS_BFLOAT16 is dtype-relevant; FLAGS_MONO_ALPHA (bit1) and
+        FLAGS_BGRA (bit2) describe channel semantics (R+A vs R+G; BGRA vs RGBA
+        component order) and do NOT change the element dtype or itemsize.
+        Masking ensures e.g. (UNSIGNED, 8, FLAGS_MONO_ALPHA | FLAGS_BGRA) →
+        "uint8" rather than falling back to "float32" with a 4× oversized itemsize.
         """
         return _DECODE_TABLE.get((kind, bits, flags & FLAGS_BFLOAT16), "float32")
 
