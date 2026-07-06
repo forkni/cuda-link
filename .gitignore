@@ -219,6 +219,12 @@ Sender_benchmark.*.toe
 Test_TD_Receiver1.toe
 Test_TD_Receiver1.*.toe
 
+# C++ Custom TOP test .toe files (local-only; tracked only on feat/cpp-custom-top)
+CUDA_Link_CPP_Test.toe
+CUDA_Link_CPP_Test.*.toe
+CUDA_Link_CPP_Receiver_Test.toe
+CUDA_Link_CPP_Receiver_Test.*.toe
+
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.
 # To include a specific numbered snapshot at release time: git add -f CUDA_Link_Example.N.toe

@@ -127,6 +127,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     use the same device or peer-access must be enabled.
         """
         self.device = device
+        # Device index retained by the in-flight set_device() call, released by the
+        # matching restore_context() — see both methods below.
+        self._retained_ctx_device: int | None = None
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
         # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
@@ -287,6 +290,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         drv.cuDeviceGet.restype = c_int
         drv.cuDevicePrimaryCtxRetain.argtypes = [POINTER(c_void_p), c_int]
         drv.cuDevicePrimaryCtxRetain.restype = c_int
+        drv.cuDevicePrimaryCtxRelease.argtypes = [c_int]
+        drv.cuDevicePrimaryCtxRelease.restype = c_int
         drv.cuCtxGetCurrent.argtypes = [POINTER(c_void_p)]
         drv.cuCtxGetCurrent.restype = c_int
         drv.cuCtxSetCurrent.argtypes = [c_void_p]
@@ -751,6 +756,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             primary_ctx = c_void_p()
             self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
             self._drv.cuCtxSetCurrent(primary_ctx)
+            self._retained_ctx_device = device
             return saved_ctx.value or 0
         # Fallback: runtime API only — effective when driver-API stack is empty
         self.cudart.cudaSetDevice(c_int(device))
@@ -764,6 +770,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         if self._drv is not None:
             self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
+            if self._retained_ctx_device is not None:
+                self._drv.cuDevicePrimaryCtxRelease(c_int(self._retained_ctx_device))
+                self._retained_ctx_device = None
 
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
@@ -945,6 +954,22 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             return False
         self.check_error(result, "cudaEventQuery")
         return False
+
+    def cudart_event_query_fn_ptr(self) -> int:
+        """Raw address of the cudaEventQuery symbol this wrapper resolved, as an int.
+
+        Lets other in-process code (e.g. cuda-link-native, R5) call the SAME
+        loaded cudart instance directly, instead of independently rediscovering
+        it via a bare-name GetModuleHandle. That rediscovery is unsafe: this
+        process can have more than one same-named cudart DLL loaded from
+        different directories (e.g. one pulled in transitively by torch, one
+        loaded here via an explicit full path — see _load_cuda_runtime()), and
+        Windows does not guarantee which instance a bare-name GetModuleHandle
+        lookup returns. Diagnosed 2026-07-04 (PLAN-002 R5): a native module
+        that resolved the wrong instance queried a foreign runtime's internal
+        state and silently misreported a pending event as complete.
+        """
+        return ctypes.cast(self.cudart.cudaEventQuery, ctypes.c_void_p).value or 0
 
     def wait_event(self, event: CUDAEvent_t) -> None:
         """Wait for event to complete (blocking).
