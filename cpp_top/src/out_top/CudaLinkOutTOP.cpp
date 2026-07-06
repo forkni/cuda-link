@@ -637,7 +637,13 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     myWriteIdx = 0;
     myAllocated = true;
 
-    Sleep(kIpcCloseGracePeriodMs);
+    // The grace period only protects a receiver that may still hold imported IPC handles to
+    // the OLD resources being freed below -- on the first allocation there are none, so
+    // sleeping would just add a pointless ~100ms hitch to the first cook (and to the
+    // switch-to-a-new-format path's perceived cost, since that is when users notice it).
+    if (!oldDevPtrs.empty() || !oldEvents.empty()) {
+        Sleep(kIpcCloseGracePeriodMs);
+    }
     for (auto* evt : oldEvents) {
         if (evt) cudaEventDestroy(evt);
     }
