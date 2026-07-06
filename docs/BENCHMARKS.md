@@ -276,6 +276,52 @@ latency field (see [3]).
 that captures both the Python-sender and TD-receiver halves of Python→TD for the same
 implementation; Original Python-sender `export=` for its own Python→TD run.
 
+### 2026-07-06 refresh — doorbell wait (`Framewaitms`) + GPU-side timing
+
+Follow-up session to the table above: the In TOP gained an opt-in bounded doorbell wait
+(`Framewaitms`, commit `63d85e6`) fixing a continuous 16F/32F stutter, plus Debug-gated
+GPU-side timing (`gpu_ipc_us`/`gpu_pass_us` on the Out TOP, `event_wait_us`/`gpu_copy_us`
+on the In TOP) and cadence counters (`noframe_ratio`, `rescued`). Numbers below are
+windowed (~97-frame) averages from an interactive TD→TD session (format switches mid-run),
+**not** controlled p50 runs — directionally solid, tighter methodology pending.
+
+```
+Format (TD->TD, 60 FPS)   Out cook/gpu_ipc/gpu_pass (µs)   In cook/event_wait/gpu_copy (µs)   noframe_ratio
+-----------------------   ------------------------------   --------------------------------   -------------
+1080p uint8   (8 MB)          320 /  60 / 109                  282 /  30 / 146                 0.007
+1080p float32 (33 MB)         233 / 215 / 564                  490 / 509 / 210                 0.001
+4K uint8      (33 MB)         262 / 308 / 662                  366 / 586 / 337                 0.012–0.021
+```
+
+**Stutter root cause: publish-vs-poll phase aliasing between two vsync-locked TD processes.**
+Pre-fix, the In TOP's `noframe_ratio` sat at **9–31%** on 1080p 32F (silent repeat frames =
+continuous judder). With `Framewaitms=4`, worst case anywhere is **0.026**; typical ≤0.7%.
+Sweep of the wait budget: 2 ms → up to 2.6% repeats in bursts (phase drift outruns the
+budget); 3 ms → 0.2% (phase-lucky run, not proof); 4 ms → reliable across all formats.
+Cook cost including the wait stays 280–490 µs — the budget is a cap, not a per-frame cost
+(the doorbell wakes the cook the moment the producer publishes; ~73% of frames arrived via
+the rescue path in the long wait=4 run).
+
+**The Original is not immune — same pathology, wire-timestamped.** A fresh Original (TOX)
+TD→TD 1080p float32 run the same day shows its `latency=` (publish→detect) drifting across
+the whole frame period: 0.5 → 16.7 ms, including ~450 consecutive frames parked at
+15.4–16.7 ms with effective fresh-frame rate sagging to 52–56 FPS (5–8 repeats/s — the same
+magnitude as the C++ pre-fix `noframe_ratio`). Its Script-TOP receiver polls once per cook
+and never calls the library's `wait_for_doorbell()`, i.e. it has the C++ In TOP's *pre-fix*
+behavior. The Original's sender-side publish jitter (blocking `EXPORT_SYNC=1` export:
+uint8 ≈ 570 µs avg; float32 206–3,112 µs across 150-frame windows) partially dithers the
+phase, which is why the aliasing rarely parks as long as the C++ pair's metronome-steady
+publishes did pre-fix.
+
+**Instrumentation footnote:** the In TOP `copy_us` CPU bracket now reads ~107 µs vs ~21 µs
+in the 2026-07-05 table. That delta is the Debug-gated `GpuTimerRing` `cudaEventRecord`
+enqueues added inside the bracket (~20 µs each under WDDM), not a transport regression —
+the Debug-off hot path is unchanged.
+
+**Gap status vs the list above:** Original TD→TD latency at float32 now captured (drifting,
+see above). C++ TD→TD end-to-end latency remains open — the planned `frame_age_ms` field
+(producer QPC publish stamp already in the slot metadata) would close it.
+
 ---
 
 ## vs CPU SharedMemory
