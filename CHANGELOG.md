@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-07-06
+
+### Added
+
+- **CUDA 13 runtime support in the cudart loader.**  `CUDARuntimeAPI._load_cuda_runtime()`
+  now probes for `cudart64_13*.dll` alongside the existing CUDA 12.x candidates, with the
+  Windows `winerror 126` ("module not found") hint message reordered so CUDA 13 is checked
+  first — matching the actual probe order and avoiding a misleading hint on CUDA 13-only
+  systems.
+
+### CI / Test hardening
+
+- **Coverage gate**: `--cov` enforced in CI (`fail_under = 72`, branch-coverage-aware,
+  baseline 74.65% measured 2026-06-29), with XML report upload to Codecov and a
+  `coverage-main-*` artifact per Python version.
+- **Randomized test ordering** (`pytest-randomly`) to catch order-dependent test bugs;
+  verified order-independent across repeated randomized seeds.
+- **Test suite reorg**: `--import-mode=importlib`, consolidated shared fakes under
+  `tests/fakes/`, dropped `sys.path` hacks and from-conftest imports in favor of
+  `pythonpath` (`pyproject.toml`) and `strict-markers`.
+- **CI infra**: bumped `actions/setup-python`/`actions/upload-artifact` to their Node-24
+  releases (v5→v6); removed the Gemini CI workflows entirely; refreshed the
+  branch-protection `ALLOWED_DOCS` allowlist.
+
+### Not included in this release
+
+Spout bridge, C++ custom TOP, and the R5 native wait backend are **not** part of 1.11.1 —
+they continue development on `feat/spout-bridge`, `feat/cpp-custom-top`, and
+`feat/r5-native-wait-backend` respectively. The R5 native wait backend showed only
+marginal improvement in benchmarking and was held back pending further work.
+
 ## [1.11.0] - 2026-06-12
 
 ### Added

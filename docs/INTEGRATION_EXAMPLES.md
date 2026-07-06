@@ -443,7 +443,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.11.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.11.1.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -649,5 +649,5 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 ---
 
-**Last Updated**: 2026-06-12
-**Version**: 1.11.0
+**Last Updated**: 2026-07-06
+**Version**: 1.11.1
