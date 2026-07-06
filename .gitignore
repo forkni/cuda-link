@@ -10,6 +10,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build_ninja/
 develop-eggs/
 dist/
 downloads/

@@ -17,6 +17,11 @@ cmake_policy(SET CMP0091 NEW)
 
 project(cpp_top LANGUAGES CXX)
 
+# Drives clang-tidy (see repo-root .clang-tidy) and other tooling that needs include paths.
+# The MSVC generator does not emit this file -- generate via the Ninja preset for tooling
+# even though the shipping build stays MSVC.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(NOT WIN32)
     message(FATAL_ERROR "cpp_top is Windows-only (CUDA IPC handle sharing is Windows-specific).")
 endif()
