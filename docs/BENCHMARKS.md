@@ -313,6 +313,18 @@ uint8 ≈ 570 µs avg; float32 206–3,112 µs across 150-frame windows) partial
 phase, which is why the aliasing rarely parks as long as the C++ pair's metronome-steady
 publishes did pre-fix.
 
+**Cross-language legs re-measured the same day (Original implementation):**
+
+- **TD→Python** (1080p uint8, torch mode, doorbell on): `latency=` 0.02–1.33 ms
+  publish→detect across the whole run, `get_frame` 81.4 µs avg (min 25.1 / max 359.6,
+  n=3697), 59.1 FPS avg, `doorbell_wakes` ≈ 1 per frame. The event-waiting consumer shows
+  **no phase aliasing at all** — confirming the pathology is specific to poll-once-per-cook
+  receivers, not to the transport.
+- **Python→TD** (512×512 uint8, CUDA Graphs ON): `export=` 622–1,830 µs windowed avg,
+  58.7 FPS over 3,942 frames. Consistent with the Full IPC Roundtrip Sweep's two-process
+  512² numbers; per footnote [2] this window bundles the synchronous ctypes staging fill,
+  so it is an example-script figure, not a library `export_frame()` cost.
+
 **Instrumentation footnote:** the In TOP `copy_us` CPU bracket now reads ~107 µs vs ~21 µs
 in the 2026-07-05 table. That delta is the Debug-gated `GpuTimerRing` `cudaEventRecord`
 enqueues added inside the bracket (~20 µs each under WDDM), not a transport regression —
