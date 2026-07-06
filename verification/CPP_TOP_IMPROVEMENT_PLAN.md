@@ -24,6 +24,10 @@ Addresses **F8**.
 - Derive the config from the code as written (4-space indent, ~110-column limit, attached
   braces, pointer-left `void* p`), *not* from a stock preset — the goal is a zero-diff or
   near-zero-diff first run, so formatting history stays clean and `git blame` stays useful.
+- If the `cpp-lsp` plugin is adopted later (Phase 6), note that its *suggested* config is
+  Google-based 4-space/100-col — the derived project `.clang-format` is authoritative and
+  must not be replaced by the plugin's template (verified against the plugin README: it
+  suggests configs, it does not force them).
 - Place at repo root; add `cpp_top/vendor/` to `.clang-format-ignore` (vendored TD headers
   must never be reformatted — the verification report treats them as a primary source).
 - **Acceptance**: `clang-format --dry-run --Werror` over `cpp_top/src/` passes with no diff
@@ -41,8 +45,22 @@ Addresses **F8**.
 - Scope: `cpp_top/src/` only; exclude `vendor/`. CUDA-specific tidy support is best-effort
   (research doc §4) — this tree is plain C++ linking cudart, so no `--cuda-path` gymnastics
   are needed until a `.cu` file exists.
+- Check-set note: this is a strict superset of the set the `cpp-lsp` plugin's template
+  suggests (`clang-analyzer-*, modernize-*, performance-*, bugprone-*`) — adopting that
+  plugin later (Phase 6) therefore requires no `.clang-tidy` changes.
 - **Acceptance**: clean run (warnings-as-errors) on `cpp_top/src/` with the documented
   NOLINTs in place.
+
+### 0.4 Export `compile_commands.json` — S
+- Add `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)` to `cpp_top/CMakeLists.txt` (or pass
+  `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` in CI/dev presets). This is the substrate every
+  clang-based tool needs — clang-tidy standalone, clangd, and all four `cpp-lsp` hooks
+  (`cpp-format-on-edit`, `cpp-tidy-on-edit`, `cpp-compile-check`, `cpp-cppcheck`) resolve
+  includes through it, including the CUDA and vendored-TD header paths.
+- Note: MSVC generators don't emit compile databases — generate with the Ninja preset for
+  tooling even if the shipping build stays MSVC.
+- **Acceptance**: `compile_commands.json` produced; `clang-tidy -p build cpp_top/src/...`
+  resolves `cuda_runtime.h` and the vendored TD headers without manual `-I` flags.
 
 ### 0.3 C++ CI job — M
 - GitHub Actions, `windows-latest`: (a) format gate, (b) configure + build both DLLs
@@ -233,27 +251,116 @@ that in. No GPU needed anywhere.
 
 ---
 
+## Phase 6 — Claude-assisted enforcement (Agent Skills layer)
+
+Source: the July 2026 skills-ecosystem research ("Claude Code Skills for C++/CUDA
+Verification, Quality & Guidelines"). Its three Tier-1 building blocks were re-verified
+against the live repos for this plan; its central finding stands: **no existing skill
+covers CUDA IPC handle lifecycle / zero-copy GPU sharing** — which is exactly the domain
+this repo has now verified and documented. This phase (a) adopts the pieces that exist,
+(b) authors the missing piece from this repo's own verified invariants.
+
+This is a natural fit here: the repo already runs a skills+hooks workflow
+(`.claude/hooks/skill-activation-prompt.sh`, `session-start-skill-reminder.sh`,
+`settings.json` custom instructions, `git-commit-enforcer.py`), so the additions below
+extend an existing convention rather than introducing one.
+
+> **Security gate for everything in this phase**: skills execute arbitrary code and the
+> aggregator ecosystem is demonstrably risky (Snyk "ToxicSkills": prompt injection in 36%
+> of skills tested; a 2026 audit of 22,511 skills found 140,963 issues). Rule: install
+> only from the three audited repos below, read every `SKILL.md` + bundled script before
+> enabling, pin to a reviewed commit (clone, don't track HEAD), and never install
+> marketplace/aggregator variants of the same skills.
+
+### 6.1 Install + audit the three verified building blocks — S (~15 min + audit time)
+| Piece | Kind | What it adds here | Verified facts |
+|---|---|---|---|
+| `technillogue/ptx-isa-markdown` → `~/.claude/skills/cuda` | true `SKILL.md` skill | Instant offline lookup of Runtime **and Driver** API semantics (405+107+128 markdown files, ~4.2 MB, SKILL.md ~13 KB always loaded) + `debugging-tools.md` (compute-sanitizer, cuda-gdb) + `nsys-guide.md`/`ncu-guide.md` | Repo confirmed; installs via `cp -r cuda_skill ~/.claude/skills/cuda` |
+| `zircote/cpp-lsp` | Claude Code **plugin** (not a skill) | Auto-runs clang-format/clang-tidy/cppcheck/clangd on every C++ edit — turns Phase 0's configs into edit-time enforcement instead of CI-time-only | v0.1.3 (Jan 2026), MIT. Caveat found in verification: README claims "14 automated hooks" but documents four (`cpp-format-on-edit`, `cpp-tidy-on-edit`, `cpp-compile-check`, `cpp-cppcheck`) — audit the hook directory before trusting the larger claim. Young (~3 stars): fork-and-pin rather than depend |
+| `awesome-skills/code-review-skill` → `~/.claude/skills/` | true `SKILL.md` skill | Structured review workflow + `reference/cpp.md` (~890 lines: RAII, Rule of 0/3/5, move semantics, exception safety, `noexcept`) — matches the exact rule set §3 of the verification report audited by hand | Repo confirmed: 20+ languages, 21,000+ lines, progressive disclosure (~220-line core), 1.3k stars, MIT |
+- Ordering note: `cpp-lsp` is only useful after 0.1/0.2/0.4 exist (it runs *our* configs
+  against *our* compile database; its bundled Google-style template is explicitly not
+  adopted — see 0.1).
+- **Acceptance**: all three audited and pinned; a test edit to a `cpp_top/src/` file
+  triggers format+tidy hooks; "Use code-review-skill" on a sample diff loads
+  `reference/cpp.md`.
+
+### 6.2 Author the missing `cuda-ipc` skill from this repo's verified invariants — M
+The ecosystem gap is this repo's home turf: the verification report already contains the
+doc-verified rule set no published skill encodes. Write `.claude/skills/cuda-ipc/SKILL.md`
+(progressive disclosure: slim core + `references/`) capturing, at minimum:
+1. **Error-checking contract**: `CUDALINK_CUDA_CHECK_BOOL`/`_FATAL` usage, file/line
+   capture, sticky-vs-recoverable classification (`myFatal` latch; why `cudaDeviceReset`
+   is forbidden in-process with TD).
+2. **RAII pairing rules**: `cudaMalloc`↔`cudaFree` vs `cudaIpcOpenMemHandle`↔
+   `cudaIpcCloseMemHandle` are *non-interchangeable*; imported events die by
+   `cudaEventDestroy`; guard `release()` exactly once on the success path
+   (mirrors `raii_handles.h`).
+3. **IPC lifecycle invariants**: export requires classic `cudaMalloc` (stream-ordered
+   allocations can't produce `cudaIpcMemHandle_t`); `cudaEventInterprocess` requires
+   `cudaEventDisableTiming`; same-process open is impossible; shutdown-flag → zero
+   handles → grace period → free ordering (imported-handle use-after-free is UB);
+   Windows IPC is supported-but-perf-costly, probe `cudaDevAttrIpcEventSupport` first.
+4. **Hot-path rules**: non-blocking streams only, GPU-side event sync only, no per-frame
+   alloc/sync, import-once-per-version.
+5. **TD bracket policy**: what must sit inside `begin/endCUDAOperations()` (interop-array
+   access) vs what may not (resource management), with the CudaOpScope pattern.
+6. **Wire/atomics rules**: `write_idx`/`version` only via `std::atomic_ref`
+   acquire/release; publish-order contract; the alignment caveat and its guards.
+- Structure the skill so the *rules* cite the shipped code (`cpp_top/src/...`) as the
+  canonical example — the code passed audit; the skill's job is keeping future edits at
+  that bar. Wire activation via the existing `.claude/hooks/skill-activation-prompt.sh`
+  keyword mechanism (add cuda/ipc/TOP keywords) so it loads when C++ TOP work starts.
+- Optional (flagged by the research doc as a publishable gap): once stable, extract a
+  project-agnostic variant — either standalone or as a `reference/cuda.md` PR to
+  `code-review-skill`. Out of scope for this plan's acceptance.
+- **Acceptance**: skill loads on demand in a session touching `cpp_top/`; a deliberately
+  wrong test edit (e.g. `cudaFree` on an imported IPC pointer, or an unbracketed interop
+  copy) gets flagged by Claude citing the skill rule.
+
+### 6.3 Watch-list with explicit re-evaluation triggers — S (recurring, zero standing cost)
+Recorded so the hand-rolled 6.2 layer is retired the moment something better ships:
+- **NVIDIA ships a first-party correctness/sanitizer skill** (their current TensorRT-LLM
+  set is Python/Triton/CuTe-oriented with performance-only Nsight skills and *no*
+  compute-sanitizer skill — a negative result the research doc itself marks as
+  name/description-based; re-verify against the live `.claude/skills/` tree before acting
+  on it) → prefer it for the sanitizer-orchestration half of 6.2/4.3.
+- **A skill appears bundling compute-sanitizer orchestration + CUDA-C++ guidelines** →
+  same.
+- **Work shifts kernel-heavy** (the `.cu` trigger from 4.3 fires) → add
+  `tensormux/kernel-skills` (`debug-cuda-kernel-correctness`, `write-kernel-test-plan`)
+  and evaluate the HF `cuda-kernels` skill; also the moment `ptx-isa-markdown`'s
+  nsys/ncu guides earn their keep.
+- Sources to watch: `VoltAgent/awesome-agent-skills`, `travisvn/awesome-claude-skills`,
+  `hesreallyhim/awesome-claude-code`, NVIDIA repos' `.claude/skills/` trees.
+
+---
+
 ## Sequencing, dependencies, and estimates
 
 | Order | Item | Effort | Depends on | Risk |
 |---|---|---|---|---|
 | 1 | 0.1 clang-format | S | — | none |
 | 2 | 0.2 clang-tidy | S/M | 0.1 | none |
-| 3 | 0.3 CI (format+build+tidy) | M | 0.1–0.2 | CI CUDA-install flakiness (cache it) |
-| 4 | 1.1–1.3 polish trio | S each | 0.3 (gates) | none |
-| 5 | 1.4 de-dup common code | M | 1.1–1.3 | low (pure refactor, TD load-test it) |
-| 6 | 4.1 golden-byte suite | M/L | 0.3 | none (no GPU) |
-| 7 | 4.2 protocol_dump | S/M | — | none |
-| 8 | 2.1 same-process UX (probe → error → docs) | M | 4.2 helpful | needs a Windows+GPU probe session |
-| 9 | 5.1–5.2 docs | S/M | 2.1 findings | none |
-| 10 | 3.2 threat-model note | S | — | none |
+| 3 | 0.4 compile_commands.json | S | — | Ninja-vs-MSVC generator wrinkle |
+| 4 | 0.3 CI (format+build+tidy) | M | 0.1–0.2 | CI CUDA-install flakiness (cache it) |
+| 5 | 6.1 install+audit skills trio | S | 0.1–0.4 (cpp-lsp runs our configs) | supply-chain (mitigated: audit+pin) |
+| 6 | 1.1–1.3 polish trio | S each | 0.3 (gates) | none |
+| 7 | 1.4 de-dup common code | M | 1.1–1.3 | low (pure refactor, TD load-test it) |
+| 8 | 6.2 author cuda-ipc skill | M | verification report (done); 6.1 patterns | none (docs-only artifact) |
+| 9 | 4.1 golden-byte suite | M/L | 0.3 | none (no GPU) |
+| 10 | 4.2 protocol_dump | S/M | — | none |
+| 11 | 2.1 same-process UX (probe → error → docs) | M | 4.2 helpful | needs a Windows+GPU probe session |
+| 12 | 5.1–5.2 docs | S/M | 2.1 findings | none |
+| 13 | 3.2 threat-model note | S | — | none |
+| — | 6.3 skills watch-list | S | recurring | none |
 | — | 2.2 hitchless teardown | M | **trigger**: hitchless switching becomes a requirement | medium (lifecycle state) |
 | — | 3.1 protocol v0.6 | L | 4.1 green; **trigger**: next functional wire change | cross-repo coordination |
 | — | 4.3 compute-sanitizer | M | **trigger**: first `.cu` kernel | needs GPU runner |
 
-Items 1–10 are all unconditionally worth doing and sum to roughly **3–5 focused days**; the
-three trigger-gated items are consciously parked with their activation conditions written
-down so they can't silently rot.
+Items 1–13 are all unconditionally worth doing and sum to roughly **4–6 focused days**; the
+trigger-gated items are consciously parked with their activation conditions written down so
+they can't silently rot.
 
 ## Thresholds that change this plan
 
@@ -270,3 +377,26 @@ down so they can't silently rot.
   the verification's IPC-doc checks against the 11.8 runtime docs (the Windows-IPC wording
   and `cudaDevAttrIpcEventSupport` exist there too, but confirm before shipping) and add the
   11.8 toolkit to the CI matrix.
+- **A published skill supersedes the hand-rolled layer** (Phase 6.3 triggers) → retire the
+  overlapping parts of the local `cuda-ipc` skill rather than maintaining both; keep only
+  the project-specific invariants (TD bracket policy, wire/atomics rules) that no generic
+  skill can know.
+
+## Skills-layer sources (Phase 6)
+
+Re-verified against the live repos for this plan (July 2026):
+- [technillogue/ptx-isa-markdown](https://github.com/technillogue/ptx-isa-markdown) — CUDA
+  `SKILL.md` + PTX ISA 9.1 / Runtime API 13.1 / Driver API 13.1 markdown reference (~4.2 MB),
+  `debugging-tools.md` (compute-sanitizer, cuda-gdb), `nsys-guide.md`, `ncu-guide.md`.
+- [zircote/cpp-lsp](https://github.com/zircote/cpp-lsp) — Claude Code plugin, v0.1.3
+  (Jan 2026), MIT; hooks `cpp-format-on-edit`/`cpp-tidy-on-edit`/`cpp-compile-check`/
+  `cpp-cppcheck` over clangd/clang-format/clang-tidy/cppcheck. (README's "14 hooks" claim
+  vs 4 documented — noted in 6.1.)
+- [awesome-skills/code-review-skill](https://github.com/awesome-skills/code-review-skill) —
+  1.3k★, MIT; 20+ languages, 21,000+ lines, progressive disclosure, `reference/cpp.md`
+  (RAII, Rule of 0/3/5, move semantics, exception safety, `noexcept`).
+- Research document: "Claude Code Skills for C++/CUDA Verification, Quality & Guidelines"
+  (July 2026) — ecosystem survey incl. tensormux/kernel-skills, HF `cuda-kernels`,
+  wshobson/agents `systems-programming`, NVIDIA TensorRT-LLM `.claude/skills` inventory
+  (negative result on a correctness skill), and the Snyk "ToxicSkills" / Agentman 2026
+  security findings cited in the Phase 6 security gate.
