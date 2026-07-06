@@ -1,0 +1,78 @@
+name: C++ Custom TOP (cpp_top)
+
+on:
+  push:
+    paths:
+      - 'cpp_top/**'
+      - '.clang-format'
+      - '.clang-format-ignore'
+      - '.clang-tidy'
+      - '.github/workflows/cpp-top.yml'
+  pull_request:
+    paths:
+      - 'cpp_top/**'
+      - '.clang-format'
+      - '.clang-format-ignore'
+      - '.clang-tidy'
+      - '.github/workflows/cpp-top.yml'
+  workflow_dispatch:
+
+jobs:
+  build-lint:
+    name: format + build + tidy
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # Pinned to the same LLVM 19.x line the repo-root .clang-format/.clang-tidy were
+      # calibrated against locally (VS 2022's bundled VC/Tools/Llvm), rather than trusting
+      # whatever LLVM build happens to ship in the windows-latest image today.
+      - name: Install LLVM/Clang tools (clang-format, clang-tidy)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '19.1.5'
+
+      - name: Format gate (clang-format --dry-run --Werror)
+        # Scoped to cpp_top/src -- cpp_top/vendor/ (vendored TD SDK headers, never
+        # reformatted; see .clang-format-ignore) is a sibling directory, never touched here.
+        shell: bash
+        run: |
+          files=$(find cpp_top/src \( -name '*.cpp' -o -name '*.h' \))
+          clang-format --dry-run --Werror $files
+
+      # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll and
+      # CudaLinkOutTOP.dll (D2D memcpy path, no .cu kernels yet) -- no GPU/driver required.
+      - name: Install CUDA toolkit (cudart + nvcc only)
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.8.0'
+          sub-packages: '["cudart","nvcc"]'
+          method: network
+
+      # Ninja (unlike the Visual Studio generator) does not invoke vcvarsall on its own --
+      # cl.exe/link.exe/rc.exe would otherwise fail to resolve even though VS is preinstalled.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja, emits compile_commands.json for the tidy step below)
+        # CMakeLists.txt only falls back to its hardcoded default path when
+        # CUDAToolkit_ROOT is undefined -- pass the runner's actual install location
+        # explicitly rather than relying on find_package(CUDAToolkit)'s CUDA_PATH
+        # env-var fallback.
+        run: >
+          cmake -S cpp_top -B cpp_top/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          "-DCUDAToolkit_ROOT=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+
+      - name: Build both Custom TOP DLLs
+        run: cmake --build cpp_top/build
+
+      - name: clang-tidy (cpp_top/src, warnings-as-errors per .clang-tidy)
+        shell: bash
+        run: |
+          files=$(find cpp_top/src -name '*.cpp')
+          clang-tidy -p cpp_top/build $files
