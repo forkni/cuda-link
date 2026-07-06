@@ -57,6 +57,15 @@ MPS (NVIDIA's escape hatch) is Linux-only.
 
 ### 2.1 Port CUDA Graphs to the C++ TOPs  ★ top item
 
+> **Status (2026-07-06):** both halves resolved. The **Out TOP** port is parked — exec-level
+> memcpy node updates reject its changing TD-owned array *source*
+> ([ADR-0010](../adr/0010-park-out-top-graphs.md)). The **In TOP** port (task #13) landed as a
+> **keyed graph-exec cache** — its TD-owned array is the *destination*, so per-frame node
+> updates are equally impossible (1D-both-operands restriction); instead one exec is cached
+> per `(readSlot, dstArrayPointer)` pair, cap 4/slot, hard-disable on overflow, default OFF
+> behind `CUDALINK_CPP_USE_GRAPHS` ([ADR-0011](../adr/0011-in-top-graphs-keyed-cache.md),
+> which also carries the live A/B verdict).
+
 *Sources: all four converge; NVIDIA PG "CUDA Graphs" (per-launch driver setup is paid per call);
 Lei Mao PyTorch-CUDA-Graph-Capture (full capture beats partial); project's own Python benchmark.*
 

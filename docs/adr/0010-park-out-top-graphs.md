@@ -72,3 +72,7 @@ Revisit if any of:
 - the TD Custom TOP API grows a way to obtain a stable per-slot output array across cooks;
 - the In TOP graphs port (task #13) lands and producer-side submission overhead still shows
   up in the `gpu_ipc_us` timing channel.
+
+The In TOP port landed as a keyed graph-exec cache — see
+[ADR-0011](0011-in-top-graphs-keyed-cache.md) for the design and its live dst-array-stability
+verdict.

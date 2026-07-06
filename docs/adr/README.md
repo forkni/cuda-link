@@ -17,6 +17,7 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0008](0008-skip-native-d2h.md) | No native work on the D2H readback path | Accepted | 2026-07-04 |
 | [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
 | [0010](0010-park-out-top-graphs.md) | Park the Out TOP CUDA-Graphs path (array-source node update rejected) | Accepted | 2026-07-06 |
+| [0011](0011-in-top-graphs-keyed-cache.md) | Port CUDA Graphs to the In TOP via a keyed graph-exec cache | Accepted | 2026-07-06 |
 
 ## Adding a new ADR
 
