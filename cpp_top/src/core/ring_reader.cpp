@@ -28,6 +28,7 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
     // rather than silently taking a locking slow path.
     static_assert(std::atomic_ref<uint64_t>::is_always_lock_free,
                   "SHM header 'version' atomic_ref must be lock-free/address-free for cross-process use");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast,cppcoreguidelines-pro-type-reinterpret-cast)
     auto* version_ptr = const_cast<uint64_t*>(reinterpret_cast<const uint64_t*>(buf + VERSION_OFFSET));
     const uint64_t version = std::atomic_ref<uint64_t>(*version_ptr).load(std::memory_order_acquire);
     if (version != last_version && last_version != 0) {
@@ -40,6 +41,7 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
     // Paired acquire load to the writer's release store on write_idx -- the only
     // formally correct way to observe this field cross-process. const_cast is safe here:
     // this is a load-only operation, never a store.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast,cppcoreguidelines-pro-type-reinterpret-cast)
     auto* write_idx_ptr = const_cast<uint32_t*>(reinterpret_cast<const uint32_t*>(buf + WRITE_IDX_OFFSET));
     const uint32_t write_idx = std::atomic_ref<uint32_t>(*write_idx_ptr).load(std::memory_order_acquire);
 

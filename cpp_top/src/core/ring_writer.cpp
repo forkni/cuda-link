@@ -33,6 +33,7 @@ void commit_version(uint8_t* buf, const SHMLayout& layout, uint64_t version) noe
     // already performs, rather than silently taking a locking slow path.
     static_assert(std::atomic_ref<uint64_t>::is_always_lock_free,
                   "SHM header 'version' atomic_ref must be lock-free/address-free for cross-process use");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     auto* version_ptr = reinterpret_cast<uint64_t*>(buf + VERSION_OFFSET);
     std::atomic_ref<uint64_t>(*version_ptr).store(version, std::memory_order_release);
     (void)layout; // version_offset is fixed (VERSION_OFFSET); kept for API symmetry
@@ -52,6 +53,7 @@ void publish(uint8_t* buf, const SHMLayout& layout, uint32_t write_idx, double t
     // matches ring_reader.cpp's documented convention that write_idx is the one field
     // with a formal cross-process ordering guarantee today.
     std::atomic_thread_fence(std::memory_order_release);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     auto* write_idx_ptr = reinterpret_cast<uint32_t*>(buf + WRITE_IDX_OFFSET);
     std::atomic_ref<uint32_t>(*write_idx_ptr).store(write_idx, std::memory_order_release);
 }

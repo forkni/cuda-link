@@ -1,0 +1,26 @@
+# clang-tidy config for cpp_top/src/ (the C++ Custom TOP tree).
+#
+# Scope is enforced by the CI job (see docs/plans/CPP_TOP_IMPROVEMENT_PLAN.md, Phase 0.3),
+# which only invokes clang-tidy against files under cpp_top/src/ -- never cpp_top/vendor/
+# (vendored TouchDesigner SDK headers, treated as a primary source, never linted or reformatted).
+#
+# Requires a compile database (Phase 0.4, cpp_top/build/compile_commands.json, generated via
+# the Ninja preset) so clang-tidy resolves cuda_runtime.h and the vendored TD headers.
+
+Checks: >
+  -*,
+  cppcoreguidelines-*,
+  modernize-*,
+  bugprone-*,
+  performance-*,
+  readability-*,
+  -cppcoreguidelines-macro-usage
+
+# The CUDALINK_CUDA_CHECK*/_BOOL/_FATAL macro family (src/common/cuda_check.h) is a
+# sanctioned CUDA file/line error-latching idiom (matches NVIDIA's own checkCudaErrors
+# pattern) -- macro-usage is disabled tree-wide above rather than NOLINT'd at each of the
+# dozen+ call sites.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*'
+FormatStyle: none
