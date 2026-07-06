@@ -277,13 +277,23 @@ void CudaLinkOutTOP::teardown() {
 
     for (auto* evt : mySlotEvents) {
         if (evt) {
-            cudaEventDestroy(evt);
+            // Non-fatal: teardown must run to completion and reset state regardless of a
+            // single slot's cleanup failure. Logged only (Debug-gated) so a stuck/corrupted
+            // event doesn't silently vanish, but myError is never latched here -- this is
+            // not actionable by the user, and latching would block the state reset below.
+            const cudaError_t err = cudaEventDestroy(evt);
+            if (err != cudaSuccess) {
+                debugLog(std::string("teardown: cudaEventDestroy failed: ") + cudaGetErrorString(err));
+            }
         }
     }
     mySlotEvents.clear();
     for (auto* devPtr : mySlotDevPtrs) {
         if (devPtr) {
-            cudaFree(devPtr);
+            const cudaError_t err = cudaFree(devPtr);
+            if (err != cudaSuccess) {
+                debugLog(std::string("teardown: cudaFree failed: ") + cudaGetErrorString(err));
+            }
         }
     }
     mySlotDevPtrs.clear();

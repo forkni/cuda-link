@@ -192,13 +192,25 @@ void CudaLinkInTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
 void CudaLinkInTOP::closeHandles() {
     for (auto* devPtr : mySlotDevPtrs) {
         if (devPtr) {
-            cudaIpcCloseMemHandle(devPtr);
+            // Non-fatal: closeHandles()/teardown() must run to completion and reset state
+            // regardless of a single slot's cleanup failure. Logged only (Debug-gated) so a
+            // stuck/corrupted handle doesn't silently vanish, but myError is never latched
+            // here -- this is not actionable by the user, and latching would block the
+            // state reset that follows.
+            const cudaError_t err = cudaIpcCloseMemHandle(devPtr);
+            if (err != cudaSuccess) {
+                debugLog(std::string("closeHandles: cudaIpcCloseMemHandle failed: ") +
+                         cudaGetErrorString(err));
+            }
         }
     }
     mySlotDevPtrs.clear();
     for (auto* evt : mySlotEvents) {
         if (evt) {
-            cudaEventDestroy(evt);
+            const cudaError_t err = cudaEventDestroy(evt);
+            if (err != cudaSuccess) {
+                debugLog(std::string("closeHandles: cudaEventDestroy failed: ") + cudaGetErrorString(err));
+            }
         }
     }
     mySlotEvents.clear();
