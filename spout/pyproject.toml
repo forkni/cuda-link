@@ -1,0 +1,66 @@
+# cuda-link-spout — optional native add-on bridging cuda-link to Spout.
+#
+# Two build modes:
+#   * Pure-Python install (no native module): pip install -e . with the setuptools
+#     fallback is NOT used here; instead, for development/CI without a GPU, put
+#     spout/src on PYTHONPATH (see spout/tests/conftest.py) and use FakeSpoutBackend.
+#   * Full native build (Windows + CUDA + Spout2): scikit-build-core compiles
+#     _spout_bridge via CMakeLists.txt. Pass the Spout2 SDK path, e.g.:
+#       pip install . --config-settings=cmake.define.SPOUT2_ROOT=C:/src/Spout2
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cuda-link-spout"
+version = "0.1.0"
+description = "Bridge cuda-link CUDA-IPC GPU frames to/from Spout (Resolume, Unreal, OBS, Notch, Unity, TouchDesigner)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Forkni", email = "forkni@gmail.com" }]
+dependencies = [
+  "cuda-link>=1.11.0",
+]
+classifiers = [
+  "Operating System :: Microsoft :: Windows",
+  "Environment :: GPU :: NVIDIA CUDA",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+cupy = ["cupy-cuda12x>=12.0"]
+test = ["pytest>=7.0", "pytest-randomly>=3.15", "pytest-cov>=5.0"]
+
+[project.scripts]
+cuda-link-spout-bridge = "cuda_link_spout.bridge:main"
+
+[tool.scikit-build]
+wheel.packages = ["src/cuda_link_spout"]
+# Native module is Windows-only; on other platforms build a pure-Python wheel
+# (FakeSpoutBackend works; the native backend raises a clear error when used).
+cmake.version = ">=3.24"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers --strict-config --import-mode=importlib --randomly-dont-reset-seed"
+markers = [
+  "requires_spout: test requires a real Spout runtime + GPU (deselect with -m 'not requires_spout')",
+]
+
+[tool.coverage.run]
+source = ["cuda_link_spout"]
+branch = true
+
+[tool.coverage.report]
+# Soft regression gate: 92% measured 2026-06-29 (54 tests, -m "not requires_spout").
+# fail_under = baseline - 3 cushion for nondeterministic randomized-order line hits.
+# Raise incrementally as coverage grows; never lower without a documented reason.
+fail_under = 89
+show_missing = true

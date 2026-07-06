@@ -5,6 +5,10 @@ Supports five installation targets so the cuda_link package is importable inside
 TouchDesigner's Python environment.  The bootstrap Text DAT (CUDALinkBootstrap.py)
 then uses sys.path injection to make the package available without mirror Text DATs.
 
+Pass --spout to also install the cuda-link-spout Spout bridge into the same target.
+The spout wheel is auto-built on demand via utils\\build_spout_wheel.cmd when missing
+(requires the Spout2 SDK, CUDA 12.x/13.x, and a C++17 compiler; see spout/README.md).
+
 Usage (interactive):
     python scripts\\install_td_library.py
 
@@ -15,10 +19,15 @@ Usage (non-interactive / CI):
     python scripts\\install_td_library.py --mode 4 --python "C:\\Python311\\python.exe"
     python scripts\\install_td_library.py --mode 5 --td-python "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\python.exe"
 
+Spout bridge (optional, auto-builds on demand):
+    python scripts\\install_td_library.py --mode 5 --td-python "..." --spout
+    python scripts\\install_td_library.py --mode 5 --td-python "..." --no-spout   # suppress interactive prompt
+
 Common flags:
     --non-interactive   Require all target args; skip menu and prompts.
     --dry-run           Print what would run without executing.
-    --wheel <path>      Override wheel path (skips auto-detect + build).
+    --wheel <path>      Override core wheel path (skips auto-detect + build).
+    --spout-wheel <path>  Override spout wheel path (implies --spout).
 """
 
 from __future__ import annotations
@@ -68,9 +77,24 @@ def _red(t: str) -> str:
 
 
 def _find_wheel() -> Path | None:
-    """Return the newest .whl in dist/, or None."""
+    """Return the newest cuda_link-*.whl (core) in dist/, or None."""
     dist = REPO_ROOT / "dist"
-    wheels = sorted(dist.glob("*.whl"), key=lambda p: p.stat().st_mtime, reverse=True) if dist.is_dir() else []
+    # Scope to core wheels only: "cuda_link-*.whl" never matches "cuda_link_spout-*.whl"
+    # because the latter has "_spout" immediately after "cuda_link" (underscore, not dash).
+    wheels = (
+        sorted(dist.glob("cuda_link-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True) if dist.is_dir() else []
+    )
+    return wheels[0] if wheels else None
+
+
+def _find_spout_wheel() -> Path | None:
+    """Return the newest cuda_link_spout-*.whl in dist/, or None."""
+    dist = REPO_ROOT / "dist"
+    wheels = (
+        sorted(dist.glob("cuda_link_spout-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if dist.is_dir()
+        else []
+    )
     return wheels[0] if wheels else None
 
 
@@ -95,6 +119,35 @@ def _build_wheel(dry_run: bool) -> Path:
     return wheel
 
 
+def _build_spout_wheel(dry_run: bool) -> Path:
+    """Run build_spout_wheel.cmd to produce a spout wheel; return its path."""
+    print(_bold("[build] No spout wheel found — building now..."))
+    cmd_path = REPO_ROOT / "utils" / "build_spout_wheel.cmd"
+    if not cmd_path.exists():
+        sys.exit(_red(f"[error] build_spout_wheel.cmd not found at {cmd_path}"))
+    if dry_run:
+        print(_yellow(f"  [dry-run] Would run: {cmd_path}"))
+        return REPO_ROOT / "dist" / "cuda_link_spout-DRY_RUN.whl"
+    # Use ["cmd.exe", "/c", path] instead of shell=True to avoid shell injection.
+    # stdin=DEVNULL prevents build_spout_wheel.cmd's `pause` from blocking mid-flow;
+    # `pause` reads EOF immediately and passes through without waiting.
+    result = subprocess.run(["cmd.exe", "/c", str(cmd_path)], cwd=REPO_ROOT, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        sys.exit(
+            _red(
+                "[error] Spout wheel build failed.\n"
+                "        Common causes: missing Spout2 SDK, CUDA Toolkit, or C++17 compiler.\n"
+                "        See spout/README.md for prerequisites:\n"
+                "          git clone --depth 1 https://github.com/leadedge/Spout2 C:\\src\\Spout2\n"
+                "        Then retry — or run utils\\build_spout_wheel.cmd directly for full output."
+            )
+        )
+    wheel = _find_spout_wheel()
+    if not wheel:
+        sys.exit(_red("[error] Build succeeded but no cuda_link_spout-*.whl found in dist/"))
+    return wheel
+
+
 def resolve_wheel(override: str | None, dry_run: bool) -> Path:
     if override:
         p = Path(override)
@@ -106,6 +159,32 @@ def resolve_wheel(override: str | None, dry_run: bool) -> Path:
         w = _build_wheel(dry_run)
     print(f"  Wheel: {w.name}")
     return w
+
+
+def resolve_spout_wheel(override: str | None, dry_run: bool) -> Path:
+    """Locate or auto-build the spout wheel; return its path."""
+    if override:
+        p = Path(override)
+        if not p.exists():
+            sys.exit(_red(f"[error] --spout-wheel path does not exist: {p}"))
+        return p
+    w = _find_spout_wheel()
+    if not w:
+        w = _build_spout_wheel(dry_run)
+    print(f"  Spout wheel: {w.name}")
+    return w
+
+
+def _prompt_yes_no(question: str, default: bool = False) -> bool:
+    """Prompt the user for a yes/no answer; returns default on EOF or blank input."""
+    hint = "[Y/n]" if default else "[y/N]"
+    try:
+        answer = input(f"{question} {hint} ").strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    return answer in ("y", "yes")
 
 
 # ─── pip runner ────────────────────────────────────────────────────────────────
@@ -222,11 +301,17 @@ _SITE_PKGS_QUERY = (
 )
 
 
-def _print_activation(site_packages: Path | None, label: str, td_preferences_only: bool = False) -> None:
+def _print_activation(
+    site_packages: Path | None,
+    label: str,
+    td_preferences_only: bool = False,
+    with_spout: bool = False,
+) -> None:
     """Print installation confirmation and path-activation instructions.
 
     td_preferences_only=True (modes 2/3/4): show only the TD Preferences path instruction.
     td_preferences_only=False (mode 1 default): show CUDALINK_LIB_PATH + TD Preferences.
+    with_spout=True: mention cuda_link_spout in the verification hint.
     """
     print()
     print(_bold("─" * 60))
@@ -256,13 +341,15 @@ def _print_activation(site_packages: Path | None, label: str, td_preferences_onl
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
         print("    [CUDALinkBootstrap] Library mode active — cuda_link submodules aliased")
+        if with_spout:
+            print("    import cuda_link_spout; print(cuda_link_spout.__version__)")
     print()
 
 
 # ─── Install modes ─────────────────────────────────────────────────────────────
 
 
-def mode_1_external_folder(wheel: Path, target: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_1_external_folder(wheels: list[Path], target: str | None, non_interactive: bool, dry_run: bool) -> None:
     """pip install --target <folder>  (default; CUDALINK_LIB_PATH points here)."""
     if not target:
         if non_interactive:
@@ -284,16 +371,16 @@ def mode_1_external_folder(wheel: Path, target: str | None, non_interactive: boo
         "install",
         "--target",
         str(dest),
-        str(wheel),
+        *[str(w) for w in wheels],
         "--upgrade",
         "--force-reinstall",
         "--no-deps",
     ]
     _run_pip(pip, dry_run)
-    _print_activation(dest, "Install folder")
+    _print_activation(dest, "Install folder", with_spout=len(wheels) > 1)
 
 
-def mode_2_venv(wheel: Path, venv_dir: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_2_venv(wheels: list[Path], venv_dir: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install into an existing venv's site-packages."""
     if not venv_dir:
         if non_interactive:
@@ -310,13 +397,13 @@ def mode_2_venv(wheel: Path, venv_dir: str | None, non_interactive: bool, dry_ru
     if not pip_exe.exists():
         sys.exit(_red(f"[error] pip not found in venv at {venv / 'Scripts'} or {venv / 'bin'}"))
 
-    pip = [str(pip_exe), "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [str(pip_exe), "install", *[str(w) for w in wheels], "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
     site_pkgs = _find_site_packages_in(venv)
-    _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True)
+    _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True, with_spout=len(wheels) > 1)
 
 
-def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install into a conda environment."""
     if not conda_env:
         if non_interactive:
@@ -325,7 +412,18 @@ def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_
         if not conda_env:
             sys.exit(_red("[error] No conda environment name specified."))
 
-    pip = ["conda", "run", "-n", conda_env, "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [
+        "conda",
+        "run",
+        "-n",
+        conda_env,
+        "pip",
+        "install",
+        *[str(w) for w in wheels],
+        "--upgrade",
+        "--force-reinstall",
+        "--no-deps",
+    ]
     _run_pip(pip, dry_run)
 
     # Try to find the site-packages path from conda info
@@ -343,14 +441,14 @@ def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_
         except FileNotFoundError:
             pass
 
-    _print_activation(site_pkgs, "conda env site-packages", td_preferences_only=True)
+    _print_activation(site_pkgs, "conda env site-packages", td_preferences_only=True, with_spout=len(wheels) > 1)
     if site_pkgs is None:
         print(_yellow("  Could not auto-detect conda site-packages path."))
         print('  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"')
         print("  then add the 'site-packages' entry to TD Preferences.")
 
 
-def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_4_system_python(wheels: list[Path], python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install into a system / parallel Python installation (the official TD docs approach)."""
     if not python_exe:
         if non_interactive:
@@ -377,7 +475,16 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
     if not py_path.is_file():
         sys.exit(_red(f"[error] Path is not an executable file: {py_path}"))
 
-    pip = [str(py_path), "-m", "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [
+        str(py_path),
+        "-m",
+        "pip",
+        "install",
+        *[str(w) for w in wheels],
+        "--upgrade",
+        "--force-reinstall",
+        "--no-deps",
+    ]
     _run_pip(pip, dry_run)
 
     # Detect site-packages — use _SITE_PKGS_QUERY to filter for the actual site-packages
@@ -395,10 +502,10 @@ def mode_4_system_python(wheel: Path, python_exe: str | None, non_interactive: b
         except (FileNotFoundError, OSError):
             pass
 
-    _print_activation(site_pkgs, "Python site-packages", td_preferences_only=True)
+    _print_activation(site_pkgs, "Python site-packages", td_preferences_only=True, with_spout=len(wheels) > 1)
 
 
-def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_5_td_python(wheels: list[Path], td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install directly into TouchDesigner's bundled Python.
 
     WARNING: Modifies TD's internal Python environment. Runs without needing CUDALINK_LIB_PATH.
@@ -432,24 +539,31 @@ def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bo
     if not td_py.is_file():
         sys.exit(_red(f"[error] Path is not an executable file: {td_py}"))
 
-    pip = [str(td_py), "-m", "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [str(td_py), "-m", "pip", "install", *[str(w) for w in wheels], "--upgrade", "--force-reinstall", "--no-deps"]
 
-    print(_yellow("\n  Note: installing into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
-    print("  cuda_link will be importable in all TD projects automatically.")
+    with_spout = len(wheels) > 1
+    pkgs_label = "cuda_link + cuda_link_spout" if with_spout else "cuda_link"
+    print(_yellow(f"\n  Note: installing {pkgs_label} into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
+    print(f"  {pkgs_label} will be importable in all TD projects automatically.")
     print("  Re-run this after upgrading TouchDesigner.\n")
     _run_pip(pip, dry_run)
 
     # TD's Python does not need a path variable — it's already on TD's sys.path
+    verify_stmt = (
+        "import cuda_link, cuda_link_spout; print(cuda_link.__version__)"
+        if with_spout
+        else "import cuda_link; print(cuda_link.__version__)"
+    )
     print()
     print(_bold("─" * 60))
     print(_bold("  INSTALL COMPLETE (TD Python)"))
     print(_bold("─" * 60))
     print()
-    print("  cuda_link is now installed into TD's Python.")
+    print(f"  {pkgs_label} {'are' if with_spout else 'is'} now installed into TD's Python.")
     print("  No CUDALINK_LIB_PATH or TD Preferences change needed.")
     print()
     print(_bold("  Verify in TD Textport after restarting TouchDesigner:"))
-    print("    import cuda_link; print(cuda_link.__version__)")
+    print(f"    {verify_stmt}")
     print()
 
 
@@ -483,7 +597,7 @@ def _interactive_menu() -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Install cuda-link into a Python environment accessible from TouchDesigner.",
+        description="Install cuda-link (+ optional Spout bridge) into a Python environment accessible from TouchDesigner.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -496,10 +610,32 @@ def main() -> None:
     parser.add_argument(
         "--td-python", metavar="EXE", help="Mode 5: path to TD's python.exe (see app.pythonExecutable in Textport)."
     )
-    parser.add_argument("--wheel", metavar="PATH", help="Override wheel path (skip auto-detect + build).")
+    parser.add_argument("--wheel", metavar="PATH", help="Override core wheel path (skip auto-detect + build).")
+    spout_grp = parser.add_mutually_exclusive_group()
+    spout_grp.add_argument(
+        "--spout",
+        action="store_true",
+        default=False,
+        help="Also install the cuda-link-spout Spout bridge into the same target (requires dist/cuda_link_spout-*.whl).",
+    )
+    spout_grp.add_argument(
+        "--no-spout",
+        action="store_true",
+        default=False,
+        help="Skip the Spout bridge even when prompted interactively.",
+    )
+    parser.add_argument(
+        "--spout-wheel",
+        metavar="PATH",
+        help="Override spout wheel path (implies --spout; skip auto-detect).",
+    )
     parser.add_argument("--non-interactive", action="store_true", help="Require explicit flags; skip all prompts.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
     args = parser.parse_args()
+
+    # --spout-wheel implies --spout
+    if args.spout_wheel:
+        args.spout = True
 
     print()
     print(_bold("=" * 60))
@@ -509,8 +645,8 @@ def main() -> None:
         print(_yellow("  [DRY-RUN MODE] — no commands will be executed."))
     print()
 
-    # Resolve wheel
-    wheel = resolve_wheel(args.wheel, args.dry_run)
+    # Resolve core wheel
+    core_wheel = resolve_wheel(args.wheel, args.dry_run)
 
     # Determine mode
     mode = args.mode
@@ -521,17 +657,29 @@ def main() -> None:
 
     print(f"\n  Mode {mode}: {_MODE_DESCRIPTIONS[mode]}")
 
+    # Decide whether to also install the Spout bridge
+    if args.spout:
+        install_spout = True
+    elif args.no_spout or args.non_interactive:
+        install_spout = False
+    else:
+        install_spout = _prompt_yes_no("\n  Also install the Spout bridge (cuda_link_spout)?", default=False)
+
+    wheels: list[Path] = [core_wheel]
+    if install_spout:
+        wheels.append(resolve_spout_wheel(args.spout_wheel, args.dry_run))
+
     # Dispatch
     if mode == 1:
-        mode_1_external_folder(wheel, args.target, args.non_interactive, args.dry_run)
+        mode_1_external_folder(wheels, args.target, args.non_interactive, args.dry_run)
     elif mode == 2:
-        mode_2_venv(wheel, args.venv, args.non_interactive, args.dry_run)
+        mode_2_venv(wheels, args.venv, args.non_interactive, args.dry_run)
     elif mode == 3:
-        mode_3_conda(wheel, args.conda, args.non_interactive, args.dry_run)
+        mode_3_conda(wheels, args.conda, args.non_interactive, args.dry_run)
     elif mode == 4:
-        mode_4_system_python(wheel, args.python, args.non_interactive, args.dry_run)
+        mode_4_system_python(wheels, args.python, args.non_interactive, args.dry_run)
     elif mode == 5:
-        mode_5_td_python(wheel, args.td_python, args.non_interactive, args.dry_run)
+        mode_5_td_python(wheels, args.td_python, args.non_interactive, args.dry_run)
 
 
 if __name__ == "__main__":
