@@ -24,13 +24,16 @@ using cudalink::core::read_num_slots;
 using cudalink::core::read_version;
 
 namespace {
-HANDLE asHandle(void* h) { return static_cast<HANDLE>(h); }
+HANDLE asHandle(void* h) {
+    return static_cast<HANDLE>(h);
+}
 
 // Names the Info CHOP/DAT counts returned by getNumInfoCHOPChans()/getInfoDATSize() --
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
-constexpr int32_t kNumInfoCHOPChans = 8; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
-constexpr int32_t kNumInfoDATRows = 4;   // ipc_version, status, last_error, last_error_frame
+constexpr int32_t kNumInfoCHOPChans =
+    8; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
+constexpr int32_t kNumInfoDATRows = 4; // ipc_version, status, last_error, last_error_frame
 } // namespace
 
 extern "C" {
@@ -98,7 +101,8 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
         int ipcSupport = 0;
         if (cudaDeviceGetAttribute(&ipcSupport, cudaDevAttrIpcEventSupport, current) == cudaSuccess &&
             ipcSupport == 0) {
-            myError = "device " + std::to_string(current) + " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
+            myError = "device " + std::to_string(current) +
+                      " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
             myFatal = true;
             return;
         }
@@ -226,7 +230,8 @@ bool CudaLinkInTOP::openSHM(const char* name) {
     // Naive byte-widening, not a general UTF-8 decoder -- correct for the ASCII SHM
     // names this protocol uses in practice (matches Python's CreateFileMapping tagname
     // verbatim-and-unprefixed contract).
-    HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, std::wstring(name, name + std::strlen(name)).c_str());
+    HANDLE h =
+        OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, std::wstring(name, name + std::strlen(name)).c_str());
     if (!h) {
         myStatus = "Waiting for producer";
         return false;
@@ -285,16 +290,19 @@ bool CudaLinkInTOP::validateNumSlots(uint32_t numSlots) {
     if (candidate.total_size() > myShmMappedSize) {
         // The claimed slot count would require reading past the actual mapped view --
         // reject rather than risk an out-of-bounds read into unmapped memory.
-        myError = "num_slots (" + std::to_string(numSlots) + ") implies a layout larger than the mapped SHM region";
+        myError =
+            "num_slots (" + std::to_string(numSlots) + ") implies a layout larger than the mapped SHM region";
         return false;
     }
     return true;
 }
 
 bool CudaLinkInTOP::validateMetadata(const cudalink::core::Metadata& metadata) {
-    if (metadata.width == 0 || metadata.height == 0 || metadata.num_comps == 0 || metadata.bits_per_comp == 0) {
+    if (metadata.width == 0 || metadata.height == 0 || metadata.num_comps == 0 ||
+        metadata.bits_per_comp == 0) {
         myError = "invalid metadata on wire (width=" + std::to_string(metadata.width) +
-                  " height=" + std::to_string(metadata.height) + " num_comps=" + std::to_string(metadata.num_comps) +
+                  " height=" + std::to_string(metadata.height) +
+                  " num_comps=" + std::to_string(metadata.num_comps) +
                   " bits=" + std::to_string(metadata.bits_per_comp) + ")";
         return false;
     }
@@ -343,7 +351,8 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
         cudaIpcMemHandle_t memHandle;
         std::memcpy(&memHandle, myShmView + myLayout.mem_handle_offset(slot), sizeof(memHandle));
         void* rawDevPtr = nullptr;
-        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess), myError);
+        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess),
+                                 myError);
         newDevPtrs[slot].reset(rawDevPtr);
 
         cudaIpcEventHandle_t eventHandle;
@@ -514,21 +523,23 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 return;
             }
 
-            CUDALINK_CUDA_CHECK_FATAL(cudaStreamWaitEvent(myStream, mySlotEvents[myReadSlot], 0), myError, myFatal);
+            CUDALINK_CUDA_CHECK_FATAL(cudaStreamWaitEvent(myStream, mySlotEvents[myReadSlot], 0), myError,
+                                      myFatal);
 
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
-            CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, mySlotDevPtrs[myReadSlot],
-                                                                rowBytes, rowBytes, myMetadata.height,
-                                                                cudaMemcpyDeviceToDevice, myStream),
-                                      myError, myFatal);
+            CUDALINK_CUDA_CHECK_FATAL(
+                cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, mySlotDevPtrs[myReadSlot], rowBytes,
+                                         rowBytes, myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
+                myError, myFatal);
             // CPU-side enqueue cost only (the copy itself is async on myStream) -- a true
             // GPU-side copy_us would need cudaEvent-based timing; deferred, not required
             // for correctness.
             workEnd = std::chrono::steady_clock::now();
             myCopyUs = std::chrono::duration<float, std::micro>(workEnd - beginEnd).count();
         }
-        myEndUs = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
+        myEndUs =
+            std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
 
         // Step 6.
         myLastWriteIdx = result.write_idx;
@@ -550,10 +561,10 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         mySumEndUs += myEndUs;
         if (++myBenchSamples >= 97) {
             debugLog("bench: avg_cook_us=" + std::to_string(mySumCookUs / myBenchSamples) +
-                      " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
-                      " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
-                      " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) +
-                      " samples=" + std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
+                     " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
+                     " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
+                     " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) + " samples=" +
+                     std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
             mySumCookUs = 0.0f;
             mySumCopyUs = 0.0f;
             mySumBeginUs = 0.0f;
@@ -675,4 +686,6 @@ void CudaLinkInTOP::getWarningString(TD::OP_String* warning, void*) {
     }
 }
 
-void CudaLinkInTOP::getInfoPopupString(TD::OP_String* info, void*) { info->setString(myStatus.c_str()); }
+void CudaLinkInTOP::getInfoPopupString(TD::OP_String* info, void*) {
+    info->setString(myStatus.c_str());
+}

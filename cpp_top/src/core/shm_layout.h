@@ -46,7 +46,8 @@ constexpr uint32_t SLOT_SIZE = 128;      // 64B cudaIpcMemHandle_t + 64B cudaIpc
 constexpr uint32_t IPC_HANDLE_SIZE = 64; // cudaIpc{Mem,Event}Handle_t are each 64 bytes
 
 constexpr uint32_t SHUTDOWN_FLAG_SIZE = 1;
-constexpr uint32_t METADATA_SIZE = 20; // 4B w + 4B h + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
+constexpr uint32_t METADATA_SIZE =
+    20; // 4B w + 4B h + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
 constexpr uint32_t TIMESTAMP_SIZE = 8;
 
 // Names the `/ 8` in every bits_per_comp -> bytes-per-component conversion
@@ -58,9 +59,9 @@ constexpr uint32_t BITS_PER_BYTE = 8;
 constexpr uint8_t FORMAT_KIND_SIGNED = 0;
 constexpr uint8_t FORMAT_KIND_UNSIGNED = 1;
 constexpr uint8_t FORMAT_KIND_FLOAT = 2;
-constexpr uint16_t FLAGS_BFLOAT16 = 0x0001;    // bit0: bfloat16 (kind=Float, bits=16)
-constexpr uint16_t FLAGS_MONO_ALPHA = 0x0002;  // bit1: 2-channel source is mono+alpha, not RG
-constexpr uint16_t FLAGS_BGRA = 0x0004;        // bit2: 4-channel uint8 source is BGRA-ordered, not RGBA
+constexpr uint16_t FLAGS_BFLOAT16 = 0x0001;   // bit0: bfloat16 (kind=Float, bits=16)
+constexpr uint16_t FLAGS_MONO_ALPHA = 0x0002; // bit1: 2-channel source is mono+alpha, not RG
+constexpr uint16_t FLAGS_BGRA = 0x0004;       // bit2: 4-channel uint8 source is BGRA-ordered, not RGBA
 
 // Pre-computed byte offsets for a SHM region with num_slots IPC slots.
 // Mirrors shm_protocol.py::SHMLayout exactly.

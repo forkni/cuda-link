@@ -25,7 +25,9 @@ using cudalink::out_top::WireFormat;
 using cudalink::out_top::mapFromPixelFormat;
 
 namespace {
-HANDLE asHandle(void* h) { return static_cast<HANDLE>(h); }
+HANDLE asHandle(void* h) {
+    return static_cast<HANDLE>(h);
+}
 
 // Names the Sleep(100) grace-period literal used at both teardown() and reallocate()'s
 // old-resource-free sites -- a timing-based grace period that gives a receiver time to
@@ -62,7 +64,9 @@ double now_seconds() {
 // Naive byte-widening, not a general UTF-8 decoder -- correct for the ASCII SHM names
 // this protocol uses in practice (matches CudaLinkInTOP::openSHM's identical technique;
 // names are verbatim and unprefixed).
-std::wstring widen(const char* s) { return std::wstring(s, s + std::strlen(s)); }
+std::wstring widen(const char* s) {
+    return std::wstring(s, s + std::strlen(s));
+}
 } // namespace
 
 extern "C" {
@@ -131,7 +135,8 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
         int ipcSupport = 0;
         if (cudaDeviceGetAttribute(&ipcSupport, cudaDevAttrIpcEventSupport, current) == cudaSuccess &&
             ipcSupport == 0) {
-            myError = "device " + std::to_string(current) + " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
+            myError = "device " + std::to_string(current) +
+                      " does not support CUDA IPC (cudaDevAttrIpcEventSupport == 0)";
             myFatal = true;
             return;
         }
@@ -317,11 +322,11 @@ void CudaLinkOutTOP::teardown() {
 // execute()'s Step 5 (the actual interop copy) is the only place that needs -- and has --
 // the bracket.
 bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireFormat& fmt, int numSlots,
-                                 const char* name) {
+                                const char* name) {
     const auto reallocStart = std::chrono::steady_clock::now();
     debugLog("reallocate: begin " + std::to_string(width) + "x" + std::to_string(height) +
-              " numSlots=" + std::to_string(numSlots) + " formatKind=" + std::to_string(fmt.format_kind) +
-              " bits=" + std::to_string(fmt.bits_per_comp) + " flags=" + std::to_string(fmt.flags));
+             " numSlots=" + std::to_string(numSlots) + " formatKind=" + std::to_string(fmt.format_kind) +
+             " bits=" + std::to_string(fmt.bits_per_comp) + " flags=" + std::to_string(fmt.flags));
 
     // Build the entire NEW session into LOCAL storage first -- the live mySlotDevPtrs/
     // mySlotEvents/myShmView/myShmHandle members are left completely untouched until the
@@ -377,8 +382,8 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
         const std::wstring wname = widen(name);
         LARGE_INTEGER sz;
         sz.QuadPart = static_cast<LONGLONG>(layout.total_size());
-        HANDLE m =
-            CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, sz.HighPart, sz.LowPart, wname.c_str());
+        HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, sz.HighPart, sz.LowPart,
+                                      wname.c_str());
         if (!m) {
             myError = "CreateFileMappingW failed";
             return false;
@@ -429,7 +434,8 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
             myError = std::string("cudaIpcGetEventHandle failed: ") + cudaGetErrorString(st);
             return false;
         }
-        write_slot_handle(view, layout, static_cast<uint32_t>(slot), reinterpret_cast<const uint8_t*>(&memHandle),
+        write_slot_handle(view, layout, static_cast<uint32_t>(slot),
+                          reinterpret_cast<const uint8_t*>(&memHandle),
                           reinterpret_cast<const uint8_t*>(&eventHandle));
     }
 
@@ -499,9 +505,10 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     }
 
     debugLog("reallocate: complete, elapsed=" +
-              std::to_string(
-                  std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - reallocStart).count()) +
-              "ms");
+             std::to_string(
+                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - reallocStart)
+                     .count()) +
+             "ms");
     return true;
 }
 
@@ -549,8 +556,8 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         }
         const WireFormat fmt = mapFromPixelFormat(in->textureDesc.pixelFormat);
         if (!fmt.supported) {
-            myWarning = "unsupported input pixel format (id=" + std::to_string(static_cast<int>(in->textureDesc.pixelFormat)) +
-                        ")";
+            myWarning = "unsupported input pixel format (id=" +
+                        std::to_string(static_cast<int>(in->textureDesc.pixelFormat)) + ")";
             return;
         }
         const uint32_t width = in->textureDesc.width;
@@ -563,10 +570,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
         // Step 3: (re)allocate on first cook / resolution / format / numslots change.
         const bool needsAlloc = !myAllocated || width != myWidth || height != myHeight ||
-                                 numSlots != static_cast<int>(myLayout.num_slots()) ||
-                                 fmt.format_kind != myMetadata.format_kind ||
-                                 fmt.bits_per_comp != myMetadata.bits_per_comp || fmt.flags != myMetadata.flags ||
-                                 fmt.num_comps != myMetadata.num_comps;
+                                numSlots != static_cast<int>(myLayout.num_slots()) ||
+                                fmt.format_kind != myMetadata.format_kind ||
+                                fmt.bits_per_comp != myMetadata.bits_per_comp ||
+                                fmt.flags != myMetadata.flags || fmt.num_comps != myMetadata.num_comps;
         if (needsAlloc) {
             const char* name = Parameters::evalIpcmemname(inputs);
             if (!name || !*name) {
@@ -632,10 +639,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             const uint32_t slot = myWriteIdx % myLayout.num_slots(); // next slot to (over)write
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
-            CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0,
-                                                                  rowBytes, myMetadata.height,
-                                                                  cudaMemcpyDeviceToDevice, myStream),
-                                      myError, myFatal);
+            CUDALINK_CUDA_CHECK_FATAL(
+                cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0, rowBytes,
+                                           myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
+                myError, myFatal);
             // Record the IPC-ready event right after the IPC-slot copy, before the
             // pass-through copy below, so the receiver's cudaStreamWaitEvent isn't delayed
             // by work this TOP does purely for its own on-screen display.
@@ -665,12 +672,12 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             // production. Same-stream ordering guarantees the IPC-slot write above completes
             // before this read -- no extra event/wait needed.
             if (selfOut) {
-                cudaError_t passThroughStatus = cudaMemcpy2DToArrayAsync(
-                    selfOut->cudaArray, 0, 0, mySlotDevPtrs[slot], rowBytes, rowBytes, myMetadata.height,
-                    cudaMemcpyDeviceToDevice, myStream);
+                cudaError_t passThroughStatus =
+                    cudaMemcpy2DToArrayAsync(selfOut->cudaArray, 0, 0, mySlotDevPtrs[slot], rowBytes,
+                                             rowBytes, myMetadata.height, cudaMemcpyDeviceToDevice, myStream);
                 if (passThroughStatus != cudaSuccess) {
-                    myWarning =
-                        std::string("pass-through output copy failed: ") + cudaGetErrorString(passThroughStatus);
+                    myWarning = std::string("pass-through output copy failed: ") +
+                                cudaGetErrorString(passThroughStatus);
                 }
             } else {
                 myWarning = "createCUDAArray failed (pass-through output unavailable this cook)";
@@ -697,7 +704,8 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             workEnd = std::chrono::steady_clock::now();
             myCopyUs = std::chrono::duration<float, std::micro>(workEnd - beginEnd).count();
         }
-        myEndUs = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
+        myEndUs =
+            std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
 
         // Step 6: publish + doorbell.
         ++myWriteIdx;
@@ -725,10 +733,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         mySumEndUs += myEndUs;
         if (++myBenchSamples >= 97) {
             debugLog("bench: avg_cook_us=" + std::to_string(mySumCookUs / myBenchSamples) +
-                      " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
-                      " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
-                      " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) +
-                      " samples=" + std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
+                     " avg_copy_us=" + std::to_string(mySumCopyUs / myBenchSamples) +
+                     " avg_begin_us=" + std::to_string(mySumBeginUs / myBenchSamples) +
+                     " avg_end_us=" + std::to_string(mySumEndUs / myBenchSamples) + " samples=" +
+                     std::to_string(myBenchSamples) + " frames=" + std::to_string(myFrameCount));
             mySumCookUs = 0.0f;
             mySumCopyUs = 0.0f;
             mySumBeginUs = 0.0f;
@@ -842,4 +850,6 @@ void CudaLinkOutTOP::getWarningString(TD::OP_String* warning, void*) {
     }
 }
 
-void CudaLinkOutTOP::getInfoPopupString(TD::OP_String* info, void*) { info->setString(myStatus.c_str()); }
+void CudaLinkOutTOP::getInfoPopupString(TD::OP_String* info, void*) {
+    info->setString(myStatus.c_str());
+}

@@ -34,38 +34,54 @@ inline TD::OP_PixelFormat mapToPixelFormat(const cudalink::core::Metadata& meta)
     if (meta.format_kind == FORMAT_KIND_FLOAT && meta.bits_per_comp == 32) {
         if (monoAlpha) return TD::OP_PixelFormat::MonoA32Float;
         switch (meta.num_comps) {
-            case 1: return TD::OP_PixelFormat::Mono32Float;
-            case 2: return TD::OP_PixelFormat::RG32Float;
-            case 4: return TD::OP_PixelFormat::RGBA32Float;
-            default: return TD::OP_PixelFormat::Invalid;
+            case 1:
+                return TD::OP_PixelFormat::Mono32Float;
+            case 2:
+                return TD::OP_PixelFormat::RG32Float;
+            case 4:
+                return TD::OP_PixelFormat::RGBA32Float;
+            default:
+                return TD::OP_PixelFormat::Invalid;
         }
     }
     if (meta.format_kind == FORMAT_KIND_FLOAT && meta.bits_per_comp == 16) {
         if (monoAlpha) return TD::OP_PixelFormat::MonoA16Float;
         switch (meta.num_comps) {
-            case 1: return TD::OP_PixelFormat::Mono16Float;
-            case 2: return TD::OP_PixelFormat::RG16Float;
-            case 4: return TD::OP_PixelFormat::RGBA16Float;
-            default: return TD::OP_PixelFormat::Invalid;
+            case 1:
+                return TD::OP_PixelFormat::Mono16Float;
+            case 2:
+                return TD::OP_PixelFormat::RG16Float;
+            case 4:
+                return TD::OP_PixelFormat::RGBA16Float;
+            default:
+                return TD::OP_PixelFormat::Invalid;
         }
     }
     if (meta.format_kind == FORMAT_KIND_UNSIGNED && meta.bits_per_comp == 16) {
         if (monoAlpha) return TD::OP_PixelFormat::MonoA16Fixed;
         switch (meta.num_comps) {
-            case 1: return TD::OP_PixelFormat::Mono16Fixed;
-            case 2: return TD::OP_PixelFormat::RG16Fixed;
-            case 4: return TD::OP_PixelFormat::RGBA16Fixed;
-            default: return TD::OP_PixelFormat::Invalid;
+            case 1:
+                return TD::OP_PixelFormat::Mono16Fixed;
+            case 2:
+                return TD::OP_PixelFormat::RG16Fixed;
+            case 4:
+                return TD::OP_PixelFormat::RGBA16Fixed;
+            default:
+                return TD::OP_PixelFormat::Invalid;
         }
     }
     if (meta.format_kind == FORMAT_KIND_UNSIGNED && meta.bits_per_comp == 8) {
         if (monoAlpha) return TD::OP_PixelFormat::MonoA8Fixed;
         const bool isBgra = (meta.flags & FLAGS_BGRA) != 0;
         switch (meta.num_comps) {
-            case 1: return TD::OP_PixelFormat::Mono8Fixed;
-            case 2: return TD::OP_PixelFormat::RG8Fixed;
-            case 4: return isBgra ? TD::OP_PixelFormat::BGRA8Fixed : TD::OP_PixelFormat::RGBA8Fixed;
-            default: return TD::OP_PixelFormat::Invalid;
+            case 1:
+                return TD::OP_PixelFormat::Mono8Fixed;
+            case 2:
+                return TD::OP_PixelFormat::RG8Fixed;
+            case 4:
+                return isBgra ? TD::OP_PixelFormat::BGRA8Fixed : TD::OP_PixelFormat::RGBA8Fixed;
+            default:
+                return TD::OP_PixelFormat::Invalid;
         }
     }
 

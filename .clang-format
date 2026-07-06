@@ -1,0 +1,51 @@
+# .clang-format for cpp_top/src/ (the C++ Custom TOP tree).
+#
+# Derived from the code as written (see docs/plans/CPP_TOP_IMPROVEMENT_PLAN.md, Phase 0.1)
+# rather than adopted from a stock preset -- the goal is a near-zero-diff first run so
+# formatting history stays clean and `git blame` stays useful.
+#
+# Vendored TD headers under cpp_top/vendor/ are excluded via .clang-format-ignore and must
+# never be reformatted.
+
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+
+IndentWidth: 4
+ColumnLimit: 110
+UseTab: Never
+NamespaceIndentation: None
+AccessModifierOffset: -4
+
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortBlocksOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: false
+IndentCaseLabels: true
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+AlignTrailingComments: true
+AlignEscapedNewlines: Right
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+AlignAfterOpenBracket: Align
+
+SortIncludes: false
+SortUsingDeclarations: false
+IncludeBlocks: Preserve
+
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpaceAfterTemplateKeyword: true
+Cpp11BracedListStyle: true
+
+BinPackParameters: true
+BinPackArguments: true
+
+FixNamespaceComments: true

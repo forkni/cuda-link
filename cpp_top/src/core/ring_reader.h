@@ -41,6 +41,6 @@ struct AcquireResult {
 // caller must act on. noexcept is accurate: every path below is atomic_ref loads, memcpy,
 // and aggregate returns -- nothing that can throw.
 [[nodiscard]] AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
-                                          uint64_t last_version) noexcept;
+                                         uint64_t last_version) noexcept;
 
 } // namespace cudalink::core

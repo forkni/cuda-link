@@ -1,0 +1,3 @@
+# Vendored TouchDesigner SDK headers -- never reformat; the verification report
+# (docs/plans/CPP_TOP_CUDA_GUIDELINES_VERIFICATION.md) treats these as a primary source.
+cpp_top/vendor/**

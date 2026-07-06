@@ -18,7 +18,8 @@ namespace {
 // DebugView) in every build configuration, not just Debug.
 void checkParamAppend(TD::OP_ParAppendResult res, const char* paramName) {
     if (res != TD::OP_ParAppendResult::Success) {
-        OutputDebugStringA((std::string("CudaLinkInTOP: failed to register parameter '") + paramName + "'\n").c_str());
+        OutputDebugStringA(
+            (std::string("CudaLinkInTOP: failed to register parameter '") + paramName + "'\n").c_str());
     }
 }
 } // namespace

@@ -13,24 +13,24 @@
 // Every latched string carries file+line, matching NVIDIA's own checkCudaErrors pattern --
 // otherwise a failure surfaced only via myError/myLastError can't be traced back to which of
 // several CUDA_CHECK call sites in the same function fired.
-#define CUDALINK_CUDA_CHECK(call, err_var)                                                        \
-    do {                                                                                          \
-        cudaError_t _cudalink_status = (call);                                                    \
-        if (_cudalink_status != cudaSuccess) {                                                    \
-            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + \
-                        " (" + __FILE__ + ":" + std::to_string(__LINE__) + ")";                    \
-            return;                                                                               \
-        }                                                                                          \
+#define CUDALINK_CUDA_CHECK(call, err_var)                                                                   \
+    do {                                                                                                     \
+        cudaError_t _cudalink_status = (call);                                                               \
+        if (_cudalink_status != cudaSuccess) {                                                               \
+            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
+                        __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
+            return;                                                                                          \
+        }                                                                                                    \
     } while (0)
 
-#define CUDALINK_CUDA_CHECK_BOOL(call, err_var)                                                   \
-    do {                                                                                          \
-        cudaError_t _cudalink_status = (call);                                                    \
-        if (_cudalink_status != cudaSuccess) {                                                    \
-            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + \
-                        " (" + __FILE__ + ":" + std::to_string(__LINE__) + ")";                    \
-            return false;                                                                         \
-        }                                                                                          \
+#define CUDALINK_CUDA_CHECK_BOOL(call, err_var)                                                              \
+    do {                                                                                                     \
+        cudaError_t _cudalink_status = (call);                                                               \
+        if (_cudalink_status != cudaSuccess) {                                                               \
+            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
+                        __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
+            return false;                                                                                    \
+        }                                                                                                    \
     } while (0)
 
 // Fatal variant -- for CUDA calls on the per-frame hot path where a failure likely means the
@@ -39,13 +39,13 @@
 // calls forever against an already-broken context. Not used on cold paths (IPC open,
 // reallocate) where a failure is often transient/recoverable (e.g. producer not ready yet) --
 // those keep retrying via the plain macros above.
-#define CUDALINK_CUDA_CHECK_FATAL(call, err_var, fatal_var)                                        \
-    do {                                                                                           \
-        cudaError_t _cudalink_status = (call);                                                     \
-        if (_cudalink_status != cudaSuccess) {                                                     \
-            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) +  \
-                        " (" + __FILE__ + ":" + std::to_string(__LINE__) + ")";                     \
-            (fatal_var) = true;                                                                    \
-            return;                                                                                \
-        }                                                                                           \
+#define CUDALINK_CUDA_CHECK_FATAL(call, err_var, fatal_var)                                                  \
+    do {                                                                                                     \
+        cudaError_t _cudalink_status = (call);                                                               \
+        if (_cudalink_status != cudaSuccess) {                                                               \
+            (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
+                        __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
+            (fatal_var) = true;                                                                              \
+            return;                                                                                          \
+        }                                                                                                    \
     } while (0)

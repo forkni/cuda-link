@@ -44,7 +44,8 @@ public:
         // ~1.78e9-second epoch value through std::ofstream's default float precision
         // rounds every line to the same "1.78324e+09", losing all sub-second resolution.
         const int64_t ms = static_cast<int64_t>(
-            std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() * 1000.0);
+            std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() *
+            1000.0);
         myFile << "[t=" << ms << " frame=" << frameCount << "] " << msg << "\n";
         myFile.flush();
     }

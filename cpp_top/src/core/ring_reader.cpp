@@ -6,7 +6,7 @@
 namespace cudalink::core {
 
 AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t last_write_idx,
-                            uint64_t last_version) noexcept {
+                           uint64_t last_version) noexcept {
     // shutdown_flag is still read with a plain load, mirroring the Python producer's
     // actual synchronization discipline today (an OS-level release fence via
     // threading.Lock, not C++ atomics -- see shm_protocol.py's _release_fence comment).

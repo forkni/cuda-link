@@ -38,7 +38,8 @@ public:
     int32_t getNumInfoCHOPChans(void* reserved1) override;
     void getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, void* reserved1) override;
     bool getInfoDATSize(TD::OP_InfoDATSize* infoSize, void* reserved1) override;
-    void getInfoDATEntries(int32_t index, int32_t nEntries, TD::OP_InfoDATEntries* entries, void* reserved1) override;
+    void getInfoDATEntries(int32_t index, int32_t nEntries, TD::OP_InfoDATEntries* entries,
+                           void* reserved1) override;
 
     void getErrorString(TD::OP_String* error, void* reserved1) override;
     void getWarningString(TD::OP_String* warning, void* reserved1) override;
@@ -90,7 +91,7 @@ private:
     int myCachedNumslots = 0;
 
     // SHM connection state.
-    void* myShmHandle = nullptr; // HANDLE, void* to avoid <windows.h> in the header
+    void* myShmHandle = nullptr;      // HANDLE, void* to avoid <windows.h> in the header
     void* myDoorbellHandle = nullptr; // HANDLE
     uint8_t* myShmView = nullptr;
     cudalink::core::SHMLayout myLayout{0};
