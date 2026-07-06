@@ -709,6 +709,88 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
 
 
 # ---------------------------------------------------------------------------
+# A1 fix — provisional-format re-resolve on first NEW_FRAME (metadata race)
+# ---------------------------------------------------------------------------
+
+
+def test_try_acquire_reresolves_provisional_format_on_first_new_frame() -> None:
+    """A1 fix: a connect-time fallback format re-resolves on the first NEW_FRAME.
+
+    Reproduces the metadata race: the importer connected before the producer had
+    written real metadata (SHM metadata block all-zero → _resolve_format() fell back
+    to a guessed format and set _format_provisional). The producer then writes real
+    metadata and its first frame *under the same version* — this never raises
+    VERSION_CHANGED, so _reinitialize() is never invoked. _try_acquire()'s NEW_FRAME
+    branch must re-resolve directly instead of leaving the bogus fallback format
+    stuck for the life of the connection.
+    """
+    from cuda_link.shm_protocol import WRITE_IDX_OFFSET, DtypeCodec, Metadata, SHMLayout
+
+    real_shape = (1080, 1920, 4)  # (H, W, C)
+    real_dtype = "float32"
+
+    # Connect as _resolve_format's fallback branch would: guessed (512, 512, 4)
+    # format, no frame written yet (write_idx=0), and the provisional marker set.
+    imp = _make_connected_importer(shape=(512, 512, 4), dtype="float32", num_slots=1, write_idx=0, last_write_idx=0)
+    imp._format_provisional = True
+
+    # Producer now writes real metadata + its first frame, SAME version (no reinit).
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode(real_dtype)
+    h, w, c = real_shape
+    Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * DtypeCodec.itemsize(real_dtype),
+    ).pack_into(shm_buf, layout)
+    struct.pack_into("<I", shm_buf, WRITE_IDX_OFFSET, 1)
+
+    slot_result, outcome = imp._try_acquire()
+
+    assert outcome is ImportOutcome.NEW_FRAME
+    assert slot_result is not None
+    assert not imp._format_provisional, "provisional flag must clear once real metadata is seen"
+    assert imp._format.shape == real_shape
+    assert imp._format.dtype_str == real_dtype
+
+
+def test_try_acquire_leaves_non_provisional_format_alone_on_new_frame() -> None:
+    """A non-provisional connect (real detection, or explicit spec overrides) must
+    not pay any re-resolve cost on NEW_FRAME — _format_provisional stays False and
+    the format is untouched even though SHM metadata differs from self._format."""
+    from cuda_link.shm_protocol import WRITE_IDX_OFFSET, DtypeCodec, Metadata, SHMLayout
+
+    imp = _make_connected_importer(shape=(8, 8, 4), dtype="uint8", num_slots=1, write_idx=0, last_write_idx=0)
+    assert not imp._format_provisional
+
+    # Write SHM metadata for a *different* shape — must be ignored since not provisional.
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode("float32")
+    Metadata(
+        width=1920,
+        height=1080,
+        num_comps=4,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=1920 * 1080 * 4 * DtypeCodec.itemsize("float32"),
+    ).pack_into(shm_buf, layout)
+    struct.pack_into("<I", shm_buf, WRITE_IDX_OFFSET, 1)
+
+    slot_result, outcome = imp._try_acquire()
+
+    assert outcome is ImportOutcome.NEW_FRAME
+    assert slot_result is not None
+    assert imp._format.shape == (8, 8, 4), "non-provisional format must not be silently overwritten"
+
+
+# ---------------------------------------------------------------------------
 # _event_to_int: IPC event pointer resolution helper
 # ---------------------------------------------------------------------------
 

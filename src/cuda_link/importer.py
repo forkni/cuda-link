@@ -940,6 +940,13 @@ class Importer:
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
 
+        # A1 fix (metadata-race): True when self._format came from _resolve_format()'s
+        # hard-coded (512, 512, 4)/float32 fallback because SHM metadata wasn't written
+        # yet at connect time. The first NEW_FRAME after connect guarantees real
+        # metadata is present (see _try_acquire), so that's when we re-resolve and
+        # clear this flag -- never per-frame once resolved.
+        self._format_provisional = False
+
         # Cached backend instances — each holds only a back-ref to this Importer
         # plus (for torch/cupy) the per-call stream, refreshed in-place rather than
         # constructing a new object each frame.  Avoids one allocation per get_frame* call.
@@ -1079,6 +1086,7 @@ class Importer:
         cupy: Any | None = None,
         numpy: Any | None = None,
         last_write_idx: int = 0,
+        format_provisional: bool = False,
     ) -> None:
         """Wire an already-open IPCConnection into this Importer's connected state.
 
@@ -1093,6 +1101,10 @@ class Importer:
                             "no frames consumed yet"). The production path always uses 0;
                             ``from_connection`` forwards this to support tests that need
                             an importer that has already consumed some frames.
+            format_provisional: Forwarded from ``_resolve_format()`` (A1 fix) — True
+                            when ``fmt`` is the hard-coded fallback, not SHM-derived.
+                            ``from_connection`` (test path) never sets this — a
+                            test-supplied fmt is always treated as resolved.
         """
         self._conn = conn
         self._format = fmt
@@ -1100,13 +1112,14 @@ class Importer:
         self._cupy = cupy
         self._numpy = numpy
         self._last_write_idx = last_write_idx
+        self._format_provisional = format_provisional
         self._initialized = True
 
     def _connect(self) -> None:
         """Open SHM, read IPC handles, build buffer views. Called once by open()."""
         shm, num_slots, ipc_version = self._open_and_validate_shm()
         try:
-            fmt = self._resolve_format(shm, num_slots)
+            fmt, provisional = self._resolve_format(shm, num_slots)
             conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
         except BaseException:
             # shm is still ours here — _open_ipc_slots only rolls back the
@@ -1118,6 +1131,7 @@ class Importer:
             fmt,
             torch=TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None,
             cupy=CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None,
+            format_provisional=provisional,
         )
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
@@ -1165,8 +1179,16 @@ class Importer:
         logger.info("Ring buffer with %d slots (v%d)", num_slots, ipc_version)
         return shm, num_slots, ipc_version
 
-    def _resolve_format(self, shm: SharedMemory, num_slots: int) -> Format:
-        """Determine frame geometry from spec overrides + SHM metadata."""
+    def _resolve_format(self, shm: SharedMemory, num_slots: int) -> tuple[Format, bool]:
+        """Determine frame geometry from spec overrides + SHM metadata.
+
+        Returns:
+            (format, provisional). provisional=True means the sender hadn't written
+            real metadata yet (SHM metadata block was all-zero) at connect time, so
+            a hard-coded (512, 512, 4)/float32 fallback was used (A1 fix — this used
+            to be indistinguishable from a genuine detection; _try_acquire()'s first
+            NEW_FRAME now re-resolves via this same method when provisional is True).
+        """
         spec = self._spec
         if spec.shape is None or spec.dtype is None:
             fmt_from_shm = Format.from_shm(shm.buf, num_slots)
@@ -1181,14 +1203,16 @@ class Importer:
                     logger.info("Auto-detected shape: %s", fmt.shape)
                 if spec.dtype is None:
                     logger.info("Auto-detected dtype: %s", fmt.dtype_str)
+                return fmt, False
             else:
                 logger.warning("Could not detect metadata — using fallback (512, 512, 4) / float32")
                 shape = spec.shape or (512, 512, 4)
                 dtype_str = spec.dtype or "float32"
                 fmt = Format.from_overrides(shape, dtype_str)
+                return fmt, True
         else:
             fmt = Format.from_overrides(spec.shape, spec.dtype)
-        return fmt
+            return fmt, False
 
     def _open_ipc_slots(
         self,
@@ -1377,6 +1401,20 @@ class Importer:
             return None, ImportOutcome.NO_FRAME
 
         self._last_write_idx = result.write_idx
+
+        # A1 fix: the first NEW_FRAME after a connect that had to guess geometry
+        # (_format_provisional, see _resolve_format) guarantees the producer has by
+        # now written real metadata under the SAME version — a case _reinitialize()
+        # never sees, since it only fires on VERSION_CHANGED. Re-resolve once here;
+        # no cost on subsequent frames once the flag is cleared.
+        if self._format_provisional:
+            resolved_fmt = Format.from_shm(self._conn.shm_handle.buf, self._conn.num_slots)
+            if resolved_fmt is not None:
+                self._apply_format_change(resolved_fmt)
+                self._format_provisional = False
+            # else: metadata still not visible (shouldn't happen once NEW_FRAME is
+            # reported) — keep the flag set and retry on the next NEW_FRAME.
+
         return result, ImportOutcome.NEW_FRAME
 
     def _adaptive_observe_wait(self, slept: bool) -> None:
@@ -1640,6 +1678,36 @@ class Importer:
     # Re-initialization (producer restarted with new IPC handles)
     # ------------------------------------------------------------------
 
+    def _apply_format_change(self, new_fmt: Format) -> None:
+        """Update self._format and rebuild any already-materialized buffer views for it.
+
+        Shared tail for the two places a resolved geometry can supersede
+        self._format: ``_reinitialize()`` (after a full IPC handle reopen, producer
+        restart) and ``_try_acquire()``'s first-NEW_FRAME provisional re-resolve (A1
+        fix — same IPC memory, only the metadata was unavailable at connect time).
+        Callers differ in whether IPC handles were reopened; rebuilding torch/numpy
+        views for the new geometry is identical either way, so it lives here once.
+
+        Compares via layout_differs_from(), not Format.__eq__ — __eq__ would
+        false-positive when self._format is override-derived (kind=bits=flags=0
+        sentinels) against an SHM-derived new_fmt with real non-zero values.
+        """
+        if new_fmt.layout_differs_from(self._format):
+            logger.info(
+                "Format changed: %s %s → %s %s",
+                self._format.shape,
+                self._format.dtype_str,
+                new_fmt.shape,
+                new_fmt.dtype_str,
+            )
+            if self._numpy is not None:
+                self._numpy.close()
+                self._numpy = None
+
+        self._format = new_fmt
+        if self._torch is not None:
+            self._torch = TorchBuffers.build(self._conn, new_fmt)
+
     def _reinitialize(self) -> None:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
         old_conn = self._conn
@@ -1665,29 +1733,18 @@ class Importer:
 
             # Route through Format.from_shm — same decoder used at connect time.
             # Falls back to current format if SHM metadata is absent or all-zeros.
-            new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
+            resolved_fmt = Format.from_shm(shm.buf, new_num_slots)
+            new_fmt = resolved_fmt or self._format
 
-            # Compare only the load-bearing layout fields via layout_differs_from —
-            # Format.__eq__ would false-positive when self._format is override-derived
-            # (kind=bits=flags=0 sentinels) vs an SHM-derived new_fmt with real values.
-            if new_fmt.layout_differs_from(self._format):
-                logger.info(
-                    "Format changed on reinit: %s %s → %s %s",
-                    self._format.shape,
-                    self._format.dtype_str,
-                    new_fmt.shape,
-                    new_fmt.dtype_str,
-                )
-                if self._numpy is not None:
-                    self._numpy.close()
-                    self._numpy = None
-
-            self._format = new_fmt
             new_conn = self._open_ipc_slots(shm, new_num_slots, new_ipc_version, new_fmt)
             self._conn = new_conn
 
-            if self._torch is not None:
-                self._torch = TorchBuffers.build(new_conn, new_fmt)
+            self._apply_format_change(new_fmt)
+            if resolved_fmt is not None:
+                # A1: a genuine SHM read (not the "still absent, kept old format" fallback
+                # above) means geometry is now authoritative — clear any stale provisional
+                # flag from the original connect so _try_acquire() doesn't re-resolve again.
+                self._format_provisional = False
 
             logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:

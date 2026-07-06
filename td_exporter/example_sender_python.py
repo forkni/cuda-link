@@ -119,8 +119,8 @@ _shutdown = install_console_ctrl_handler("[sender]", _do_cleanup, defer_close=Tr
 # ---------------------------------------------------------------------------
 
 SHM_NAME = "cudalink_ipc_Python>>TD"
-WIDTH = 512
-HEIGHT = 512
+WIDTH = 1920
+HEIGHT = 1080
 DTYPE = "uint8"  # "uint8" or "float32"
 NUM_SLOTS = 3
 TARGET_FPS = 60.0
