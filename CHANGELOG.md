@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runnable `examples/` directory.** 8 standalone, heavily-commented scripts
+  (`examples/01_fake_adapter_tour.py` through `examples/08_low_cpu_doorbell_consumer.py`,
+  plus shared `_common.py`) that each spawn their own demo producer process, so they run
+  end-to-end on a single machine without TouchDesigner. These are the runnable counterparts
+  of the embedded-code workflows in [docs/INTEGRATION_EXAMPLES.md](docs/INTEGRATION_EXAMPLES.md);
+  see [examples/README.md](examples/README.md) for the reading order.
 - **CUDA 13 runtime support in the cudart loader.**  `CUDARuntimeAPI._load_cuda_runtime()`
   now probes for `cudart64_13*.dll` alongside the existing CUDA 12.x candidates, with the
   Windows `winerror 126` ("module not found") hint message reordered so CUDA 13 is checked

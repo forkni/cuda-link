@@ -198,6 +198,8 @@ with Importer.open(ImportSpec(shm_name="my_texture_ipc")) as importer:
 importer.close()
 ```
 
+> ▶ Runnable version: [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py) — spawns its own demo producer, so no TouchDesigner is needed to try it.
+
 ### 3. Python → TouchDesigner (AI Output)
 
 Send AI-generated frames **back to TD** for display:
@@ -227,6 +229,8 @@ with Exporter.open(
 ```
 
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
+
+> ▶ Runnable version: [examples/07_python_to_td_exporter_and_benchmark.py](examples/07_python_to_td_exporter_and_benchmark.py) — includes a per-frame `export()` cost benchmark (p50/p95/p99).
 
 ## Architecture
 
@@ -286,6 +290,7 @@ For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 - **[TOX Build Guide](docs/TOX_BUILD_GUIDE.md)** - Step-by-step .tox assembly in TouchDesigner
 - **[Architecture](docs/ARCHITECTURE.md)** - Protocol spec, ring buffer design, GPU sync
 - **[Integration Examples](docs/INTEGRATION_EXAMPLES.md)** - TD→PyTorch, TD→OpenCV, multi-stream
+- **[Runnable Examples](examples/README.md)** - 8 standalone, heavily-commented scripts (`examples/`) — each spawns its own demo producer, so they run without TouchDesigner
 
 ## Testing
 
@@ -424,7 +429,7 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 
 **Cause**: In standalone Python processes (WDDM), `export_frame()` with EXPORT_SYNC=1 typically measures 24–357 µs p50 (512×512 → 4K float32 RGBA, RTX 4090 / PCIe 4.0). Values 2–5× higher than these baselines may indicate GPU driver overhead, context contention, or PCIe bandwidth sharing with other D2H workloads.
 
-**Solution**: Compare against the baseline numbers in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Contributors with a local clone may reproduce using `python benchmarks/bench_graphs.py` (standalone) or `python benchmarks/bench_sweep.py --quick` (multiprocess).
+**Solution**: Compare against the baseline numbers in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), which documents exact reproduction commands using the tracked `scripts/profiling/` tooling (e.g. `python scripts/profiling/profile_export.py --frames 2000 --export-profile`).
 
 ### "Version mismatch" or stale frames
 
