@@ -581,7 +581,13 @@ class TDSenderEngine:
                 self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
             return False  # skip this frame; next cook exports normally
 
-        _nvtx_push(_NVTX_SENDER_SLOT_NAMES[self._exporter.write_idx % self.num_slots], "green")
+        # Defense in depth: parexecute_callbacks.handle_numslots_change rejects Numslots > 10,
+        # but self.num_slots can also arrive via direct TDSenderEngine construction (e.g. a
+        # stale out-of-range value loaded from a .tox on first Activate, before any "change"
+        # event fires). The extra `% len(...)` keeps this a label lookup, never an IndexError,
+        # even if num_slots exceeds the fixed 10-entry NVTX name tuple.
+        _nvtx_slot = (self._exporter.write_idx % self.num_slots) % len(_NVTX_SENDER_SLOT_NAMES)
+        _nvtx_push(_NVTX_SENDER_SLOT_NAMES[_nvtx_slot], "green")
         try:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no

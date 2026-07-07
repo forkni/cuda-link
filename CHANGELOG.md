@@ -5,6 +5,134 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-07-06
+
+### Added
+
+- **Runnable `examples/` directory.** 8 standalone, heavily-commented scripts
+  (`examples/01_fake_adapter_tour.py` through `examples/08_low_cpu_doorbell_consumer.py`,
+  plus shared `_common.py`) that each spawn their own demo producer process, so they run
+  end-to-end on a single machine without TouchDesigner. These are the runnable counterparts
+  of the embedded-code workflows in [docs/INTEGRATION_EXAMPLES.md](docs/INTEGRATION_EXAMPLES.md);
+  see [examples/README.md](examples/README.md) for the reading order.
+- **CUDA 13 runtime support in the cudart loader.**  `CUDARuntimeAPI._load_cuda_runtime()`
+  now probes for `cudart64_13*.dll` alongside the existing CUDA 12.x candidates, with the
+  Windows `winerror 126` ("module not found") hint message reordered so CUDA 13 is checked
+  first — matching the actual probe order and avoiding a misleading hint on CUDA 13-only
+  systems.
+- **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
+  (compiled into the core `cuda-link` wheel on Windows; `ImportPolicy.wait_backend`:
+  `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
+  Replaces the Python spin/sleep poll with one native (C++/pybind11) call that
+  spins on `cudaEventQuery` then blocks on the R2 doorbell's Win32 event;
+  activating native forces the doorbell open even if `CUDALINK_DOORBELL` is
+  unset, since the native block phase has nothing faster to wait on
+  otherwise. Built via `scikit-build-core` + root `CMakeLists.txt` as part of
+  the single-wheel build (`pip install .` / `utils\build_wheel.cmd`), degrading
+  to pure-Python off Windows or without an MSVC toolchain — see
+  [PLAN-002](docs/plans/PLAN-002-native-waiter.md),
+  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md)'s consequences
+  amendment, and [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)
+  for the fold from an initial separate `cuda-link-native` sidecar package
+  into this single wheel. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
+  frames/arm, 30+60 fps): native's own re-check-after-wake latency
+  (`avg_spin_us`) is genuinely fast (~0.02–6.5 µs), but the accept gate
+  (p50<10µs, p95<50µs, measured as cross-process publish→detect latency via
+  `imp.last_latency`) **MISSes at both fps** — native (p50≈66–67µs,
+  p95≈139–140µs) is not measurably faster than plain doorbell here, likely
+  because the dominant cost is the Windows kernel's own
+  `WaitForSingleObject` wake/scheduling floor, which neither backend
+  controls. Recorded honestly per PLAN-002's own accept-gate framing; R5
+  still ships because it never regresses relative to doorbell-only and the
+  seam is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
+
+### CI / Test hardening
+
+- **Coverage gate**: `--cov` enforced in CI (`fail_under = 72`, branch-coverage-aware,
+  baseline 74.65% measured 2026-06-29), with XML report upload to Codecov and a
+  `coverage-main-*` artifact per Python version.
+- **Randomized test ordering** (`pytest-randomly`) to catch order-dependent test bugs;
+  verified order-independent across repeated randomized seeds.
+- **Test suite reorg**: `--import-mode=importlib`, consolidated shared fakes under
+  `tests/fakes/`, dropped `sys.path` hacks and from-conftest imports in favor of
+  `pythonpath` (`pyproject.toml`) and `strict-markers`.
+- **CI infra**: bumped `actions/setup-python`/`actions/upload-artifact` to their Node-24
+  releases (v5→v6); removed the Gemini CI workflows entirely; refreshed the
+  branch-protection `ALLOWED_DOCS` allowlist.
+
+### Fixed
+
+- **`bench_r1_wait.py` R5 accept-gate measured the wrong metric.** The
+  PASS/MISS check compared `get_frame()` total wall-clock time (spin + tensor
+  materialization + Python overhead) against PLAN-002's gate, which is
+  defined on publish→detect notification latency — a metric this script
+  never measures. Replaced the gate line with a detection-profile line
+  (`avg_spin_us`/pacing-block breakdown) and a pointer to
+  `bench_doorbell.py`'s new native arm as the authoritative venue.
+- **`bench_doorbell.py`'s poll/doorbell arms did not pin `wait_backend`**,
+  defaulting to `ImportPolicy`'s own `"auto"` — with the native extension
+  available, the "doorbell" arm would silently engage the native backend,
+  contaminating the R2 poll-vs-doorbell comparison (same bug class as the
+  `bench_r1_wait.py` fix above). Every arm now pins `wait_backend`
+  explicitly.
+- **`bench_r1_wait.py`'s per-arm frame budget was still insufficient after
+  its initial fix.** `OVERHEAD_FRAMES=100` (~1.67s at 60fps) let 4/5 arms
+  succeed but the 5th (cupy, last in sequence) still exhausted the shared
+  producer's budget before its turn — real per-arm overhead (subprocess
+  spawn + import + CUDA context init + SHM discovery) runs closer to 4–5s.
+  Bumped to `overhead_frames=400`.
+- **R5 native waiter: torn-frame race in the block phase's `write_idx`
+  pre-check.** `native_waiter.cpp`'s block phase pre-checked the SHM
+  `write_idx` before `cudaEventQuery` and returned success (`READY_LATE`,
+  bucketed as a success by `importer.py`) as soon as `write_idx` advanced
+  past the value captured at wait-start — treating "a newer frame landed"
+  as equivalent to "this slot's own event fired." Under the Python
+  `Exporter`'s async default (`export_sync=False`), `write_idx` can advance
+  several frames ahead of a still-in-flight D2D copy on *this* slot, so a
+  consumer could read a torn (still-copying) GPU buffer. Not reachable via
+  the TD Sender (blocking export since v1.10.1 guarantees the copy is done
+  before publish); reachable via the Python `Exporter`'s async default under
+  GPU load. `cudaEventQuery` is now the only valid "ready" exit from the
+  block phase — the doorbell wake (or, absent a doorbell, a bounded `Sleep`)
+  is purely a hint to re-check sooner, never a substitute. `READY_LATE`
+  stays in the status enum for ABI stability but is never emitted again.
+  Added `READY_POLL` alongside (block phase caught it with no doorbell
+  available, vs. `READY_DOORBELL` genuinely having one in play) — a related
+  telemetry-accuracy fix bundled in since it's the same code region. New
+  `tests/core/test_native_state_machine.py` drives the real C++ state machine
+  with injected Python fakes (via a new test-only `wait_slot_test()` pybind
+  entry point) to regression-test this, including the specific "`write_idx`
+  advances while this slot's event stays not-ready" scenario the bug needed.
+- **Prebuilt wheel distribution — end-user machines no longer need MSVC.** The
+  ADR-0012 fold (earlier in this release) turned `cuda-link` into a compiled
+  wheel but left an install-time gap: `install_td_library.py` silently
+  auto-built via `utils\build_wheel.cmd` whenever no matching wheel was
+  cached, and `CMakeLists.txt`'s `project(cuda_link LANGUAGES CXX)` forced
+  compiler detection even for the `BUILD_NATIVE_WAITER=OFF` fallback — both
+  defeating the "works everywhere" intent for StreamDiffusionTD artists'
+  machines, which almost never have Visual Studio installed. Fixed: CI
+  (`release.yml`, new `windows-latest` job) now builds and publishes both a
+  native `cp311-cp311-win_amd64` wheel and a compiler-free `py3-none-any`
+  fallback as GitHub Release assets; `install_td_library.py` resolves a wheel
+  per install target (probing that target's own Python version, not the
+  installer's) and only falls back to a local build behind an explicit
+  `--build` flag; `CMakeLists.txt` now defers compiler detection to inside
+  the `BUILD_NATIVE_WAITER` branch (`project(... LANGUAGES NONE)` +
+  `enable_language(CXX)`), so the fallback build is genuinely compiler-free.
+  Mode 5 (installing into TouchDesigner's own bundled Python) is now marked
+  deprecated in the installer's menu, steering to mode 2 (venv) or mode 4
+  (system Python) instead. See
+  [ADR-0013](docs/adr/0013-prebuilt-wheel-distribution.md). This also
+  corrects the `e57d1fc` fold commit's message, which implied no further
+  MSVC-toolchain work was needed for end users — that assumption was wrong,
+  and this entry is the correction of record (the pushed commit itself is
+  not being rewritten).
+
+### Not included in this release
+
+Spout bridge and C++ custom TOP are **not** part of 1.12.0 — they continue development on
+`feat/spout-bridge` and `feat/cpp-custom-top` respectively.
+
 ## [1.11.0] - 2026-06-12
 
 ### Added

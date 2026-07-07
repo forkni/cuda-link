@@ -1,6 +1,7 @@
 # ADR-0006: Stay pure-Python — do not rewrite in Rust
 
-**Status**: Accepted
+**Status**: Superseded by [ADR-0012](0012-native-extension-in-core-wheel.md) (packaging
+conclusion only — the rejection of a full Rust/native rewrite below still holds)
 **Date**: 2026-06-07
 **Applies to**: the whole library — `src/cuda_link/`, `td_exporter/`,
 packaging (`pyproject.toml`), and the deployment model documented in
@@ -87,6 +88,22 @@ revisit-if, not a current direction.
   static-typing hardening rather than a rewrite.
 - Future "should we use Rust?" explorations can start from this record and the
   benchmarks rather than re-deriving the conclusion.
+- **PLAN-002 (R5, 2026-07-04) exercised this ADR's escape hatch** — "narrow
+  optional extension for a consumer-side hot path" — with a C++/pybind11
+  native notification-wait backend, initially shipped as a separate sidecar
+  package (`cuda-link-native`, cloning the `spout/` sidecar pattern) that
+  defaulted **on** in `install_td_library.py`. **[ADR-0012](0012-native-extension-in-core-wheel.md)
+  (2026-07-07) folded that sidecar into the core wheel** — see that ADR for why
+  (performance parity closed the gap that justified a separate package, and
+  the roadmap now calls for more native code with one build to maintain, not
+  more sidecars). The practical result is the same shape this note originally
+  flagged: most Windows users end up with the accelerated path without
+  deliberately choosing it, now simply because it is compiled into the one
+  wheel they already install rather than a second opt-out-able package.
+  See [PLAN-002](../plans/PLAN-002-native-waiter.md) for the full design and
+  measured results (the 10µs/50µs accept gate did not pass on the measured
+  hardware; the escape hatch was still worth taking because native never
+  regresses relative to the existing doorbell path).
 
 ## Reopen condition
 

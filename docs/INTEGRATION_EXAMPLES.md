@@ -8,9 +8,15 @@ Complete workflows for common CUDA IPC use cases.
 > call `Exporter.open(FrameSpec(...))` and `exporter.export(GpuFrame(...))`.
 > The TouchDesigner COMP facade is `CUDAIPCExtension` (Sender or Receiver mode).
 
+> **▶ Runnable versions:** every workflow below has a standalone, heavily-commented script in
+> [`examples/`](../examples/README.md) that spawns its own demo producer — no TouchDesigner
+> needed to run them. Each example heading links to its script.
+
 ---
 
 ## Example 1: TouchDesigner → PyTorch AI Pipeline (Zero-Copy)
+
+> ▶ Runnable: [examples/03_td_to_pytorch_pipeline.py](../examples/03_td_to_pytorch_pipeline.py)
 
 ### Use Case
 Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner video feed.
@@ -91,6 +97,8 @@ with Importer.open(ImportSpec(
 
 ## Example 2: TouchDesigner → OpenCV Processing (Numpy)
 
+> ▶ Runnable: [examples/04_td_to_opencv_numpy.py](../examples/04_td_to_opencv_numpy.py)
+
 ### Use Case
 Traditional computer vision (edge detection, feature tracking, etc.) on TouchDesigner feed.
 
@@ -144,6 +152,8 @@ cv2.destroyAllWindows()
 ---
 
 ## Example 3: Multiple Texture Streams (Main + ControlNet)
+
+> ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part a`
 
 ### Use Case
 AI pipeline with two inputs: main image + control signal (depth map, edges, etc.).
@@ -222,6 +232,8 @@ finally:
 
 ## Example 4: Dynamic Resolution Handling
 
+> ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part b`
+
 ### Use Case
 Source TOP resolution changes at runtime (user resizes window, switches camera, etc.).
 
@@ -266,6 +278,8 @@ steady-state resumes at `NEW_FRAME` with the new shape automatically.
 ---
 
 ## Example 5: Graceful Shutdown Handling
+
+> ▶ Runnable: [examples/06_graceful_shutdown_and_reconnect.py](../examples/06_graceful_shutdown_and_reconnect.py)
 
 ### Use Case
 Cleanly shut down Python process when TouchDesigner exits.
@@ -323,6 +337,8 @@ print("Clean shutdown complete")
 
 ## Example 6: Benchmarking IPC Performance
 
+> ▶ Runnable: [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py) (producer-side percentiles)
+
 ### Use Case
 Measure IPC overhead for your specific hardware.
 
@@ -379,6 +395,8 @@ Dominated by GPU-to-CPU D2H transfer. `get_frame_numpy()` p50 ~5000 µs at 1080p
 ---
 
 ## Example 7: Python → TouchDesigner (AI Output Display)
+
+> ▶ Runnable: [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py)
 
 ### Use Case
 
@@ -443,7 +461,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.11.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.12.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -482,6 +500,8 @@ Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENC
 ---
 
 ## Example 8: Low-CPU Doorbell Consumer (R2)
+
+> ▶ Runnable: [examples/08_low_cpu_doorbell_consumer.py](../examples/08_low_cpu_doorbell_consumer.py)
 
 ### Use Case
 
@@ -524,7 +544,7 @@ with Importer.open(ImportSpec(
             # Block until the producer fires SetEvent — replaces poll-sleep.
             # Returns immediately if a new frame arrived between get_frame() and this call
             # (lost-wakeup guard: re-checks write_idx before blocking).
-            importer.wait_for_doorbell(timeout_secs=2.0)
+            importer.wait_for_doorbell(2000.0)  # timeout in MILLISECONDS
             continue
 
         if result.outcome is ImportOutcome.RECONNECTING:
@@ -649,5 +669,5 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 ---
 
-**Last Updated**: 2026-06-12
-**Version**: 1.11.0
+**Last Updated**: 2026-07-06
+**Version**: 1.12.0

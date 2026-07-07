@@ -210,6 +210,14 @@ def main() -> None:
                 frame_count += 1
                 no_frame_count = 0
 
+                if frame_count == 1:
+                    # Printed on the first frame (not after open()) because with
+                    # reconnect enabled the connection — and hence the resolved
+                    # wait backend — may not exist until get_frame*() succeeds.
+                    # getattr: the installed cuda-link may predate wait_backend_name.
+                    wb = getattr(importer, "wait_backend_name", "unknown (cuda-link < 1.12.1)")
+                    print(f"[receiver] Wait backend: {wb}", flush=True)
+
                 get_frame_total_s += gf_dt
                 if gf_dt < get_frame_min_s:
                     get_frame_min_s = gf_dt
@@ -294,7 +302,7 @@ def main() -> None:
             min_us = get_frame_min_s * 1e6
             max_us = get_frame_max_s * 1e6
             print(
-                f"[receiver] Perf: mode={effective_mode}  "
+                f"[receiver] Perf: mode={effective_mode}  wait={getattr(importer, 'wait_backend_name', 'unknown')}  "
                 f"get_frame avg={avg_us:.1f} µs  min={min_us:.1f} µs  max={max_us:.1f} µs  "
                 f"(n={frame_count})",
                 flush=True,

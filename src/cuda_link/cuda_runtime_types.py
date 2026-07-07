@@ -156,6 +156,46 @@ class CUDAError:
 
 
 # ---------------------------------------------------------------------------
+# Library-specific exception hierarchy
+# ---------------------------------------------------------------------------
+#
+# Previously every failure here raised a bare builtin (RuntimeError / ValueError /
+# TimeoutError), so callers could not `except CudaLinkError` without also catching
+# unrelated bugs that happen to raise the same builtin. Each subclass below ALSO
+# inherits the builtin it replaces, so this is purely additive: every existing
+# `except RuntimeError` / `except ValueError` / `except TimeoutError` call site in
+# this codebase keeps catching these unchanged, while new code can narrow to
+# `except CudaLinkError` (or a specific subclass) instead.
+
+
+class CudaLinkError(RuntimeError):
+    """Base class for all cuda-link library-specific exceptions."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code  # raw CUDA error code, when available — see CUDAError.get_name()
+
+
+class CudaIpcError(CudaLinkError):
+    """A CUDA driver/runtime call (alloc, IPC handle, event, memcpy, ...) failed."""
+
+
+class ProtocolError(CudaLinkError, ValueError):
+    """The SHM wire protocol was violated (bad magic, version, or field value).
+
+    Also inherits ValueError so existing `except ValueError` sites keep working.
+    """
+
+
+class ProducerTimeoutError(CudaLinkError, TimeoutError):
+    """Timed out waiting for the producer to signal a slot/doorbell.
+
+    Also inherits TimeoutError so existing `except TimeoutError` sites
+    (e.g. per-frame timeout handling in importer.py) keep working unchanged.
+    """
+
+
+# ---------------------------------------------------------------------------
 # CUDA runtime enum constants — named replacements for magic integers
 # ---------------------------------------------------------------------------
 

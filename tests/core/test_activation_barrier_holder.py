@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import FakeShmAdapter
+from fakes import FakeShmAdapter
 
 from cuda_link.activation_barrier import HolderBarrier, HolderShmPort, RealShmAdapter
 

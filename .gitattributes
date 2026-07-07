@@ -13,6 +13,10 @@
 # CGW config file: LF required so _config.sh quote-stripping regex works on Windows
 .cgw.conf text eol=lf
 
+# Windows batch scripts must use CRLF — cmd.exe silently no-ops with LF line endings
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # ============================================================================
 # GENERAL PATTERNS (APPLY FIRST)
 # Use "diff3" strategy for better conflict resolution

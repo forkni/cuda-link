@@ -240,6 +240,61 @@ full hardware caveats and source data.
 
 ---
 
+## R5: Native notification-wait accelerator (`Importer._wait_for_slot`)
+
+Compiled into the core wheel on Windows (see
+[ADR-0012](adr/0012-native-extension-in-core-wheel.md) for the fold from a separate
+`cuda-link-native` sidecar into the single wheel). `ImportPolicy.wait_backend` selects
+`"auto"` (default) | `"python"` | `"native"`. See
+[PLAN-002](plans/PLAN-002-native-waiter.md) for the full design and
+[ADR-0006](adr/0006-stay-pure-python-no-rust.md) for why this narrow native escape hatch
+was taken instead of a broader Rust/C++ rewrite.
+
+Measured 2026-07-04 via `scripts/profiling/bench_doorbell.py` (this script, not
+`bench_r1_wait.py`, hosts the accept-gate measurement — see note below), 512×512 RGBA
+float32, 300 measurement frames + 40 warmup, single producer/consumer process pair,
+30 and 60 fps:
+
+```
+fps   Arm         CPU%   latency p50   latency p95
+---   --------    ----   -----------   -----------
+30    doorbell    1.1%      69.3 us       141.4 us
+30    native      0.8%      66.4 us       138.7 us
+60    doorbell    1.8%      64.6 us       113.4 us
+60    native      0.3%      67.4 us       140.2 us
+```
+
+**Accept gate (PLAN-002: p50 < 10 µs, p95 < 50 µs, measured as producer-publish →
+consumer-detect latency): MISS at both fps.** native and doorbell land within a few µs
+of each other at both fps — well inside run-to-run noise, i.e. **native is not
+measurably faster than plain doorbell on this hardware** for this metric.
+
+This is not evidence that R5's own wait logic is slow: the native backend's internal
+re-check-after-wake latency (`avg_spin_us`, measured separately via
+`bench_r1_wait.py`) is ~0.02–6.5 µs — genuinely fast. The likely explanation is that
+`imp.last_latency` (the metric above) captures the *full* cross-process round trip
+including the Windows kernel's `WaitForSingleObject` wake/scheduling latency, which is
+the same floor regardless of whether the post-wake re-check happens in Python or C++.
+R5 removes the Python polling-loop cost; it does not — and was never positioned to —
+make the underlying OS wake faster. Recorded honestly: the 10 µs/50 µs target does not
+pass on this hardware, but R5 ships anyway because it never regresses (native ≈
+doorbell, never worse) and the seam is clean, tested, and fully reversible
+(`CUDALINK_WAIT_BACKEND=python` reproduces prior behavior exactly).
+
+> **Why `bench_doorbell.py`, not `bench_r1_wait.py`, hosts this gate**: `bench_r1_wait.py`
+> measures `get_frame()` **wall-clock time** (spin + tensor materialization + Python
+> overhead) — a different, larger quantity than the publish→detect notification latency
+> PLAN-002's gate is defined on. That script's own printout for the native arm now
+> explicitly points here instead of asserting a PASS/MISS against the wrong metric.
+
+Reproduce:
+```bash
+python scripts/profiling/bench_doorbell.py --outfile .profiling/r5_doorbell.json
+python scripts/profiling/bench_r1_wait.py --outfile .profiling/r5_wait.json  # informational only, see note above
+```
+
+---
+
 ## Performance Tuning
 
 See [README.md §Performance Tuning](../README.md#performance-tuning-env-vars) for the

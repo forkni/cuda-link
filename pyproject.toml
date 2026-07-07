@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link"
-version = "1.11.0"
+version = "1.12.0"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,6 +39,8 @@ all = ["cuda-link[torch,numpy,cupy,nvml]"]
 dev = [
     "cuda-link[all]",
     "pytest>=7.0",
+    "pytest-randomly>=3.15",
+    "pytest-cov>=5.0",
     "ruff",
     "pyrefly",
     "snoop>=0.4",
@@ -53,21 +55,26 @@ Documentation = "https://github.com/forkni/cuda-link/tree/main/docs"
 Repository = "https://github.com/forkni/cuda-link"
 Issues = "https://github.com/forkni/cuda-link/issues"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.scikit-build]
+wheel.packages = ["src/cuda_link"]
+# _native_waiter (src/cuda_link/_cpp/native_waiter.cpp, see root CMakeLists.txt)
+# is Windows-only and needs no CUDA Toolkit/SDK at build time — cudaEventQuery
+# is handed in as a function pointer the caller already resolved. On other
+# platforms CMakeLists.txt returns early and this produces a pure-Python wheel;
+# the native backend then raises a clear RuntimeError only if actually used.
+cmake.version = ">=3.24"
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
+pythonpath = [".", "src", "td_exporter", "tests"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+addopts = "--strict-markers --strict-config --import-mode=importlib --randomly-dont-reset-seed"
 markers = [
     "requires_cuda: marks tests as requiring CUDA GPU (deselect with '-m \"not requires_cuda\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_native: test requires a real native _native_waiter build + GPU (deselect with -m 'not requires_native')",
 ]
 
 [tool.ruff]
@@ -86,7 +93,7 @@ ignore = ["E501"]  # Line length handled by formatter
 "src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, etc.)
 "src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
-"verification/*" = ["F821", "SIM105", "SIM210"]  # TD textport scripts: op/baseCOMP/scriptTOP etc. are TD built-in globals; probe patterns intentionally use try/except/pass
+"examples/*" = ["N999"]  # Numbered example scripts (01_..., 02_...) are run as files, never imported as modules
 
 [tool.ruff.format]
 quote-style = "double"
@@ -99,14 +106,24 @@ python-version = "3.11.0"
 # type checks against win32 so ctypes.windll / WINFUNCTYPE and other
 # platform-gated code resolve on any developer or CI host.
 python-platform = "win32"
+# python-interpreter-path is intentionally unset so pyrefly auto-queries
+# python3/python on PATH for site-package-path (numpy, etc.). python-version
+# and python-platform are pinned explicitly above, so the interpreter is only
+# consulted for site-packages — never for version or platform. This works on
+# CI (setup-python@v5 puts the right Python on PATH), local Windows dev envs,
+# and any other host without a machine-specific absolute path.
 # Optional GPU/telemetry deps are imported under try/except and bound to None
 # when absent. Treat them as Any so type-checking does not require a CUDA
 # toolchain in CI; the runtime None-guards remain authoritative.
 # td is TouchDesigner's built-in module (COMP, TOP, CUDAMemoryShape, ui …);
 # it only exists inside the TD interpreter, so treat all td.* imports as Any.
+# cuda_link._native_waiter is the compiled R5 pybind11 extension (built from
+# src/cuda_link/_cpp/native_waiter.cpp by root CMakeLists.txt) — imported only
+# inside _native_loader.load_native_backend() (try/except ImportError); pyrefly
+# has no stub for a compiled module, so treat it as Any.
 replace-imports-with-any = [
     "torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes",
-    "td", "td.*",
+    "td", "td.*", "cuda_link._native_waiter",
 ]
 # Add td_exporter/ to the import search path so flat-namespace sibling imports
 # (e.g. `from CUDAIPCWrapper import …`) resolve inside that tree.
@@ -138,11 +155,20 @@ project-excludes = [
 # ---- src/cuda_link/ ----------------------------------------------------------
 
 # Consumer engine: optional libs bound to None (missing-attribute), ctypes
-# c_void_p<->int pointer duality (bad-argument-type), and SharedMemory buffers
-# that are Optional until attached (unsupported-operation).
+# c_void_p<->int pointer duality (bad-argument-type), SharedMemory buffers
+# that are Optional until attached (unsupported-operation), and R5's
+# int(conn.doorbell_handle) — the field is typed `object` (matches shm_handle's
+# pattern) but is always a plain int at runtime (ctypes restype=c_void_p
+# auto-converts); int()'s overload set doesn't statically accept `object`
+# (no-matching-overload), same shape as TDReceiver.py's frombuffer suppression.
+# bad-assignment: Importer.open()/from_connection() default `cuda` to
+# CTypesCUDAAdapter, which satisfies CudaPort/ImporterCudaPort only via
+# __getattr__ delegation (see _cuda_adapters.py) — a static checker cannot
+# verify structural Protocol conformance through a dynamic proxy, same root
+# cause already suppressed below for exporter.py.
 [[tool.pyrefly.sub-config]]
 matches = "src/cuda_link/importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry: pynvml bound to None when nvidia-ml-py is absent.
 [[tool.pyrefly.sub-config]]
@@ -183,7 +209,7 @@ errors = {bad-argument-type = false}
 # Consumer engine mirror (same idioms as src/cuda_link/importer.py).
 [[tool.pyrefly.sub-config]]
 matches = "td_exporter/Importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry mirror (same as src/cuda_link/nvml_observer.py).
 [[tool.pyrefly.sub-config]]
@@ -209,6 +235,46 @@ errors = {invalid-inheritance = false}
 [[tool.pyrefly.sub-config]]
 matches = "td_exporter/CUDAGraphs.py"
 errors = {bad-argument-type = false}
+
+[tool.coverage.run]
+source = ["cuda_link", "td_exporter"]
+branch = true
+# td_exporter/*.py mirrors below are auto-generated byte-identical/rewritten copies
+# of their src/cuda_link/*.py twin (scripts/sync_td_wrapper.py; parity enforced by
+# test_wrapper_sync.py) — same lines, exercised only under the canonical import
+# path. Measuring them again here would double-count already-tested logic as 0%
+# and mask the real gap: the TD-only integration layer (TDSender/TDReceiver/etc.)
+# that has no canonical counterpart.
+omit = [
+    "td_exporter/Env.py",
+    "td_exporter/FrameProfile.py",
+    "td_exporter/CUDAIPCWrapper.py",
+    "td_exporter/CUDARuntimeTypes.py",
+    "td_exporter/CUDAGraphs.py",
+    "td_exporter/NVMLObserver.py",
+    "td_exporter/SHMProtocol.py",
+    "td_exporter/ActivationBarrier.py",
+    "td_exporter/Doorbell.py",
+    "td_exporter/NVTXShim.py",
+    "td_exporter/ExporterPort.py",
+    "td_exporter/ImporterPort.py",
+    "td_exporter/CUDAAdapters.py",
+    "td_exporter/Exporter.py",
+    "td_exporter/Importer.py",
+]
+
+[tool.coverage.report]
+# Soft regression gate: 58.73% measured 2026-07-06 (746 tests, -m "not requires_cuda",
+# branch=true), now that `source` includes td_exporter/ alongside cuda_link (see T1 in
+# the 2026-07-06 PR review). The prior 72% gate measured cuda_link/ only; auto-generated
+# td_exporter/*.py mirrors are omitted above to avoid double-counting already-tested
+# logic, but genuinely TD-only files (TDReceiver.py 44%, TDSender.py 48%, and several
+# untested example/glue scripts) are real, previously-invisible gaps — closing them is
+# tracked separately as T2 (TD integration-layer characterization tests).
+# fail_under = floor(58.73) - 3 = 55. Raise incrementally as coverage grows (T2 work);
+# never lower without a documented reason.
+fail_under = 55
+show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------
 

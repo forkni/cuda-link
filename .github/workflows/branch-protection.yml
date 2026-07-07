@@ -72,18 +72,21 @@ jobs:
         run: |
           echo "Checking docs/ directory..."
 
-          # Allowed public documentation files
-          ALLOWED_DOCS="ARCHITECTURE\.md|AUTOMATED_GIT_WORKFLOW\.md|BASH_STYLE_GUIDE\.md|BATCH_STYLE_GUIDE\.md|IMPLEMENTATION_SUMMARY\.md|INTEGRATION_EXAMPLES\.md|PERFORMANCE_OPTIMIZATIONS\.md|PYTHON_DEBUGGING_PROTOCOL\.md|PYTHON_STYLE_GUIDE\.md|PYTHON_STYLE_GUIDE_QUICK\.md|SHELL_STYLE_GUIDE\.md|TOX_BUILD_GUIDE\.md"
+          # Allowed public documentation files (top-level docs/ only).
+          # adr/ and plans/ subdirectories are always permitted — excluded below.
+          ALLOWED_DOCS="ARCHITECTURE\.md|AUTOMATED_GIT_WORKFLOW\.md|BASH_STYLE_GUIDE\.md|BATCH_STYLE_GUIDE\.md|BENCHMARKS\.md|IMPLEMENTATION_SUMMARY\.md|INTEGRATION_EXAMPLES\.md|PERFORMANCE_OPTIMIZATIONS\.md|PROFILING\.md|PYTHON_DEBUGGING_PROTOCOL\.md|PYTHON_STYLE_GUIDE\.md|PYTHON_STYLE_GUIDE_QUICK\.md|SHELL_STYLE_GUIDE\.md|TOX_BUILD_GUIDE\.md"
 
           # Find unauthorized docs (only check on main branch)
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            UNAUTHORIZED=$(git ls-files docs/ | grep -v -E "docs/($ALLOWED_DOCS)$" || true)
+            UNAUTHORIZED=$(git ls-files docs/ \
+              | grep -v -E "docs/($ALLOWED_DOCS)$" \
+              | grep -v -E "^docs/(adr|plans)/" || true)
 
             if [ -n "$UNAUTHORIZED" ]; then
               echo "❌ ERROR: Unauthorized documentation files found on main branch:"
               echo "$UNAUTHORIZED"
               echo ""
-              echo "Only these 12 docs are allowed in main branch:"
+              echo "Only these 15 top-level docs are allowed in main branch (plus adr/ and plans/ subdirs):"
               echo "$ALLOWED_DOCS" | tr '|' '\n' | sed 's/\\//g'
               exit 1
             fi
@@ -113,12 +116,12 @@ jobs:
 
       - name: Run tests (skip CUDA-dependent tests)
         run: |
-          pytest tests/ -v --tb=short --maxfail=5 -m "not requires_cuda"
+          pytest tests/ -v --tb=short --maxfail=5 -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing
         continue-on-error: false
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: test-results/

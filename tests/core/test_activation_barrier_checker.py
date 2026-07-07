@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import FakeShmAdapter
+from fakes import FakeShmAdapter
 
 from cuda_link.activation_barrier import BarrierShmPort, CheckerBarrier, CheckerOutcome
 

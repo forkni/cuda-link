@@ -7,6 +7,7 @@ on:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'CMakeLists.txt'
       - '.github/workflows/tests.yml'
       - 'td_exporter/**'
       - 'scripts/sync_td_wrapper.py'
@@ -15,6 +16,7 @@ on:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'CMakeLists.txt'
       - '.github/workflows/tests.yml'
       - 'td_exporter/**'
       - 'scripts/sync_td_wrapper.py'
@@ -34,24 +36,49 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install test dependencies
-        # numpy + typing_extensions are required by the no-GPU suite. torch is a
-        # best-effort CPU install: the few tests that need it use
-        # pytest.importorskip, so the suite stays green on any Python version
-        # without a CPU wheel. cupy is omitted (CUDA-only; no test marked
+        # pytest-randomly enables the randomized test ordering configured in
+        # pyproject.toml addopts (--randomly-dont-reset-seed). pytest-cov matches
+        # the dev extra for parity. numpy + typing_extensions are required by the
+        # no-GPU suite. torch is a best-effort CPU install: the few tests that
+        # need it use pytest.importorskip, so the suite stays green on any Python
+        # version without a CPU wheel. cupy is omitted (CUDA-only; no test marked
         # "not requires_cuda" needs it).
         run: |
           python -m pip install --upgrade pip
-          pip install pytest typing_extensions numpy
+          pip install pytest pytest-randomly pytest-cov typing_extensions numpy
           pip install torch --index-url https://download.pytorch.org/whl/cpu \
             || echo "::notice::torch CPU wheel unavailable for Python ${{ matrix.python-version }} — torch-dependent tests will skip"
 
       - name: Run no-GPU test suite
         # pytest reads pythonpath = ["src", "tests"] from pyproject.toml, so the
         # package and test helpers import without an editable install.
-        run: pytest tests/ -m "not requires_cuda" -q
+        # requires_native tests are also deselected: this runner is ubuntu-latest
+        # and never builds the Windows-only _native_waiter extension, so they'd
+        # only skip anyway -- the marker keeps that explicit rather than implicit.
+        # --cov enforces the fail_under gate in [tool.coverage.report] (pyproject.toml).
+        # --cov-report=xml produces coverage.xml for Codecov upload below.
+        run: pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          flags: main
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # fail_ci_if_error=false: keep CI green while the repo is being activated on
+          # codecov.io (the upload is a no-op until CODECOV_TOKEN secret is set).
+          fail_ci_if_error: false
+
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-main-${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 14

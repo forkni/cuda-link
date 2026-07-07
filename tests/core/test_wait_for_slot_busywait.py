@@ -40,8 +40,13 @@ def test_spin_resolves_immediately_no_sleep() -> None:
     imp._conn.cuda.query_event.return_value = True
 
     with patch("cuda_link.importer.time") as mock_time:
-        # Calls: wait_start(1), while-check(2), spin_us-calc(3)
-        mock_time.perf_counter.side_effect = [0.0, 0.00001, 0.00001]
+        # query_event resolves True on the first poll, so only a couple of
+        # perf_counter() calls are actually consumed — padded well past that
+        # (pattern from test_falls_through_to_sleep_after_spin_budget below)
+        # so an added perf_counter() call in the SUT doesn't hard-fail with
+        # StopIteration even though the exact count here is correct today.
+        times = iter([0.0] + [0.00001] * 20)
+        mock_time.perf_counter.side_effect = lambda: next(times)
         result = imp._wait_for_slot(slot=0)
 
     mock_time.sleep.assert_not_called()
@@ -56,9 +61,11 @@ def test_spin_resolves_on_second_poll_no_sleep() -> None:
     imp._conn.cuda.query_event.side_effect = [False, True]
 
     with patch("cuda_link.importer.time") as mock_time:
-        # Calls: wait_start(1), while-check(2), timeout-check(3),
-        #        while-check(4), spin_us-calc(5)
-        mock_time.perf_counter.side_effect = [0.0, 0.00005, 0.00005, 0.00010, 0.00010]
+        # query_event returns False once then True — padded well past the
+        # handful of perf_counter() calls that path actually needs so an
+        # added call in the SUT doesn't hard-fail with StopIteration.
+        times = iter([0.0] + [0.00005] * 10 + [0.00010] * 20)
+        mock_time.perf_counter.side_effect = lambda: next(times)
         imp._wait_for_slot(slot=0)
 
     mock_time.sleep.assert_not_called()

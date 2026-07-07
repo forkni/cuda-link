@@ -5,10 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
+*.pyd
 
 # Distribution / packaging
 .Python
 build/
+_skbuild/
 develop-eggs/
 dist/
 downloads/
@@ -147,6 +149,7 @@ TOXES/CUDAIPCLink_v1.9.0.tox
 TOXES/CUDAIPCLink_v1.10.0.tox
 TOXES/CUDAIPCLink_v1.10.1.tox
 TOXES/CUDAIPCLink_v1.10.2.tox
+TOXES/CUDAIPCLink_v1.11.0.tox
 
 # Local-only tooling component (never distributed)
 TOXES/Semantic_Version_Control_v0.4.2.tox
@@ -177,9 +180,6 @@ nul
 .profiling/current.json
 # All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
 .profiling/
-
-# Verification probe outputs (timestamped JSON from probe_cook_context runs)
-verification/results/probe_cook_context_*.json
 
 # Test artifacts
 test_timeout_manual.py
@@ -218,6 +218,12 @@ Sender_benchmark.*.toe
 Test_TD_Receiver1.toe
 Test_TD_Receiver1.*.toe
 
+# C++ Custom TOP test .toe files (local-only; tracked only on feat/cpp-custom-top)
+CUDA_Link_CPP_Test.toe
+CUDA_Link_CPP_Test.*.toe
+CUDA_Link_CPP_Receiver_Test.toe
+CUDA_Link_CPP_Receiver_Test.*.toe
+
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.
 # To include a specific numbered snapshot at release time: git add -f CUDA_Link_Example.N.toe
@@ -238,18 +244,7 @@ init_heatmap.png
 References/
 
 # Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
-# Use wildcard (not trailing slash) so nested exceptions can re-include specific files.
-benchmarks/**
-!benchmarks/results/
-benchmarks/results/**
-!benchmarks/results/td/
-benchmarks/results/td/**
-!benchmarks/results/td/cell_C_td/
-!benchmarks/results/td/cell_D_td/
-benchmarks/results/td/cell_C_td/**
-benchmarks/results/td/cell_D_td/**
-!benchmarks/results/td/cell_C_td/textport.txt
-!benchmarks/results/td/cell_D_td/textport.txt
+benchmarks/
 
 # Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
 CONTEXT.md
@@ -282,5 +277,15 @@ scripts/git/
 cgw.conf.example
 
 # Local profiling artifacts and probe scripts
-scripts/probes/59.5
 scripts/profiling/benchmarks/
+
+# Local-only dev tooling (probes, shell lint helper). scripts/profiling/ and
+# scripts/probe/driver_api_ipc_probe.py stay tracked — referenced by
+# docs/BENCHMARKS.md, docs/PROFILING.md, docs/ARCHITECTURE.md, ADR-0004, and
+# a CI test (tests/cuda/test_probe_error_decode.py).
+scripts/probes/
+scripts/probe/ipc_event_in_graph_probe.py
+scripts/lint/
+
+# Local-only manual verification probes (not part of the pytest suite)
+verification/

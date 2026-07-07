@@ -13,7 +13,7 @@ from __future__ import annotations
 import struct
 
 import pytest
-from conftest import FakeTDHost, FakeTOPHandle
+from fakes import FakeTDHost, FakeTOPHandle
 
 from cuda_link.shm_protocol import (
     PROTOCOL_MAGIC,

@@ -425,13 +425,8 @@ def test_real_tdhost_make_cuda_shape_uint8(monkeypatch: Any) -> None:
 
 def test_fake_tdhost_make_cuda_shape_records_call() -> None:
     """FakeTDHost.make_cuda_shape returns FakeCUDAMemoryShape and records the call."""
-    import sys
-    from pathlib import Path
-
     import numpy as np
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "td_exporter"))
-    from _td_fakes import FakeCUDAMemoryShape, FakeTDHost
+    from fakes import FakeCUDAMemoryShape, FakeTDHost
 
     host = FakeTDHost()
     shape = host.make_cuda_shape(320, 240, 3, np.uint8)
@@ -447,13 +442,8 @@ def test_fake_tdhost_make_cuda_shape_records_call() -> None:
 
 def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
     """Each make_cuda_shape call appends a distinct object to cuda_shapes."""
-    import sys
-    from pathlib import Path
-
     import numpy as np
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "td_exporter"))
-    from _td_fakes import FakeTDHost
+    from fakes import FakeTDHost
 
     host = FakeTDHost()
     s1 = host.make_cuda_shape(64, 64, 4, np.float32)

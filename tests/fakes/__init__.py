@@ -4,15 +4,95 @@ Test fixture factories for building fake IPCConnection objects and connected Imp
 Shared across test_importer.py, test_wait_for_slot_busywait.py, and
 test_cuda_ipc_importer.py — each of which builds a different Importer
 but uses the same IPCConnection scaffold (bytearray SHM + MagicMock cuda).
+
+Also re-exports shared test doubles:
+  - FakeTDHost, FakeTOPHandle, FakeCUDAMemoryRef, FakeCUDAMemoryShape (from td_exporter/_td_fakes.py)
+  - FakeShmAdapter  (in-process fake for BarrierShmPort / HolderShmPort)
+
+Import via ``from fakes import FakeShmAdapter, FakeTDHost, ...``
+(importlib-mode-safe — never ``from conftest import``).
 """
 
 from __future__ import annotations
 
+import time as _time
 from ctypes import c_void_p
+from dataclasses import dataclass as _dataclass
 from unittest.mock import MagicMock
+
+# Re-export TD fake doubles (available via pythonpath = ["td_exporter"] in pyproject.toml)
+from _td_fakes import FakeCUDAMemoryRef, FakeCUDAMemoryShape, FakeTDHost, FakeTOPHandle  # noqa: F401
 
 from cuda_link.importer import IPCConnection
 from cuda_link.shm_protocol import SHMLayout
+
+# ---------------------------------------------------------------------------
+# FakeShmAdapter — satisfies BarrierShmPort / HolderShmPort structurally
+# ---------------------------------------------------------------------------
+
+
+@_dataclass
+class FakeShmAdapter:
+    """In-process fake satisfying BarrierShmPort (structural).
+
+    Tests construct the scenario they want and pass it as `shm=` to
+    CheckerBarrier.  No real SharedMemory is touched.
+
+    Use `raise_on_*` fields to simulate I/O failures at specific callpoints.
+    `last_change_ns` defaults to None; `attach()` sets it to time.monotonic_ns()
+    on first call, simulating a freshly-written segment.  Pass an explicit
+    value to simulate a stale segment (e.g. ``last_change_ns=0``).
+    """
+
+    active_count: int = 0
+    last_change_ns: int | None = None
+    barrier_skips: int = 0
+    attached: bool = False
+    raise_on_attach: type[Exception] | None = None
+    raise_on_read: type[Exception] | None = None
+    raise_on_bump: type[Exception] | None = None
+
+    @property
+    def is_attached(self) -> bool:
+        return self.attached
+
+    def attach(self, *, create: bool) -> None:
+        if self.raise_on_attach is not None:
+            raise self.raise_on_attach("simulated")
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+
+    def read_state(self) -> tuple[int, int, int]:
+        if self.raise_on_read is not None:
+            raise self.raise_on_read("simulated")
+        return (self.active_count, self.last_change_ns or 0, self.barrier_skips)
+
+    def bump_skip(self) -> None:
+        if self.raise_on_bump is not None:
+            raise self.raise_on_bump("simulated")
+        self.barrier_skips += 1
+
+    def close(self) -> None:
+        self.attached = False
+
+    # --- HolderShmPort methods (satisfies HolderBarrier seam structurally) ---
+
+    def open_and_increment(self, pid: int) -> int:
+        self.attached = True
+        if self.last_change_ns is None:
+            self.last_change_ns = _time.monotonic_ns()
+        self.active_count += 1
+        return self.active_count
+
+    def decrement(self, pid: int) -> int:
+        self.active_count = max(0, self.active_count - 1)
+        return self.active_count
+
+
+# ---------------------------------------------------------------------------
+# IPCConnection / Importer factory helpers
+# ---------------------------------------------------------------------------
 
 
 def make_fake_ipc_connection(
@@ -136,8 +216,6 @@ def make_connected_importer(
     Returns:
         A connected ``Importer`` instance ready for ``get_frame*()`` calls.
     """
-    from unittest.mock import MagicMock
-
     import numpy as np
 
     from cuda_link._cuda_adapters import FakeCUDAAdapter
@@ -205,8 +283,6 @@ def make_bare_runtime_api(*, install_errcheck: bool = False, cudart: object | No
     Returns:
         A CUDARuntimeAPI instance whose __init__ was never called.
     """
-    from unittest.mock import MagicMock
-
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
     api = CUDARuntimeAPI.__new__(CUDARuntimeAPI)

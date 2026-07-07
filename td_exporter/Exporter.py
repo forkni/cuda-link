@@ -31,7 +31,6 @@ import contextlib
 import logging
 import threading
 import time
-import traceback
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
@@ -53,6 +52,7 @@ from CUDARuntimeTypes import (
     CUDAGraph_t,
     CUDAGraphExec_t,
     CUDAGraphNode_t,
+    CudaIpcError,
     CUDAStream_t,
 )
 from SHMProtocol import (
@@ -245,7 +245,7 @@ class Exporter:
     def _initialize(self) -> None:
         actual_device = self._cuda.get_device()
         if actual_device != self._spec.device:
-            raise RuntimeError(
+            raise CudaIpcError(
                 f"Device mismatch: requested device {self._spec.device} but CUDA context "
                 f"is bound to device {actual_device}. Ensure no other code calls "
                 "cudaSetDevice() with a different index before Exporter.open()."
@@ -296,19 +296,23 @@ class Exporter:
         # context) cannot open them (error 400).  We save the current context and restore
         # it after the alloc block so TD's interop machinery is unaffected.
         _ctx_token = self._cuda.set_device(self._spec.device)
-
-        for slot in range(self._spec.num_slots):
-            self.dev_ptrs[slot] = self._cuda.malloc(self.buffer_size)
-            logger.info(
-                "Slot %d: allocated %.1f KB at 0x%016x", slot, self.buffer_size / 1024, self.dev_ptrs[slot].value
-            )
-            self.ipc_handles[slot] = self._cuda.ipc_get_mem_handle(self.dev_ptrs[slot])
-            logger.debug("Slot %d: created IPC mem handle (64 bytes)", slot)
-            self.ipc_events[slot] = self._cuda.create_ipc_event()
-            self.ipc_event_handles[slot] = self._cuda.ipc_get_event_handle(self.ipc_events[slot])
-            logger.debug("Slot %d: created IPC event (64 bytes)", slot)
-
-        self._cuda.restore_context(_ctx_token)
+        try:
+            for slot in range(self._spec.num_slots):
+                self.dev_ptrs[slot] = self._cuda.malloc(self.buffer_size)
+                logger.info(
+                    "Slot %d: allocated %.1f KB at 0x%016x", slot, self.buffer_size / 1024, self.dev_ptrs[slot].value
+                )
+                self.ipc_handles[slot] = self._cuda.ipc_get_mem_handle(self.dev_ptrs[slot])
+                logger.debug("Slot %d: created IPC mem handle (64 bytes)", slot)
+                self.ipc_events[slot] = self._cuda.create_ipc_event()
+                self.ipc_event_handles[slot] = self._cuda.ipc_get_event_handle(self.ipc_events[slot])
+                logger.debug("Slot %d: created IPC event (64 bytes)", slot)
+        finally:
+            # Bonus fix alongside #4 (cuda_ipc_wrapper.py primary-context refcount leak):
+            # without this finally, a raise anywhere in the alloc loop above (e.g. malloc
+            # OOM on a later slot) skipped restore_context() entirely, leaking the
+            # set_device() retain and leaving TD's interop context un-restored.
+            self._cuda.restore_context(_ctx_token)
         logger.info("Created %d IPC buffer slots with GPU-side sync", self._spec.num_slots)
 
         shm_size = self._layout.total_size
@@ -745,9 +749,8 @@ class Exporter:
 
             return FrameOutcome.PUBLISHED
 
-        except (OSError, RuntimeError) as e:
-            logger.error("Export failed: %s", e)
-            traceback.print_exc()
+        except (OSError, RuntimeError):
+            logger.exception("Export failed")
             return FrameOutcome.FAILED
         finally:
             _nvtx.pop_range()
