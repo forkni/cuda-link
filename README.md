@@ -90,8 +90,8 @@ Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-targe
 (one-time):
 
 ```bat
-utils\build_wheel.cmd              REM build dist\cuda_link-1.12.0-py3-none-any.whl
-install_td_library.cmd             REM interactive menu — choose one of 5 install modes
+install_td_library.cmd             REM interactive menu — auto-downloads the matching
+                                    REM prebuilt wheel; no build step needed (see ADR-0013)
 ```
 
 **Install modes** (`python scripts/install_td_library.py --help`):
@@ -125,17 +125,27 @@ for full instructions.
 
 #### Install the package
 
+cuda-link ships **prebuilt wheels** — no compiler needed on your machine (see
+[ADR-0013](docs/adr/0013-prebuilt-wheel-distribution.md)). Two supported targets: a
+system Python 3.11 install, or a dedicated venv (e.g. StreamDiffusionTD's pinned
+3.11.9). Never pip-install directly into TouchDesigner's own bundled Python.
+
 ```bash
-# Option A: Build wheel and install (recommended — portable, no source needed):
+# Option A: Guided installer (recommended) — auto-downloads the wheel matching
+# your target interpreter's version from GitHub Releases:
 cd C:\path\to\CUDA_IPC
-utils\build_wheel.cmd                       # Builds dist\cuda_link-1.12.0-py3-none-any.whl
+python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
+# or: python scripts\install_td_library.py   (interactive menu — pick your target)
 
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[all]"     # All output modes
+# Option B: Manual — download a wheel from
+# https://github.com/forkni/cuda-link/releases (cp311-cp311-win_amd64 for Python
+# 3.11, py3-none-any for anything else), then:
+pip install "cuda_link-1.12.0-*.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.12.0-*.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.12.0-*.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.12.0-*.whl[all]"     # All output modes
 
-# Option B: Editable install from source (for development — changes apply immediately):
+# Option C: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
 pip install -e ".[all]"
 
@@ -445,29 +455,50 @@ cuda-link uses a **dual distribution model** to support both use cases:
 
 ### For Python Consumers (StreamDiffusion, AI/ML pipelines)
 
-#### Method 1: Build wheel (recommended — portable, installs into any environment)
+cuda-link is **Windows-only** and ships as **prebuilt wheels** — see
+[ADR-0013](docs/adr/0013-prebuilt-wheel-distribution.md). Every tagged release publishes
+two wheel assets:
+
+- `cuda_link-<version>-cp311-cp311-win_amd64.whl` — Python 3.11 (covers both
+  StreamDiffusionTD's pinned 3.11.9 and TouchDesigner's bundled 3.11.10), carrying the
+  compiled `_native_waiter` wait-backend accelerator.
+- `cuda_link-<version>-py3-none-any.whl` — every other Python version. Pure Python; the
+  native accelerator's benefit is marginal (<1–5%), so this loses almost nothing.
+
+No local compiler is required for either. Two supported install scenarios in practice: a
+system Python 3.11 install, or a dedicated venv (e.g. StreamDiffusionTD's).
+
+#### Method 1: Guided installer (recommended)
 
 ```bash
 git clone https://github.com/forkni/cuda-link.git
 cd cuda-link
 
-# Run the build script (uses PEP 517 isolated build via python -m build)
-utils\build_wheel.cmd
-# Output: dist\cuda_link-1.12.0-py3-none-any.whl  (~30 KB)
-
-# Install into any Python environment — conda, venv, system Python, TouchDesigner Python:
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[torch]"   # PyTorch GPU tensors
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[cupy]"    # CuPy GPU arrays
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[numpy]"   # NumPy CPU arrays
-pip install "dist\cuda_link-1.12.0-py3-none-any.whl[all]"     # All output modes
+# Auto-downloads the wheel matching your target interpreter's version from
+# GitHub Releases — no --wheel or --build flag needed for the common case:
+python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv    # dedicated venv
+python scripts\install_td_library.py --mode 4 --python C:\Python311\python.exe  # system Python
+python scripts\install_td_library.py   # interactive menu
 
 # Force reinstall to update:
-pip install --force-reinstall "dist\cuda_link-1.12.0-py3-none-any.whl[torch]"
+python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```
 
-The wheel is a self-contained archive — copy it anywhere and install without needing the source tree.
+#### Method 2: Manual download from GitHub Releases
 
-#### Method 2: Editable install from source (for development)
+```bash
+# Download the wheel matching your interpreter from
+# https://github.com/forkni/cuda-link/releases, then:
+pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
+
+# Force reinstall to update:
+pip install --force-reinstall "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[torch]"
+```
+
+#### Method 3: Editable install from source (for development)
 
 ```bash
 git clone https://github.com/forkni/cuda-link.git
@@ -476,7 +507,19 @@ pip install -e ".[torch]"   # Changes to src/cuda_link/ apply immediately, no re
 pip install -e ".[all]"     # All output modes
 ```
 
-#### Method 3: From PyPI (coming soon)
+#### Method 4: Build from source (dev-only, requires MSVC)
+
+```bash
+git clone https://github.com/forkni/cuda-link.git
+cd cuda-link
+utils\build_wheel.cmd            # Native wheel — requires an MSVC C++17 toolchain
+utils\build_wheel.cmd nowaiter   # Fallback wheel — no compiler needed
+# Then: python scripts\install_td_library.py --build --mode 2 --venv D:\path\to\your\venv
+```
+
+End users should not need this method — see Method 1 and 2 above.
+
+#### Method 5: From PyPI (coming soon)
 
 ```bash
 # pip install cuda-link[torch]
@@ -515,8 +558,8 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 
 | Use Case | TD Side | Python Side |
 |----------|---------|-------------|
-| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` Sender mode | `pip install dist\cuda_link-*.whl[torch]` |
-| **Python → TD** (AI output display) | `.tox` Receiver mode | `pip install dist\cuda_link-*.whl[torch]` |
+| **TD → Python** (StreamDiffusion, AI pipelines) | `.tox` Sender mode | `install_td_library.py --mode 2/4` (see above) |
+| **Python → TD** (AI output display) | `.tox` Receiver mode | `install_td_library.py --mode 2/4` (see above) |
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
 Both sides communicate through the 433-byte SharedMemory protocol — zero import dependencies between TD and Python code.

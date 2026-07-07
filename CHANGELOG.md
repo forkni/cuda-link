@@ -97,6 +97,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with injected Python fakes (via a new test-only `wait_slot_test()` pybind
   entry point) to regression-test this, including the specific "`write_idx`
   advances while this slot's event stays not-ready" scenario the bug needed.
+- **Prebuilt wheel distribution — end-user machines no longer need MSVC.** The
+  ADR-0012 fold (earlier in this release) turned `cuda-link` into a compiled
+  wheel but left an install-time gap: `install_td_library.py` silently
+  auto-built via `utils\build_wheel.cmd` whenever no matching wheel was
+  cached, and `CMakeLists.txt`'s `project(cuda_link LANGUAGES CXX)` forced
+  compiler detection even for the `BUILD_NATIVE_WAITER=OFF` fallback — both
+  defeating the "works everywhere" intent for StreamDiffusionTD artists'
+  machines, which almost never have Visual Studio installed. Fixed: CI
+  (`release.yml`, new `windows-latest` job) now builds and publishes both a
+  native `cp311-cp311-win_amd64` wheel and a compiler-free `py3-none-any`
+  fallback as GitHub Release assets; `install_td_library.py` resolves a wheel
+  per install target (probing that target's own Python version, not the
+  installer's) and only falls back to a local build behind an explicit
+  `--build` flag; `CMakeLists.txt` now defers compiler detection to inside
+  the `BUILD_NATIVE_WAITER` branch (`project(... LANGUAGES NONE)` +
+  `enable_language(CXX)`), so the fallback build is genuinely compiler-free.
+  Mode 5 (installing into TouchDesigner's own bundled Python) is now marked
+  deprecated in the installer's menu, steering to mode 2 (venv) or mode 4
+  (system Python) instead. See
+  [ADR-0013](docs/adr/0013-prebuilt-wheel-distribution.md). This also
+  corrects the `e57d1fc` fold commit's message, which implied no further
+  MSVC-toolchain work was needed for end users — that assumption was wrong,
+  and this entry is the correction of record (the pushed commit itself is
+  not being rewritten).
 
 ### Not included in this release
 

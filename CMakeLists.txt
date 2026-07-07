@@ -13,7 +13,15 @@
 # native backend raises a clear error only if it is actually used without
 # having been built.
 cmake_minimum_required(VERSION 3.24)
-project(cuda_link LANGUAGES CXX)
+# LANGUAGES NONE: defer C++ compiler detection until inside the
+# BUILD_NATIVE_WAITER branch below. project() with an explicit language
+# forces compiler discovery at configure time regardless of the option's
+# value, which made even the compiler-free py3-none-any fallback build
+# (-C cmake.define.BUILD_NATIVE_WAITER=OFF) fail on machines without MSVC.
+# WIN32/UNIX/APPLE are still set correctly by project() with LANGUAGES NONE
+# (they reflect the target platform, not compiler availability), so the
+# option() default below is unaffected.
+project(cuda_link LANGUAGES NONE)
 
 # Build the native extension only on Windows. Force with -DBUILD_NATIVE_WAITER=ON.
 option(BUILD_NATIVE_WAITER "Build the native _native_waiter extension (Windows only)" ${WIN32})
@@ -24,6 +32,10 @@ if(NOT BUILD_NATIVE_WAITER)
                  "(or force -DBUILD_NATIVE_WAITER=ON).")
   return()
 endif()
+
+# Compiler detection happens here, only when the native extension is
+# actually being built.
+enable_language(CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

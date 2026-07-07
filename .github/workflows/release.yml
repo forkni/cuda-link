@@ -3,17 +3,88 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Windows-only: cuda-link is locked to Windows (see docs/adr/0013-prebuilt-wheel-distribution.md),
+  # and the native wheel needs the MSVC + Windows SDK that windows-latest runners ship. Builds and
+  # smoke-tests both distributed wheels so end users never need a local compiler -- see
+  # scripts/install_td_library.py, which downloads whichever of these assets matches its target.
+  build-wheels:
+    name: Build wheels (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade pip build
+
+      - name: Sync td_exporter/CUDAIPCWrapper.py from canonical source
+        run: python scripts/sync_td_wrapper.py
+
+      - name: Build native wheel (cp311, compiles _native_waiter)
+        # BUILD_NATIVE_WAITER defaults ON on Windows -- no flag needed.
+        run: python -m build --wheel
+
+      - name: Build fallback wheel (py3-none-any, no compiler)
+        # -C cmake.define... is the only PEP 517-correct way to reach CMake through
+        # the build frontend. wheel.py-api=py3 sets the Python/ABI tag; wheel.platlib=false
+        # is what actually gets the "any" platform tag -- scikit-build-core defaults to
+        # targeting platlib (hence win_amd64) whenever wheel.cmake is true, regardless of
+        # py-api, since it doesn't auto-detect that this CMake configuration installs no
+        # platform-specific files.
+        run: python -m build --wheel -C cmake.define.BUILD_NATIVE_WAITER=OFF -C wheel.py-api=py3 -C wheel.platlib=false
+
+      - name: List built wheels
+        run: Get-ChildItem dist\*.whl
+
+      - name: Install native wheel and exercise the compiled extension
+        # First real compile-and-run of the C++ state machine in CI.
+        # test_native_state_machine.py needs only the compiled extension (no
+        # GPU/cudart) -- see its module docstring -- unlike test_native_smoke.py,
+        # which needs a loaded cudart and can't run on these GPU-less runners.
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
+          python -m pip install "$($wheel.FullName)"
+          python -c "import cuda_link._native_waiter; print('native extension imported OK')"
+          python -m pip install pytest pytest-randomly
+          pytest tests/core/test_native_state_machine.py -m requires_native -v
+
+      - name: Upload wheels artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels
+          path: dist/cuda_link-*.whl
+          retention-days: 14
+
   release:
+    name: Create GitHub Release
+    needs: build-wheels
     runs-on: ubuntu-latest
+    # workflow_dispatch runs (no tag) build + smoke-test the wheels above but stop
+    # there -- softprops/action-gh-release requires an actual tag ref to attach to.
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v6
+        with:
+          name: wheels
+          path: dist
 
       - name: Extract changelog section for tag
         run: |
@@ -33,4 +104,5 @@ jobs:
           files: |
             TOXES/CUDAIPCLink_v*.tox
             CUDA_Link_Example*.toe
+            dist/cuda_link-*.whl
           fail_on_unmatched_files: false

@@ -16,6 +16,7 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0008](0008-skip-native-d2h.md) | No native work on the D2H readback path | Accepted | 2026-07-04 |
 | [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
 | [0012](0012-native-extension-in-core-wheel.md) | Fold the native extension into the core wheel | Accepted | 2026-07-07 |
+| [0013](0013-prebuilt-wheel-distribution.md) | Prebuilt wheel distribution — Windows-only, cp311 native + py3-none-any fallback | Accepted | 2026-07-07 |
 
 ## Adding a new ADR
 

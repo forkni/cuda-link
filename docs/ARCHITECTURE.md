@@ -835,6 +835,7 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0008** — No native work on the D2H readback path
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
 - **ADR-0012** — Fold the native extension into the core wheel (supersedes ADR-0006's packaging conclusion)
+- **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
 
 ---
 

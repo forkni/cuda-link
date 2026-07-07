@@ -8,16 +8,30 @@ REM Uses the resolved Python interpreter (preferring 'py -3' Windows launcher)
 REM with PyPA's PEP 517 isolated build env: <python> -m build --wheel
 REM (scikit-build-core + pybind11, declared in pyproject.toml [build-system]).
 REM
-REM On Windows with an MSVC C++17 toolchain available, this also compiles the
-REM _native_waiter wait-backend accelerator into the wheel -- making the
-REM output a PLATFORM wheel (dist\cuda_link-<version>-cp3XX-cp3XX-win_amd64.whl),
-REM not py3-none-any. Without MSVC (or off Windows), CMakeLists.txt's
-REM BUILD_NATIVE_WAITER gate degrades gracefully to a pure-Python wheel --
-REM Importer falls back to its Python wait path at runtime either way.
+REM This is a DEV/CI tool. End users install a PREBUILT wheel (see
+REM https://github.com/forkni/cuda-link/releases or scripts/install_td_library.py,
+REM which downloads the matching release asset automatically) -- they never run
+REM this script or need a compiler. See docs/adr/0013-prebuilt-wheel-distribution.md.
+REM
+REM Two build modes:
+REM   build_wheel.cmd            Native build (default). Compiles the
+REM                               _native_waiter wait-backend accelerator into
+REM                               the wheel, producing a PLATFORM wheel
+REM                               (dist\cuda_link-<version>-cp3XX-cp3XX-win_amd64.whl).
+REM                               Requires an MSVC C++17 toolchain (checked
+REM                               below via vswhere -- fails fast with an
+REM                               actionable message if none is found).
+REM   build_wheel.cmd nowaiter    Fallback build. Passes
+REM                               -C cmake.define.BUILD_NATIVE_WAITER=OFF to
+REM                               skip the native extension entirely, producing
+REM                               a compiler-free py3-none-any wheel. Importer
+REM                               falls back to its Python wait path at runtime
+REM                               either way.
 REM
 REM Usage:
 REM   Double-click or run from any terminal:
 REM     build_wheel.cmd
+REM     build_wheel.cmd nowaiter
 REM
 REM   Then install into any Python environment (see dist\ for the exact filename):
 REM     pip install "dist\cuda_link-<version>-*.whl"
@@ -30,9 +44,25 @@ echo ========================================
 echo.
 
 REM ----------------------------------------
-REM [1/4] Resolve Python interpreter
+REM [0/5] Parse build mode
 REM ----------------------------------------
-echo [1/4] Resolving Python interpreter...
+set "FALLBACK=0"
+set "BUILD_ARGS="
+if /i "%~1"=="nowaiter" set "FALLBACK=1"
+if /i "%~1"=="--fallback" set "FALLBACK=1"
+
+if "!FALLBACK!"=="1" (
+    set "BUILD_ARGS=-C cmake.define.BUILD_NATIVE_WAITER=OFF -C wheel.py-api=py3 -C wheel.platlib=false"
+    echo   Mode: fallback ^(py3-none-any, no native extension^)
+) else (
+    echo   Mode: native ^(cp3XX-win_amd64, compiles _native_waiter^)
+)
+echo.
+
+REM ----------------------------------------
+REM [1/5] Resolve Python interpreter
+REM ----------------------------------------
+echo [1/5] Resolving Python interpreter...
 
 REM Prefer 'py -3' (Windows Python Launcher) -- bypasses Microsoft Store stub.
 REM Fall back to 'python' on PATH if launcher isn't installed.
@@ -79,9 +109,48 @@ echo   !PY_EXE!
 echo.
 
 REM ----------------------------------------
-REM [1.5/4] Sync td_exporter/CUDAIPCWrapper.py from canonical source
+REM [2/5] MSVC preflight (native mode only)
 REM ----------------------------------------
-echo [1.5/4] Syncing CUDAIPCWrapper.py...
+if "!FALLBACK!"=="1" (
+    echo [2/5] Skipping MSVC preflight ^(fallback mode^).
+    echo.
+) else (
+    echo [2/5] Checking for MSVC C++ toolchain...
+
+    REM vswhere is authoritative; `where cl` is a false negative -- cl.exe is
+    REM only on PATH inside a VS Developer Prompt, not a plain shell.
+    set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+    if not exist "!VSWHERE!" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+    set "MSVC_PATH="
+    if exist "!VSWHERE!" (
+        for /f "usebackq tokens=*" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "MSVC_PATH=%%i"
+    )
+
+    if not defined MSVC_PATH (
+        echo.
+        echo [ERROR] No MSVC C++ toolchain detected ^(checked via vswhere^).
+        echo         Building the native _native_waiter extension requires the
+        echo         "Desktop development with C++" workload ^(Visual Studio or
+        echo         VS Build Tools^): https://visualstudio.microsoft.com/downloads/
+        echo.
+        echo         Options:
+        echo           1. Install VS Build Tools with the C++ workload, then re-run.
+        echo           2. Build the compiler-free fallback wheel instead:
+        echo                build_wheel.cmd nowaiter
+        echo           3. Skip building entirely and use a prebuilt wheel from
+        echo              https://github.com/forkni/cuda-link/releases
+        goto :error
+    )
+
+    echo   MSVC found: !MSVC_PATH!
+    echo.
+)
+
+REM ----------------------------------------
+REM [2.5/5] Sync td_exporter/CUDAIPCWrapper.py from canonical source
+REM ----------------------------------------
+echo [2.5/5] Syncing CUDAIPCWrapper.py...
 
 !PY! scripts\sync_td_wrapper.py
 if errorlevel 1 (
@@ -92,9 +161,9 @@ if errorlevel 1 (
 echo.
 
 REM ----------------------------------------
-REM [2/4] Ensure PyPA build frontend
+REM [3/5] Ensure PyPA build frontend
 REM ----------------------------------------
-echo [2/4] Ensuring build tools...
+echo [3/5] Ensuring build tools...
 
 !PY! -m pip install --upgrade build --quiet
 if errorlevel 1 (
@@ -108,9 +177,9 @@ echo   build package ready
 echo.
 
 REM ----------------------------------------
-REM [3/4] Clean old build artifacts
+REM [4/5] Clean old build artifacts
 REM ----------------------------------------
-echo [3/4] Cleaning old artifacts...
+echo [4/5] Cleaning old artifacts...
 
 set "cleaned=0"
 
@@ -153,19 +222,27 @@ if !cleaned! equ 0 (
 echo.
 
 REM ----------------------------------------
-REM [4/4] Build the wheel
+REM [5/5] Build the wheel
 REM ----------------------------------------
-echo [4/4] Building wheel...
+echo [5/5] Building wheel...
 echo.
 
-!PY! -m build --wheel
+!PY! -m build --wheel !BUILD_ARGS!
 if errorlevel 1 (
     echo.
     echo [ERROR] Wheel build failed.
     echo         Check the output above for details.
-    echo         Common fixes:
-    echo           - Ensure pyproject.toml is valid
-    echo           - Run: !PY! -m pip install --upgrade setuptools build
+    if "!FALLBACK!"=="1" (
+        echo         Common fixes:
+        echo           - Ensure pyproject.toml is valid
+        echo           - Run: !PY! -m pip install --upgrade setuptools build
+    ) else (
+        echo         The MSVC preflight above passed, so this is likely a genuine
+        echo         compile error in src/cuda_link/_cpp/native_waiter.cpp or a
+        echo         pyproject.toml/CMakeLists.txt misconfiguration -- not a missing
+        echo         toolchain. To rule out the toolchain, try the fallback build:
+        echo           build_wheel.cmd nowaiter
+    )
     goto :error
 )
 

@@ -82,6 +82,11 @@ top-level package.
   unchanged; what changes is that the **build toolchain** is no longer optional in the same
   way once native TD operators land, since those will not degrade as gracefully as this
   wait-backend accelerator does.
+  - This framed install as "run on the user's own machine," which turned out to be an
+    unaddressed gap for end users without MSVC — see
+    [ADR-0013](0013-prebuilt-wheel-distribution.md), which closes it: CI ships prebuilt
+    wheels (native `cp311` + `py3-none-any` fallback), and `install_td_library.py` never
+    compiles on an end-user box.
 - `requires_native`-marked tests live in the main `tests/` tree and are deselected on CI
   (`ubuntu-latest`, which never compiles the Windows-only extension) exactly as the old
   `native-tests` CI job's tests were — no CI coverage regression from the fold.
