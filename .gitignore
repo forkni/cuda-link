@@ -149,6 +149,7 @@ TOXES/CUDAIPCLink_v1.9.0.tox
 TOXES/CUDAIPCLink_v1.10.0.tox
 TOXES/CUDAIPCLink_v1.10.1.tox
 TOXES/CUDAIPCLink_v1.10.2.tox
+TOXES/CUDAIPCLink_v1.11.0.tox
 
 # Local-only tooling component (never distributed)
 TOXES/Semantic_Version_Control_v0.4.2.tox
