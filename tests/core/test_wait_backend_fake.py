@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cuda_link_native import FakeWaitBackend, WaitBackend, WaitResult, WaitStatus
+from cuda_link._wait_backend import FakeWaitBackend, WaitBackend, WaitResult, WaitStatus
 
 
 def test_fake_satisfies_protocol():

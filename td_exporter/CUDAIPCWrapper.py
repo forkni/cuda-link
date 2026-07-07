@@ -958,7 +958,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
     def cudart_event_query_fn_ptr(self) -> int:
         """Raw address of the cudaEventQuery symbol this wrapper resolved, as an int.
 
-        Lets other in-process code (e.g. cuda-link-native, R5) call the SAME
+        Lets other in-process code (e.g. the native wait-backend extension, R5) call the SAME
         loaded cudart instance directly, instead of independently rediscovering
         it via a bare-name GetModuleHandle. That rediscovery is unsafe: this
         process can have more than one same-named cudart DLL loaded from

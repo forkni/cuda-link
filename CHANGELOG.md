@@ -15,17 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first — matching the actual probe order and avoiding a misleading hint on CUDA 13-only
   systems.
 - **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
-  (opt-in via the `cuda-link-native` sidecar; `ImportPolicy.wait_backend`:
+  (compiled into the core `cuda-link` wheel on Windows; `ImportPolicy.wait_backend`:
   `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
   Replaces the Python spin/sleep poll with one native (C++/pybind11) call that
   spins on `cudaEventQuery` then blocks on the R2 doorbell's Win32 event;
   activating native forces the doorbell open even if `CUDALINK_DOORBELL` is
   unset, since the native block phase has nothing faster to wait on
-  otherwise. Ships as a **default** installer-driven component on Windows
-  (`install_td_library.py --native`, default on) rather than an opt-in `pip
-  install` — see [PLAN-002](docs/plans/PLAN-002-native-waiter.md) and the
-  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md) consequences
-  amendment. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
+  otherwise. Built via `scikit-build-core` + root `CMakeLists.txt` as part of
+  the single-wheel build (`pip install .` / `utils\build_wheel.cmd`), degrading
+  to pure-Python off Windows or without an MSVC toolchain — see
+  [PLAN-002](docs/plans/PLAN-002-native-waiter.md),
+  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md)'s consequences
+  amendment, and [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)
+  for the fold from an initial separate `cuda-link-native` sidecar package
+  into this single wheel. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
   frames/arm, 30+60 fps): native's own re-check-after-wake latency
   (`avg_spin_us`) is genuinely fast (~0.02–6.5 µs), but the accept gate
   (p50<10µs, p95<50µs, measured as cross-process publish→detect latency via
@@ -61,8 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`avg_spin_us`/pacing-block breakdown) and a pointer to
   `bench_doorbell.py`'s new native arm as the authoritative venue.
 - **`bench_doorbell.py`'s poll/doorbell arms did not pin `wait_backend`**,
-  defaulting to `ImportPolicy`'s own `"auto"` — with `cuda-link-native`
-  installed, the "doorbell" arm would silently engage the native backend,
+  defaulting to `ImportPolicy`'s own `"auto"` — with the native extension
+  available, the "doorbell" arm would silently engage the native backend,
   contaminating the R2 poll-vs-doorbell comparison (same bug class as the
   `bench_r1_wait.py` fix above). Every arm now pins `wait_backend`
   explicitly.
@@ -90,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Added `READY_POLL` alongside (block phase caught it with no doorbell
   available, vs. `READY_DOORBELL` genuinely having one in play) — a related
   telemetry-accuracy fix bundled in since it's the same code region. New
-  `native/tests/test_state_machine.py` drives the real C++ state machine
+  `tests/core/test_native_state_machine.py` drives the real C++ state machine
   with injected Python fakes (via a new test-only `wait_slot_test()` pybind
   entry point) to regression-test this, including the specific "`write_idx`
   advances while this slot's event stays not-ready" scenario the bug needed.

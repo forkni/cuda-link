@@ -7,7 +7,7 @@ cuda-link-spout package's ``SpoutBackend`` seam: a structural ``Protocol``
 plus two adapters —
 
   _NativeWaitBackend  — wraps the compiled ``_native_waiter`` pybind11 module
-                        (in _native.py; Windows only)
+                        (in _native_loader.py; Windows only)
   FakeWaitBackend     — in-memory, no GPU / no native module; drives all unit tests
 
 ``Importer._wait_for_slot`` (src/cuda_link/importer.py) depends only on this

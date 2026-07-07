@@ -1,6 +1,7 @@
 # ADR-0006: Stay pure-Python — do not rewrite in Rust
 
-**Status**: Accepted
+**Status**: Superseded by [ADR-0012](0012-native-extension-in-core-wheel.md) (packaging
+conclusion only — the rejection of a full Rust/native rewrite below still holds)
 **Date**: 2026-06-07
 **Applies to**: the whole library — `src/cuda_link/`, `td_exporter/`,
 packaging (`pyproject.toml`), and the deployment model documented in
@@ -89,16 +90,16 @@ revisit-if, not a current direction.
   benchmarks rather than re-deriving the conclusion.
 - **PLAN-002 (R5, 2026-07-04) exercised this ADR's escape hatch** — "narrow
   optional extension for a consumer-side hot path" — with a C++/pybind11
-  native notification-wait backend (`cuda-link-native`, cloning the `spout/`
-  sidecar pattern). This is a real, non-obvious trade-off worth recording
-  explicitly rather than letting it pass silently: the native sidecar is now
-  a **default** installer-driven component on Windows (`install_td_library.py`'s
-  `--native` flag defaults **on**, not merely available via opt-in `pip
-  install`), so most Windows users end up with the accelerated path without
-  deliberately choosing it. The *core* `cuda-link` wheel remains pure-Python
-  and zero-dependency — this ADR's headline property is unchanged — but the
-  practical, as-shipped default experience for this project's actual
-  distribution channel is no longer "pure Python unless you ask otherwise."
+  native notification-wait backend, initially shipped as a separate sidecar
+  package (`cuda-link-native`, cloning the `spout/` sidecar pattern) that
+  defaulted **on** in `install_td_library.py`. **[ADR-0012](0012-native-extension-in-core-wheel.md)
+  (2026-07-07) folded that sidecar into the core wheel** — see that ADR for why
+  (performance parity closed the gap that justified a separate package, and
+  the roadmap now calls for more native code with one build to maintain, not
+  more sidecars). The practical result is the same shape this note originally
+  flagged: most Windows users end up with the accelerated path without
+  deliberately choosing it, now simply because it is compiled into the one
+  wheel they already install rather than a second opt-out-able package.
   See [PLAN-002](../plans/PLAN-002-native-waiter.md) for the full design and
   measured results (the 10µs/50µs accept gate did not pass on the measured
   hardware; the escape hatch was still worth taking because native never

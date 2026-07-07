@@ -12,10 +12,10 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0003](0003-library-install-sys-path-bootstrap.md) | Library-install sys.path bootstrap (1C) | Accepted | 2026-05-29 |
 | [0004](0004-legacy-cuda-ipc-over-vmm.md) | Legacy CUDA Runtime IPC over VMM driver API | Accepted | 2026-05-31 |
 | [0005](0005-static-typing-hardening.md) | Static type-checking hardening (scoped suppression + CI gate) | Accepted | 2026-06-07 |
-| [0006](0006-stay-pure-python-no-rust.md) | Stay pure-Python — do not rewrite in Rust | Accepted | 2026-06-07 |
-| [0007](0007-spout-as-launcher-not-transport.md) | Expose Spout as a sidecar-launcher COMP, not an embedded transport | Accepted | 2026-06-27 |
+| [0006](0006-stay-pure-python-no-rust.md) | Stay pure-Python — do not rewrite in Rust | Superseded by 0012 | 2026-06-07 |
 | [0008](0008-skip-native-d2h.md) | No native work on the D2H readback path | Accepted | 2026-07-04 |
 | [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
+| [0012](0012-native-extension-in-core-wheel.md) | Fold the native extension into the core wheel | Accepted | 2026-07-07 |
 
 ## Adding a new ADR
 

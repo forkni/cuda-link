@@ -8,12 +8,13 @@ should raise a clear RuntimeError (not a bare ImportError).
 from __future__ import annotations
 
 import pytest
-from cuda_link_native._native import load_native_backend
+
+from cuda_link._native_loader import load_native_backend
 
 
 def _native_module_present() -> bool:
     try:
-        from cuda_link_native import _native_waiter  # noqa: F401
+        from cuda_link import _native_waiter  # noqa: F401
 
         return True
     except ImportError:
@@ -49,7 +50,7 @@ def test_load_native_backend_refuses_hosts_without_hr_timers(monkeypatch):
     hr_nap_supported() check raises first. The pointer is reset to 0 afterwards
     so no other test can observe the sentinel as a resolved cudart.
     """
-    from cuda_link_native import _native_waiter
+    from cuda_link import _native_waiter
 
     monkeypatch.setattr(_native_waiter, "hr_nap_supported", lambda: False)
     try:

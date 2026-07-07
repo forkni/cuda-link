@@ -6,10 +6,10 @@ state machine that is otherwise only covered by pure-Python unit tests against
 FakeWaitBackend. They require a Windows box with a CUDA runtime already loaded
 in-process and the native module compiled via:
 
-    pip install ./native
+    pip install .
 
 Run:
-    pytest native/tests/test_native_smoke.py -m requires_native -v
+    pytest tests/cuda/test_native_smoke.py -m requires_native -v
 
 All tests skip automatically when the native module is absent so the file is
 safe to collect in any environment.
@@ -18,8 +18,9 @@ safe to collect in any environment.
 from __future__ import annotations
 
 import pytest
-from cuda_link_native._backend import WaitStatus
-from cuda_link_native._native import load_native_backend
+
+from cuda_link._native_loader import load_native_backend
+from cuda_link._wait_backend import WaitStatus
 
 
 def _get_runtime():
@@ -55,7 +56,7 @@ def _native_module_present() -> bool:
 
 _skip_no_native = pytest.mark.skipif(
     not _native_module_present(),
-    reason="native _native_waiter not built or no cudart loaded — see native/README.md",
+    reason="native _native_waiter not built or no cudart loaded — see README.md",
 )
 
 pytestmark = [pytest.mark.requires_native, _skip_no_native]

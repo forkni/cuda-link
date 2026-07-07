@@ -93,14 +93,14 @@ class ImportPolicy:
     # on NO_FRAME. Set the same env var on both sides. Single-consumer only
     # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
     doorbell: bool = False
-    # R5: native notification-wait backend (cuda-link-native, optional sidecar
-    # package). "auto" (default) uses the native backend when the sidecar is
-    # installed, os.name=="nt", and a cudart instance is already loaded in this
-    # process — with silent fallback to the Python spin/sleep path on any
-    # resolution failure. "native" forces it (raises if unavailable is NOT the
-    # behavior — same silent-fallback applies, "native" only skips the "auto"
-    # environment gate). "python" always uses today's path, matching pre-R5
-    # behavior exactly. Activating the native backend forces the doorbell open
+    # R5: native notification-wait backend (compiled _native_waiter extension,
+    # built into this wheel on Windows). "auto" (default) uses the native
+    # backend when the extension is built, os.name=="nt", and a cudart instance
+    # is already loaded in this process — with silent fallback to the Python
+    # spin/sleep path on any resolution failure. "native" forces it (raises if
+    # unavailable is NOT the behavior — same silent-fallback applies, "native"
+    # only skips the "auto" environment gate). "python" always uses today's
+    # path, matching pre-R5 behavior exactly. Activating the native backend forces the doorbell open
     # for that connection even if `doorbell` above is False — the native
     # backend's block phase cannot reach its <10us target without it (the
     # Windows sleep-loop floor is ~1ms, language-independent).
@@ -134,9 +134,10 @@ class ImportPolicy:
         Disables spin-wait, multi-stream D2H, stream priority, and enables
         pageable fallback so tests can run with FakeCUDAAdapter without any GPU.
         reconnect_enabled=False so unit tests don't incur reconnect-wait delays.
-        wait_backend="python" so tests never attempt to import cuda-link-native
-        (would silently fail-and-fallback anyway, but this keeps GPU-free test
-        runs deterministic and avoids the extra import attempt entirely).
+        wait_backend="python" so tests never attempt to import the compiled
+        _native_waiter extension (would silently fail-and-fallback anyway, but
+        this keeps GPU-free test runs deterministic and avoids the extra
+        import attempt entirely).
         """
         return cls(
             wait_spin_us=0,

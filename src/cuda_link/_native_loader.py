@@ -2,16 +2,18 @@
 Native backend loader — adapts the compiled ``_native_waiter`` pybind11 module to
 the :class:`WaitBackend` Protocol.
 
-The compiled module (``native/src/cuda_link_native/_cpp/native_waiter.cpp``) is
-built on Windows with no CUDA Toolkit or SDK required (see native/README.md). It
-is intentionally imported lazily — importing ``cuda_link_native`` and using
+The compiled module (``src/cuda_link/_cpp/native_waiter.cpp``) is built on
+Windows with no CUDA Toolkit or SDK required (see the root CMakeLists.txt). It
+is intentionally imported lazily — importing ``cuda_link`` and using
 FakeWaitBackend never requires the native module, so the pure-Python layer and
 its tests run anywhere.
 """
 
 from __future__ import annotations
 
-from ._backend import WaitBackend, WaitResult, WaitStatus
+from typing import Any
+
+from ._wait_backend import WaitBackend, WaitResult, WaitStatus
 
 _STATUS_FROM_INT = {
     0: WaitStatus.READY_SPIN,
@@ -50,22 +52,22 @@ def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
         from . import _native_waiter  # type: ignore[attr-defined]  # compiled extension
     except ImportError as e:  # pragma: no cover - exercised only without the built ext
         raise RuntimeError(
-            "cuda-link-native module (_native_waiter) is not available. It must be "
-            "built on Windows (no CUDA Toolkit required — see native/README.md for "
-            "build instructions). (The pure-Python API and tests work without it "
-            "via FakeWaitBackend.)"
+            "cuda-link's native module (_native_waiter) is not available. It must be "
+            "built on Windows (no CUDA Toolkit required — see the root CMakeLists.txt "
+            "and README for build instructions). (The pure-Python API and tests work "
+            "without it via FakeWaitBackend.)"
         ) from e
     _native_waiter.set_cuda_event_query(cuda_event_query_fn_ptr)
     if not _native_waiter.cudart_resolved():
         raise RuntimeError(
-            "cuda-link-native module (_native_waiter) is built but "
+            "cuda-link's native module (_native_waiter) is built but "
             "cuda_event_query_fn_ptr was 0 — the caller has no cudart runtime "
             "loaded yet (e.g. via cuda_link.cuda_ipc_wrapper.get_cuda_runtime()) "
             "before the native wait backend was activated."
         )
     if not _native_waiter.hr_nap_supported():
         raise RuntimeError(
-            "cuda-link-native module (_native_waiter) is built but this host "
+            "cuda-link's native module (_native_waiter) is built but this host "
             "cannot create high-resolution waitable timers (requires Windows 10 "
             "1803+). Without them the native block phase would be quantized to "
             "the ~15.6ms default timer tick — the exact defect fixed on "
@@ -85,7 +87,7 @@ class _NativeWaitBackend:
     above). Satisfies :class:`WaitBackend` structurally.
     """
 
-    def __init__(self, mod: object) -> None:
+    def __init__(self, mod: Any) -> None:
         self._mod = mod
 
     def wait_slot(

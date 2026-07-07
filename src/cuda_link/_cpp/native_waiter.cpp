@@ -1,6 +1,6 @@
 // native_waiter.cpp — native notification-wait accelerator for cuda-link's Importer.
 //
-// Implements the WaitBackend surface (see _backend.py) as a pybind11 module named
+// Implements the WaitBackend surface (see _wait_backend.py) as a pybind11 module named
 // `_native_waiter`. Windows-only. This module NEVER links or loads cudart itself,
 // and — as of the 2026-07-04 fix below — never independently resolves it either.
 // The resolved cudaEventQuery function-pointer address is handed in explicitly by
@@ -26,7 +26,7 @@
 // the deadline, re-checking cudaEventQuery between bounded naps on a per-thread
 // high-resolution waitable timer. The spin/block loop core is written as a template
 // over the polling functions so a test harness can inject fakes without touching
-// real CUDA/Win32 state (see native/tests/test_state_machine.py, which drives it
+// real CUDA/Win32 state (see tests/test_state_machine.py, which drives it
 // through the wait_slot_test() pybind entry point below).
 //
 // FIXED (2026-07-04, torn-frame race): the block phase used to pre-check the SHM
@@ -69,8 +69,8 @@
 // back to the python wait path — rather than silently degraded back onto the
 // coarse tick.
 //
-// Build: see native/CMakeLists.txt. This file is intentionally not compiled in CI
-// on Linux; the pure-Python layer is tested via FakeWaitBackend. Validate on a
+// Build: see the root CMakeLists.txt. This file is intentionally not compiled in
+// CI on Linux; the pure-Python layer is tested via FakeWaitBackend. Validate on a
 // Windows box before release.
 
 #include <pybind11/pybind11.h>
@@ -100,7 +100,7 @@ using CudaEventQueryFn = int (*)(void*);  // cudaError_t cudaEventQuery(cudaEven
 
 CudaEventQueryFn g_cudaEventQuery = nullptr;
 
-// Status codes mirrored in Python's WaitStatus enum (_backend.py) — keep in sync.
+// Status codes mirrored in Python's WaitStatus enum (_wait_backend.py) — keep in sync.
 enum WaitStatusCode : int {
     kReadySpin = 0,
     kReadyDoorbell = 1,
@@ -141,7 +141,7 @@ constexpr int kMethodTimerNap = 4;
 // ---------------------------------------------------------------------------
 // The spin/block state machine, parameterized over the polling primitives so a
 // test harness can inject fakes (see wait_slot_test() below and
-// native/tests/test_state_machine.py).
+// tests/test_state_machine.py).
 // ---------------------------------------------------------------------------
 
 template <typename EventQueryFn, typename ReadWriteIdxFn, typename NapFn, typename NowUsFn>
@@ -316,7 +316,7 @@ std::tuple<int, double, int> wait_slot(
 
 // ---------------------------------------------------------------------------
 // Test-only entry point: drives the REAL wait_slot_impl template with
-// Python-injected fake polling functions, so native/tests/test_state_machine.py
+// Python-injected fake polling functions, so tests/test_state_machine.py
 // can exercise the actual state machine (including the torn-frame regression
 // test) without any real CUDA/Win32 state. Not used by the production wait_slot()
 // path above, and — unlike it — does NOT release the GIL: calling back into
@@ -392,7 +392,7 @@ PYBIND11_MODULE(_native_waiter, m) {
 
     // Test-only entry point (see the docstring on wait_slot_test's definition
     // above). GIL held throughout -- not used by the production wait_slot() path.
-    // Named py::arg()s so native/tests/test_state_machine.py can call it with
+    // Named py::arg()s so tests/test_state_machine.py can call it with
     // keyword arguments.
     m.def("wait_slot_test", &wait_slot_test, py::arg("event_query"), py::arg("read_write_idx"),
           py::arg("nap"), py::arg("now_us"), py::arg("event_ptr"), py::arg("doorbell_handle"),
@@ -400,5 +400,5 @@ PYBIND11_MODULE(_native_waiter, m) {
           "TEST ONLY: drive the real wait_slot_impl state machine with injected "
           "Python fake polling functions (event_query, read_write_idx, "
           "nap, now_us). Same return contract as wait_slot(). Used by "
-          "native/tests/test_state_machine.py; not part of the production API.");
+          "tests/test_state_machine.py; not part of the production API.");
 }

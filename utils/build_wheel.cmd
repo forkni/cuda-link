@@ -6,16 +6,23 @@ REM build_wheel.cmd - Build cuda-link Python wheel for distribution
 REM
 REM Uses the resolved Python interpreter (preferring 'py -3' Windows launcher)
 REM with PyPA's PEP 517 isolated build env: <python> -m build --wheel
-REM Output: dist\cuda_link-<version>-py3-none-any.whl  (version from pyproject.toml)
+REM (scikit-build-core + pybind11, declared in pyproject.toml [build-system]).
+REM
+REM On Windows with an MSVC C++17 toolchain available, this also compiles the
+REM _native_waiter wait-backend accelerator into the wheel -- making the
+REM output a PLATFORM wheel (dist\cuda_link-<version>-cp3XX-cp3XX-win_amd64.whl),
+REM not py3-none-any. Without MSVC (or off Windows), CMakeLists.txt's
+REM BUILD_NATIVE_WAITER gate degrades gracefully to a pure-Python wheel --
+REM Importer falls back to its Python wait path at runtime either way.
 REM
 REM Usage:
 REM   Double-click or run from any terminal:
 REM     build_wheel.cmd
 REM
-REM   Then install into any Python environment:
-REM     pip install "dist\cuda_link-<version>-py3-none-any.whl"
-REM     pip install "dist\cuda_link-<version>-py3-none-any.whl[torch]"
-REM     pip install "dist\cuda_link-<version>-py3-none-any.whl[all]"
+REM   Then install into any Python environment (see dist\ for the exact filename):
+REM     pip install "dist\cuda_link-<version>-*.whl"
+REM     pip install "dist\cuda_link-<version>-*.whl[torch]"
+REM     pip install "dist\cuda_link-<version>-*.whl[all]"
 
 echo ========================================
 echo  cuda-link Wheel Builder
@@ -107,9 +114,9 @@ echo [3/4] Cleaning old artifacts...
 
 set "cleaned=0"
 
-REM Remove only stale CORE wheels — never touch sibling native/spout wheels in dist\.
-REM "cuda_link-*.whl" matches cuda_link-1.11.0-... but NOT cuda_link_native-*/cuda_link_spout-*
-REM (underscore after "cuda_link", not a dash) — same invariant _find_wheel() relies on.
+REM Remove only stale cuda_link wheels (dist\cuda_link-*.whl) — this glob would
+REM exclude any future sibling wheel package (e.g. a hypothetical cuda_link_spout-*),
+REM since that requires an underscore directly after "cuda_link", not a dash.
 if exist "dist\" (
     for %%f in ("dist\cuda_link-*.whl") do (
         if exist "%%f" (

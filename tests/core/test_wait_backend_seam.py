@@ -1,9 +1,9 @@
 """
 Tests for the R5 native-wait-backend seam in Importer._wait_for_slot.
 
-Deliberately does NOT import cuda_link_native — core tests must stay
-independent of the optional sidecar package (it may not be installed in this
-environment at all). Instead, a tiny local duck-typed fake exercises the seam
+Deliberately does NOT import cuda_link._native_waiter — core tests must stay
+independent of the compiled extension (it may not be built on this host or
+platform at all). Instead, a tiny local duck-typed fake exercises the seam
 structurally: anything with a matching `.wait_slot(...)` method and a result
 carrying `.status.name` / `.waited_us` satisfies what `_wait_for_slot` needs.
 """
@@ -35,7 +35,7 @@ class _FakeResult:
 
 
 class _LocalFakeWaitBackend:
-    """Local stand-in for cuda_link_native.FakeWaitBackend — records calls, scripts results."""
+    """Local stand-in for cuda_link._wait_backend.FakeWaitBackend — records calls, scripts results."""
 
     def __init__(self, status: _FakeStatus = _FakeStatus.READY_SPIN, waited_us: float = 1.5) -> None:
         self.calls: list[dict] = []

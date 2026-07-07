@@ -52,7 +52,7 @@ from .shm_protocol import (
 )
 
 if TYPE_CHECKING:
-    from cuda_link_native import WaitBackend
+    from cuda_link._wait_backend import WaitBackend
 
     from .nvml_observer import NVMLObserver
 
@@ -958,7 +958,8 @@ class Importer:
         self._torch_backend: _TorchBackend | None = None
         self._cupy_backend: _CupyBackend | None = None
 
-        # R5: resolved native wait backend (cuda-link-native, optional sidecar).
+        # R5: resolved native wait backend (compiled _native_waiter extension,
+        # built into this wheel on Windows; see _native_loader.py).
         # None until/unless _open_ipc_slots resolves one; re-resolved on every
         # (re)connect, including from _reinitialize(), so a producer restart
         # never leaves a stale backend/address behind. See _wait_for_slot().
@@ -1331,12 +1332,12 @@ class Importer:
         )
 
     def _resolve_wait_backend(self) -> WaitBackend | None:
-        """Best-effort resolve the native wait backend (cuda-link-native).
+        """Best-effort resolve the native wait backend (cuda_link._native_waiter).
 
-        Returns None on any failure (sidecar not installed, this CUDA adapter
-        can't supply a cudaEventQuery pointer, or the sidecar rejects it) —
-        callers must treat None as "use the existing Python spin/sleep path",
-        never as an error.
+        Returns None on any failure (extension not built for this platform,
+        this CUDA adapter can't supply a cudaEventQuery pointer, or the
+        extension rejects it) — callers must treat None as "use the existing
+        Python spin/sleep path", never as an error.
 
         The resolved function-pointer address is obtained from *this
         connection's own* CUDA adapter (`self._cuda`) and handed to the
@@ -1349,9 +1350,9 @@ class Importer:
         silently misreported a genuinely-pending CUDA event as complete.
         """
         try:
-            from cuda_link_native._native import load_native_backend  # noqa: PLC0415
+            from cuda_link._native_loader import load_native_backend  # noqa: PLC0415
         except ImportError:
-            logger.info("cuda-link-native not installed; using Python wait path")
+            logger.info("cuda_link._native_waiter not built for this platform; using Python wait path")
             return None
         try:
             fn_ptr = self._cuda.cudart_event_query_fn_ptr()
@@ -1366,11 +1367,7 @@ class Importer:
         except RuntimeError as e:
             logger.info("Native wait backend unavailable (%s); using Python wait path", e)
             return None
-        try:
-            from cuda_link_native import __version__ as native_version  # noqa: PLC0415
-        except ImportError:
-            native_version = "unknown"
-        logger.info("Native wait backend engaged (cuda-link-native %s)", native_version)
+        logger.info("Native wait backend engaged")
         return backend
 
     # ------------------------------------------------------------------

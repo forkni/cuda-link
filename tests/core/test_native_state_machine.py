@@ -1,7 +1,7 @@
 """
 Injected-fake tests for the real ``wait_slot_impl`` C++ state machine.
 
-Unlike ``test_backend.py`` (which drives the independent, pure-Python
+Unlike ``test_wait_backend_fake.py`` (which drives the independent, pure-Python
 ``FakeWaitBackend`` double) and ``test_native_smoke.py`` (which requires a real
 Windows box with a loaded CUDA runtime), these tests drive the *actual* compiled
 state machine in ``native_waiter.cpp`` through its test-only ``wait_slot_test()``
@@ -12,17 +12,16 @@ Requires only that the ``_native_waiter`` extension is compiled (Windows) — no
 GPU or loaded cudart needed, since ``set_cuda_event_query()`` is never called
 here and the fakes never touch real CUDA state. This is a lighter bar than
 ``test_native_smoke.py``'s ``_native_module_present()`` (which also requires a
-real cudart), so this file can run on any Windows box with `pip install ./native`
+real cudart), so this file can run on any Windows box with `pip install .`
 done, GPU or not.
 
-CAVEAT: native-tests CI (.github/workflows/tests.yml, the `native-tests` job)
-runs on ubuntu-latest and never builds the Windows-only extension. Like
-test_native_smoke.py, this file only actually exercises anything when run
-manually on a Windows box with the extension compiled -- it is not enforced by
-the automated CI gate.
+CAVEAT: CI (.github/workflows/tests.yml) runs on ubuntu-latest and never builds
+the Windows-only extension, so this file only actually exercises anything when
+run manually on a Windows box with the extension compiled -- the
+`requires_native` marker keeps it deselected there.
 
 Run:
-    pytest native/tests/test_state_machine.py -m requires_native -v
+    pytest tests/core/test_native_state_machine.py -m requires_native -v
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def _native_waiter_present() -> bool:
     set_cuda_event_query() or touch real CUDA state.
     """
     try:
-        import cuda_link_native._native_waiter  # noqa: F401, PLC0415
+        import cuda_link._native_waiter  # noqa: F401, PLC0415
     except ImportError:
         return False
     return True
@@ -46,7 +45,7 @@ def _native_waiter_present() -> bool:
 
 _skip_no_native_waiter = pytest.mark.skipif(
     not _native_waiter_present(),
-    reason="native _native_waiter not built -- see native/README.md",
+    reason="native _native_waiter not built -- see README.md",
 )
 
 pytestmark = [pytest.mark.requires_native, _skip_no_native_waiter]
@@ -77,8 +76,9 @@ class _FakeClock:
 
 
 def _wait_slot_test(**kwargs):
-    from cuda_link_native._backend import WaitResult, WaitStatus  # noqa: PLC0415
-    from cuda_link_native._native_waiter import wait_slot_test  # noqa: PLC0415
+    from cuda_link._native_waiter import wait_slot_test  # noqa: PLC0415
+
+    from cuda_link._wait_backend import WaitResult, WaitStatus  # noqa: PLC0415
 
     status_int, waited_us, method = wait_slot_test(**kwargs)
     status = {
@@ -237,7 +237,7 @@ def test_hr_nap_supported_on_this_host():
     The one test here that touches real Win32 state -- it creates and closes a
     single unnamed waitable timer, nothing shared or persistent.
     """
-    from cuda_link_native._native_waiter import hr_nap_supported  # noqa: PLC0415
+    from cuda_link._native_waiter import hr_nap_supported  # noqa: PLC0415
 
     assert hr_nap_supported() is True
 

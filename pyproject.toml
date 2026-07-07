@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link"
@@ -55,11 +55,14 @@ Documentation = "https://github.com/forkni/cuda-link/tree/main/docs"
 Repository = "https://github.com/forkni/cuda-link"
 Issues = "https://github.com/forkni/cuda-link/issues"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.scikit-build]
+wheel.packages = ["src/cuda_link"]
+# _native_waiter (src/cuda_link/_cpp/native_waiter.cpp, see root CMakeLists.txt)
+# is Windows-only and needs no CUDA Toolkit/SDK at build time — cudaEventQuery
+# is handed in as a function pointer the caller already resolved. On other
+# platforms CMakeLists.txt returns early and this produces a pure-Python wheel;
+# the native backend then raises a clear RuntimeError only if actually used.
+cmake.version = ">=3.24"
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "td_exporter", "tests"]
@@ -71,6 +74,7 @@ addopts = "--strict-markers --strict-config --import-mode=importlib --randomly-d
 markers = [
     "requires_cuda: marks tests as requiring CUDA GPU (deselect with '-m \"not requires_cuda\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_native: test requires a real native _native_waiter build + GPU (deselect with -m 'not requires_native')",
 ]
 
 [tool.ruff]
@@ -113,12 +117,13 @@ python-platform = "win32"
 # toolchain in CI; the runtime None-guards remain authoritative.
 # td is TouchDesigner's built-in module (COMP, TOP, CUDAMemoryShape, ui …);
 # it only exists inside the TD interpreter, so treat all td.* imports as Any.
-# cuda_link_native is the optional R5 sidecar package (native/) — imported only
-# inside Importer._resolve_wait_backend() (try/except ImportError/AttributeError)
-# and under TYPE_CHECKING for the WaitBackend annotation; never a core dep.
+# cuda_link._native_waiter is the compiled R5 pybind11 extension (built from
+# src/cuda_link/_cpp/native_waiter.cpp by root CMakeLists.txt) — imported only
+# inside _native_loader.load_native_backend() (try/except ImportError); pyrefly
+# has no stub for a compiled module, so treat it as Any.
 replace-imports-with-any = [
     "torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes",
-    "td", "td.*", "cuda_link_native", "cuda_link_native.*",
+    "td", "td.*", "cuda_link._native_waiter",
 ]
 # Add td_exporter/ to the import search path so flat-namespace sibling imports
 # (e.g. `from CUDAIPCWrapper import …`) resolve inside that tree.

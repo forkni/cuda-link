@@ -216,13 +216,6 @@ def main() -> None:
                     # wait backend — may not exist until get_frame*() succeeds.
                     # getattr: the installed cuda-link may predate wait_backend_name.
                     wb = getattr(importer, "wait_backend_name", "unknown (cuda-link < 1.12.1)")
-                    if wb == "native":
-                        try:
-                            from cuda_link_native import __version__ as _native_ver  # noqa: PLC0415
-
-                            wb = f"native (cuda-link-native {_native_ver})"
-                        except ImportError:
-                            pass
                     print(f"[receiver] Wait backend: {wb}", flush=True)
 
                 get_frame_total_s += gf_dt

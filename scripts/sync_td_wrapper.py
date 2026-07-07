@@ -72,6 +72,8 @@ CANONICAL_ONLY: frozenset[str] = frozenset(
         "__init__.py",
         "_console.py",  # imported from cuda_link package directly by example scripts; no TD twin
         "cuda_ipc_importer.py",  # deprecation shim — TD consumers use Importer.py directly
+        "_wait_backend.py",  # R5 native-wait seam; pip-only, no TD twin (ADR-0012)
+        "_native_loader.py",  # R5 native-wait seam; pip-only, no TD twin (ADR-0012)
     }
 )
 

@@ -7,19 +7,19 @@ on:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'CMakeLists.txt'
       - '.github/workflows/tests.yml'
       - 'td_exporter/**'
       - 'scripts/sync_td_wrapper.py'
-      - 'native/**'
   pull_request:
     paths:
       - 'src/cuda_link/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'CMakeLists.txt'
       - '.github/workflows/tests.yml'
       - 'td_exporter/**'
       - 'scripts/sync_td_wrapper.py'
-      - 'native/**'
   workflow_dispatch:
 
 jobs:
@@ -58,9 +58,12 @@ jobs:
       - name: Run no-GPU test suite
         # pytest reads pythonpath = ["src", "tests"] from pyproject.toml, so the
         # package and test helpers import without an editable install.
+        # requires_native tests are also deselected: this runner is ubuntu-latest
+        # and never builds the Windows-only _native_waiter extension, so they'd
+        # only skip anyway -- the marker keeps that explicit rather than implicit.
         # --cov enforces the fail_under gate in [tool.coverage.report] (pyproject.toml).
         # --cov-report=xml produces coverage.xml for Codecov upload below.
-        run: pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing --cov-report=xml -q
+        run: pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing --cov-report=xml -q
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -78,54 +81,4 @@ jobs:
         with:
           name: coverage-main-${{ matrix.python-version }}
           path: coverage.xml
-          retention-days: 14
-
-  native-tests:
-    name: native pytest (no GPU)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install dependencies
-        # cuda-link is a runtime dependency of cuda_link_native (for
-        # CUDARuntimeAPI.cudart_event_query_fn_ptr() etc.). Install it in
-        # editable mode first so the native package can import it.
-        # pytest-randomly + pytest-cov match native/pyproject.toml's dev config.
-        # The native _native_waiter extension requires Windows + a loaded CUDA
-        # runtime; FakeWaitBackend replaces it for all tests not marked
-        # requires_native.
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest pytest-randomly pytest-cov numpy
-
-      - name: Run no-GPU native test suite
-        # pytest reads [tool.pytest.ini_options] from native/pyproject.toml when
-        # run from the native/ directory (rootdir = native/).
-        # --cov enforces the fail_under gate in [tool.coverage.report] (native/pyproject.toml).
-        # coverage.xml is written to native/ (pytest runs from there via cd).
-        run: cd native && pytest tests -m "not requires_native" --cov=cuda_link_native --cov-report=term-missing --cov-report=xml -q
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: ./native/coverage.xml
-          flags: native
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-
-      - name: Upload coverage report artifact
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: coverage-native
-          path: native/coverage.xml
           retention-days: 14

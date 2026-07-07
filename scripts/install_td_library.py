@@ -5,11 +5,9 @@ Supports five installation targets so the cuda_link package is importable inside
 TouchDesigner's Python environment.  The bootstrap Text DAT (CUDALinkBootstrap.py)
 then uses sys.path injection to make the package available without mirror Text DATs.
 
-The cuda-link-native wait-backend accelerator installs BY DEFAULT (pass --no-native
-to skip it) — auto-built on demand via utils\\build_native_wheel.cmd when missing
-(requires only a C++17 compiler; no CUDA Toolkit, no SDK; see native/README.md). If
-the build fails (e.g. no MSVC found), the installer warns and continues with just
-the core wheel — this is a soft default, never a hard install failure.
+On Windows with MSVC available, the wheel also carries the compiled _native_waiter
+wait-backend accelerator (built automatically as part of the single cuda_link wheel —
+see utils\\build_wheel.cmd). No separate install step or flag is needed.
 
 Usage (interactive):
     python scripts\\install_td_library.py
@@ -21,15 +19,10 @@ Usage (non-interactive / CI):
     python scripts\\install_td_library.py --mode 4 --python "C:\\Python311\\python.exe"
     python scripts\\install_td_library.py --mode 5 --td-python "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\python.exe"
 
-Native wait backend (on by default, auto-builds on demand):
-    python scripts\\install_td_library.py --mode 5 --td-python "..."             # native installs automatically
-    python scripts\\install_td_library.py --mode 5 --td-python "..." --no-native # skip it
-
 Common flags:
     --non-interactive   Require all target args; skip menu and prompts.
     --dry-run           Print what would run without executing.
-    --wheel <path>      Override core wheel path (skips auto-detect + build).
-    --native-wheel <path>  Override native wheel path (implies --native).
+    --wheel <path>      Override wheel path (skips auto-detect + build).
 
 Environment variables (persisted via `setx`, current user, on by default):
     CUDALINK_DOORBELL=1 is set after ANY successful install (all modes).
@@ -87,30 +80,16 @@ def _red(t: str) -> str:
 
 
 def _find_wheel() -> Path | None:
-    """Return the newest cuda_link-*.whl (core) in dist/, or None."""
+    """Return the newest cuda_link-*.whl in dist/, or None."""
     dist = REPO_ROOT / "dist"
-    # Scope to core wheels only: "cuda_link-*.whl" never matches "cuda_link_native-*.whl"
-    # because the latter has "_native" immediately after "cuda_link" (underscore, not dash).
     wheels = (
         sorted(dist.glob("cuda_link-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True) if dist.is_dir() else []
     )
     return wheels[0] if wheels else None
 
 
-def _find_native_wheel() -> Path | None:
-    """Return the newest cuda_link_native-*.whl in dist/, or None."""
-    dist = REPO_ROOT / "dist"
-    wheels = (
-        sorted(dist.glob("cuda_link_native-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if dist.is_dir()
-        else []
-    )
-    return wheels[0] if wheels else None
-
-
-# Repo-relative source roots whose changes should invalidate each wheel.
-_CORE_SOURCE_ROOTS = ("src/cuda_link", "pyproject.toml")
-_NATIVE_SOURCE_ROOTS = ("native/src", "native/CMakeLists.txt", "native/pyproject.toml")
+# Repo-relative source roots whose changes should invalidate the wheel.
+_CORE_SOURCE_ROOTS = ("src/cuda_link", "pyproject.toml", "CMakeLists.txt")
 
 # Build artifact dirs to skip when walking source roots for mtimes — a wheel must
 # never be able to count itself (or a stale build/ copy) as its own source.
@@ -148,8 +127,8 @@ def _wheel_is_stale(wheel: Path, roots: tuple[str, ...], _root: Path = REPO_ROOT
 
     mtime is a pragmatic signal, not a content hash: a `git checkout`/clone can
     rewrite source mtimes and trigger a spurious rebuild, but that is safe
-    (correct-but-slower) — never a wrong install. Use the --wheel/--native-wheel
-    override flags to force-reuse a specific wheel unconditionally.
+    (correct-but-slower) — never a wrong install. Use the --wheel override flag
+    to force-reuse a specific wheel unconditionally.
 
     `_root` overrides the repo root; only tests should pass it.
     """
@@ -177,43 +156,6 @@ def _build_wheel(dry_run: bool) -> Path:
     return wheel
 
 
-def _build_native_wheel(dry_run: bool) -> Path | None:
-    """Run build_native_wheel.cmd to produce a native wheel; return its path, or None on failure.
-
-    Unlike a wheel resolver that sys.exit()s on failure, this degrades gracefully:
-    native installs by default, so a build failure here (e.g. no MSVC found) must
-    not block the core install. The caller prints a warning and continues with the
-    core wheel only.
-    """
-    print(_bold("[build] No native wheel found — building now..."))
-    cmd_path = REPO_ROOT / "utils" / "build_native_wheel.cmd"
-    if not cmd_path.exists():
-        print(_yellow(f"  [warn] build_native_wheel.cmd not found at {cmd_path} — skipping native backend."))
-        return None
-    if dry_run:
-        print(_yellow(f"  [dry-run] Would run: {cmd_path}"))
-        return REPO_ROOT / "dist" / "cuda_link_native-DRY_RUN.whl"
-    # Use ["cmd.exe", "/c", path] instead of shell=True to avoid shell injection.
-    # stdin=DEVNULL prevents build_native_wheel.cmd's `pause` from blocking mid-flow;
-    # `pause` reads EOF immediately and passes through without waiting.
-    result = subprocess.run(["cmd.exe", "/c", str(cmd_path)], cwd=REPO_ROOT, stdin=subprocess.DEVNULL)
-    if result.returncode != 0:
-        print(
-            _yellow(
-                "  [warn] Native wheel build failed — continuing without the native wait backend.\n"
-                "         Common cause: no C++17 compiler (MSVC) found.\n"
-                "         See native/README.md, or run utils\\build_native_wheel.cmd directly for full output.\n"
-                "         The core wheel alone still works — Importer falls back to its Python wait path."
-            )
-        )
-        return None
-    wheel = _find_native_wheel()
-    if not wheel:
-        print(_yellow("  [warn] Build reported success but no cuda_link_native-*.whl found in dist/ — skipping."))
-        return None
-    return wheel
-
-
 def resolve_wheel(override: str | None, dry_run: bool) -> Path:
     if override:
         p = Path(override)
@@ -227,28 +169,6 @@ def resolve_wheel(override: str | None, dry_run: bool) -> Path:
         print(_yellow(f"  [stale] {w.name} predates src/cuda_link changes — rebuilding..."))
         w = _build_wheel(dry_run)
     print(f"  Wheel: {w.name}")
-    return w
-
-
-def resolve_native_wheel(override: str | None, dry_run: bool) -> Path | None:
-    """Locate or auto-build the native wheel; return its path, or None to skip gracefully.
-
-    A missing/failed native wheel here is not fatal: native is a soft default.
-    """
-    if override:
-        p = Path(override)
-        if not p.exists():
-            print(_yellow(f"  [warn] --native-wheel path does not exist: {p} — skipping native backend."))
-            return None
-        return p
-    w = _find_native_wheel()
-    if not w:
-        w = _build_native_wheel(dry_run)
-    elif _wheel_is_stale(w, _NATIVE_SOURCE_ROOTS):
-        print(_yellow(f"  [stale] {w.name} predates native/ changes — rebuilding..."))
-        w = _build_native_wheel(dry_run) or w  # keep the stale wheel if rebuild fails
-    if w:
-        print(f"  Native wheel: {w.name}")
     return w
 
 
@@ -269,9 +189,9 @@ def _run_pip(pip_args: list[str], dry_run: bool) -> None:
 def _setx_user(name: str, value: str, dry_run: bool) -> bool:
     """Persist a current-user Windows environment variable via `setx` (no admin needed).
 
-    Soft-failure like the native wheel auto-build: a setx problem (e.g. the
-    combined-length limit, or setx being unavailable on a non-Windows dev
-    environment) warns and returns False rather than aborting the whole install.
+    Soft-failure: a setx problem (e.g. the combined-length limit, or setx
+    being unavailable on a non-Windows dev environment) warns and returns
+    False rather than aborting the whole install.
 
     NOTE: setx only affects NEW processes started after it runs — the current
     shell/TD session will not see the new value until restarted. Callers are
@@ -413,33 +333,15 @@ _SITE_PKGS_QUERY = (
 )
 
 
-def _extra_packages_from_wheels(wheels: list[Path]) -> list[str]:
-    """Map installed wheel filenames to their extra (non-core) import names.
-
-    "Extra" excludes the core cuda_link-*.whl (always present, never listed
-    separately) — used to build verification/activation hints that scale to
-    any combination of optional packages, rather than a single boolean that
-    stopped generalizing once an optional wheel (native) was added.
-    """
-    names = []
-    for w in wheels:
-        if w.name.startswith("cuda_link_native-"):
-            names.append("cuda_link_native")
-    return names
-
-
 def _print_activation(
     site_packages: Path | None,
     label: str,
     td_preferences_only: bool = False,
-    extra_packages: list[str] | None = None,
 ) -> None:
     """Print installation confirmation and path-activation instructions.
 
     td_preferences_only=True (modes 2/3/4): show only the TD Preferences path instruction.
     td_preferences_only=False (mode 1 default): show CUDALINK_LIB_PATH + TD Preferences.
-    extra_packages: optional-package import names installed alongside cuda_link
-    (e.g. ["cuda_link_native"]) — each gets its own verify-import hint line.
     """
     print()
     print(_bold("─" * 60))
@@ -469,15 +371,13 @@ def _print_activation(
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
         print("    [CUDALinkBootstrap] Library mode active — cuda_link submodules aliased")
-        for pkg in extra_packages or []:
-            print(f"    import {pkg}; print({pkg}.__version__)")
     print()
 
 
 # ─── Install modes ─────────────────────────────────────────────────────────────
 
 
-def mode_1_external_folder(wheels: list[Path], target: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_1_external_folder(wheel: Path, target: str | None, non_interactive: bool, dry_run: bool) -> None:
     """pip install --target <folder>  (default; CUDALINK_LIB_PATH points here)."""
     if not target:
         if non_interactive:
@@ -499,18 +399,16 @@ def mode_1_external_folder(wheels: list[Path], target: str | None, non_interacti
         "install",
         "--target",
         str(dest),
-        *[str(w) for w in wheels],
+        str(wheel),
         "--upgrade",
         "--force-reinstall",
         "--no-deps",
     ]
     _run_pip(pip, dry_run)
-    _print_activation(dest, "Install folder", extra_packages=_extra_packages_from_wheels(wheels))
+    _print_activation(dest, "Install folder")
 
 
-def mode_2_venv(
-    wheels: list[Path], venv_dir: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True
-) -> None:
+def mode_2_venv(wheel: Path, venv_dir: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True) -> None:
     """Install into an existing venv's site-packages."""
     if not venv_dir:
         if non_interactive:
@@ -529,12 +427,10 @@ def mode_2_venv(
     if not pip_exe.exists():
         sys.exit(_red(f"[error] pip not found in venv at {venv / 'Scripts'} or {venv / 'bin'}"))
 
-    pip = [str(pip_exe), "install", *[str(w) for w in wheels], "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [str(pip_exe), "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
     site_pkgs = _find_site_packages_in(venv)
-    _print_activation(
-        site_pkgs, "venv site-packages", td_preferences_only=True, extra_packages=_extra_packages_from_wheels(wheels)
-    )
+    _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True)
 
     if set_env and python_exe.exists():
         # Same rationale as mode 4: this venv's python.exe is the interpreter
@@ -548,7 +444,7 @@ def mode_2_venv(
         _print_env_vars_set(set_vars)
 
 
-def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_3_conda(wheel: Path, conda_env: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install into a conda environment."""
     if not conda_env:
         if non_interactive:
@@ -564,7 +460,7 @@ def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: boo
         conda_env,
         "pip",
         "install",
-        *[str(w) for w in wheels],
+        str(wheel),
         "--upgrade",
         "--force-reinstall",
         "--no-deps",
@@ -586,12 +482,7 @@ def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: boo
         except FileNotFoundError:
             pass
 
-    _print_activation(
-        site_pkgs,
-        "conda env site-packages",
-        td_preferences_only=True,
-        extra_packages=_extra_packages_from_wheels(wheels),
-    )
+    _print_activation(site_pkgs, "conda env site-packages", td_preferences_only=True)
     if site_pkgs is None:
         print(_yellow("  Could not auto-detect conda site-packages path."))
         print('  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"')
@@ -599,7 +490,7 @@ def mode_3_conda(wheels: list[Path], conda_env: str | None, non_interactive: boo
 
 
 def mode_4_system_python(
-    wheels: list[Path], python_exe: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True
+    wheel: Path, python_exe: str | None, non_interactive: bool, dry_run: bool, set_env: bool = True
 ) -> None:
     """Install into a system / parallel Python installation (the official TD docs approach)."""
     if not python_exe:
@@ -632,7 +523,7 @@ def mode_4_system_python(
         "-m",
         "pip",
         "install",
-        *[str(w) for w in wheels],
+        str(wheel),
         "--upgrade",
         "--force-reinstall",
         "--no-deps",
@@ -654,9 +545,7 @@ def mode_4_system_python(
         except (FileNotFoundError, OSError):
             pass
 
-    _print_activation(
-        site_pkgs, "Python site-packages", td_preferences_only=True, extra_packages=_extra_packages_from_wheels(wheels)
-    )
+    _print_activation(site_pkgs, "Python site-packages", td_preferences_only=True)
 
     if set_env:
         # CUDALINK_RECEIVER_PYTHON_EXE: the interpreter example_receiver_launcher.py's
@@ -672,7 +561,7 @@ def mode_4_system_python(
         _print_env_vars_set(set_vars)
 
 
-def mode_5_td_python(wheels: list[Path], td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
+def mode_5_td_python(wheel: Path, td_python_exe: str | None, non_interactive: bool, dry_run: bool) -> None:
     """Install directly into TouchDesigner's bundled Python.
 
     WARNING: Modifies TD's internal Python environment. Runs without needing CUDALINK_LIB_PATH.
@@ -706,29 +595,24 @@ def mode_5_td_python(wheels: list[Path], td_python_exe: str | None, non_interact
     if not td_py.is_file():
         sys.exit(_red(f"[error] Path is not an executable file: {td_py}"))
 
-    pip = [str(td_py), "-m", "pip", "install", *[str(w) for w in wheels], "--upgrade", "--force-reinstall", "--no-deps"]
+    pip = [str(td_py), "-m", "pip", "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
 
-    extra_pkgs = _extra_packages_from_wheels(wheels)
-    all_pkgs = ["cuda_link", *extra_pkgs]
-    plural = len(all_pkgs) > 1
-    pkgs_label = " + ".join(all_pkgs)
-    print(_yellow(f"\n  Note: installing {pkgs_label} into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
-    print(f"  {pkgs_label} will be importable in all TD projects automatically.")
+    print(_yellow("\n  Note: installing cuda_link into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
+    print("  cuda_link will be importable in all TD projects automatically.")
     print("  Re-run this after upgrading TouchDesigner.\n")
     _run_pip(pip, dry_run)
 
     # TD's Python does not need a path variable — it's already on TD's sys.path
-    verify_stmt = f"import {', '.join(all_pkgs)}; print(cuda_link.__version__)"
     print()
     print(_bold("─" * 60))
     print(_bold("  INSTALL COMPLETE (TD Python)"))
     print(_bold("─" * 60))
     print()
-    print(f"  {pkgs_label} {'are' if plural else 'is'} now installed into TD's Python.")
+    print("  cuda_link is now installed into TD's Python.")
     print("  No CUDALINK_LIB_PATH or TD Preferences change needed.")
     print()
     print(_bold("  Verify in TD Textport after restarting TouchDesigner:"))
-    print(f"    {verify_stmt}")
+    print("    import cuda_link; print(cuda_link.__version__)")
     print()
 
 
@@ -775,26 +659,7 @@ def main() -> None:
     parser.add_argument(
         "--td-python", metavar="EXE", help="Mode 5: path to TD's python.exe (see app.pythonExecutable in Textport)."
     )
-    parser.add_argument("--wheel", metavar="PATH", help="Override core wheel path (skip auto-detect + build).")
-    native_grp = parser.add_mutually_exclusive_group()
-    native_grp.add_argument(
-        "--native",
-        action="store_true",
-        default=False,
-        help="Install the cuda-link-native wait-backend accelerator (default: on; this flag is "
-        "only needed to force it back on after --no-native, or to be explicit).",
-    )
-    native_grp.add_argument(
-        "--no-native",
-        action="store_true",
-        default=False,
-        help="Skip the native wait-backend accelerator (it installs by default otherwise).",
-    )
-    parser.add_argument(
-        "--native-wheel",
-        metavar="PATH",
-        help="Override native wheel path (implies --native; skip auto-detect).",
-    )
+    parser.add_argument("--wheel", metavar="PATH", help="Override wheel path (skip auto-detect + build).")
     parser.add_argument("--non-interactive", action="store_true", help="Require explicit flags; skip all prompts.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
     parser.add_argument(
@@ -806,10 +671,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # --native-wheel implies --native
-    if args.native_wheel:
-        args.native = True
-
     print()
     print(_bold("=" * 60))
     print(_bold("  cuda-link TD Library Installer"))
@@ -818,8 +679,8 @@ def main() -> None:
         print(_yellow("  [DRY-RUN MODE] — no commands will be executed."))
     print()
 
-    # Resolve core wheel
-    core_wheel = resolve_wheel(args.wheel, args.dry_run)
+    # Resolve wheel
+    wheel = resolve_wheel(args.wheel, args.dry_run)
 
     # Determine mode
     mode = args.mode
@@ -830,32 +691,20 @@ def main() -> None:
 
     print(f"\n  Mode {mode}: {_MODE_DESCRIPTIONS[mode]}")
 
-    # Decide whether to also install the native wait-backend accelerator.
-    # Soft default ON — no interactive prompt: --no-native is the only way to
-    # skip it, and a build/resolve failure degrades gracefully
-    # (resolve_native_wheel returns None) rather than aborting the install.
-    install_native = not args.no_native
-
-    wheels: list[Path] = [core_wheel]
-    if install_native:
-        native_wheel = resolve_native_wheel(args.native_wheel, args.dry_run)
-        if native_wheel:
-            wheels.append(native_wheel)
-
     # Set unconditionally by --no-set-env: True unless the user opted out.
     set_env = not args.no_set_env
 
     # Dispatch
     if mode == 1:
-        mode_1_external_folder(wheels, args.target, args.non_interactive, args.dry_run)
+        mode_1_external_folder(wheel, args.target, args.non_interactive, args.dry_run)
     elif mode == 2:
-        mode_2_venv(wheels, args.venv, args.non_interactive, args.dry_run, set_env)
+        mode_2_venv(wheel, args.venv, args.non_interactive, args.dry_run, set_env)
     elif mode == 3:
-        mode_3_conda(wheels, args.conda, args.non_interactive, args.dry_run)
+        mode_3_conda(wheel, args.conda, args.non_interactive, args.dry_run)
     elif mode == 4:
-        mode_4_system_python(wheels, args.python, args.non_interactive, args.dry_run, set_env)
+        mode_4_system_python(wheel, args.python, args.non_interactive, args.dry_run, set_env)
     elif mode == 5:
-        mode_5_td_python(wheels, args.td_python, args.non_interactive, args.dry_run)
+        mode_5_td_python(wheel, args.td_python, args.non_interactive, args.dry_run)
 
     # CUDALINK_DOORBELL: persisted here (not a library code default) after ANY
     # successful mode above — a mode function that hit sys.exit() on error never
