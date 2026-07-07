@@ -364,7 +364,7 @@ def test_reconnect_request_immediate_skips_backoff() -> None:
     # After immediate reconnect, frames_since_last_retry == retry_interval_frames
     assert imp._retry.frames_since_last_retry == imp._retry.retry_interval_frames
     # And it changed from the value before
-    assert imp._retry.frames_since_last_retry != frames_before or imp._retry.retry_interval_frames == 1
+    assert imp._retry.frames_since_last_retry != frames_before
 
 
 def test_reconnect_for_testing_policy_has_reconnect_disabled() -> None:
@@ -569,7 +569,9 @@ def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest
     # Call _reinitialize directly
     imp._reinitialize()
 
-    mock_numpy.close.assert_not_called(), "NumpyBuffers must NOT be torn down — shape+dtype unchanged"
+    # Trailing message dropped: `assert_not_called(), "msg"` builds a dead tuple, never
+    # surfaces "msg" — the check itself (assert_not_called) still enforces correctly.
+    mock_numpy.close.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +707,9 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
 
     imp._reinitialize()
 
-    mock_numpy.close.assert_called_once(), "NumpyBuffers MUST be torn down when shape changes"
+    # Trailing message dropped: `assert_called_once(), "msg"` builds a dead tuple, never
+    # surfaces "msg" — the check itself (assert_called_once) still enforces correctly.
+    mock_numpy.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -919,19 +923,52 @@ def test_adaptive_stays_latched_after_trigger() -> None:
 
 
 def test_adaptive_torch_backend_uses_gpu_wait_when_latched() -> None:
-    """_TorchBackend takes the stream_wait_event branch when _gpu_wait_active=True.
+    """_TorchBackend.wait() takes the stream_wait_event branch when _gpu_wait_active=True.
 
     Confirms that policy.torch_gpu_wait=False but _gpu_wait_active=True still
-    routes through the GPU-side wait — i.e. the latch is consulted.
+    routes through the GPU-side wait — drives a real _TorchBackend.wait() call
+    and asserts conn.cuda.stream_wait_event is actually invoked, rather than
+    just re-evaluating the same boolean expression the SUT itself checks.
     """
+    from cuda_link.importer import TORCH_AVAILABLE, _TorchBackend
 
-    # Build importer with gpu_wait disabled in policy but latch already set
-    imp = _make_connected_importer()
+    if not TORCH_AVAILABLE:
+        pytest.skip("torch not installed")
+
+    # Build importer with gpu_wait disabled in policy but latch already set.
+    # with_events=True is required: _TorchBackend.wait() only takes the
+    # GPU-side branch when the slot has an IPC event (evt truthy).
+    imp = make_connected_importer(with_events=True)
     assert imp._policy.torch_gpu_wait is False
     imp._gpu_wait_active = True  # simulate a latched state
 
-    # Confirm the latch condition is recognised in the torch backend
-    assert imp._policy.torch_gpu_wait or imp._gpu_wait_active  # the OR that matters
+    backend = _TorchBackend(imp, stream=None)  # no explicit stream -> latch path
+    mock_stream = MagicMock(cuda_stream=123)
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.current_stream", return_value=mock_stream),
+    ):
+        backend.wait(imp._conn, read_slot=0)
+
+    imp._conn.cuda.stream_wait_event.assert_called_once_with(123, imp._conn.ipc_events[0], 0)
+
+
+def test_torch_backend_uses_cpu_wait_when_not_latched() -> None:
+    """_TorchBackend.wait() falls through to the CPU poll when the latch is unset.
+
+    Companion to the latched case above — confirms stream_wait_event is NOT
+    called when neither policy.torch_gpu_wait nor _gpu_wait_active is set.
+    """
+    from cuda_link.importer import _TorchBackend
+
+    imp = make_connected_importer(with_events=True)
+    assert imp._policy.torch_gpu_wait is False
+    assert imp._gpu_wait_active is False
+
+    backend = _TorchBackend(imp, stream=None)
+    backend.wait(imp._conn, read_slot=0)  # resolves via conn.cuda.query_event (pre-wired True)
+
+    imp._conn.cuda.stream_wait_event.assert_not_called()
 
 
 def test_adaptive_stats_visible_in_get_stats() -> None:

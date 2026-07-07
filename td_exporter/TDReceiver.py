@@ -496,17 +496,21 @@ class TDReceiverEngine:
                     f32_size = f16_size * 2  # float32 = 2× bytes
 
                     cupy_f16 = self._cupy_f16_views[read_slot]
-                    # Run conversion on _connection.stream so copyCUDAMemory (also on _connection.stream)
-                    # automatically serializes after the elementwise cast kernel.
-                    with cp.cuda.ExternalStream(rx_stream_int):
-                        cp.copyto(self._cupy_f32_buf, cupy_f16, casting="same_kind")
+                    try:
+                        # Run conversion on _connection.stream so copyCUDAMemory (also on
+                        # _connection.stream) automatically serializes after the elementwise cast kernel.
+                        with cp.cuda.ExternalStream(rx_stream_int):
+                            cp.copyto(self._cupy_f32_buf, cupy_f16, casting="same_kind")
 
-                    handle.copy_cuda_memory(
-                        self._cupy_f32_buf.data.ptr,
-                        f32_size,
-                        self._cached_shape,  # dataType=float32 set during initialize_receiver()
-                        stream=rx_stream_int,
-                    )
+                        handle.copy_cuda_memory(
+                            self._cupy_f32_buf.data.ptr,
+                            f32_size,
+                            self._cached_shape,  # dataType=float32 set during initialize_receiver()
+                            stream=rx_stream_int,
+                        )
+                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError/RuntimeError (see :944) — keep broad so a GPU OOM here degrades this frame instead of escaping into onCook
+                        self._log(f"float16 GPU conversion failed ({_e}); dropping frame", force=True)
+                        return False
                 else:
                     # CPU fallback: D2H + numpy convert + copyNumpyArray.
                     # Used when CuPy is not installed or GPU buffer allocation failed.
@@ -644,6 +648,10 @@ class TDReceiverEngine:
         self._host.set_param_enabled("Numslots", False)
 
         _t0 = time.perf_counter()
+        # Tracks whether self._connection was overwritten with this attempt's handles below —
+        # the outer except uses this to decide whether a targeted teardown is needed (a raise
+        # after the commit must not leak the just-opened IPC/SHM handles into the next retry).
+        connection_committed = False
         try:
             self.cuda = get_cuda_runtime(device=self.device)
             if not getattr(self, "_runtime_load_logged", False):
@@ -778,7 +786,8 @@ class TDReceiverEngine:
             # Create dedicated non-blocking stream for receiver IPC operations
             # MUST happen before ipc_open_mem_handle to establish CUDA context
             # Reuse existing stream on re-init to avoid leaks on reconnection cycles
-            if self._connection.stream is None:
+            stream_is_new = self._connection.stream is None
+            if stream_is_new:
                 stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created receiver stream: 0x{int(stream.value):016x}",
@@ -805,7 +814,7 @@ class TDReceiverEngine:
                         force=True,
                     )
                     # Partial cleanup — slots 0..slot-1 already opened
-                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
+                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
                 self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
@@ -820,7 +829,7 @@ class TDReceiverEngine:
                         "or CUDA device mismatch. Will retry with backoff.",
                         force=True,
                     )
-                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
+                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
                 # Read + open event handle
@@ -852,6 +861,7 @@ class TDReceiverEngine:
                 shutdown_offset=shutdown_offset,
                 last_write_idx=0,
             )
+            connection_committed = True
             self._format = Format.from_metadata(_md)
             self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
@@ -963,6 +973,15 @@ class TDReceiverEngine:
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Receiver initialization failed: {e}", force=True)
 
+            if connection_committed:
+                # Post-commit work (format/shape resolution, float16 buffer allocation) raised
+                # after self._connection above was already overwritten with this attempt's
+                # IPC/SHM handles. Without this, those handles are dropped unclosed and leak
+                # on every subsequent backoff retry. Release resources only — do NOT call the
+                # full cleanup() here, since it also resets self._retry's backoff counters,
+                # which would make the receiver retry every frame instead of backing off.
+                self._release_resources()
+
             traceback.print_exc()
             return False
 
@@ -972,6 +991,7 @@ class TDReceiverEngine:
         dev_ptrs: list,
         ipc_events: list,
         stream: object,
+        stream_is_new: bool,
         shm_handle: object,
     ) -> None:
         """Cleanup partially-opened resources when initialization fails mid-slot.
@@ -985,6 +1005,8 @@ class TDReceiverEngine:
             dev_ptrs: In-progress dev_ptrs list from this init attempt.
             ipc_events: In-progress ipc_events list from this init attempt.
             stream: Stream created for this init attempt (only closed if freshly created).
+            stream_is_new: True when `stream` was created by this attempt (not reused from
+                self._connection.stream) — only then is it safe to destroy it here.
             shm_handle: SHM handle to close and clear.
         """
         for i in range(failed_slot):
@@ -1000,17 +1022,28 @@ class TDReceiverEngine:
                     self.cuda.destroy_event(ipc_events[i])
                 ipc_events[i] = None
 
+        # Destroy the stream only if this attempt created it fresh — a stream reused from
+        # self._connection.stream must survive so the next retry can keep reusing it (a
+        # freshly-created stream left un-destroyed here was a latent leak on every failed
+        # per-slot open before the first successful connect).
+        if stream_is_new and stream is not None:
+            with contextlib.suppress(RuntimeError, OSError):
+                self.cuda.destroy_stream(stream)
+
         # Close SharedMemory so next retry re-opens fresh (avoids reading stale content)
         if shm_handle is not None:
             with contextlib.suppress(OSError, BufferError):
                 shm_handle.close()
 
-    def cleanup(self) -> None:
-        """Cleanup Receiver CUDA IPC resources."""
-        # Guard against double-cleanup (matches cleanup_sender() pattern)
-        if not self._initialized and self._connection.shm_handle is None:
-            return
+    def _release_resources(self) -> None:
+        """Close the active connection and free float16 D2H buffers (idempotent).
 
+        Resource-teardown only — does NOT touch self._retry backoff counters or
+        self._initialized. Shared by cleanup() (full teardown on deactivate) and
+        initialize_receiver()'s post-commit failure path, where resetting backoff state
+        would make the receiver retry every frame instead of backing off (see the
+        outer except in initialize_receiver()).
+        """
         self._connection.close(self.cuda, self._log)
 
         # Free pinned float16 D2H buffer if allocated
@@ -1032,6 +1065,14 @@ class TDReceiverEngine:
         self._cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC
         self._cupy_f16_views = []
         self._cached_shape = None
+
+    def cleanup(self) -> None:
+        """Cleanup Receiver CUDA IPC resources."""
+        # Guard against double-cleanup (matches cleanup_sender() pattern)
+        if not self._initialized and self._connection.shm_handle is None:
+            return
+
+        self._release_resources()
 
         self._initialized = False
         self._retry.connect_attempts = 0

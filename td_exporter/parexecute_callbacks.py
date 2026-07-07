@@ -127,8 +127,19 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
         ext._log("Numslots change ignored while Active (deactivate first)", force=True)
         return
 
-    # Validate slot count (2-5 slots supported)
-    if new_value < 2 or new_value > 5:
+    # Hard bounds: below 2 there's no double-buffering; above 10 overflows both the
+    # receiver's protocol guard (TDReceiver.py num_slots > 10 check) and the fixed
+    # 10-entry _NVTX_SENDER_SLOT_NAMES tuple indexed by write_idx % num_slots in
+    # export_frame() — letting it through produces an IndexError inside onFrameEnd.
+    if new_value < 2 or new_value > 10:
+        ext._log(
+            f"WARNING: Numslots={new_value} outside supported range (2-10); change rejected",
+            force=True,
+        )
+        return
+
+    # 2-5 slots is the recommended/tested range; 6-10 works but is less exercised.
+    if new_value > 5:
         ext._log(f"WARNING: Numslots={new_value} outside recommended range (2-5)", force=True)
 
     ext.reconfigure_and_reinit("num_slots", new_value)

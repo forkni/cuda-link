@@ -161,9 +161,14 @@ project-excludes = [
 # pattern) but is always a plain int at runtime (ctypes restype=c_void_p
 # auto-converts); int()'s overload set doesn't statically accept `object`
 # (no-matching-overload), same shape as TDReceiver.py's frombuffer suppression.
+# bad-assignment: Importer.open()/from_connection() default `cuda` to
+# CTypesCUDAAdapter, which satisfies CudaPort/ImporterCudaPort only via
+# __getattr__ delegation (see _cuda_adapters.py) — a static checker cannot
+# verify structural Protocol conformance through a dynamic proxy, same root
+# cause already suppressed below for exporter.py.
 [[tool.pyrefly.sub-config]]
 matches = "src/cuda_link/importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry: pynvml bound to None when nvidia-ml-py is absent.
 [[tool.pyrefly.sub-config]]
@@ -204,7 +209,7 @@ errors = {bad-argument-type = false}
 # Consumer engine mirror (same idioms as src/cuda_link/importer.py).
 [[tool.pyrefly.sub-config]]
 matches = "td_exporter/Importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry mirror (same as src/cuda_link/nvml_observer.py).
 [[tool.pyrefly.sub-config]]

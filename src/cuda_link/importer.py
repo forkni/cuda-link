@@ -33,7 +33,7 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
-from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS
+from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS, CudaIpcError, ProducerTimeoutError, ProtocolError
 from .shm_protocol import (
     IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
@@ -54,6 +54,7 @@ from .shm_protocol import (
 if TYPE_CHECKING:
     from cuda_link._wait_backend import WaitBackend
 
+    from ._importer_port import ImporterCudaPort
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
@@ -271,7 +272,7 @@ class IPCConnection:
     _open_ipc_slots(), then nulled in-place by close_ipc_handles() / close().
     """
 
-    cuda: Any  # ImporterCudaPort
+    cuda: ImporterCudaPort
     shm_handle: object  # SharedMemory | None after close()
     ipc_version: int
     num_slots: int
@@ -419,7 +420,7 @@ class NumpyBuffers:
     close() tears them down idempotently.
     """
 
-    cuda: Any  # ImporterCudaPort
+    cuda: ImporterCudaPort
     fmt: Format
     buffer: object  # np.ndarray — reusable D2H destination
     pinned_ptr: object  # c_void_p | None
@@ -929,7 +930,7 @@ class Importer:
         self,
         spec: ImportSpec,
         policy: ImportPolicy,
-        cuda: Any,  # ImporterCudaPort
+        cuda: ImporterCudaPort,
     ) -> None:
         """Internal constructor. Use Importer.open() instead."""
         self._spec = spec
@@ -1009,7 +1010,7 @@ class Importer:
         spec: ImportSpec,
         *,
         policy: ImportPolicy | None = None,
-        cuda: Any | None = None,
+        cuda: ImporterCudaPort | None = None,
     ) -> Importer:
         """Open a CUDA IPC channel and return a connected Importer.
 
@@ -1045,7 +1046,7 @@ class Importer:
         conn: IPCConnection,
         fmt: Format,
         *,
-        cuda: Any | None = None,
+        cuda: ImporterCudaPort | None = None,
         torch: Any | None = None,
         cupy: Any | None = None,
         numpy: Any | None = None,
@@ -1164,7 +1165,7 @@ class Importer:
 
         if magic != PROTOCOL_MAGIC:
             shm.close()
-            raise RuntimeError(
+            raise ProtocolError(
                 f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
                 "Update both TD and Python sides to the same protocol version."
             )
@@ -1174,18 +1175,18 @@ class Importer:
 
         if num_slots == 0 or num_slots > 10:
             shm.close()
-            raise ValueError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
+            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
 
         shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
             shutdown_flag = shm.buf[shutdown_offset]
         except (OSError, BufferError, IndexError) as e:
             shm.close()
-            raise RuntimeError(f"Could not read shutdown flag: {e}") from e
+            raise CudaIpcError(f"Could not read shutdown flag: {e}") from e
 
         if shutdown_flag == 1:
             shm.close()
-            raise RuntimeError("Producer shutdown flag set — SharedMemory is stale")
+            raise ProtocolError("Producer shutdown flag set — SharedMemory is stale")
 
         logger.info("Ring buffer with %d slots (v%d)", num_slots, ipc_version)
         return shm, num_slots, ipc_version
@@ -1538,7 +1539,7 @@ class Importer:
             )
             status_name = result.status.name  # avoid importing WaitStatus in core
             if status_name == "TIMEOUT":
-                raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
             if status_name == "READY_SPIN":
                 self.total_wait_spin_us += result.waited_us
                 self.wait_spin_hits += 1
@@ -1570,7 +1571,9 @@ class Importer:
                         return spin_us
                 # If we exited because spin_deadline == deadline, we timed out.
                 if time.perf_counter() >= deadline:
-                    raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                    raise ProducerTimeoutError(
+                        f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
+                    )
 
             phase2_start = time.perf_counter()
             did_sleep = False
@@ -1579,7 +1582,9 @@ class Importer:
                     if query(evt):
                         break
                     if time.perf_counter() >= deadline:
-                        raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                        raise ProducerTimeoutError(
+                            f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
+                        )
                     time.sleep(0.0001)
                     did_sleep = True
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000

@@ -439,12 +439,12 @@ def test_roundtrip_data_integrity(temp_shm_name: str) -> None:
     assert not errors, f"Process errors: {errors}"
 
     ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    if ok_dicts:
-        stats = ok_dicts[-1][1]
-        assert stats["frames"] >= 1, "Consumer received 0 frames"
-        assert stats["mismatches"] == 0, (
-            f"Data integrity failure: {stats['mismatches']}/{stats['frames']} frames had pixel values ≠ {fill_value}"
-        )
+    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
+    stats = ok_dicts[-1][1]
+    assert stats["frames"] >= 1, "Consumer received 0 frames"
+    assert stats["mismatches"] == 0, (
+        f"Data integrity failure: {stats['mismatches']}/{stats['frames']} frames had pixel values ≠ {fill_value}"
+    )
 
 
 @pytest.mark.requires_cuda
@@ -467,8 +467,8 @@ def test_roundtrip_shutdown_detection(temp_shm_name: str) -> None:
     assert not errors, f"Process errors: {errors}"
 
     ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    if ok_dicts:
-        assert ok_dicts[-1][1]["shutdown_detected"], "Consumer did not detect producer shutdown"
+    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
+    assert ok_dicts[-1][1]["shutdown_detected"], "Consumer did not detect producer shutdown"
 
 
 @pytest.mark.requires_cuda
@@ -490,7 +490,7 @@ def test_roundtrip_metadata_auto_detect(temp_shm_name: str) -> None:
     assert not errors, f"Process errors: {errors}"
 
     ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    if ok_dicts:
-        data = ok_dicts[-1][1]
-        assert data["shape"] == (8, 8, 4), f"Expected (8,8,4), got {data['shape']}"
-        assert data["dtype"] == "float32", f"Expected 'float32', got {data['dtype']}"
+    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
+    data = ok_dicts[-1][1]
+    assert data["shape"] == (8, 8, 4), f"Expected (8,8,4), got {data['shape']}"
+    assert data["dtype"] == "float32", f"Expected 'float32', got {data['dtype']}"
