@@ -82,6 +82,18 @@ grep -qE 'git clean -f' <<< "${COMMAND_UNQUOTED}" \
   && _block 'git clean -f' \
      'Confirm with the user before running git clean. This permanently deletes untracked files from the working tree.'
 
+# git rm with a force flag deletes files from the WORKING TREE. git itself refuses
+# `git rm` on modified/added files ("use -f to force"); -f overrides that and can
+# UNRECOVERABLY delete git-ignored / untracked-turned-added files (e.g. local-only
+# artifacts staged by `git cherry-pick -n`). --cached is index-only (keeps the file
+# on disk — the documented untrack workflow), so a --cached command is always allowed.
+if grep -qE 'git rm( |$)' <<< "${COMMAND_UNQUOTED}" \
+   && ! grep -qE -- '--cached' <<< "${COMMAND_UNQUOTED}" \
+   && grep -qE -- '(^|[[:space:]])(-[A-Za-z]*f[A-Za-z]*|--force)([[:space:]]|$)' <<< "${COMMAND_UNQUOTED}"; then
+  _block 'git rm -f' \
+    'git rm -f deletes files from the working tree — for git-ignored or untracked files this is UNRECOVERABLE. To untrack a file while keeping it on disk, use git rm --cached <path>. To force-delete a tracked file, confirm with the user first.'
+fi
+
 # Force-delete branch — may lose commits on an unmerged branch
 grep -qE 'git branch -D( |$)' <<< "${COMMAND_UNQUOTED}" \
   && _block 'git branch -D' \
