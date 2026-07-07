@@ -6,7 +6,7 @@ Unlike ``test_backend.py`` (which drives the independent, pure-Python
 Windows box with a loaded CUDA runtime), these tests drive the *actual* compiled
 state machine in ``native_waiter.cpp`` through its test-only ``wait_slot_test()``
 pybind entry point, with Python-injected fake polling functions standing in for
-``cudaEventQuery`` / ``write_idx`` / the doorbell / the clock.
+``cudaEventQuery`` / ``write_idx`` / the block-phase nap / the clock.
 
 Requires only that the ``_native_waiter`` extension is compiled (Windows) — no
 GPU or loaded cudart needed, since ``set_cuda_event_query()`` is never called
@@ -60,10 +60,10 @@ pytestmark = [pytest.mark.requires_native, _skip_no_native_waiter]
 class _FakeClock:
     """Monotonically-advancing fake microsecond clock, advanced explicitly by tests.
 
-    Passed as wait_slot_test's now_us callable. Every call to wait_doorbell()
-    (the block-phase's "wake or bounded slice" primitive) also advances the
-    clock by the requested slice, mimicking a real WaitForSingleObject timeout,
-    so deadline math behaves realistically without any real sleeping.
+    Passed as wait_slot_test's now_us callable. Every call to nap() (the
+    block-phase's bounded pacing primitive) also advances the clock by the
+    requested duration, mimicking a real timer wait elapsing, so deadline math
+    behaves realistically without any real sleeping.
     """
 
     def __init__(self, start_us: float = 0.0) -> None:
@@ -102,7 +102,7 @@ def test_ready_spin_when_event_already_signaled():
     result = _wait_slot_test(
         event_query=lambda ptr: True,
         read_write_idx=lambda addr: 0,
-        wait_doorbell=lambda handle, slice_ms: False,
+        nap=lambda nap_us: pytest.fail("nap must not run when the spin phase catches the event"),
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0x2000,
@@ -115,17 +115,16 @@ def test_ready_spin_when_event_already_signaled():
 
 
 def test_timeout_when_nothing_ever_ready():
-    """Event never ready, no doorbell wake -- must hit the deadline, not hang."""
+    """Event never ready -- must hit the deadline, not hang."""
     clock = _FakeClock()
 
-    def wait_doorbell(handle, slice_ms):
-        clock.advance(slice_ms * 1000.0)  # simulate a real bounded wait consuming time
-        return False
+    def nap(nap_us):
+        clock.advance(float(nap_us))  # simulate a real bounded wait consuming time
 
     result = _wait_slot_test(
         event_query=lambda ptr: False,
         read_write_idx=lambda addr: 0,
-        wait_doorbell=wait_doorbell,
+        nap=nap,
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0x2000,
@@ -137,23 +136,25 @@ def test_timeout_when_nothing_ever_ready():
     assert result.status.name == "TIMEOUT"
 
 
-def test_ready_doorbell_after_genuine_wake():
-    """A doorbell wake (wait_doorbell -> True) followed by the event turning ready."""
+def test_block_phase_catch_with_doorbell_present_reports_ready_doorbell():
+    """A block-phase catch (event ready after one nap) with a doorbell channel
+    present reports READY_DOORBELL -- the status name is attribution only; the
+    doorbell itself is never waited on (2026-07-06 timer-nap fix)."""
     clock = _FakeClock()
-    calls = {"n": 0}
+    calls = {"event": 0, "naps": 0}
 
     def event_query(ptr):
-        calls["n"] += 1
-        return calls["n"] >= 2  # not ready first check, ready after the wake
+        calls["event"] += 1
+        return calls["event"] >= 2  # not ready first check, ready after one nap
 
-    def wait_doorbell(handle, slice_ms):
-        clock.advance(slice_ms * 1000.0)
-        return True  # genuine wake
+    def nap(nap_us):
+        calls["naps"] += 1
+        clock.advance(float(nap_us))
 
     result = _wait_slot_test(
         event_query=event_query,
         read_write_idx=lambda addr: 0,
-        wait_doorbell=wait_doorbell,
+        nap=nap,
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0x2000,
@@ -163,11 +164,13 @@ def test_ready_doorbell_after_genuine_wake():
         timeout_ms=1000,
     )
     assert result.status.name == "READY_DOORBELL"
+    assert calls["naps"] == 1
+    assert result.method == 4  # kMethodTimerNap -- distinguishes fixed builds in telemetry
 
 
 def test_ready_poll_when_no_doorbell_available():
-    """doorbell_handle=0 -- block phase must use bare Sleep polling and report READY_POLL,
-    never claim a doorbell wake that could not have happened."""
+    """doorbell_handle=0 -- the same timer-nap loop runs, but the status must be
+    READY_POLL, never claiming a doorbell that was not there."""
     clock = _FakeClock()
     calls = {"n": 0}
 
@@ -175,10 +178,13 @@ def test_ready_poll_when_no_doorbell_available():
         calls["n"] += 1
         return calls["n"] >= 3
 
+    def nap(nap_us):
+        clock.advance(float(nap_us))
+
     result = _wait_slot_test(
         event_query=event_query,
         read_write_idx=lambda addr: 0,
-        wait_doorbell=lambda handle, slice_ms: pytest.fail("wait_doorbell must not be called when doorbell_handle=0"),
+        nap=nap,
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0,  # no doorbell
@@ -188,6 +194,52 @@ def test_ready_poll_when_no_doorbell_available():
         timeout_ms=1000,
     )
     assert result.status.name == "READY_POLL"
+    assert result.method == 4
+
+
+def test_nap_is_clamped_to_remaining_deadline():
+    """The block phase must never nap past the deadline: once the remaining
+    budget drops below the standard nap, the nap request shrinks to fit (and is
+    never zero, so forward progress is guaranteed)."""
+    clock = _FakeClock()
+    naps: list[int] = []
+
+    def event_query(ptr):
+        clock.advance(150.0)  # each re-check itself consumes time
+        return False
+
+    def nap(nap_us):
+        naps.append(nap_us)
+        clock.advance(float(nap_us))
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=nap,
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0x2000,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=0,
+        timeout_ms=1,  # 1000us deadline
+    )
+    assert result.status.name == "TIMEOUT"
+    assert naps, "block phase must have napped at least once"
+    assert all(0 < n <= 200 for n in naps), f"naps must be bounded by kBlockNapUs: {naps}"
+    assert naps[-1] < 200, f"final nap must be clamped below the standard 200us: {naps}"
+
+
+def test_hr_nap_supported_on_this_host():
+    """The load-time capability gate: any host these tests run on (Windows 10
+    1803+, a floor every cuda-link deployment clears) must report support.
+
+    The one test here that touches real Win32 state -- it creates and closes a
+    single unnamed waitable timer, nothing shared or persistent.
+    """
+    from cuda_link_native._native_waiter import hr_nap_supported  # noqa: PLC0415
+
+    assert hr_nap_supported() is True
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +279,13 @@ def test_write_idx_advancing_does_not_short_circuit_a_pending_event():
         # async D2D copy for THIS slot), then genuinely ready.
         return calls["event"] >= 5
 
-    def wait_doorbell(handle, slice_ms):
-        clock.advance(slice_ms * 1000.0)
-        return False  # never a genuine wake -- forces repeated re-checks
+    def nap(nap_us):
+        clock.advance(float(nap_us))  # never a readiness signal -- forces repeated re-checks
 
     result = _wait_slot_test(
         event_query=event_query,
         read_write_idx=read_write_idx,
-        wait_doorbell=wait_doorbell,
+        nap=nap,
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0x2000,
@@ -256,14 +307,13 @@ def test_write_idx_advancing_with_event_never_ready_times_out_not_ready_late():
     def read_write_idx(addr):
         return 999  # always "newer" than last_write_idx
 
-    def wait_doorbell(handle, slice_ms):
-        clock.advance(slice_ms * 1000.0)
-        return False
+    def nap(nap_us):
+        clock.advance(float(nap_us))
 
     result = _wait_slot_test(
         event_query=lambda ptr: False,  # never ready
         read_write_idx=read_write_idx,
-        wait_doorbell=wait_doorbell,
+        nap=nap,
         now_us=clock.now_us,
         event_ptr=0x1000,
         doorbell_handle=0x2000,

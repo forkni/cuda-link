@@ -40,7 +40,11 @@ def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
 
     Raises:
         RuntimeError: with actionable guidance if the native module is not built,
-            or if ``cuda_event_query_fn_ptr`` is 0 (caller has no cudart loaded yet).
+            if ``cuda_event_query_fn_ptr`` is 0 (caller has no cudart loaded yet),
+            or if the host cannot create high-resolution waitable timers
+            (Windows 10 pre-1803) — activating without them would reintroduce
+            the ~15.6ms-quantized block-phase waits fixed on 2026-07-06, so the
+            caller should fall back to the python wait path instead.
     """
     try:
         from . import _native_waiter  # type: ignore[attr-defined]  # compiled extension
@@ -59,6 +63,16 @@ def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
             "loaded yet (e.g. via cuda_link.cuda_ipc_wrapper.get_cuda_runtime()) "
             "before the native wait backend was activated."
         )
+    if not _native_waiter.hr_nap_supported():
+        raise RuntimeError(
+            "cuda-link-native module (_native_waiter) is built but this host "
+            "cannot create high-resolution waitable timers (requires Windows 10 "
+            "1803+). Without them the native block phase would be quantized to "
+            "the ~15.6ms default timer tick — the exact defect fixed on "
+            "2026-07-06 — so the native backend refuses to activate; the python "
+            "wait path (which the Importer falls back to automatically) is "
+            "strictly better on this host."
+        )
     return _NativeWaitBackend(_native_waiter)
 
 
@@ -66,9 +80,9 @@ class _NativeWaitBackend:
     """Thin adapter over the compiled ``_native_waiter`` module.
 
     Kept deliberately thin: forwards 1:1 to the native module, which owns the
-    spin/block state machine and the Win32 doorbell wait (cudart dispatch is
-    the fixed function pointer registered by load_native_backend() above).
-    Satisfies :class:`WaitBackend` structurally.
+    spin/block state machine and its high-resolution timer naps (cudart
+    dispatch is the fixed function pointer registered by load_native_backend()
+    above). Satisfies :class:`WaitBackend` structurally.
     """
 
     def __init__(self, mod: object) -> None:

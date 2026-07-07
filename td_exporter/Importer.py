@@ -1363,10 +1363,16 @@ class Importer:
             logger.info("CUDA adapter has no cudart_event_query_fn_ptr(); using Python wait path")
             return None
         try:
-            return load_native_backend(fn_ptr)
+            backend = load_native_backend(fn_ptr)
         except RuntimeError as e:
             logger.info("Native wait backend unavailable (%s); using Python wait path", e)
             return None
+        try:
+            from cuda_link_native import __version__ as native_version  # noqa: PLC0415
+        except ImportError:
+            native_version = "unknown"
+        logger.info("Native wait backend engaged (cuda-link-native %s)", native_version)
+        return backend
 
     # ------------------------------------------------------------------
     # Reconnect helpers
@@ -1930,6 +1936,16 @@ class Importer:
             return False
         return len(self._conn.dev_ptrs) > 0 and all(ptr is not None for ptr in self._conn.dev_ptrs)
 
+    @property
+    def wait_backend_name(self) -> str:
+        """Which wait path ``_wait_for_slot`` uses: ``"native"`` or ``"python"``.
+
+        Resolved per-connection (re-resolved on every reconnect, see
+        ``_open_ipc_slots``); reads ``"python"`` before the first successful
+        connect and whenever the native sidecar failed to resolve.
+        """
+        return "native" if self._wait_backend is not None else "python"
+
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
@@ -1956,6 +1972,7 @@ class Importer:
             "tensor_device": (
                 str(tensors[0].device) if TORCH_AVAILABLE and tensors and tensors[0] is not None else "N/A"
             ),
+            "wait_backend": self.wait_backend_name,
             "wait_spin_hits": self.wait_spin_hits,
             "wait_sleep_hits": self.wait_sleep_hits,
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,

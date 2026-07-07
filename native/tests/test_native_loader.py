@@ -35,3 +35,25 @@ def test_load_native_backend_raises_when_fn_ptr_is_zero():
     """
     with pytest.raises(RuntimeError, match="cuda_event_query_fn_ptr was 0"):
         load_native_backend(0)
+
+
+@pytest.mark.skipif(not _native_module_present(), reason="requires the compiled native module")
+def test_load_native_backend_refuses_hosts_without_hr_timers(monkeypatch):
+    """A host that cannot create high-resolution waitable timers (Windows 10
+    pre-1803) must be refused at load time — activating there would reintroduce
+    the ~15.6ms-quantized block-phase naps fixed on 2026-07-06 — so the caller
+    falls back to the python wait path.
+
+    Does not require a live GPU: the sentinel fn_ptr just has to be non-zero to
+    get past the cudart_resolved() gate; it is never dereferenced because the
+    hr_nap_supported() check raises first. The pointer is reset to 0 afterwards
+    so no other test can observe the sentinel as a resolved cudart.
+    """
+    from cuda_link_native import _native_waiter
+
+    monkeypatch.setattr(_native_waiter, "hr_nap_supported", lambda: False)
+    try:
+        with pytest.raises(RuntimeError, match="high-resolution waitable timers"):
+            load_native_backend(0xDEAD)
+    finally:
+        _native_waiter.set_cuda_event_query(0)

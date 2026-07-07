@@ -26,10 +26,10 @@ class WaitStatus(Enum):
     """How ``wait_slot`` discovered the frame was ready (or that it timed out)."""
 
     READY_SPIN = auto()  # caught by the native busy-spin phase
-    READY_DOORBELL = auto()  # block phase caught it with a doorbell in play
+    READY_DOORBELL = auto()  # block phase caught it; doorbell channel present (name kept for ABI/telemetry -- the doorbell itself is no longer waited on, 2026-07-06 timer-nap fix)
     READY_LATE = auto()  # retired 2026-07-04 (torn-frame fix) -- never emitted anymore, kept for ABI
     TIMEOUT = auto()  # deadline exceeded with no frame
-    READY_POLL = auto()  # block phase caught it with no doorbell available (bare-Sleep polling)
+    READY_POLL = auto()  # block phase caught it with no doorbell channel present (same timer-nap loop; distinct name only so telemetry never implies a doorbell that wasn't there)
 
 
 @dataclass(frozen=True)
@@ -60,19 +60,22 @@ class WaitBackend(Protocol):
         spin_us: int,
         timeout_ms: int,
     ) -> WaitResult:
-        """Wait for the per-slot CUDA event or the doorbell, whichever fires first.
+        """Wait for the per-slot CUDA event to signal readiness.
 
         *event_ptr* — the per-slot ``cudaEvent_t`` (as an int) to poll via
         ``cudaEventQuery`` — the only valid "this slot is ready" signal; see the
         2026-07-04 torn-frame fix note in ``native_waiter.cpp`` for why nothing
         else (e.g. ``write_idx`` alone) may be treated as ready. *doorbell_handle*
-        — the Win32 event HANDLE (as an int) opened for this SHM channel; 0 if the
-        doorbell is unavailable (block phase falls back to a bounded
-        ``cudaEventQuery`` poll only). *write_idx_addr* / *last_write_idx* — kept
-        for interface stability; no longer consulted by the real implementation
-        (retained only so a stale/unrebuilt native module still accepts the same
-        call shape). *spin_us* — the busy-spin budget before falling into the
-        blocking phase. *timeout_ms* — the overall deadline for the call.
+        — the Win32 event HANDLE (as an int) opened for this SHM channel, or 0 if
+        unavailable. Since the 2026-07-06 timer-nap fix the block phase never
+        waits on it (it re-checks ``cudaEventQuery`` between bounded
+        high-resolution timer naps instead); the handle only selects the
+        READY_DOORBELL-vs-READY_POLL status attribution. *write_idx_addr* /
+        *last_write_idx* — kept for interface stability; no longer consulted by
+        the real implementation (retained only so a stale/unrebuilt native module
+        still accepts the same call shape). *spin_us* — the busy-spin budget
+        before falling into the blocking phase. *timeout_ms* — the overall
+        deadline for the call.
         """
         ...
 
