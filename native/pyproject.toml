@@ -13,7 +13,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link-native"
-version = "0.1.0"
+version = "0.2.0"
 description = "Native notification-wait accelerator for cuda-link's Importer consumer wait path."
 readme = "README.md"
 requires-python = ">=3.9"

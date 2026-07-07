@@ -23,8 +23,8 @@
 // rediscovery, no guessing, correct by construction.
 //
 // State machine (wait_slot): spin on cudaEventQuery for spin_us, then block until
-// the deadline, checking cudaEventQuery, then WaitForSingleObject on the doorbell
-// event for a bounded slice. The spin/block loop core is written as a template
+// the deadline, re-checking cudaEventQuery between bounded naps on a per-thread
+// high-resolution waitable timer. The spin/block loop core is written as a template
 // over the polling functions so a test harness can inject fakes without touching
 // real CUDA/Win32 state (see native/tests/test_state_machine.py, which drives it
 // through the wait_slot_test() pybind entry point below).
@@ -43,6 +43,32 @@
 // status enum for numeric stability but the real implementation never emits it
 // again. See docs/plans/PLAN-002-native-waiter.md D2 for the full writeup.
 //
+// FIXED (2026-07-06, block-phase timer quantization): the block phase used to
+// nap by waiting on the shared doorbell event in bounded slices
+// (WaitForSingleObject(doorbell, kBlockSliceMs=2)) — or Sleep(2) without a
+// doorbell. Nothing in this process raises the Windows timer resolution
+// (cuda_link's importer only does so on Python < 3.11, deliberately), so those
+// nominal 2ms waits were serviced on the default ~15.625ms tick and actually
+// cost ~13.5-17.8ms each (measured on-host). At sub-60fps cadences roughly a
+// third of frames fall past the spin budget into the block phase, each paying
+// ~9ms mean / ~16ms p99 versus ~0.8ms on the pure-Python fallback — which is
+// immune, because CPython >= 3.11 time.sleep() internally uses a
+// high-resolution waitable timer. Fix: nap on a per-thread waitable timer
+// created with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (~0.5ms actual for a
+// 200us due time — the same primitive CPython's sleep uses). The doorbell is
+// no longer waited on here at all: during THIS wait it can only ever signal
+// the NEXT frame's publish, never this slot's copy completion, so waking on it
+// was an accidental re-check lottery — and consuming a signal here violated
+// _doorbell.py's documented single-consumer contract
+// (Importer.wait_for_doorbell is the one legitimate consumer).
+// doorbell_handle stays in the signature and still selects the
+// READY_DOORBELL-vs-READY_POLL status attribution (cuda_link's adaptive-wait
+// telemetry keys on the READY_DOORBELL name). Hosts that cannot create
+// high-resolution timers (Windows 10 before 1803) are refused at load time via
+// hr_nap_supported() — load_native_backend() raises and the Importer falls
+// back to the python wait path — rather than silently degraded back onto the
+// coarse tick.
+//
 // Build: see native/CMakeLists.txt. This file is intentionally not compiled in CI
 // on Linux; the pure-Python layer is tested via FakeWaitBackend. Validate on a
 // Windows box before release.
@@ -54,6 +80,12 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+
+// Older SDK headers may lack this flag (introduced in Windows 10 1803); the
+// value is ABI-stable.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 namespace py = pybind11;
 
@@ -89,11 +121,20 @@ double qpc_freq_inv_us() {
     return 1'000'000.0 / static_cast<double>(freq.QuadPart);
 }
 
-// Small bounded slice for the block-phase WaitForSingleObject call: bounds how
-// stale the cudaEventQuery re-check can get before it runs again, without
-// busy-spinning. Matches the doorbell design's existing bounded lost-wakeup
-// window (see _doorbell.py / wait_for_doorbell).
-constexpr DWORD kBlockSliceMs = 2;
+// Bounded nap between block-phase cudaEventQuery re-checks: bounds how stale a
+// re-check can get without busy-spinning. 200us due time on a high-resolution
+// waitable timer lands at ~0.5ms actual on measured hosts (scheduler wake
+// floor) — the same class as the CPython >= 3.11 time.sleep(1e-4) nap in the
+// pure-Python fallback path, and ~26x tighter than the pre-fix
+// WaitForSingleObject(doorbell, 2ms), which the default ~15.625ms timer tick
+// stretched to ~13.5-17.8ms (see the 2026-07-06 fix note in the header).
+constexpr int kBlockNapUs = 200;
+
+// Diagnostic `method` code (third slot of the result tuple) for a block-phase
+// catch under the timer-nap design. The pre-fix block phase returned 2
+// (doorbell-slice wait) or 3 (bare Sleep); those values are retired but never
+// reused, so telemetry can tell fixed and unfixed builds apart at runtime.
+constexpr int kMethodTimerNap = 4;
 
 }  // namespace
 
@@ -103,11 +144,11 @@ constexpr DWORD kBlockSliceMs = 2;
 // native/tests/test_state_machine.py).
 // ---------------------------------------------------------------------------
 
-template <typename EventQueryFn, typename ReadWriteIdxFn, typename WaitDoorbellFn, typename NowUsFn>
+template <typename EventQueryFn, typename ReadWriteIdxFn, typename NapFn, typename NowUsFn>
 std::tuple<int, double, int> wait_slot_impl(
     EventQueryFn event_query,          // (event_ptr) -> bool ready
     ReadWriteIdxFn read_write_idx,     // (write_idx_addr) -> uint32_t
-    WaitDoorbellFn wait_doorbell,      // (doorbell_handle, slice_ms) -> bool signaled
+    NapFn nap,                         // (nap_us) -> void; bounded pacing nap, never exact
     NowUsFn now_us,                    // () -> double microseconds, monotonic
     std::uintptr_t event_ptr,
     std::uintptr_t doorbell_handle,
@@ -139,10 +180,13 @@ std::tuple<int, double, int> wait_slot_impl(
 
     // --- block phase ---------------------------------------------------------
     // cudaEventQuery is the only valid "ready" exit here (see the torn-frame fix
-    // note above the enum). The doorbell wake — or, absent a doorbell, the
-    // bounded Sleep — is purely a hint to re-check sooner; a missed/late signal
-    // costs at most one kBlockSliceMs slice before the next event_query, never a
-    // correctness issue.
+    // note above the enum). The nap between re-checks is pure pacing: it bounds
+    // how stale the next event_query can get (~one kBlockNapUs-class wake)
+    // without busy-spinning, and is never treated as a readiness signal. The
+    // doorbell is deliberately NOT waited on (see the 2026-07-06 fix note in the
+    // header): during this wait it could only ever announce the NEXT frame's
+    // publish, and consuming its signal here violated _doorbell.py's
+    // single-consumer contract.
     while (true) {
         const double t = now_us();
         if (t >= deadline) {
@@ -150,29 +194,27 @@ std::tuple<int, double, int> wait_slot_impl(
         }
 
         if (event_ptr != 0 && event_query(event_ptr)) {
-            // doorbell_handle != 0 means a doorbell was genuinely in play for this
-            // wait — kReadyDoorbell, even if this particular check happened right
-            // after a bounded slice elapsed rather than an exact wake (the two are
-            // not worth distinguishing further: both mean "the block phase, not
-            // the spin phase, caught it"). doorbell_handle == 0 means there was
-            // never a doorbell to wake on at all — kReadyPoll, so telemetry never
-            // implies a wake that couldn't have happened.
+            // doorbell_handle != 0 means a doorbell was genuinely in play for
+            // this channel — kReadyDoorbell, so telemetry keeps its historical
+            // shape (cuda_link's adaptive-wait bookkeeping keys on that name).
+            // doorbell_handle == 0 means there was never a doorbell at all —
+            // kReadyPoll. Neither implies the doorbell was waited on; both mean
+            // "the block phase, not the spin phase, caught it."
             const bool had_doorbell = doorbell_handle != 0;
-            return {had_doorbell ? kReadyDoorbell : kReadyPoll, now_us() - start, had_doorbell ? 2 : 3};
+            return {had_doorbell ? kReadyDoorbell : kReadyPoll, now_us() - start, kMethodTimerNap};
         }
 
-        if (doorbell_handle != 0) {
-            wait_doorbell(doorbell_handle, kBlockSliceMs);
-            // Whether this returned true (genuine wake) or false (slice elapsed),
-            // loop back and re-check the event above -- a wake is only a hint,
-            // never a substitute for cudaEventQuery.
-        } else {
-            // No doorbell available — bounded sleep so we don't busy-spin forever
-            // (this degrades to roughly the block-phase floor the Python fallback
-            // already has; callers should prefer python/auto fallback when the
-            // doorbell can't be opened at all).
-            Sleep(kBlockSliceMs);
+        // Clamp the nap to the remaining deadline budget (re-read the clock:
+        // event_query above may itself have consumed time), rounding up so the
+        // nap is never zero and forward progress is guaranteed.
+        const double remaining_us = deadline - now_us();
+        if (remaining_us <= 0.0) {
+            continue;  // the deadline check at the loop top reports the timeout
         }
+        const int nap_us = remaining_us < static_cast<double>(kBlockNapUs)
+                               ? static_cast<int>(remaining_us) + 1
+                               : kBlockNapUs;
+        nap(nap_us);
     }
 }
 
@@ -194,9 +236,65 @@ std::uint32_t real_read_write_idx(std::uintptr_t addr) {
     return *reinterpret_cast<volatile std::uint32_t*>(addr);
 }
 
-bool real_wait_doorbell(std::uintptr_t handle, DWORD slice_ms) {
-    HANDLE h = reinterpret_cast<HANDLE>(handle);
-    return WaitForSingleObject(h, slice_ms) == WAIT_OBJECT_0;
+// One timer per thread, reused across naps: SetWaitableTimer on a handle
+// shared between concurrently-waiting threads would re-arm each other's naps
+// (multi-Importer processes can wait concurrently), and creating a fresh timer
+// per nap wastes a syscall pair. thread_local + RAII gives interference-free
+// reuse, released at thread exit.
+class HrNapTimer {
+ public:
+    HrNapTimer()
+        : handle_(CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_ALL_ACCESS)) {}
+    ~HrNapTimer() {
+        if (handle_ != nullptr) {
+            CloseHandle(handle_);
+        }
+    }
+    HrNapTimer(const HrNapTimer&) = delete;
+    HrNapTimer& operator=(const HrNapTimer&) = delete;
+    HANDLE get() const { return handle_; }
+
+ private:
+    HANDLE handle_;
+};
+
+bool hr_nap_supported() {
+    // One-time probe: CREATE_WAITABLE_TIMER_HIGH_RESOLUTION needs Windows 10
+    // 1803+. Without it every available nap primitive is quantized to the
+    // ~15.625ms default timer tick — exactly the defect the 2026-07-06 fix
+    // removed — so load_native_backend() refuses to activate this backend and
+    // the Importer's python fallback (strictly better there) takes over.
+    static const bool supported = [] {
+        HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);
+        if (h == nullptr) {
+            return false;
+        }
+        CloseHandle(h);
+        return true;
+    }();
+    return supported;
+}
+
+void real_nap(int nap_us) {
+    thread_local HrNapTimer timer;
+    HANDLE h = timer.get();
+    if (h != nullptr) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(static_cast<LONGLONG>(nap_us) * 10);  // negative = relative, 100ns units
+        if (SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) {
+            // Bounded cap well above any sane wake (~0.5ms measured): if the
+            // timer is somehow lost, the caller's deadline check still governs.
+            WaitForSingleObject(h, 10);
+            return;
+        }
+    }
+    // Unreachable when hr_nap_supported() gated activation (see
+    // load_native_backend); if a timer op still fails (e.g. handle
+    // exhaustion), degrade to a coarse Sleep rather than busy-spinning — the
+    // wait stays correct, just slower.
+    Sleep(1);
 }
 
 double real_now_us() {
@@ -212,7 +310,7 @@ std::tuple<int, double, int> wait_slot(
     int spin_us,
     int timeout_ms) {
     return wait_slot_impl(
-        real_event_query, real_read_write_idx, real_wait_doorbell, real_now_us,
+        real_event_query, real_read_write_idx, real_nap, real_now_us,
         event_ptr, doorbell_handle, write_idx_addr, last_write_idx, spin_us, timeout_ms);
 }
 
@@ -228,7 +326,7 @@ std::tuple<int, double, int> wait_slot(
 std::tuple<int, double, int> wait_slot_test(
     py::function event_query,       // (event_ptr: int) -> bool
     py::function read_write_idx,    // (write_idx_addr: int) -> int
-    py::function wait_doorbell,     // (doorbell_handle: int, slice_ms: int) -> bool
+    py::function nap,               // (nap_us: int) -> None; fakes should advance the test clock
     py::function now_us,            // () -> float, microseconds, caller-controlled clock
     std::uintptr_t event_ptr,
     std::uintptr_t doorbell_handle,
@@ -240,13 +338,11 @@ std::tuple<int, double, int> wait_slot_test(
     auto read_write_idx_wrap = [&](std::uintptr_t addr) -> std::uint32_t {
         return read_write_idx(addr).cast<std::uint32_t>();
     };
-    auto wait_doorbell_wrap = [&](std::uintptr_t handle, DWORD slice_ms) -> bool {
-        return wait_doorbell(handle, static_cast<int>(slice_ms)).cast<bool>();
-    };
+    auto nap_wrap = [&](int nap_us) { nap(nap_us); };
     auto now_us_wrap = [&]() -> double { return now_us().cast<double>(); };
 
     return wait_slot_impl(
-        event_query_wrap, read_write_idx_wrap, wait_doorbell_wrap, now_us_wrap,
+        event_query_wrap, read_write_idx_wrap, nap_wrap, now_us_wrap,
         event_ptr, doorbell_handle, write_idx_addr, last_write_idx, spin_us, timeout_ms);
 }
 
@@ -274,6 +370,12 @@ PYBIND11_MODULE(_native_waiter, m) {
           "CUDARuntimeAPI. Must be called once before wait_slot() is used.");
     m.def("cudart_resolved", &cudart_resolved,
           "Return True if set_cuda_event_query() has been called with a non-null pointer.");
+    m.def("hr_nap_supported", &hr_nap_supported,
+          "Return True if this host can create high-resolution waitable timers "
+          "(Windows 10 1803+), which the block phase's bounded nap requires. "
+          "load_native_backend() refuses to activate the native backend when this "
+          "is False — the coarse-tick alternatives would reintroduce the "
+          "~15.6ms-quantized waits fixed on 2026-07-06.");
 
     // GIL released for the whole call: all args are passed by value (ints) before
     // release, and the return value is a plain std::tuple<int,double,int> that
@@ -282,8 +384,9 @@ PYBIND11_MODULE(_native_waiter, m) {
     // with cuda_link_spout's `receive()`, which manually builds a py::tuple
     // inside the function body and must therefore keep the GIL held throughout).
     m.def("wait_slot", &wait_slot, py::call_guard<py::gil_scoped_release>(),
-          "Wait for the per-slot CUDA event or the doorbell, whichever fires first. "
-          "Returns (status_int, waited_us, method) where status_int is "
+          "Wait for the per-slot CUDA event: spin on cudaEventQuery for spin_us, "
+          "then re-check it between bounded high-resolution timer naps until "
+          "timeout_ms. Returns (status_int, waited_us, method) where status_int is "
           "0=READY_SPIN 1=READY_DOORBELL 2=READY_LATE(retired, never emitted) "
           "3=TIMEOUT 4=READY_POLL.");
 
@@ -292,10 +395,10 @@ PYBIND11_MODULE(_native_waiter, m) {
     // Named py::arg()s so native/tests/test_state_machine.py can call it with
     // keyword arguments.
     m.def("wait_slot_test", &wait_slot_test, py::arg("event_query"), py::arg("read_write_idx"),
-          py::arg("wait_doorbell"), py::arg("now_us"), py::arg("event_ptr"), py::arg("doorbell_handle"),
+          py::arg("nap"), py::arg("now_us"), py::arg("event_ptr"), py::arg("doorbell_handle"),
           py::arg("write_idx_addr"), py::arg("last_write_idx"), py::arg("spin_us"), py::arg("timeout_ms"),
           "TEST ONLY: drive the real wait_slot_impl state machine with injected "
           "Python fake polling functions (event_query, read_write_idx, "
-          "wait_doorbell, now_us). Same return contract as wait_slot(). Used by "
+          "nap, now_us). Same return contract as wait_slot(). Used by "
           "native/tests/test_state_machine.py; not part of the production API.");
 }

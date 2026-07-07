@@ -4,9 +4,10 @@ Optional native add-on that accelerates **cuda-link's `Importer` consumer wait
 path**. When a Python consumer has drained the current frame and is waiting for
 the next one, the pure-Python path spins then falls into a `time.sleep(0.0001)`
 loop (`Importer._wait_for_slot`) — measured 136-286 µs p50 cross-process (see
-`../docs/BENCHMARKS.md`). This package moves that wait into one native call that
-spins on `cudaEventQuery` then blocks on the existing Win32 doorbell event —
-target p50 < 10 µs, p95 < 50 µs.
+`../docs/BENCHMARKS.md`). This package moves that wait into one native call
+(GIL released throughout) that spins on `cudaEventQuery`, then re-checks it
+between bounded naps on a high-resolution waitable timer (~0.5 ms class — the
+same primitive CPython ≥ 3.11's `time.sleep` uses).
 
 This package **relaxes cuda-link's pure-Python rule** ([ADR-0006](../docs/adr/0006-stay-pure-python-no-rust.md))
 on purpose — the same escape hatch [`cuda-link-spout`](../spout/README.md)
@@ -37,8 +38,8 @@ Importer._wait_for_slot            (pure Python, cuda_link core)
 WaitBackend  (Protocol)            ← seam (ADR-0001 port-adapter pattern)
    ├── FakeWaitBackend             in-memory; drives all CI tests, no GPU
    └── _NativeWaitBackend          wraps the compiled _native_waiter module
-                                    (spin/block state machine + Win32 doorbell
-                                    wait; cudart dispatch is a fixed function
+                                    (spin/block state machine + high-resolution
+                                    timer naps; cudart dispatch is a fixed function
                                     pointer registered by the caller), Windows-only
 ```
 
@@ -64,9 +65,13 @@ Nothing to configure by default: when both `cuda-link` and `cuda-link-native`
 are installed on Windows and a CUDA runtime is already loaded in-process,
 `ImportPolicy.wait_backend="auto"` (the default) picks the native backend
 automatically the next time an `Importer` connects, and forces the Win32
-doorbell on for that connection (required — without it the native backend
-cannot beat the ~1 ms Windows sleep-loop floor either). Force a specific
-backend via `CUDALINK_WAIT_BACKEND=python|native|auto`.
+doorbell on for that connection (cuda-link requires it to engage the backend:
+the doorbell serves the Importer's frame-arrival wait, `wait_for_doorbell` —
+the native block phase itself naps on a high-resolution timer and never
+consumes doorbell signals). The backend additionally requires Windows 10 1803+
+(high-resolution waitable timers); on older hosts `load_native_backend` raises
+and the Importer falls back to the python wait path automatically. Force a
+specific backend via `CUDALINK_WAIT_BACKEND=python|native|auto`.
 
 ## Testing without a compiler or GPU
 
