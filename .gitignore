@@ -181,9 +181,6 @@ nul
 # All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
 .profiling/
 
-# Verification probe outputs (timestamped JSON from probe_cook_context runs)
-verification/results/probe_cook_context_*.json
-
 # Test artifacts
 test_timeout_manual.py
 
@@ -247,18 +244,7 @@ init_heatmap.png
 References/
 
 # Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
-# Use wildcard (not trailing slash) so nested exceptions can re-include specific files.
-benchmarks/**
-!benchmarks/results/
-benchmarks/results/**
-!benchmarks/results/td/
-benchmarks/results/td/**
-!benchmarks/results/td/cell_C_td/
-!benchmarks/results/td/cell_D_td/
-benchmarks/results/td/cell_C_td/**
-benchmarks/results/td/cell_D_td/**
-!benchmarks/results/td/cell_C_td/textport.txt
-!benchmarks/results/td/cell_D_td/textport.txt
+benchmarks/
 
 # Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
 CONTEXT.md
@@ -291,5 +277,15 @@ scripts/git/
 cgw.conf.example
 
 # Local profiling artifacts and probe scripts
-scripts/probes/59.5
 scripts/profiling/benchmarks/
+
+# Local-only dev tooling (probes, shell lint helper). scripts/profiling/ and
+# scripts/probe/driver_api_ipc_probe.py stay tracked — referenced by
+# docs/BENCHMARKS.md, docs/PROFILING.md, docs/ARCHITECTURE.md, ADR-0004, and
+# a CI test (tests/cuda/test_probe_error_decode.py).
+scripts/probes/
+scripts/probe/ipc_event_in_graph_probe.py
+scripts/lint/
+
+# Local-only manual verification probes (not part of the pytest suite)
+verification/
