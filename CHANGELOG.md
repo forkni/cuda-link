@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **pybind11 upgraded from 2.12 to 3.0.4** (build-time dependency for the optional
+  `_native_waiter` extension; `pyproject.toml` `[build-system]` requires and the
+  `find_package(pybind11 ...)` floor in `CMakeLists.txt`). No changes to
+  `src/cuda_link/_cpp/native_waiter.cpp` were needed — every pybind11 construct it
+  uses (`PYBIND11_MODULE`, `m.def`, `py::arg`, `py::call_guard<py::gil_scoped_release>`,
+  `py::function` + `.cast<T>()`, automatic `std::tuple` return conversion) is unchanged
+  in 3.x, and the project already met 3.0's floors (C++17 > C++14 feature floor,
+  Python >= 3.9 > 3.8 minimum, MSVC 2017+). pybind11 3.0 rebuilds the module with
+  multi-phase initialization (PEP 489) behind the same `PYBIND11_MODULE` macro and
+  bumps the cross-extension ABI; both are invisible here because `_native_waiter`
+  binds no classes and shares no pybind11 state with other extensions. Note the old
+  `>=2.12` requirement was an uncapped floor, so isolated PEP 517 builds had already
+  been resolving to pybind11 3.x since its release — this change makes that explicit
+  and verified rather than incidental.
+
 ## [1.12.0] - 2026-07-06
 
 ### Added

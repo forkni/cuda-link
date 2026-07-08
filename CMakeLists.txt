@@ -41,7 +41,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 2.12 CONFIG REQUIRED)
+# Floor matches pyproject.toml's build requirement (pybind11>=3.0.4); pybind11's
+# CMake package version file is AnyNewerVersion-compatible, so any newer 3.x also
+# satisfies this.
+find_package(pybind11 3.0.4 CONFIG REQUIRED)
 
 pybind11_add_module(_native_waiter
   src/cuda_link/_cpp/native_waiter.cpp
