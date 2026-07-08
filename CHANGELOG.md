@@ -20,31 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows `winerror 126` ("module not found") hint message reordered so CUDA 13 is checked
   first — matching the actual probe order and avoiding a misleading hint on CUDA 13-only
   systems.
-- **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
-  (compiled into the core `cuda-link` wheel on Windows; `ImportPolicy.wait_backend`:
-  `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
-  Replaces the Python spin/sleep poll with one native (C++/pybind11) call that
-  spins on `cudaEventQuery` then blocks on the R2 doorbell's Win32 event;
-  activating native forces the doorbell open even if `CUDALINK_DOORBELL` is
-  unset, since the native block phase has nothing faster to wait on
-  otherwise. Built via `scikit-build-core` + root `CMakeLists.txt` as part of
-  the single-wheel build (`pip install .` / `utils\build_wheel.cmd`), degrading
-  to pure-Python off Windows or without an MSVC toolchain — see
-  [PLAN-002](docs/plans/PLAN-002-native-waiter.md),
-  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md)'s consequences
-  amendment, and [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)
-  for the fold from an initial separate `cuda-link-native` sidecar package
-  into this single wheel. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
-  frames/arm, 30+60 fps): native's own re-check-after-wake latency
-  (`avg_spin_us`) is genuinely fast (~0.02–6.5 µs), but the accept gate
-  (p50<10µs, p95<50µs, measured as cross-process publish→detect latency via
-  `imp.last_latency`) **MISSes at both fps** — native (p50≈66–67µs,
-  p95≈139–140µs) is not measurably faster than plain doorbell here, likely
-  because the dominant cost is the Windows kernel's own
-  `WaitForSingleObject` wake/scheduling floor, which neither backend
-  controls. Recorded honestly per PLAN-002's own accept-gate framing; R5
-  still ships because it never regresses relative to doorbell-only and the
-  seam is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
+- **Native notification-wait backend for the consumer wait loop**
+  (`ImportPolicy.wait_backend`: `"auto"` default | `"python"` | `"native"`; env
+  `CUDALINK_WAIT_BACKEND`). Replaces the pure-Python spin/sleep poll in
+  `Importer._wait_for_slot` with a native C++/pybind11 call that spins on `cudaEventQuery`
+  then blocks on the doorbell's Win32 event; enabling it forces the doorbell open even when
+  `CUDALINK_DOORBELL` is unset. Compiled into the core `cuda-link` wheel on Windows (via
+  `scikit-build-core`), degrading to pure Python off Windows or without an MSVC toolchain — see
+  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md) and
+  [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md). In benchmarking it did not
+  measurably beat the plain doorbell (the dominant cost is the Windows kernel's own
+  `WaitForSingleObject` wake floor), so it ships as an opt-in that never regresses against
+  doorbell-only and is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
 
 ### CI / Test hardening
 
@@ -62,9 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bench_r1_wait.py` R5 accept-gate measured the wrong metric.** The
+- **`bench_r1_wait.py`'s accept-gate measured the wrong metric.** The
   PASS/MISS check compared `get_frame()` total wall-clock time (spin + tensor
-  materialization + Python overhead) against PLAN-002's gate, which is
+  materialization + Python overhead) against the native-waiter accept gate, which is
   defined on publish→detect notification latency — a metric this script
   never measures. Replaced the gate line with a detection-profile line
   (`avg_spin_us`/pacing-block breakdown) and a pointer to
@@ -72,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bench_doorbell.py`'s poll/doorbell arms did not pin `wait_backend`**,
   defaulting to `ImportPolicy`'s own `"auto"` — with the native extension
   available, the "doorbell" arm would silently engage the native backend,
-  contaminating the R2 poll-vs-doorbell comparison (same bug class as the
+  contaminating the poll-vs-doorbell comparison (same bug class as the
   `bench_r1_wait.py` fix above). Every arm now pins `wait_backend`
   explicitly.
 - **`bench_r1_wait.py`'s per-arm frame budget was still insufficient after
@@ -81,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer's budget before its turn — real per-arm overhead (subprocess
   spawn + import + CUDA context init + SHM discovery) runs closer to 4–5s.
   Bumped to `overhead_frames=400`.
-- **R5 native waiter: torn-frame race in the block phase's `write_idx`
+- **Native waiter: torn-frame race in the block phase's `write_idx`
   pre-check.** `native_waiter.cpp`'s block phase pre-checked the SHM
   `write_idx` before `cudaEventQuery` and returned success (`READY_LATE`,
   bucketed as a success by `importer.py`) as soon as `write_idx` advanced
@@ -127,11 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MSVC-toolchain work was needed for end users — that assumption was wrong,
   and this entry is the correction of record (the pushed commit itself is
   not being rewritten).
-
-### Not included in this release
-
-Spout bridge and C++ custom TOP are **not** part of 1.12.0 — they continue development on
-`feat/spout-bridge` and `feat/cpp-custom-top` respectively.
 
 ## [1.11.0] - 2026-06-12
 

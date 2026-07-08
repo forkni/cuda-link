@@ -29,7 +29,7 @@ CPU-side headroom; D2H does not:
 **No native extension, and no `cuda.bindings`/Rust/C++ work, targets the D2H path.**
 The optimization budget for D2H is configuration only: pinned-memory defaults, stream
 count, and copy/compute overlap (executed as
-[PLAN-004](../plans/PLAN-004-d2h-tuning.md)).
+PLAN-004).
 
 This decision also scopes PLAN-001/002/003: their native or binding work must not grow
 D2H-facing surface.

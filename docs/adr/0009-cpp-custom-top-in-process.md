@@ -3,7 +3,7 @@
 **Status**: Proposed (flips to Accepted when PLAN-001 Phase 0 spike validates)
 **Date**: 2026-07-04
 **Applies to**: the planned `cpp_top/` component (`CudaLinkOutTOP` / `CudaLinkInTOP`
-Custom Operator DLLs; see [PLAN-001](../plans/PLAN-001-cpp-custom-top.md)).
+Custom Operator DLLs; see PLAN-001).
 
 ---
 

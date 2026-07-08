@@ -100,7 +100,7 @@ revisit-if, not a current direction.
   flagged: most Windows users end up with the accelerated path without
   deliberately choosing it, now simply because it is compiled into the one
   wheel they already install rather than a second opt-out-able package.
-  See [PLAN-002](../plans/PLAN-002-native-waiter.md) for the full design and
+  See PLAN-002 for the full design and
   measured results (the 10µs/50µs accept gate did not pass on the measured
   hardware; the escape hatch was still worth taking because native never
   regresses relative to the existing doorbell path).

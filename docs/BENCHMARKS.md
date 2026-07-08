@@ -246,7 +246,7 @@ Compiled into the core wheel on Windows (see
 [ADR-0012](adr/0012-native-extension-in-core-wheel.md) for the fold from a separate
 `cuda-link-native` sidecar into the single wheel). `ImportPolicy.wait_backend` selects
 `"auto"` (default) | `"python"` | `"native"`. See
-[PLAN-002](plans/PLAN-002-native-waiter.md) for the full design and
+PLAN-002 for the full design and
 [ADR-0006](adr/0006-stay-pure-python-no-rust.md) for why this narrow native escape hatch
 was taken instead of a broader Rust/C++ rewrite.
 
