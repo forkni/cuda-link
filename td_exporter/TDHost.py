@@ -275,7 +275,7 @@ class RealTDHost(TDHost):
     def param_value(self, name: str) -> Any:
         try:
             return getattr(self._comp.par, name).eval()
-        except AttributeError:
+        except (AttributeError, RuntimeError):
             return None
 
     def set_param_value(self, name: str, value: Any) -> None:
@@ -295,7 +295,7 @@ class RealTDHost(TDHost):
             return True  # no Active par → always active (backward compat)
         try:
             return bool(self._active_par.eval())
-        except AttributeError:
+        except (AttributeError, RuntimeError):
             return True
 
     def find_top(self, name: str) -> RealTOPHandle | None:

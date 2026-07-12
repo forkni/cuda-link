@@ -105,25 +105,25 @@ class cudaPointerAttributes(ctypes.Structure):
     ]
 
 
-assert ctypes.sizeof(cudaIpcMemHandle_t) == 64, (
-    f"cudaIpcMemHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcMemHandle_t)}"
-)
-assert ctypes.sizeof(cudaIpcEventHandle_t) == 64, (
-    f"cudaIpcEventHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcEventHandle_t)}"
-)
-assert ctypes.sizeof(cudaPointerAttributes) == 24, (
-    f"cudaPointerAttributes ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPointerAttributes)}"
-)
+def _abi_guard(actual: int, expected: int, name: str) -> None:
+    """Raise RuntimeError on ctypes struct size drift.
+
+    Deliberately NOT an `assert` — asserts are stripped under `python -O`, which would
+    let a struct layout mismatch pass silently instead of failing loudly at import time.
+    """
+    if actual != expected:
+        raise RuntimeError(f"{name} ABI mismatch: expected {expected} bytes, got {actual}")
+
+
+_abi_guard(ctypes.sizeof(cudaIpcMemHandle_t), 64, "cudaIpcMemHandle_t")
+_abi_guard(ctypes.sizeof(cudaIpcEventHandle_t), 64, "cudaIpcEventHandle_t")
+_abi_guard(ctypes.sizeof(cudaPointerAttributes), 24, "cudaPointerAttributes")
 # Graph param struct ABI guards — cudaMemcpy3DParms is the largest and most alignment-sensitive.
 # All four values were verified against Python ctypes on a 64-bit Windows host (sizeof c_size_t=8).
-assert ctypes.sizeof(cudaPos) == 24, f"cudaPos ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPos)}"
-assert ctypes.sizeof(cudaPitchedPtr) == 32, (
-    f"cudaPitchedPtr ABI mismatch: expected 32 bytes, got {ctypes.sizeof(cudaPitchedPtr)}"
-)
-assert ctypes.sizeof(cudaExtent) == 24, f"cudaExtent ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaExtent)}"
-assert ctypes.sizeof(cudaMemcpy3DParms) == 160, (
-    f"cudaMemcpy3DParms ABI mismatch: expected 160 bytes, got {ctypes.sizeof(cudaMemcpy3DParms)}"
-)
+_abi_guard(ctypes.sizeof(cudaPos), 24, "cudaPos")
+_abi_guard(ctypes.sizeof(cudaPitchedPtr), 32, "cudaPitchedPtr")
+_abi_guard(ctypes.sizeof(cudaExtent), 24, "cudaExtent")
+_abi_guard(ctypes.sizeof(cudaMemcpy3DParms), 160, "cudaMemcpy3DParms")
 
 
 # CUDA Error codes (subset)
