@@ -32,7 +32,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def _make_receiver(shm_name: str):
-    from TDConfig import TDSenderConfig
+    from TDConfig import TDReceiverConfig
     from TDHost import TDHost
     from TDReceiver import TDReceiverEngine
 
@@ -82,7 +82,7 @@ def _make_receiver(shm_name: str):
         def set_info_status(self, msg):
             pass
 
-    config = TDSenderConfig()
+    config = TDReceiverConfig()
     return TDReceiverEngine(
         host=_NullHost(),
         config=config,
