@@ -1,0 +1,61 @@
+name: GPU Tests
+
+# Runs the requires_cuda suite — deselected everywhere on hosted CI — on a
+# self-hosted Windows GPU runner. Setup + security checklist: .github/SELF_HOSTED_RUNNER.md
+#
+# SECURITY — this repo is public and the runner is real hardware. The job is
+# label-gated: it runs only when a maintainer applies the 'gpu-ci' label to the
+# PR (a per-PR trust decision) or manually dispatches the workflow. Do NOT
+# remove the `if:` condition — without it, any fork PR could execute arbitrary
+# code on the runner machine the moment it opens.
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-tests:
+    name: GPU tests (self-hosted)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
+    runs-on: [self-hosted, Windows, gpu]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Create fresh venv with test dependencies
+        # Fresh per-run venv keeps the persistent runner clean; the user-level pip
+        # cache makes this fast after the first run. Dependency set mirrors
+        # tests.yml minus torch/coverage: the requires_cuda suite is pure
+        # ctypes->cudart + numpy (torch/cupy references in it are mocked), and the
+        # fail_under coverage gate is calibrated on the no-GPU suite, so --cov is
+        # deliberately not passed here.
+        shell: pwsh
+        run: |
+          python -m venv .ci-venv
+          .ci-venv\Scripts\python.exe -m pip install --upgrade pip
+          .ci-venv\Scripts\python.exe -m pip install pytest pytest-randomly numpy typing_extensions
+
+      - name: Run CUDA test suite
+        # pytest reads pythonpath = ["src", "tests"] from pyproject.toml, so the
+        # package imports without an install; cudart is loaded via ctypes from the
+        # machine's CUDA toolkit (see SELF_HOSTED_RUNNER.md if this fails to load).
+        shell: pwsh
+        run: .ci-venv\Scripts\python.exe -m pytest tests/ -m requires_cuda -v
+
+      - name: Cleanup venv
+        if: always()
+        shell: pwsh
+        run: if (Test-Path .ci-venv) { Remove-Item -Recurse -Force .ci-venv }
