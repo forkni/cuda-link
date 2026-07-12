@@ -652,6 +652,12 @@ class TDReceiverEngine:
         # the outer except uses this to decide whether a targeted teardown is needed (a raise
         # after the commit must not leak the just-opened IPC/SHM handles into the next retry).
         connection_committed = False
+        # Local shm_handle opened below (line ~663). Tracked here so the outer except can close
+        # it on a raise that lands after the validation guards but before slot-loop coverage
+        # (e.g. create_stream_with_priority) — that window is outside both the validation
+        # guards' shm_handle.close() calls and _cleanup_partial's coverage, so without this it
+        # leaks the SHM mapping on every failed attempt / backoff retry.
+        shm_handle = None
         try:
             self.cuda = get_cuda_runtime(device=self.device)
             if not getattr(self, "_runtime_load_logged", False):
@@ -981,6 +987,12 @@ class TDReceiverEngine:
                 # full cleanup() here, since it also resets self._retry's backoff counters,
                 # which would make the receiver retry every frame instead of backing off.
                 self._release_resources()
+            elif shm_handle is not None:
+                # Raised after shm_handle was opened but before any validation guard's
+                # shm_handle.close() or the slot loop's _cleanup_partial coverage began
+                # (e.g. create_stream_with_priority) — close it directly so it doesn't leak.
+                with contextlib.suppress(OSError, BufferError):
+                    shm_handle.close()
 
             traceback.print_exc()
             return False

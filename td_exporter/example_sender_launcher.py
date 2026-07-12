@@ -22,11 +22,63 @@ TD Setup:
     4. Set Active     → ON
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()
+
+Python executable resolution (priority order) — mirrors example_receiver_launcher.py:
+    1. CUDALINK_SENDER_PYTHON_EXE env var — full path, highest priority.
+    2. Windows Python Launcher: 'py -3' resolves the system Python 3 installation
+       and returns its full path (e.g. C:\\Users\\...\\Python311\\python.exe).
+       Reliable on any Windows machine with the standard Python installer.
+    3. 'python' — bare fallback, only used if it actually resolves on PATH
+       (checked via shutil.which). If it does not resolve, onStart() prints a
+       clear error and does not spawn — a bare "python" that resolves to TD's
+       own bundled interpreter (or to nothing) fails with an opaque
+       ImportError deep in the subprocess console instead of here.
+
+    The resolved path is printed on each onStart() so you can verify which
+    interpreter is used without opening a terminal.
 """
 
 import os
+import shutil
 import signal
 import subprocess
+
+
+def _find_python_exe() -> str | None:
+    """Resolve the Python executable for the sender subprocess.
+
+    Runs once at Execute DAT load time so the path is ready before onStart().
+    Returns None only if no usable interpreter could be resolved at all.
+    """
+    # 1. Explicit env-var override — highest priority.
+    if env := os.environ.get("CUDALINK_SENDER_PYTHON_EXE", ""):
+        return env
+
+    # 2. Windows Python Launcher: 'py -3' always resolves the registered system
+    #    Python 3, regardless of PATH order.  Ask it for sys.executable so we
+    #    get the full absolute path rather than relying on 'py' staying available.
+    if shutil.which("py"):
+        try:
+            result = subprocess.run(
+                ["py", "-3", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+    # 3. Bare fallback — only if 'python' actually resolves on PATH. Unlike the
+    #    receiver launcher, we do NOT blindly return "python" here: inside a TD
+    #    Execute DAT, sys.executable resolves to TD's own bundled Python (not
+    #    the sender's env), so a PATH-less "python" would spawn something that
+    #    fails with an opaque ImportError instead of a clear message here.
+    return shutil.which("python")
+
+
+_SENDER_PYTHON_EXE = _find_python_exe()
 
 _process = None  # Sender subprocess handle
 
@@ -34,6 +86,12 @@ _process = None  # Sender subprocess handle
 def onStart() -> None:
     """Launch the Python sender as a separate subprocess."""
     global _process
+
+    if _SENDER_PYTHON_EXE is None:
+        print("[CUDA-Link Launcher] ERROR: could not resolve a Python interpreter for the sender.")
+        print("  Set CUDALINK_SENDER_PYTHON_EXE to a full python.exe path, or ensure 'py' or")
+        print("  'python' is on PATH. Not spawning — see docstring for resolution order.")
+        return
 
     script = os.path.join(project.folder, "td_exporter", "example_sender_python.py")
 
@@ -43,14 +101,15 @@ def onStart() -> None:
         return
 
     _process = subprocess.Popen(
-        ["python", script],
+        [_SENDER_PYTHON_EXE, script],
         # CREATE_NEW_CONSOLE: opens a visible console window for the sender.
         # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on shutdown
         # (CTRL_C_EVENT is blocked for new process groups on Windows).
         creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     print(f"[CUDA-Link Launcher] Sender subprocess started  (PID {_process.pid})")
-    print(f"  Script: {script}")
+    print(f"  Script:     {script}")
+    print(f"  Python exe: {_SENDER_PYTHON_EXE}")
 
 
 def onCreate() -> None:

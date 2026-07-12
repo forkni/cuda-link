@@ -147,8 +147,10 @@ class NVMLObserver:
             return False
         if self._started:
             return True
+        acquired = False
         try:
             _NVML_REFS.acquire()
+            acquired = True
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device)
             with contextlib.suppress(pynvml.NVMLError):
                 # Raises NVMLError_NotSupported on Linux (driver-model is Windows-only).
@@ -163,6 +165,11 @@ class NVMLObserver:
             self._started = True
             return True
         except (pynvml.NVMLError, RuntimeError, OSError) as e:
+            # Only release a ref we actually acquired — if nvmlInit() itself (inside
+            # acquire()) was what failed, release() would wrongly nvmlShutdown() an
+            # NVML that was never successfully initialized by this call.
+            if acquired:
+                _NVML_REFS.release()
             logger.warning("NVML start failed for device %d: %s", self.device, e)
             return False
 

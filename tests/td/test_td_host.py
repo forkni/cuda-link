@@ -24,6 +24,15 @@ class _TDParValue:
         return self._v
 
 
+class _RaisingParValue(_TDParValue):
+    """Simulates a TD par in an error state: .eval() raises RuntimeError/tdError,
+    not AttributeError. Used to test the #5a hardening (param_value/is_active must
+    catch RuntimeError alongside AttributeError, matching the sibling find_top)."""
+
+    def eval(self) -> Any:
+        raise RuntimeError("simulated TD param eval failure")
+
+
 class _TDPar:
     def __init__(self, **kwargs: Any) -> None:
         self._attrs: dict[str, _TDParValue] = {}
@@ -309,6 +318,31 @@ def test_real_td_host_is_active_no_par_defaults_true() -> None:
     from TDHost import RealTDHost
 
     comp = _TDComp()  # no Active parameter
+    host = RealTDHost(comp)
+
+    assert host.is_active() is True
+
+
+def test_real_td_host_param_value_runtime_error_returns_none() -> None:
+    """param_value() must catch RuntimeError (not just AttributeError) — a param that
+    exists but is in an error state raises RuntimeError/tdError from .eval(), and the
+    per-frame path must not propagate it. Matches the sibling find_top()'s except clause."""
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Mode="Sender")
+    comp.par._attrs["Mode"] = _RaisingParValue("Sender")
+    host = RealTDHost(comp)
+
+    assert host.param_value("Mode") is None
+
+
+def test_real_td_host_is_active_runtime_error_defaults_true() -> None:
+    """is_active() must catch RuntimeError from Active.eval() (param in an error state)
+    and fail open (True) instead of propagating, matching the sibling find_top()."""
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Active=True)
+    comp.par._attrs["Active"] = _RaisingParValue(True)
     host = RealTDHost(comp)
 
     assert host.is_active() is True
