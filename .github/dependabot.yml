@@ -1,0 +1,21 @@
+# Keeps SHA-pinned actions current: Dependabot rewrites the pin and its version
+# comment together in one grouped weekly PR per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python-deps:
+        patterns:
+          - "*"
