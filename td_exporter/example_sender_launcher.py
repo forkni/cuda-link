@@ -38,6 +38,8 @@ Python executable resolution (priority order) — mirrors example_receiver_launc
     interpreter is used without opening a terminal.
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import signal
