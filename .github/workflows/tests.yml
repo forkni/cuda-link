@@ -67,6 +67,10 @@ jobs:
       - name: Run no-GPU test suite
         # pytest reads pythonpath = ["src", "tests"] from pyproject.toml, so the
         # package and test helpers import without an editable install.
+        # requires_cuda tests are deliberately local-only: this is a public repo,
+        # so a self-hosted GPU runner is out (executes PR code on personal
+        # hardware), and hosted GPU runners are Linux/T4 while this codebase is
+        # Windows-locked (ctypes.windll). Run them on a GPU machine before releases.
         # requires_native tests are also deselected: this runner is ubuntu-latest
         # and never builds the Windows-only _native_waiter extension, so they'd
         # only skip anyway -- the marker keeps that explicit rather than implicit.
