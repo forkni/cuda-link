@@ -140,10 +140,10 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 # Option B: Manual — download a wheel from
 # https://github.com/forkni/cuda-link/releases (cp311-cp311-win_amd64 for Python
 # 3.11, py3-none-any for anything else), then:
-pip install "cuda_link-1.12.0-*.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.0-*.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.0-*.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.0-*.whl[all]"     # All output modes
+pip install "cuda_link-1.12.1-*.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.12.1-*.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.12.1-*.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.12.1-*.whl[all]"     # All output modes
 
 # Option C: Editable install from source (for development — changes apply immediately):
 pip install -e ".[torch]"
@@ -494,13 +494,13 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```bash
 # Download the wheel matching your interpreter from
 # https://github.com/forkni/cuda-link/releases, then:
-pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
+pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "cuda_link-1.12.0-cp311-cp311-win_amd64.whl[torch]"
+pip install --force-reinstall "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[torch]"
 ```
 
 #### Method 3: Editable install from source (for development)

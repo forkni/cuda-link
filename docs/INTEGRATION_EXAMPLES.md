@@ -669,5 +669,5 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 ---
 
-**Last Updated**: 2026-07-06
-**Version**: 1.12.0
+**Last Updated**: 2026-07-12
+**Version**: 1.12.1
