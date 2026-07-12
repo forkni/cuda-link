@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-07-12
+
+### Fixed
+
+- **NVML ref-count leak on failed `start()`** (`nvml_observer.py`) — a failure after
+  `acquire()` (e.g. `nvmlDeviceGetHandleByIndex` raising) never released the ref, so
+  `nvmlInit()` was never paired with `nvmlShutdown()` and repeated failures compounded
+  the leak. `start()` now only releases a ref it actually acquired — calling `release()`
+  unconditionally would have wrongly `nvmlShutdown()`'d an NVML that was never
+  successfully initialized by this call.
+- **`TDReceiverEngine.initialize_receiver()` leaked its locally-opened `shm_handle`**
+  when a raise (e.g. from `create_stream_with_priority`) landed after the validation
+  guards but before `connection_committed` was set — a window outside both the guards'
+  own `close()` calls and `_cleanup_partial`'s coverage. Leaked on every failed attempt
+  and every backoff retry; `shm_handle` is now tracked independently and closed in the
+  outer `except` whenever the connection was never committed.
+- **ABI/size guards used bare `assert`** (`cuda_runtime_types.py`), stripped under
+  `python -O` — a ctypes struct-layout drift would import silently instead of failing
+  loudly. Replaced with an explicit `_abi_guard()` helper that raises `RuntimeError`
+  unconditionally, regardless of `-O`.
+- **`example_sender_launcher.py` spawned a bare `"python"` subprocess**, relying on
+  `PATH` order — inside a TouchDesigner Execute DAT this risks silently launching TD's
+  own bundled interpreter instead of the sender's env. Now reuses the receiver
+  launcher's resolver pattern (`CUDALINK_SENDER_PYTHON_EXE` env var → Windows `py -3`
+  → `shutil.which("python")`), hardened further: if nothing resolves, `onStart()`
+  prints a clear error and does not spawn, instead of risking an opaque `ImportError`
+  in the wrong interpreter. (The resolver itself is Python 3.9-safe via
+  `from __future__ import annotations`.)
+- **`TDHost.param_value`/`is_active` caught only `AttributeError`**, unlike the sibling
+  `find_top()` — broadened both to `(AttributeError, RuntimeError)` so a TD param in an
+  error state fails safe instead of propagating on the per-frame path.
+
+Two other findings from the same audit (partial-connect CUDA IPC handle leak; a
+doorbell default disagreement) were investigated and confirmed to be false positives /
+already handled — no code change needed.
+
 ## [1.12.0] - 2026-07-06
 
 ### Added
