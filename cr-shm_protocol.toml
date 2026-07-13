@@ -1,0 +1,16 @@
+# Mutation-testing config for src/cuda_link/shm_protocol.py (cosmic-ray 8.4.x).
+# Workflow: cosmic-ray init cr-shm_protocol.toml cr-shm_protocol.sqlite
+#           cosmic-ray baseline cr-shm_protocol.toml
+#           cosmic-ray exec cr-shm_protocol.toml cr-shm_protocol.sqlite
+#           cr-report cr-shm_protocol.sqlite
+# The sqlite session files are regenerated artifacts — gitignored (cr-*.sqlite).
+[cosmic-ray]
+module-path = "src/cuda_link/shm_protocol.py"
+timeout = 30.0
+excluded-modules = []
+# Absolute interpreter path: bare "python" resolves through the Windows App Paths
+# registry to a potentially different environment. One run ≈ 4.3 s (torch import).
+test-command = "C:/Users/INTER/AppData/Local/Programs/Python/Python311/python.exe -m pytest tests/core/test_shm_protocol.py -x -q --tb=no -p no:cacheprovider"
+
+[cosmic-ray.distributor]
+name = "local"

@@ -264,16 +264,17 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Soft regression gate: 58.73% measured 2026-07-06 (746 tests, -m "not requires_cuda",
-# branch=true), now that `source` includes td_exporter/ alongside cuda_link (see T1 in
-# the 2026-07-06 PR review). The prior 72% gate measured cuda_link/ only; auto-generated
-# td_exporter/*.py mirrors are omitted above to avoid double-counting already-tested
-# logic, but genuinely TD-only files (TDReceiver.py 44%, TDSender.py 48%, and several
-# untested example/glue scripts) are real, previously-invisible gaps — closing them is
-# tracked separately as T2 (TD integration-layer characterization tests).
-# fail_under = floor(58.73) - 3 = 55. Raise incrementally as coverage grows (T2 work);
+# Soft regression gate: 79.46% measured 2026-07-12 (1112 tests, -m "not requires_cuda
+# and not requires_native", branch=true, bare `--cov` so `source` above applies:
+# cuda_link + TD-only td_exporter files). The cuda_link package alone measures 99.10%
+# (`--cov=cuda_link`, CI's invocation) after the 2026-07-12 coverage push; the gate is
+# set against the weaker combined run so both invocations pass. The remaining gap is
+# the TD integration layer (TDReceiver/TDSender/example scripts) — still tracked as T2
+# (TD integration-layer characterization tests). Auto-generated td_exporter/*.py mirrors
+# stay omitted above to avoid double-counting already-tested logic.
+# fail_under = floor(79.46) - 3 = 76. Raise incrementally as coverage grows (T2 work);
 # never lower without a documented reason.
-fail_under = 55
+fail_under = 76
 show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------

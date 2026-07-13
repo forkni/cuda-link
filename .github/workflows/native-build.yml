@@ -1,0 +1,67 @@
+name: Native Build
+
+# Per-PR compile check for the _native_waiter C++ extension. release.yml builds
+# the same wheel at tag time; this workflow catches CMake/MSVC breakage when it
+# lands, not weeks later at release. Steps mirror release.yml's build-wheels job
+# (native wheel only — the py3-none-any fallback wheel compiles nothing, so it
+# can't break and isn't rebuilt here).
+
+on:
+  push:
+    branches: [development, main, master]
+    paths:
+      - 'src/cuda_link/_cpp/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/native-build.yml'
+  pull_request:
+    paths:
+      - 'src/cuda_link/_cpp/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/native-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-native:
+    name: Build native wheel (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade pip build
+
+      - name: Sync td_exporter/CUDAIPCWrapper.py from canonical source
+        run: python scripts/sync_td_wrapper.py
+
+      - name: Build native wheel (compiles _native_waiter)
+        # BUILD_NATIVE_WAITER defaults ON on Windows — no flag needed.
+        run: python -m build --wheel
+
+      - name: Install wheel and run native state-machine tests
+        # test_native_state_machine.py needs only the compiled extension (no
+        # GPU/cudart) — same smoke test release.yml runs at tag time.
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
+          python -m pip install "$($wheel.FullName)"
+          python -c "import cuda_link._native_waiter; print('native extension imported OK')"
+          python -m pip install pytest pytest-randomly
+          pytest tests/core/test_native_state_machine.py -m requires_native -v

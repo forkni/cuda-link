@@ -185,6 +185,9 @@ nul
 # Test artifacts
 test_timeout_manual.py
 
+# Cosmic-ray mutation-testing session databases (large, regenerated from cr-*.toml)
+cr-*.sqlite
+
 # Local-only project files
 CLAUDE.md
 clean_pycache.cmd
