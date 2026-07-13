@@ -129,6 +129,15 @@ def test_cupy_buffers_build_success_builds_one_array_per_slot() -> None:
     assert len(buffers.arrays) == 2
     assert mock_cp.cuda.UnownedMemory.call_count == 2
     assert mock_cp.ndarray.call_count == 2
+    # Each slot's own dev_ptr must be threaded through individually -- not
+    # slot 0's pointer reused for every slot. dev_ptr_style="c_void_p" gives
+    # slot 0 -> 0x1000, slot 1 -> 0x2000 (see fakes.make_fake_ipc_connection).
+    mock_cp.cuda.UnownedMemory.assert_any_call(0x1000, fmt.frame_nbytes, owner=conn)
+    mock_cp.cuda.UnownedMemory.assert_any_call(0x2000, fmt.frame_nbytes, owner=conn)
+    # Every ndarray view must use the resolved shape/dtype, regardless of slot.
+    for args, kwargs in mock_cp.ndarray.call_args_list:
+        assert args == (fmt.shape,)
+        assert kwargs["dtype"] == "uint8"
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +231,8 @@ def test_numpy_buffers_build_multi_stream_creates_chunk_plan() -> None:
 
 
 def test_numpy_buffers_build_high_priority_streams() -> None:
-    cuda = FakeCUDAAdapter()
+    fake_cuda = FakeCUDAAdapter()
+    cuda = MagicMock(wraps=fake_cuda)
     conn, _, _ = make_fake_ipc_connection(num_slots=1)
     conn.cuda = cuda
     fmt = _fmt()
@@ -230,6 +240,13 @@ def test_numpy_buffers_build_high_priority_streams() -> None:
     nb = NumpyBuffers.build(conn, fmt, num_streams=1, high_priority=True)
 
     assert nb.primary_stream is not None
+    # high_priority=True must route through create_stream_with_priority, not
+    # the plain create_stream() path -- FakeCUDAAdapter returns a non-None
+    # handle from both, so "primary_stream is not None" alone can't tell them
+    # apart. Pin the actual call to catch a regression that silently ignores
+    # the flag.
+    cuda.create_stream_with_priority.assert_called_once_with(flags=0x01)
+    cuda.create_stream.assert_not_called()
     nb.close()
 
 

@@ -117,5 +117,11 @@ def test_record_event_external_tracks_call():
 
 def test_record_event_external_uses_str_fallback_for_untagged_objects():
     adapter = FakeCUDAAdapter()
-    adapter.record_event_external(object(), object())
-    assert len(adapter.recorded_events) == 1
+    event = object()
+    stream = object()
+
+    adapter.record_event_external(event, stream)
+
+    # Exact fallback content, not just "something got recorded" — catches a swapped
+    # event/stream order or a wrong/constant fallback value.
+    assert adapter.recorded_events == [(str(event), str(stream))]

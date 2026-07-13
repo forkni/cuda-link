@@ -276,12 +276,18 @@ def test_apply_format_change_rebuilds_torch_buffers_when_present(monkeypatch: py
     mock_tensor = MagicMock()
     monkeypatch.setattr(torch, "as_tensor", lambda wrapper, device: mock_tensor)
     imp._torch = TorchBuffers.build(imp._conn, imp._format)
+    old_torch = imp._torch
     new_fmt = Format.from_overrides((4, 4, 4), "int16")  # dtype differs -> layout_differs_from() True
 
     imp._apply_format_change(new_fmt)
 
     assert imp._format is new_fmt
     assert imp._torch is not None
+    # TorchBuffers.build() always returns a fresh dataclass instance -- pin
+    # identity against the pre-call object, not just non-None, so a bug that
+    # skips the rebuild (leaving the stale pre-existing buffers in place)
+    # is actually caught rather than passing vacuously.
+    assert imp._torch is not old_torch
 
 
 # ---------------------------------------------------------------------------

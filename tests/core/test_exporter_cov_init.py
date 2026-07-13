@@ -21,7 +21,7 @@ from cuda_link import ExportPolicy, FrameSpec
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.cuda_runtime_types import CudaIpcError
-from cuda_link.exporter import CTypesCUDAAdapter, Exporter, _read_hws_mode
+from cuda_link.exporter import IPC_HANDLE_SIZE, CTypesCUDAAdapter, Exporter, _read_hws_mode
 
 _H = _W = _C = 4
 _DATA_SIZE = _H * _W * _C  # uint8
@@ -99,12 +99,17 @@ def test_open_defaults_policy_and_cuda_when_omitted(monkeypatch: pytest.MonkeyPa
 
 
 def test_open_device_mismatch_raises_cuda_ipc_error_and_cleans_up() -> None:
-    """A CUDA context bound to a different device raises; open() cleans up before re-raising."""
+    """A CUDA context bound to a different device raises; open()'s except-clause
+    calls _do_cleanup(cuda_valid=False) before re-raising (236)."""
     fake = FakeCUDAAdapter(device=1)  # spec asks for device 0
-    with pytest.raises(CudaIpcError, match="Device mismatch"):
+    original_do_cleanup = Exporter._do_cleanup
+    with (
+        patch.object(Exporter, "_do_cleanup", autospec=True, side_effect=original_do_cleanup) as mock_cleanup,
+        pytest.raises(CudaIpcError, match="Device mismatch"),
+    ):
         Exporter.open(_spec(device=0), policy=ExportPolicy.for_testing(), cuda=fake)
-    # Cleanup ran with cuda_valid=False before any allocation happened.
-    assert fake.allocations == {}
+    mock_cleanup.assert_called_once()
+    assert mock_cleanup.call_args.kwargs["cuda_valid"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +175,35 @@ def test_write_helpers_are_no_ops_before_shm_handle_exists() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _DistinctiveEventHandle:
+    """A fake IPC event handle whose bytes are NOT all-zero.
+
+    FakeCUDAAdapter's own _FakeIpcHandle.reserved is always bytes(64) (all-zero),
+    which is indistinguishable from an untouched (never-written) SHM region. This
+    handle uses a non-zero fill so the write-vs-skip branches are actually
+    distinguishable by inspecting the SHM buffer contents.
+    """
+
+    reserved = b"\xab" * IPC_HANDLE_SIZE
+
+
 def test_write_handles_skips_falsy_event_handle_slot() -> None:
-    """A falsy ipc_event_handles[slot] (e.g. event-handle export failed) is skipped, not written."""
+    """A falsy ipc_event_handles[slot] (e.g. event-handle export failed) is skipped:
+    its SHM region is left untouched (374), while a truthy sibling slot's region IS
+    written with that slot's handle bytes."""
     fake = FakeCUDAAdapter(device=0)
-    with patch.object(fake, "ipc_get_event_handle", return_value=None):
+    truthy_handle = _DistinctiveEventHandle()
+    with patch.object(fake, "ipc_get_event_handle", side_effect=[None, truthy_handle]):
         exp = Exporter.open(_spec(num_slots=2), policy=ExportPolicy.for_testing(), cuda=fake)
     try:
-        assert exp.ipc_event_handles == [None, None]
+        assert exp.ipc_event_handles == [None, truthy_handle]
         assert exp._initialized is True
+
+        evt_off_0 = exp._layout.event_handle_offset(0)
+        evt_off_1 = exp._layout.event_handle_offset(1)
+        # Slot 0 was skipped: its region stays at the SHM segment's zero-initialized default.
+        assert bytes(exp.shm_handle.buf[evt_off_0 : evt_off_0 + IPC_HANDLE_SIZE]) == bytes(IPC_HANDLE_SIZE)
+        # Slot 1 was written: its region matches the distinctive (non-zero) handle bytes.
+        assert bytes(exp.shm_handle.buf[evt_off_1 : evt_off_1 + IPC_HANDLE_SIZE]) == bytes(truthy_handle.reserved)
     finally:
         exp.close()

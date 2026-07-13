@@ -214,16 +214,27 @@ def test_start_failure_inside_acquire_does_not_call_release():
 
 
 def test_context_manager_calls_start_and_stop():
+    """__enter__ calls self.start() and __exit__ calls self.stop().
+
+    enabled=False would make both start() and stop() no-ops regardless of whether
+    __enter__/__exit__ actually invoke them — asserting only on `obs._started`
+    (as a prior version of this test did) can't distinguish "the methods were
+    called" from "the methods were never called at all". Patch the instance's
+    start/stop with MagicMocks instead, so the call itself is what's pinned.
+    """
     from cuda_link.nvml_observer import NVMLObserver
 
-    # enabled=False makes start() a clean no-op (short-circuits at line 146-147)
-    # and stop() a no-op too (since _started stays False) — no pynvml mocking
-    # needed while still exercising __enter__/__exit__ themselves.
     obs = NVMLObserver(device=0, enabled=False)
+    obs.start = MagicMock(return_value=True)
+    obs.stop = MagicMock()
+
     with obs as ctx:
         assert ctx is obs
-        assert obs._started is False
-    assert obs._started is False
+        obs.start.assert_called_once()
+        obs.stop.assert_not_called()
+
+    obs.start.assert_called_once()
+    obs.stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

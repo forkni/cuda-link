@@ -247,13 +247,28 @@ def test_numpy_backend_wait_delegates_to_wait_for_slot() -> None:
 
 def test_numpy_backend_materialize_single_stream() -> None:
     imp = make_connected_importer(dev_ptr_style="c_void_p")
-    imp._conn.cuda = FakeCUDAAdapter()
+    fake_cuda = FakeCUDAAdapter()
+    wrapped = MagicMock(wraps=fake_cuda)
+    imp._conn.cuda = wrapped
     imp._numpy = NumpyBuffers.build(imp._conn, imp._format, num_streams=1)
     backend = _NumpyBackend(imp)
+    conn = imp._conn
 
-    result = backend.materialize(imp._conn, 0)
+    result = backend.materialize(conn, 0)
 
     assert result is imp._numpy.buffer
+    # materialize() unconditionally returns nb.buffer at the end regardless of
+    # whether the D2H copy actually ran -- pin the actual memcpy_async/
+    # stream_synchronize calls too, so a regression that drops the copy
+    # itself (not just the return value) is caught.
+    wrapped.memcpy_async.assert_called_once_with(
+        dst=imp._numpy.buffer_ptr,
+        src=conn.dev_ptrs[0],
+        count=imp._format.frame_nbytes,
+        kind=2,
+        stream=imp._numpy.primary_stream,
+    )
+    wrapped.stream_synchronize.assert_called_once_with(imp._numpy.primary_stream)
     imp._numpy.close()
 
 
@@ -329,7 +344,10 @@ def test_cupy_backend_wait_default_stream_uses_get_current_stream() -> None:
 
     assert waited == 0.0
     mock_cp.cuda.get_current_stream.assert_called_once()
-    mock_cp.cuda.runtime.streamWaitEvent.assert_called_once()
+    # Pin the resolved stream's .ptr (0xAAAA), not just "called once" -- a bug
+    # that threads the wrong pointer (e.g. 0, or self._stream instead of the
+    # resolved current stream) would still satisfy a bare assert_called_once().
+    mock_cp.cuda.runtime.streamWaitEvent.assert_called_once_with(0xAAAA, _event_to_int(conn.ipc_events[0]), 0)
 
 
 def test_cupy_backend_wait_explicit_non_cupy_stream_resolves_via_external_stream() -> None:
@@ -350,7 +368,10 @@ def test_cupy_backend_wait_explicit_non_cupy_stream_resolves_via_external_stream
 
     assert waited == 0.0
     mock_cp.cuda.ExternalStream.assert_called_once_with(0xBEEF)
-    mock_cp.cuda.runtime.streamWaitEvent.assert_called_once()
+    # Pin the resolved ExternalStream's .ptr (0xBEEF), not just "called once" --
+    # a bug that passes the wrong pointer through to streamWaitEvent would
+    # still satisfy a bare assert_called_once().
+    mock_cp.cuda.runtime.streamWaitEvent.assert_called_once_with(0xBEEF, _event_to_int(conn.ipc_events[0]), 0)
 
 
 def test_cupy_backend_wait_stream_already_cupy_stream_instance_skips_external_stream() -> None:

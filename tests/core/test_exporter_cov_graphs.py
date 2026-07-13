@@ -147,10 +147,15 @@ def test_build_export_graphs_three_node_success_path_with_truthy_ipc_event() -> 
 
 
 def test_build_export_graphs_abandons_capture_on_mid_capture_exception() -> None:
-    """An exception raised while capture_started=True must abandon+destroy the partial capture."""
+    """An exception raised while capture_started=True must abandon+destroy the partial
+    capture (449-452): stream_end_capture() + graph_destroy() are both invoked on the
+    abandoned template — not just "some exception got caught and graphs got disabled,"
+    which is also true of exceptions raised outside the begin/end-capture window."""
     fake = FakeCUDAAdapter(device=0)
     with (
         patch.object(fake, "memcpy_async", side_effect=RuntimeError("simulated capture failure")),
+        patch.object(fake, "stream_end_capture", wraps=fake.stream_end_capture) as spy_end_capture,
+        patch.object(fake, "graph_destroy", wraps=fake.graph_destroy) as spy_graph_destroy,
         patch("cuda_link.exporter.logger") as mock_logger,
     ):
         exp = Exporter.open(_spec(), policy=_graphs_policy(), cuda=fake)
@@ -158,6 +163,16 @@ def test_build_export_graphs_abandons_capture_on_mid_capture_exception() -> None
         assert exp._graphs_disabled is True
         messages = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
         assert any("CUDA Graph build failed" in m for m in messages)
+        # The abandon-and-destroy cleanup path ran: capture was ended on the IPC stream
+        # and exactly the resulting (abandoned) template was destroyed. _graph_execs/
+        # _graph_templates never got populated (the exception fired before slot 439/440
+        # assignment), so this is the ONLY graph_destroy call in the whole open() — it
+        # cannot be coming from the normal build-success path or from a later
+        # _destroy_export_graphs() sweep over already-built graphs.
+        spy_end_capture.assert_called_once_with(exp.ipc_stream)
+        spy_graph_destroy.assert_called_once()
+        (destroyed_template,) = spy_graph_destroy.call_args.args
+        assert destroyed_template is not None
     finally:
         exp.close()
 

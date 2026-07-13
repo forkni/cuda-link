@@ -17,7 +17,7 @@ No @pytest.mark.requires_cuda / requires_native marker needed.
 
 from __future__ import annotations
 
-from ctypes import c_void_p
+from ctypes import POINTER, c_int, c_void_p, cast
 
 from cuda_link.cuda_runtime_types import MemcpyKind
 from tests.fakes import make_bare_runtime_api
@@ -81,13 +81,25 @@ def test_stream_begin_capture_forwards_stream_and_mode() -> None:
 
 
 def test_stream_end_capture_returns_graph_handle() -> None:
+    """stream_end_capture() forwards the caller's stream and returns the graph
+    handle cudaStreamEndCapture wrote into the out-param (not a hardcoded 0)."""
     import cuda_link.cuda_ipc_wrapper as _w
 
     api = make_bare_runtime_api()
     stream = _w.CUDAStream_t(1)
+
+    def _fake_end_capture(forwarded_stream, graph_ptr):
+        cast(graph_ptr, POINTER(_w.CUDAGraph_t)).contents.value = 0xABCD
+        return 0
+
+    api.cudart.cudaStreamEndCapture.side_effect = _fake_end_capture
+
     result = api.stream_end_capture(stream)
-    api.cudart.cudaStreamEndCapture.assert_called_once()
+
+    call_args = api.cudart.cudaStreamEndCapture.call_args[0]
+    assert call_args[0] is stream
     assert isinstance(result, _w.CUDAGraph_t)
+    assert result.value == 0xABCD
 
 
 def test_graph_instantiate_returns_graph_exec_handle() -> None:
@@ -224,7 +236,17 @@ def test_graph_exec_event_wait_node_set_event_forwards_args() -> None:
 
 
 def test_get_runtime_version_returns_int() -> None:
+    """get_runtime_version() returns the value cudaRuntimeGetVersion wrote into the
+    out-param (not a hardcoded 0 — the c_int(0) default a MagicMock never overwrites)."""
     api = make_bare_runtime_api()
+
+    def _fake_get_runtime_version(version_ptr):
+        cast(version_ptr, POINTER(c_int)).contents.value = 12080
+        return 0
+
+    api.cudart.cudaRuntimeGetVersion.side_effect = _fake_get_runtime_version
+
     result = api.get_runtime_version()
+
     api.cudart.cudaRuntimeGetVersion.assert_called_once()
-    assert isinstance(result, int)
+    assert result == 12080

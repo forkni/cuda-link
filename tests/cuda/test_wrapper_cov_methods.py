@@ -23,7 +23,7 @@ No @pytest.mark.requires_cuda / requires_native marker needed.
 
 from __future__ import annotations
 
-from ctypes import c_void_p
+from ctypes import POINTER, c_float, c_int, c_void_p, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,6 +37,22 @@ import pytest
 from cuda_link.cuda_ipc_wrapper import CudaIpcError
 from cuda_link.cuda_runtime_types import CUDAError, MemcpyKind, StreamFlags
 from tests.fakes import make_bare_runtime_api
+
+
+def _fill_scalar_byref(ptr_arg: object, ctype: type, value: object) -> None:
+    """Write `value` through a scalar ctypes byref() out-param captured by a mocked call.
+
+    A MagicMock call never performs the write a real ctypes call would (there is no
+    argtypes-driven marshalling) — the raw CArgObject from byref() is simply recorded
+    as a call argument and otherwise ignored. Casting that CArgObject back to
+    POINTER(ctype) and assigning .contents.value lets a side_effect simulate a real
+    driver call actually populating the out-param, so a test can prove a wrapper
+    method's return value is read from that out-param rather than a hardcoded
+    constant. Only for scalar ctypes (c_void_p/c_int/c_float/...) — struct out-params
+    (e.g. cudaIpcMemHandle_t) assign into `.contents.<field>` directly instead.
+    """
+    cast(ptr_arg, POINTER(ctype)).contents.value = value
+
 
 # ---------------------------------------------------------------------------
 # check_error
@@ -163,10 +179,21 @@ def test_host_unregister_forwards_ptr() -> None:
 
 
 def test_malloc_returns_device_pointer() -> None:
+    """malloc() forwards the caller's size and returns the pointer cudaMalloc wrote
+    into the out-param — not a hardcoded/fresh c_void_p."""
     api = make_bare_runtime_api()
+
+    def _fake_cuda_malloc(dev_ptr, size):
+        _fill_scalar_byref(dev_ptr, c_void_p, 0xDEAD_BEEF)
+        return 0
+
+    api.cudart.cudaMalloc.side_effect = _fake_cuda_malloc
+
     result = api.malloc(1024)
-    api.cudart.cudaMalloc.assert_called_once()
+
+    assert api.cudart.cudaMalloc.call_args[0][1] == 1024
     assert isinstance(result, c_void_p)
+    assert result.value == 0xDEAD_BEEF
 
 
 def test_free_forwards_pointer() -> None:
@@ -291,10 +318,21 @@ def test_restore_context_noop_when_no_driver_api() -> None:
 
 
 def test_malloc_host_returns_pointer() -> None:
+    """malloc_host() forwards the caller's size and returns the pointer
+    cudaMallocHost wrote into the out-param."""
     api = make_bare_runtime_api()
+
+    def _fake_cuda_malloc_host(ptr, size):
+        _fill_scalar_byref(ptr, c_void_p, 0xFEED_FACE)
+        return 0
+
+    api.cudart.cudaMallocHost.side_effect = _fake_cuda_malloc_host
+
     result = api.malloc_host(2048)
-    api.cudart.cudaMallocHost.assert_called_once()
+
+    assert api.cudart.cudaMallocHost.call_args[0][1] == 2048
     assert isinstance(result, c_void_p)
+    assert result.value == 0xFEED_FACE
 
 
 def test_free_host_forwards_pointer() -> None:
@@ -317,12 +355,24 @@ def test_memcpy_forwards_all_args() -> None:
 
 
 def test_ipc_get_mem_handle_returns_handle() -> None:
+    """ipc_get_mem_handle() forwards the caller's device pointer and returns the
+    handle cudaIpcGetMemHandle wrote into the out-param (not an empty/zeroed one)."""
     import cuda_link.cuda_ipc_wrapper as _w
 
     api = make_bare_runtime_api()
-    result = api.ipc_get_mem_handle(c_void_p(0x5000))
-    api.cudart.cudaIpcGetMemHandle.assert_called_once()
+    dev_ptr = c_void_p(0x5000)
+
+    def _fake_get_mem_handle(handle_ptr, forwarded_dev_ptr):
+        cast(handle_ptr, POINTER(_w.cudaIpcMemHandle_t)).contents.internal[0] = 0x42
+        return 0
+
+    api.cudart.cudaIpcGetMemHandle.side_effect = _fake_get_mem_handle
+
+    result = api.ipc_get_mem_handle(dev_ptr)
+
+    assert api.cudart.cudaIpcGetMemHandle.call_args[0][1] is dev_ptr
     assert isinstance(result, _w.cudaIpcMemHandle_t)
+    assert result.internal[0] == 0x42
 
 
 def test_ipc_close_mem_handle_forwards_pointer() -> None:
@@ -419,12 +469,24 @@ def test_wait_event_calls_event_synchronize() -> None:
 
 
 def test_ipc_get_event_handle_returns_handle() -> None:
+    """ipc_get_event_handle() forwards the caller's event and returns the handle
+    cudaIpcGetEventHandle wrote into the out-param (not an empty/zeroed one)."""
     import cuda_link.cuda_ipc_wrapper as _w
 
     api = make_bare_runtime_api()
-    result = api.ipc_get_event_handle(_w.CUDAEvent_t(3))
-    api.cudart.cudaIpcGetEventHandle.assert_called_once()
+    event = _w.CUDAEvent_t(3)
+
+    def _fake_get_event_handle(handle_ptr, forwarded_event):
+        cast(handle_ptr, POINTER(_w.cudaIpcEventHandle_t)).contents.reserved[0] = 0x7
+        return 0
+
+    api.cudart.cudaIpcGetEventHandle.side_effect = _fake_get_event_handle
+
+    result = api.ipc_get_event_handle(event)
+
+    assert api.cudart.cudaIpcGetEventHandle.call_args[0][1] is event
     assert isinstance(result, _w.cudaIpcEventHandle_t)
+    assert result.reserved[0] == 0x7
 
 
 def test_destroy_event_forwards_event() -> None:
@@ -451,13 +513,25 @@ def test_create_sync_event_uses_disable_timing_flag() -> None:
 
 
 def test_event_elapsed_time_returns_float() -> None:
+    """event_elapsed_time() forwards start/end and returns the value
+    cudaEventElapsedTime wrote into the out-param (not a hardcoded 0.0)."""
     import cuda_link.cuda_ipc_wrapper as _w
 
     api = make_bare_runtime_api()
     start, end = _w.CUDAEvent_t(1), _w.CUDAEvent_t(2)
+
+    def _fake_elapsed_time(elapsed_ptr, forwarded_start, forwarded_end):
+        _fill_scalar_byref(elapsed_ptr, c_float, 12.5)
+        return 0
+
+    api.cudart.cudaEventElapsedTime.side_effect = _fake_elapsed_time
+
     result = api.event_elapsed_time(start, end)
-    api.cudart.cudaEventElapsedTime.assert_called_once()
-    assert isinstance(result, float)
+
+    call_args = api.cudart.cudaEventElapsedTime.call_args[0]
+    assert call_args[1] is start
+    assert call_args[2] is end
+    assert result == pytest.approx(12.5)
 
 
 # ---------------------------------------------------------------------------
@@ -466,10 +540,20 @@ def test_event_elapsed_time_returns_float() -> None:
 
 
 def test_get_device_returns_int() -> None:
+    """get_device() returns the value cudaGetDevice wrote into the out-param
+    (not a hardcoded 0 — the c_int() default that a MagicMock never overwrites)."""
     api = make_bare_runtime_api()
+
+    def _fake_get_device(device_ptr):
+        _fill_scalar_byref(device_ptr, c_int, 7)
+        return 0
+
+    api.cudart.cudaGetDevice.side_effect = _fake_get_device
+
     result = api.get_device()
+
     api.cudart.cudaGetDevice.assert_called_once()
-    assert isinstance(result, int)
+    assert result == 7
 
 
 def test_create_stream_default_flags_is_non_blocking() -> None:
@@ -569,12 +653,27 @@ def test_stream_query_raises_on_real_error() -> None:
 
 
 def test_pointer_get_attributes_returns_struct() -> None:
+    """pointer_get_attributes() forwards the caller's pointer (wrapped in c_void_p)
+    and returns the struct cudaPointerGetAttributes wrote into the out-param."""
     import cuda_link.cuda_ipc_wrapper as _w
 
     api = make_bare_runtime_api()
+
+    def _fake_pointer_get_attributes(attrs_ptr, forwarded_ptr):
+        attrs = cast(attrs_ptr, POINTER(_w.cudaPointerAttributes)).contents
+        attrs.type = 2
+        attrs.device = 3
+        return 0
+
+    api.cudart.cudaPointerGetAttributes.side_effect = _fake_pointer_get_attributes
+
     result = api.pointer_get_attributes(0x7000)
-    api.cudart.cudaPointerGetAttributes.assert_called_once()
+
+    call_args = api.cudart.cudaPointerGetAttributes.call_args[0]
+    assert call_args[1].value == 0x7000
     assert isinstance(result, _w.cudaPointerAttributes)
+    assert result.type == 2
+    assert result.device == 3
 
 
 def test_device_can_access_peer_returns_bool() -> None:

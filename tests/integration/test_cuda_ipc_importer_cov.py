@@ -51,8 +51,13 @@ class _FakeConnectedImporter:
         self.get_frame_numpy_calls = 0
         self.attached_observer = None
         self.closed = False
+        # Record the stream kwarg each call received, so tests can verify the
+        # shim actually forwards it rather than dropping it on the floor.
+        self.last_get_frame_stream = "__unset__"
+        self.last_get_frame_cupy_stream = "__unset__"
 
     def get_frame(self, stream=None):
+        self.last_get_frame_stream = stream
         return _FakeResult(ImportOutcome.NEW_FRAME, "tensor_sentinel")
 
     def get_frame_numpy(self):
@@ -60,6 +65,7 @@ class _FakeConnectedImporter:
         return _FakeResult(ImportOutcome.NEW_FRAME, "numpy_sentinel")
 
     def get_frame_cupy(self, stream=None):
+        self.last_get_frame_cupy_stream = stream
         return _FakeResult(ImportOutcome.NEW_FRAME, "cupy_sentinel")
 
     def get_stats(self):
@@ -113,8 +119,12 @@ def test_connect_syncs_shape_dtype_from_format(monkeypatch):
 
 def test_get_frame_connected_returns_frame_on_new_frame():
     imp = CUDAIPCImporter(shm_name="x")
-    imp._importer = _FakeConnectedImporter()
+    fake = _FakeConnectedImporter()
+    imp._importer = fake
     assert imp.get_frame(stream="s1") == "tensor_sentinel"
+    # get_frame() must forward its stream kwarg to the inner Importer
+    # unchanged, not silently default it to None.
+    assert fake.last_get_frame_stream == "s1"
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +157,12 @@ def test_get_frame_cupy_returns_none_when_not_connected():
 
 def test_get_frame_cupy_connected_returns_frame():
     imp = CUDAIPCImporter(shm_name="x")
-    imp._importer = _FakeConnectedImporter()
+    fake = _FakeConnectedImporter()
+    imp._importer = fake
     assert imp.get_frame_cupy(stream="s2") == "cupy_sentinel"
+    # get_frame_cupy() must forward its stream kwarg to the inner Importer
+    # unchanged, not silently default it to None.
+    assert fake.last_get_frame_cupy_stream == "s2"
 
 
 # ---------------------------------------------------------------------------

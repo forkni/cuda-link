@@ -12,7 +12,9 @@ ctypes plumbing on Windows).
 from __future__ import annotations
 
 import importlib
+import logging
 import os
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -59,24 +61,38 @@ def test_create_doorbell_returns_none_on_createeventw_failure(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_open_doorbell_returns_none_when_not_found(monkeypatch):
-    """err == 2 (ERROR_FILE_NOT_FOUND) — producer not ready yet, logged at debug."""
+def test_open_doorbell_returns_none_when_not_found(monkeypatch, caplog: pytest.LogCaptureFixture):
+    """err == 2 (ERROR_FILE_NOT_FOUND) — producer not ready yet, logged at debug (not warning)."""
     monkeypatch.setattr(db._k32, "OpenEventW", lambda *a: 0)
     monkeypatch.setattr(db.ctypes, "get_last_error", lambda: 2)
-    assert db.open_doorbell("nonexistent_event_name") is None
+    with caplog.at_level(logging.DEBUG, logger="cuda_link._doorbell"):
+        assert db.open_doorbell("nonexistent_event_name") is None
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("not found" in r.message for r in debug_records)
+    assert warning_records == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_open_doorbell_returns_none_on_other_failure(monkeypatch):
-    """err != 2 — some other OpenEventW failure, logged at warning."""
+def test_open_doorbell_returns_none_on_other_failure(monkeypatch, caplog: pytest.LogCaptureFixture):
+    """err != 2 — some other OpenEventW failure, logged at warning (not debug)."""
     monkeypatch.setattr(db._k32, "OpenEventW", lambda *a: 0)
     monkeypatch.setattr(db.ctypes, "get_last_error", lambda: 5)  # ERROR_ACCESS_DENIED
-    assert db.open_doorbell("some_event_name") is None
+    with caplog.at_level(logging.DEBUG, logger="cuda_link._doorbell"):
+        assert db.open_doorbell("some_event_name") is None
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("OpenEventW" in r.message for r in warning_records)
+    assert debug_records == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_signal_is_noop_when_handle_none():
+def test_signal_is_noop_when_handle_none(monkeypatch):
+    """handle=None must short-circuit before ever touching _k32.SetEvent."""
+    mock_set_event = MagicMock()
+    monkeypatch.setattr(db._k32, "SetEvent", mock_set_event)
     db.signal(None)  # must not raise, must not touch _k32.SetEvent
+    mock_set_event.assert_not_called()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")

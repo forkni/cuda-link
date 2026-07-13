@@ -25,6 +25,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# CudaLinkError is imported from the wrapper module's own resolved namespace (not
+# cuda_link.cuda_runtime_types directly) — same reasoning as CudaIpcError in
+# test_wrapper_cov_methods.py: cuda_ipc_wrapper.py's top-level try/except import can
+# bind a *different* class object than cuda_link.cuda_runtime_types.CudaLinkError, and
+# pytest.raises() needs the exact class _load_cuda_runtime actually raises.
+from cuda_link.cuda_ipc_wrapper import CudaLinkError
 from tests.fakes import make_bare_runtime_api
 
 
@@ -119,7 +125,7 @@ def test_load_cuda_runtime_raises_with_winerror_126_hint() -> None:
     with (
         patch("cuda_link.cuda_ipc_wrapper.os.path.exists", return_value=False),
         patch("cuda_link.cuda_ipc_wrapper.ctypes.CDLL", side_effect=_always_fail),
-        pytest.raises(Exception) as exc_info,
+        pytest.raises(CudaLinkError) as exc_info,
     ):
         api._load_cuda_runtime()
 
@@ -139,7 +145,7 @@ def test_load_cuda_runtime_raises_without_winerror_126_hint() -> None:
     with (
         patch("cuda_link.cuda_ipc_wrapper.os.path.exists", return_value=False),
         patch("cuda_link.cuda_ipc_wrapper.ctypes.CDLL", side_effect=_always_fail),
-        pytest.raises(Exception) as exc_info,
+        pytest.raises(CudaLinkError) as exc_info,
     ):
         api._load_cuda_runtime()
 
@@ -149,26 +155,39 @@ def test_load_cuda_runtime_raises_without_winerror_126_hint() -> None:
     assert "winerror=2" in message
 
 
-def test_load_cuda_runtime_raises_uses_path_tier_error_when_name_tier_had_no_attempt() -> None:
-    """last_path_err is used in the diagnostic message when a path was attempted (and failed).
+def test_load_cuda_runtime_raises_uses_name_tier_error_over_path_tier_error() -> None:
+    """The final diagnostic message always reflects the bare-name tier's last error,
+    never the absolute-path tier's — even when a path was attempted and failed too.
 
-    Exercises the `os.path.exists` True + CDLL-raises branch feeding into last_path_err,
-    combined with the bare-name tier also exhausting, so the final message reflects a
-    real absolute-path failure rather than only a bare-name failure.
+    `_load_cuda_runtime` unconditionally runs the full bare-name loop after the
+    absolute-path loop; there is no code path that reaches the final `raise` with
+    the name tier unattempted (a prior version of this test assumed such a path
+    existed and used the same winerror for both tiers, so its assertion couldn't
+    tell which tier's error actually surfaced). Since every element of `dll_names`
+    is always tried, `last_name_err` is always set by the time
+    `last_name_err or last_path_err` is evaluated — so the name tier's error always
+    wins. Two distinct winerrors here (87 for the path tier, 2 for the name tier)
+    pin that precedence: only the name tier's winerror may appear in the message.
     """
     api = make_bare_runtime_api()
 
-    def _always_fail(name, *args, **kwargs):
-        raise _os_error_with_winerror(87, "The parameter is incorrect", 87)
+    def _fail_with_tier_specific_winerror(name_or_path, *args, **kwargs):
+        if "\\" in name_or_path:
+            # Absolute-path tier (dll_paths entries are full Windows paths).
+            raise _os_error_with_winerror(87, "The parameter is incorrect", 87)
+        # Bare-name tier (dll_names entries, e.g. "cudart64_13.dll").
+        raise _os_error_with_winerror(2, "The system cannot find the file specified", 2)
 
     with (
         patch("cuda_link.cuda_ipc_wrapper.os.path.exists", return_value=True),
-        patch("cuda_link.cuda_ipc_wrapper.ctypes.CDLL", side_effect=_always_fail),
-        pytest.raises(Exception) as exc_info,
+        patch("cuda_link.cuda_ipc_wrapper.ctypes.CDLL", side_effect=_fail_with_tier_specific_winerror),
+        pytest.raises(CudaLinkError) as exc_info,
     ):
         api._load_cuda_runtime()
 
-    assert "winerror=87" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "winerror=2" in message
+    assert "winerror=87" not in message
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +299,8 @@ def test_load_driver_api_cuinit_nonzero_returns_none() -> None:
 
 
 def test_load_driver_api_success_returns_drv() -> None:
-    """When nvcuda.dll loads and cuInit() succeeds, the driver handle is returned."""
+    """When nvcuda.dll loads and cuInit() succeeds, the driver handle is returned
+    with all 7 driver symbols bound to the argtypes/restype _load_driver_api sets."""
     api = make_bare_runtime_api()
 
     fake_drv = MagicMock()
@@ -290,5 +310,19 @@ def test_load_driver_api_success_returns_drv() -> None:
         result = api._load_driver_api()
 
     assert result is fake_drv
-    # All 6 driver symbols must have been bound with argtypes/restype.
-    assert fake_drv.cuDeviceGet.argtypes == [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+
+    # All 7 driver symbols _load_driver_api binds, keyed by name, with their exact
+    # (argtypes, restype) pair per the production bindings.
+    expected_signatures: dict[str, tuple[list, type]] = {
+        "cuInit": ([ctypes.c_uint], ctypes.c_int),
+        "cuDeviceGet": ([ctypes.POINTER(ctypes.c_int), ctypes.c_int], ctypes.c_int),
+        "cuDevicePrimaryCtxRetain": ([ctypes.POINTER(ctypes.c_void_p), ctypes.c_int], ctypes.c_int),
+        "cuDevicePrimaryCtxRelease": ([ctypes.c_int], ctypes.c_int),
+        "cuCtxGetCurrent": ([ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int),
+        "cuCtxSetCurrent": ([ctypes.c_void_p], ctypes.c_int),
+        "cuGetErrorString": ([ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)], ctypes.c_int),
+    }
+    for symbol, (argtypes, restype) in expected_signatures.items():
+        bound = getattr(fake_drv, symbol)
+        assert bound.argtypes == argtypes, f"{symbol}.argtypes mismatch"
+        assert bound.restype == restype, f"{symbol}.restype mismatch"

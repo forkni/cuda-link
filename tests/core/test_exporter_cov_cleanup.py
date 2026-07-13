@@ -61,11 +61,19 @@ def test_do_cleanup_cuda_context_invalid_skips_gpu_teardown_steps() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_do_cleanup_early_return_when_never_initialized() -> None:
+def test_do_cleanup_early_return_when_never_initialized(caplog: pytest.LogCaptureFixture) -> None:
+    """Never-initialized exporter: only barrier cleanup runs and _do_cleanup returns
+    immediately — the full 7-step teardown (which always ends by logging "Exporter
+    closed") never executes."""
     exp = Exporter(_spec(), ExportPolicy.for_testing(), FakeCUDAAdapter())
-    exp.close()
+    with caplog.at_level("INFO", logger="cuda_link.exporter"):
+        exp.close()
     assert exp._closed is True
     assert exp._initialized is False
+    # "Exporter closed" is only logged at the very end of the full cleanup path (883).
+    # Its absence proves the early-return guard fired instead of running STEP1..STEP7
+    # (which, on this never-opened instance, would otherwise complete without error).
+    assert not any("Exporter closed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -73,12 +81,26 @@ def test_do_cleanup_early_return_when_never_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_do_cleanup_shm_handle_none_mid_cleanup_skips_shm_steps() -> None:
+def test_do_cleanup_shm_handle_none_mid_cleanup_skips_shm_steps(caplog: pytest.LogCaptureFixture) -> None:
     fake = FakeCUDAAdapter(device=0)
     exp = Exporter.open(_spec(), policy=ExportPolicy.for_testing(), cuda=fake)
+    # Hold the segment open independently: on Windows a named mapping dies with its
+    # last handle, so dropping the exporter's only reference would make STEP7's
+    # attach-by-name a FileNotFoundError no-op instead of a real unlink.
+    surviving_handle = exp.shm_handle
+    assert surviving_handle is not None
     exp.shm_handle = None  # simulate an already-released SHM handle
-    exp.close()  # STEP7 still unlinks the real segment by name regardless
-    assert exp._closed is True
+    try:
+        with caplog.at_level("INFO", logger="cuda_link.exporter"):
+            exp.close()  # STEP7 still unlinks the real segment by name regardless
+        assert exp._closed is True
+        messages = [r.message for r in caplog.records]
+        # STEP1 is skipped entirely: the shutdown-signal log never fires.
+        assert not any("Shutdown signal sent to consumer" in m for m in messages)
+        # STEP7 is unconditional: it still finds and unlinks the segment by name.
+        assert any("Unlinked SharedMemory" in m for m in messages)
+    finally:
+        surviving_handle.close()
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +145,14 @@ def test_do_cleanup_shm_write_failures_are_logged_not_raised() -> None:
 def test_do_cleanup_dev_ptrs_none_entry_skipped_in_free_loop() -> None:
     fake = FakeCUDAAdapter(device=0)
     exp = Exporter.open(_spec(num_slots=2), policy=ExportPolicy.for_testing(), cuda=fake)
+    slot1_ptr = exp.dev_ptrs[1].value
     exp.dev_ptrs[0] = None  # simulate a slot whose allocation was already freed
     exp.close()
     assert exp._closed is True
+    # Only slot 1's real pointer was handed to fake.free(); the None slot was skipped
+    # rather than freed (which would either raise inside the free thread or, if the
+    # loop's slot selection were wrong, free the wrong/no pointer).
+    assert fake.freed == [slot1_ptr]
 
 
 # ---------------------------------------------------------------------------
