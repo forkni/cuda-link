@@ -7,7 +7,9 @@ using the module's own types. No local constant duplication.
 
 from __future__ import annotations
 
+import dataclasses
 import time
+from unittest import mock
 
 import pytest
 
@@ -19,10 +21,20 @@ from cuda_link.shm_protocol import (
     FORMAT_KIND_SIGNED,
     FORMAT_KIND_UNSIGNED,
     IPC_HANDLE_SIZE,
+    MAGIC_OFFSET,
+    MAGIC_SIZE,
     METADATA_SIZE,
+    NUM_SLOTS_OFFSET,
+    NUM_SLOTS_SIZE,
+    PROTOCOL_MAGIC,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
+    VERSION_OFFSET,
+    VERSION_SIZE,
+    WRITE_IDX_OFFSET,
+    WRITE_IDX_SIZE,
+    AcquireResult,
     DtypeCodec,
     Metadata,
     SHMLayout,
@@ -774,3 +786,199 @@ def test_mem_event_handle_roundtrip() -> None:
 def test_slot_size_equals_two_handle_sizes() -> None:
     """SLOT_SIZE = 2 * IPC_HANDLE_SIZE — the entire slot is exactly two handles."""
     assert SLOT_SIZE == 2 * IPC_HANDLE_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Mutation kill-tests (cosmic-ray survivor triage)
+#
+# Every test below targets one or more specific cosmic-ray survivor mutants
+# for shm_protocol.py. shm_protocol is a wire-format module, so exact-value
+# assertions on struct offsets/sizes/magic numbers/version constants below
+# are golden contract tests, not tautologies — the wire format genuinely
+# must not drift.
+# ---------------------------------------------------------------------------
+
+
+def test_header_constants_exact_wire_values() -> None:
+    """Pin every header constant to its exact wire-format value. These are
+    load-bearing byte offsets/sizes for the SHM binary layout — any drift
+    silently corrupts the wire contract for every reader/writer of this
+    module."""
+    assert PROTOCOL_MAGIC == 0x43495044
+    assert MAGIC_OFFSET == 0
+    assert MAGIC_SIZE == 4
+    assert VERSION_OFFSET == 4
+    assert VERSION_SIZE == 8
+    assert NUM_SLOTS_OFFSET == 12
+    assert NUM_SLOTS_SIZE == 4
+    assert WRITE_IDX_OFFSET == 16
+    assert WRITE_IDX_SIZE == 4
+    assert SHM_HEADER_SIZE == 20
+
+
+def test_format_kind_float_exact_value() -> None:
+    """FORMAT_KIND_FLOAT must equal cudaChannelFormatKindFloat (2) — used as a
+    wire-format discriminant, not an arbitrary enum ordinal."""
+    assert FORMAT_KIND_FLOAT == 2
+
+
+def test_float32_registry_exact_wire_values() -> None:
+    """DtypeCodec.encode('float32') must yield the exact registered
+    (kind, bits, flags) triple. A round-trip test alone cannot catch drift
+    here: encode() and decode() both derive from the same _DTYPE_TABLE row,
+    so decode(encode(x)) == x holds trivially even if bits/flags are wrong."""
+    assert DtypeCodec.encode("float32") == (FORMAT_KIND_FLOAT, 32, 0)
+
+
+def test_shmlayout_is_frozen() -> None:
+    """SHMLayout must be immutable (dataclass(frozen=True)) — offsets are
+    derived once and must never be mutated out from under a consumer."""
+    layout = SHMLayout(num_slots=2)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        layout.num_slots = 5  # type: ignore[misc]
+
+
+def test_metadata_is_frozen() -> None:
+    """Metadata must be immutable (dataclass(frozen=True)) — same rationale
+    as SHMLayout."""
+    md = Metadata(width=1, height=1, num_comps=1, format_kind=0, bits_per_comp=8, flags=0, data_size=1)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        md.width = 99  # type: ignore[misc]
+
+
+def test_build_buffer_version_write_idx_are_keyword_only() -> None:
+    """version/write_idx are keyword-only (the bare '*' marker in the
+    signature) — calling positionally must raise TypeError. Mutating '*' to
+    '/' would silently make them positional-or-keyword instead."""
+    layout = SHMLayout(num_slots=2)
+    with pytest.raises(TypeError):
+        layout.build_buffer(1, 0)  # type: ignore[misc]
+
+
+def test_build_buffer_defaults() -> None:
+    """build_buffer()'s defaults (version=1, write_idx=0) must be exact —
+    test factories and out-of-process probes rely on them."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(layout.build_buffer())
+    assert read_version(buf) == 1
+    assert read_write_idx(buf) == 0
+
+
+def test_expected_size_floor_division_by_8() -> None:
+    """bits_per_comp=57 is not a multiple of 8 (never true for a real
+    registered dtype, but the dataclass itself does not validate it) —
+    floor-dividing by 8 vs. 7, or switching '//' for true division ('/'),
+    each produce a different expected_size. 57 // 8 == 7 exactly."""
+    md = Metadata(width=1, height=1, num_comps=1, format_kind=FORMAT_KIND_FLOAT, bits_per_comp=57, flags=0, data_size=0)
+    assert md.expected_size == 7
+    assert isinstance(md.expected_size, int)
+
+
+@pytest.mark.parametrize("exc_type", [ValueError, IndexError])
+def test_bump_version_catches_value_and_index_error(exc_type: type[Exception]) -> None:
+    """read_version() in practice only ever raises struct.error/TypeError, so
+    ValueError and IndexError in bump_version's except tuple are unreachable
+    through normal wire I/O. Mock read_version to force each artificially and
+    confirm both are caught with the documented current=0 fallback
+    (new_version == current + 1 == 1)."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    with mock.patch("cuda_link.shm_protocol.read_version", side_effect=exc_type("forced")):
+        new_version = bump_version(buf)
+    assert new_version == 1
+    assert read_version(buf) == 1
+
+
+def test_acquire_result_defaults() -> None:
+    """Pin every AcquireResult field default — these are the values a
+    NO_FRAME/SHUTDOWN result carries when only `state` is supplied
+    positionally (all real call sites rely on these defaults)."""
+    r = AcquireResult(SlotState.NO_FRAME)
+    assert r.slot == -1
+    assert r.timestamp == 0.0
+    assert r.new_version == 0
+    assert r.write_idx == 0
+
+
+def test_acquire_slot_last_version_negative_still_triggers_check() -> None:
+    """last_version is a caller-supplied int with no non-negativity
+    guarantee. -1 must still enable the version-change check
+    (last_version != 0), not be treated as though it were <= 0 and skipped."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))  # version stays 0
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=-1)
+    assert result.state == SlotState.VERSION_CHANGED
+    assert result.new_version == 0
+
+
+def test_acquire_slot_version_decrease_triggers_change() -> None:
+    """version < last_version (e.g. a reopen whose counter rolled back) must
+    still fire VERSION_CHANGED — the check is inequality ('!='), not
+    'greater than'."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    bump_version(buf)  # version = 1
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=5)
+    assert result.state == SlotState.VERSION_CHANGED
+    assert result.new_version == 1
+
+
+def test_acquire_slot_version_equal_value_unequal_identity() -> None:
+    """Use a value outside CPython's small-int cache (-5..256) so the
+    wire-read version and an independently-constructed last_version are
+    equal but not the same object — 'is not' would wrongly treat them as
+    changed even though '!=' correctly says they match."""
+    layout = SHMLayout(num_slots=2)
+    buf = memoryview(bytearray(layout.total_size))
+    set_version(buf, 1000)
+    last_version = int("1000")  # constructed independently; guaranteed distinct object
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=last_version)
+    assert result.state == SlotState.NO_FRAME
+
+
+def test_acquire_slot_write_idx_behind_last_still_new_frame() -> None:
+    """write_idx < last_write_idx must not be treated as 'no new frame'
+    merely because it's <= last_write_idx — only exact equality means
+    'unchanged'."""
+    layout = SHMLayout(num_slots=3)
+    buf = memoryview(layout.build_buffer(write_idx=2))
+    result = acquire_slot(buf, layout, last_write_idx=5, last_version=0)
+    assert result.state == SlotState.NEW_FRAME
+
+
+def test_acquire_slot_write_idx_equal_value_unequal_identity() -> None:
+    """Same is/== distinction as the version check above, applied to
+    write_idx vs. last_write_idx."""
+    layout = SHMLayout(num_slots=3)
+    buf = memoryview(layout.build_buffer(write_idx=1000))
+    last_write_idx = int("1000")  # constructed independently; guaranteed distinct object
+    result = acquire_slot(buf, layout, last_write_idx=last_write_idx, last_version=0)
+    assert result.state == SlotState.NO_FRAME
+
+
+def test_acquire_slot_write_idx_zero_with_nonzero_last_write_idx() -> None:
+    """write_idx == 0 (never-published slot) must short-circuit to NO_FRAME
+    regardless of last_write_idx — mutating '== 0' to '< 0' or '== -1' both
+    fail to match the always-non-negative wire value 0."""
+    layout = SHMLayout(num_slots=3)
+    buf = memoryview(layout.build_buffer(write_idx=0))
+    result = acquire_slot(buf, layout, last_write_idx=1000, last_version=0)
+    assert result.state == SlotState.NO_FRAME
+
+
+def test_acquire_slot_timestamp_struct_error_fallback() -> None:
+    """Truncate the buffer so the timestamp read at the end of the NEW_FRAME
+    path genuinely raises struct.error (insufficient bytes for the float64),
+    exercising the except-branch for real. Confirms acquire_slot still
+    returns normally (mangling the 'struct.error' exception name would let a
+    NameError escape instead) with the documented timestamp=0.0 fallback."""
+    layout = SHMLayout(num_slots=1)
+    full_buf = layout.build_buffer(version=1, write_idx=5)
+    # Truncate to 4 of the 8 bytes needed for the float64 timestamp — every
+    # earlier header/slot/shutdown/metadata field stays intact and readable.
+    truncated = memoryview(full_buf)[: layout.timestamp_offset + 4]
+
+    result = acquire_slot(truncated, layout, last_write_idx=0, last_version=0)
+
+    assert result.state == SlotState.NEW_FRAME
+    assert result.timestamp == 0.0

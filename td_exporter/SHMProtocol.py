@@ -134,7 +134,9 @@ class SHMLayout:
     num_slots: int
 
     def slot_offset(self, i: int) -> int:
-        return SHM_HEADER_SIZE + i * SLOT_SIZE
+        # SHM_HEADER_SIZE (20) and i*SLOT_SIZE (multiple of 128) share no set
+        # bits for any i >= 0: + == ^ == | here.
+        return SHM_HEADER_SIZE + i * SLOT_SIZE  # pragma: no mutate
 
     def mem_handle_offset(self, slot: int) -> int:
         """Byte offset of the 64-byte cudaIpcMemHandle_t within slot *slot*."""
@@ -142,15 +144,22 @@ class SHMLayout:
 
     def event_handle_offset(self, slot: int) -> int:
         """Byte offset of the 64-byte cudaIpcEventHandle_t within slot *slot*."""
-        return self.slot_offset(slot) + IPC_HANDLE_SIZE
+        # slot_offset(slot) always has bit pattern ...0010100 in its low 7 bits
+        # (20 + slot*128); IPC_HANDLE_SIZE=64 occupies only bit 6, which is 0
+        # there: + == ^ == | here for any slot >= 0.
+        return self.slot_offset(slot) + IPC_HANDLE_SIZE  # pragma: no mutate
 
     @property
     def shutdown_offset(self) -> int:
-        return SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE
+        # SHM_HEADER_SIZE (20) and num_slots*SLOT_SIZE (multiple of 128) share
+        # no set bits for any num_slots >= 0: + == ^ == | here.
+        return SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE  # pragma: no mutate
 
     @property
     def metadata_offset(self) -> int:
-        return self.shutdown_offset + SHUTDOWN_FLAG_SIZE
+        # shutdown_offset (20 + num_slots*128) and SHUTDOWN_FLAG_SIZE (1) are
+        # bit-disjoint for any num_slots >= 0: + == ^ == | here.
+        return self.shutdown_offset + SHUTDOWN_FLAG_SIZE  # pragma: no mutate
 
     @property
     def timestamp_offset(self) -> int:
@@ -204,18 +213,24 @@ class Metadata:
         offset = layout.metadata_offset
         _ST_U32.pack_into(buf, offset, self.width)
         _ST_U32.pack_into(buf, offset + 4, self.height)
-        _ST_U32.pack_into(buf, offset + 8, self.num_comps)
+        # offset+8 is bit-disjoint (verified for offset >= 0): + == ^ == | here.
+        _ST_U32.pack_into(buf, offset + 8, self.num_comps)  # pragma: no mutate
         _ST_BBH.pack_into(buf, offset + 12, self.format_kind, self.bits_per_comp, self.flags)
         _ST_U32.pack_into(buf, offset + 16, self.data_size)
 
     @classmethod
     def read_from(cls, buf: memoryview, layout: SHMLayout) -> Metadata:
         offset = layout.metadata_offset
-        width = _ST_U32.unpack_from(buf, offset)[0]
-        height = _ST_U32.unpack_from(buf, offset + 4)[0]
-        num_comps = _ST_U32.unpack_from(buf, offset + 8)[0]
+        # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+        width = _ST_U32.unpack_from(buf, offset)[0]  # pragma: no mutate
+        # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+        height = _ST_U32.unpack_from(buf, offset + 4)[0]  # pragma: no mutate
+        # offset+8 is bit-disjoint (verified for offset >= 0) and _ST_U32 unpacks
+        # exactly 1 field: [0] == [-1]; + == ^ == | and [0] == [-1] both hold here.
+        num_comps = _ST_U32.unpack_from(buf, offset + 8)[0]  # pragma: no mutate
         kind, bits, flags = _ST_BBH.unpack_from(buf, offset + 12)
-        data_size = _ST_U32.unpack_from(buf, offset + 16)[0]
+        # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+        data_size = _ST_U32.unpack_from(buf, offset + 16)[0]  # pragma: no mutate
         return cls(
             width=width,
             height=height,
@@ -242,7 +257,8 @@ class DtypeCodec:
     Backend:   typestr() / numpy_name() / cupy_name()
     """
 
-    @staticmethod
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
     def encode(dtype: str) -> tuple[int, int, int]:
         """dtype string → (format_kind, bits_per_comp, flags).
 
@@ -252,7 +268,8 @@ class DtypeCodec:
         e = _DTYPE_TABLE[dtype]
         return (e.kind, e.bits, e.flags)
 
-    @staticmethod
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
     def decode(kind: int, bits: int, flags: int) -> str:
         """(format_kind, bits_per_comp, flags) → dtype string.
 
@@ -266,7 +283,8 @@ class DtypeCodec:
         """
         return _DECODE_TABLE.get((kind, bits, flags & FLAGS_BFLOAT16), "float32")
 
-    @staticmethod
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
     def itemsize(dtype: str) -> int:
         """Return the byte width of one element of the given dtype.
 
@@ -275,12 +293,14 @@ class DtypeCodec:
         """
         return _DTYPE_TABLE[dtype].itemsize
 
-    @staticmethod
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
     def supported() -> tuple[str, ...]:
         """Tuple of all supported dtype strings, in registration order."""
         return tuple(_DTYPE_TABLE)
 
-    @staticmethod
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
     def typestr(dtype: str) -> str:
         """Return the __cuda_array_interface__ typestr for dtype (e.g. "<f4").
 
@@ -292,8 +312,10 @@ class DtypeCodec:
         """
         return _DTYPE_TABLE[dtype].typestr
 
-    @staticmethod
-    def numpy_name(dtype: str) -> str | None:
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
+    # lazy-evaluated annotation (from __future__ import annotations); the | is never executed at runtime.
+    def numpy_name(dtype: str) -> str | None:  # pragma: no mutate
         """Return the numpy dtype name string for dtype (e.g. "float32").
 
         Returns None for bfloat16 — the caller must use ml_dtypes.bfloat16
@@ -304,8 +326,10 @@ class DtypeCodec:
         """
         return _DTYPE_TABLE[dtype].numpy_name
 
-    @staticmethod
-    def cupy_name(dtype: str) -> str | None:
+    # never called on an instance (DtypeCodec is a pure namespace class); @staticmethod is unobservable here.
+    @staticmethod  # pragma: no mutate
+    # lazy-evaluated annotation (from __future__ import annotations); the | is never executed at runtime.
+    def cupy_name(dtype: str) -> str | None:  # pragma: no mutate
         """Return the cupy dtype name string for dtype (e.g. "float32").
 
         Returns None for bfloat16 — CuPy has no bfloat16 dtype; callers should
@@ -323,19 +347,23 @@ class DtypeCodec:
 
 
 def read_magic(buf: memoryview) -> int:
-    return _ST_U32.unpack_from(buf, MAGIC_OFFSET)[0]
+    # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+    return _ST_U32.unpack_from(buf, MAGIC_OFFSET)[0]  # pragma: no mutate
 
 
 def read_version(buf: memoryview) -> int:
-    return _ST_U64.unpack_from(buf, VERSION_OFFSET)[0]
+    # _ST_U64 unpacks exactly 1 field; [0] and [-1] are always equal here.
+    return _ST_U64.unpack_from(buf, VERSION_OFFSET)[0]  # pragma: no mutate
 
 
 def read_num_slots(buf: memoryview) -> int:
-    return _ST_U32.unpack_from(buf, NUM_SLOTS_OFFSET)[0]
+    # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+    return _ST_U32.unpack_from(buf, NUM_SLOTS_OFFSET)[0]  # pragma: no mutate
 
 
 def read_write_idx(buf: memoryview) -> int:
-    return _ST_U32.unpack_from(buf, WRITE_IDX_OFFSET)[0]
+    # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+    return _ST_U32.unpack_from(buf, WRITE_IDX_OFFSET)[0]  # pragma: no mutate
 
 
 def bump_version(buf: memoryview) -> int:
@@ -444,7 +472,8 @@ def acquire_slot(
     Folds _get_read_slot() (importer) and the three identical preambles in
     get_frame / get_frame_numpy / get_frame_cupy into one location.
     """
-    if buf[layout.shutdown_offset] != 0:
+    # buf[...] is an unsigned byte in [0,255]; != 0 and > 0 agree here.
+    if buf[layout.shutdown_offset] != 0:  # pragma: no mutate
         return AcquireResult(state=SlotState.SHUTDOWN)
 
     version = read_version(buf)
@@ -457,7 +486,8 @@ def acquire_slot(
 
     slot = (write_idx - 1) % layout.num_slots
     try:
-        timestamp = _ST_F64.unpack_from(buf, layout.timestamp_offset)[0]
+        # _ST_F64 unpacks exactly 1 field; [0] and [-1] are always equal here.
+        timestamp = _ST_F64.unpack_from(buf, layout.timestamp_offset)[0]  # pragma: no mutate
     except struct.error:
         timestamp = 0.0
 

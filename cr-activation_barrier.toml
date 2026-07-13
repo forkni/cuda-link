@@ -1,0 +1,15 @@
+# Mutation-testing config for src/cuda_link/activation_barrier.py (cosmic-ray 8.4.x).
+# NOTE: these tests use the fixed-name SHM segment (SHM_NAME) — never run this
+# exec concurrently with another pytest run or a live TD session on this machine.
+[cosmic-ray]
+module-path = "src/cuda_link/activation_barrier.py"
+# Barrier wait loops have time-based deadlines; a mutated comparison can spin
+# until an in-test timeout fires, so allow more headroom than the ~4.3 s baseline.
+timeout = 60.0
+excluded-modules = []
+# Absolute interpreter path: bare "python" resolves through the Windows App Paths
+# registry to a potentially different environment.
+test-command = "C:/Users/INTER/AppData/Local/Programs/Python/Python311/python.exe -m pytest tests/core/test_activation_barrier.py tests/core/test_activation_barrier_checker.py tests/core/test_activation_barrier_holder.py tests/core/test_activation_barrier_cov.py -x -q --tb=no -p no:cacheprovider"
+
+[cosmic-ray.distributor]
+name = "local"

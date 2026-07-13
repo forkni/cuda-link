@@ -40,7 +40,10 @@ VERSION = 1
 #         barrier_skips(u32) last_writer_pid(u32) reserved(32s)
 _STRUCT = struct.Struct("<IIIIQII32s")
 
-assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {SHM_SIZE}"
+# EQUIVALENT(Eq_LtE/Eq_Is/Eq_GtE): struct size is fixed at 64 == SHM_SIZE
+# always, so ==, <=, >= are all identically True here; `is` also holds via
+# CPython small-int interning of 64.
+assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {SHM_SIZE}"  # pragma: no mutate
 
 # Hot-path struct: reads only the fields returned by read_state, skipping reserved(32s).
 # unpack_from() reads directly from the memoryview — no intermediate bytes() copy.
@@ -64,7 +67,16 @@ def open_or_create(*, create: bool) -> SharedMemory:
         if not create:
             raise
         shm = SharedMemory(name=SHM_NAME, create=True, size=SHM_SIZE)
-        _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
+        # EQUIVALENT(NumberReplacer on `* 32`, e.g. `* 31`/`* 33`): struct.pack's
+        # `Ns` field silently truncates/zero-pads; for all-zero-byte content the
+        # packed 32s output is byte-identical regardless of a 31/32/33 length
+        # mismatch (empirically verified). NOTE: this line also carries 3
+        # genuine-killable mutants (pad/last_change_ns/last_writer_pid indices)
+        # independently verified killed by
+        # test_open_or_create_initializes_full_header_to_zero before this
+        # pragma was added; the pragma necessarily suppresses all mutants on
+        # this line, not just the equivalent ones.
+        _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)  # pragma: no mutate
         return shm
 
 
@@ -134,7 +146,10 @@ class CheckerOutcome(Enum):
 
     @property
     def should_skip(self) -> bool:
-        return self is CheckerOutcome.SKIP_ACTIVE
+        # EQUIVALENT(Is_Eq): CheckerOutcome has no __eq__ override, so Enum
+        # singleton identity (`is`) and equality (`==`) are behaviorally
+        # identical for its members.
+        return self is CheckerOutcome.SKIP_ACTIVE  # pragma: no mutate
 
 
 @runtime_checkable
@@ -148,10 +163,16 @@ class BarrierShmPort(Protocol):
     RuntimeError / struct.error; CheckerBarrier swallows them.
     """
 
-    @property
+    # EQUIVALENT(RemoveDecorator): Protocol stub body is `...`, never
+    # executed; runtime_checkable isinstance() only checks attribute-name
+    # presence via hasattr(), never decoration.
+    @property  # pragma: no mutate
     def is_attached(self) -> bool: ...
 
-    def attach(self, *, create: bool) -> None: ...
+    # EQUIVALENT(Mul_Div): Protocol stub body is `...`, never executed;
+    # runtime_checkable isinstance() only checks attribute-name presence via
+    # hasattr(), never a method's parameter-kind separators.
+    def attach(self, *, create: bool) -> None: ...  # pragma: no mutate
 
     def read_state(self) -> tuple[int, int, int]: ...  # (active_count, last_change_ns, barrier_skips)
 
@@ -333,7 +354,10 @@ class HolderBarrier:
         if self.settle_remaining <= 0:
             return False
         self.settle_remaining -= 1
-        if self.settle_remaining == 0 and self.held:
+        # EQUIVALENT(Eq_LtE): line 333's guard (`<= 0: return False`) guarantees
+        # settle_remaining is always >= 0 here (decremented by exactly 1 from a
+        # value > 0), and for x >= 0, `x == 0` is equivalent to `x <= 0`.
+        if self.settle_remaining == 0 and self.held:  # pragma: no mutate
             try:
                 count = self.port.decrement(pid)
                 log_fn(
