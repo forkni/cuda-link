@@ -7,6 +7,8 @@ ReportWindow.started property, and ReportWindow.fps().
 
 from __future__ import annotations
 
+import pytest
+
 from cuda_link._profile import FrameProfile, ReportWindow
 
 # ---------------------------------------------------------------------------
@@ -37,7 +39,7 @@ def test_report_formats_averages_per_region():
 def test_avg_matches_report_computation():
     fp = FrameProfile(("copy",))
     fp.record("copy", 30.0)
-    assert fp.avg("copy", 3) == 10.0
+    assert fp.avg("copy", 3) == pytest.approx(10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +68,7 @@ def test_fps_first_call_seeds_from_session_baseline():
     rw.start(100.0, 0)
     # First fps() call: last_t is 0.0, so it seeds from start_t/start_frame.
     fps = rw.fps(110.0, 100)
-    assert fps == 10.0  # 100 frames / 10s
+    assert fps == pytest.approx(10.0)  # 100 frames / 10s
     assert rw.last_t == 110.0
     assert rw.last_frame == 100
 
@@ -76,7 +78,7 @@ def test_fps_subsequent_call_advances_window():
     rw.start(0.0, 0)
     rw.fps(10.0, 100)  # seeds + first window: 100 frames / 10s = 10 fps
     fps2 = rw.fps(15.0, 150)  # second window: 50 frames / 5s = 10 fps
-    assert fps2 == 10.0
+    assert fps2 == pytest.approx(10.0)
     assert rw.last_t == 15.0
     assert rw.last_frame == 150
 
