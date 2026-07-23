@@ -8,6 +8,7 @@ is the complete list.
 
 | Variable | Default | Effect |
 |---|---|---|
+| `CUDALINK_LIB_PATH` | unset | TD-side, install/bootstrap-time only (`td_exporter/CUDALinkBootstrap.py`). Folder created by `pip install --target <folder>` that `CUDALinkBootstrap` injects onto `sys.path` before importing `cuda_link`, enabling library mode (fewer Text DATs in the `.tox`). Unset or unimportable falls back to classic mode (all mirror Text DATs present in the COMP). Not read by anything under `src/cuda_link/`. See the "Library mode" note in [HELP_DOC.md](../td_exporter/HELP_DOC.md)'s Quick Start and mode 4 in `scripts/install_td_library.py --help`. |
 | `CUDALINK_REQUIRE_SOURCE_SYNC` | `0` | Raise `ValueError` in `export()` when no producer-stream ordering has been armed (no `producer_stream` in `GpuFrame` and `record_source_sync()` not called). Default `0` emits a `logger.warning` once per exporter instance instead. Set to `1` to enforce ordering at call sites (recommended for new integrations). See *Producer-stream ordering* in the README. |
 | `CUDALINK_STRICT_DEVICE` | `0` | Raise `ValueError` in `export()` / `record_source_sync()` when the source pointer or stream belongs to a different CUDA device than the exporter. Default `0` logs an error but continues. |
 | `CUDALINK_LIB_STREAM_PRIO` | `high` | CUDA stream priority for the Python-lib IPC stream. Default `high` minimises GPU scheduling latency for the D2D copy. Set to `normal` to disable high-priority scheduling (e.g., to avoid priority inversion with other high-priority streams). |
