@@ -1,9 +1,13 @@
 # Keeps SHA-pinned actions current: Dependabot rewrites the pin and its version
 # comment together in one grouped weekly PR per ecosystem.
+# target-branch routes version-update PRs through development (the integration
+# branch) so they reach master via the normal dev->master merge. NOTE: Dependabot
+# *security* updates ignore target-branch and always target the default branch.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    target-branch: development
     schedule:
       interval: weekly
     groups:
@@ -13,6 +17,7 @@ updates:
 
   - package-ecosystem: pip
     directory: /
+    target-branch: development
     schedule:
       interval: weekly
     groups:
