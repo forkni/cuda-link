@@ -817,7 +817,6 @@ See the dedicated subsections in **GPU Synchronization → R1** and **GPU Synchr
 - **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing host-side `cudaEventSynchronize` with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
 - **R2** (`CUDALINK_DOORBELL=1`): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
 - **R3**: pinned-memory f16 fallback in CuPy wait path — prevents dtype mismatch on f16 producers.
-- **R4** (`CUDALINK_TD_GRAPHS_DEFERRED=1`): defers CUDA graph capture to the second cook, avoiding capture on the first cook when TD state may be incomplete.
 
 ---
 
