@@ -8,7 +8,54 @@
 
 # cuda-link
 
-[![codecov](https://codecov.io/gh/forkni/cuda-link/branch/development/graph/badge.svg)](https://codecov.io/gh/forkni/cuda-link)
+<!--ts-->
+## Table of Contents
+
+* [cuda-link](#cuda-link)
+  * [Overview](#overview)
+    * [Key Features](#key-features)
+    * [Performance](#performance)
+  * [Requirements](#requirements)
+    * [Python Dependencies](#python-dependencies)
+  * [Quick Start](#quick-start)
+    * [1. TouchDesigner Side (Exporter)](#1-touchdesigner-side-exporter)
+    * [2. Python Side (Importer)](#2-python-side-importer)
+      * [Install the package](#install-the-package)
+      * [Use in your Python script](#use-in-your-python-script)
+    * [3. Python → TouchDesigner (AI Output)](#3-python--touchdesigner-ai-output)
+  * [Architecture](#architecture)
+    * [Ring Buffer (3 Slots)](#ring-buffer-3-slots)
+    * [SharedMemory Protocol (433 bytes for 3 slots)](#sharedmemory-protocol-433-bytes-for-3-slots)
+  * [Documentation](#documentation)
+  * [Testing](#testing)
+    * [Randomized ordering](#randomized-ordering)
+    * [Coverage gate](#coverage-gate)
+    * [Test doubles](#test-doubles)
+  * [Benchmarks](#benchmarks)
+    * [Performance Tuning (env vars)](#performance-tuning-env-vars)
+  * [Troubleshooting](#troubleshooting)
+    * ["SharedMemory not found"](#sharedmemory-not-found)
+    * ["CUDA IPC overhead unexpectedly high"](#cuda-ipc-overhead-unexpectedly-high)
+    * ["Version mismatch" or stale frames](#version-mismatch-or-stale-frames)
+    * [GPU memory leak](#gpu-memory-leak)
+  * [Distribution](#distribution)
+    * [For Python Consumers (StreamDiffusion, AI/ML pipelines)](#for-python-consumers-streamdiffusion-aiml-pipelines)
+      * [Method 1: Guided installer (recommended)](#method-1-guided-installer-recommended)
+      * [Method 2: Manual download from GitHub Releases](#method-2-manual-download-from-github-releases)
+      * [Method 3: Editable install from source (for development)](#method-3-editable-install-from-source-for-development)
+      * [Method 4: Build from source (dev-only, requires MSVC)](#method-4-build-from-source-dev-only-requires-msvc)
+      * [Method 5: From PyPI (coming soon)](#method-5-from-pypi-coming-soon)
+    * [For TouchDesigner Integration](#for-touchdesigner-integration)
+    * [Use Cases](#use-cases)
+  * [Changelog](#changelog)
+  * [Contributing](#contributing)
+  * [License](#license)
+  * [Credits](#credits)
+
+<!--te-->
+
+
+[![codecov](https://codecov.io/gh/forkni/cuda-link/graph/badge.svg)](https://codecov.io/gh/forkni/cuda-link)
 
 Zero-copy GPU texture transfer between TouchDesigner and Python processes using CUDA IPC.
 
@@ -20,7 +67,7 @@ This component enables **zero-copy GPU texture sharing** between TouchDesigner a
 
 - **Zero-copy GPU transfer** - Textures stay on GPU, no CPU memory copies
 - **Bidirectional IPC** - TD → Python (input capture) AND Python → TD (AI output display)
-- **Low-overhead IPC** - `export_frame()` 13.9–357 µs p50 (512×512 → 4K float32, Python Exporter async+graphs); **TD Sender defaults to blocking** (45–357 µs, v1.10.1+); `get_frame_numpy()` D2H 0.18–5.7 ms p50 (PCIe 4.0 ~22–24 GB/s); IPC notification ~136–286 µs cross-process (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+- **Low-overhead IPC** - Sub-100 µs GPU-side export at up to 1080p, microsecond-scale D2H when needed (see Performance below and [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 - **Ring buffer architecture** - N-slot pipeline prevents producer/consumer blocking
 - **GPU-side synchronization** - CUDA IPC events eliminate CPU polling
 - **Triple output modes** - PyTorch tensors (GPU, zero-copy), CuPy arrays (GPU, zero-copy), or numpy arrays (CPU, D2H copy)
@@ -84,42 +131,8 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 
 **Option C: Library mode (cleaner .tox — fewer Text DATs)**
 
-Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
-DAT then loads the package automatically — the 14 mirror Text DATs (Env, SHMProtocol,
-Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-target installer
-(one-time):
-
-```bat
-install_td_library.cmd             REM interactive menu — auto-downloads the matching
-                                    REM prebuilt wheel; no build step needed (see ADR-0013)
-```
-
-**Install modes** (`python scripts/install_td_library.py --help`):
-
-| Mode | Flag | Description |
-|------|------|-------------|
-| 1 | `--target DIR` | Install into a custom folder; set `CUDALINK_LIB_PATH=DIR` before launching TD |
-| 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
-| 3 | `--conda ENV` | Install into a conda environment |
-| 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
-| 5 | `--td-python EXE` | Install directly into TD's bundled Python (`app.pythonExecutable`) |
-
-**Mode 4 (recommended for most setups):** auto-discovers both the registered system Python
-(`py -3`) and the TouchDesigner install path; sets `Python64 Path` in TD Preferences so
-library mode activates on the next TD launch with zero env-var configuration.
-
-```bat
-REM Non-interactive mode 4 (auto-discover Python + TD):
-install_td_library.cmd --mode 4 --non-interactive
-
-REM Dry-run to preview what would be written:
-install_td_library.cmd --mode 4 --dry-run
-```
-
-The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
-If `CUDALINK_LIB_PATH` is unset and mode 4 was not used, the bootstrap no-ops and the
-classic mirror DATs take over silently. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
-for full instructions.
+For a leaner `.tox` (package installed once into a Python environment TD can see, instead
+of 14 mirror Text DATs), see [Distribution → For TouchDesigner Integration](#for-touchdesigner-integration).
 
 ### 2. Python Side (Importer)
 
@@ -131,27 +144,15 @@ system Python 3.11 install, or a dedicated venv (e.g. StreamDiffusionTD's pinned
 3.11.9). Never pip-install directly into TouchDesigner's own bundled Python.
 
 ```bash
-# Option A: Guided installer (recommended) — auto-downloads the wheel matching
-# your target interpreter's version from GitHub Releases:
+# Guided installer (recommended) — auto-downloads the wheel matching your
+# target interpreter's version from GitHub Releases:
 cd C:\path\to\CUDA_IPC
 python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 # or: python scripts\install_td_library.py   (interactive menu — pick your target)
-
-# Option B: Manual — download a wheel from
-# https://github.com/forkni/cuda-link/releases (cp311-cp311-win_amd64 for Python
-# 3.11, py3-none-any for anything else), then:
-pip install "cuda_link-1.12.1-*.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.1-*.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.1-*.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.1-*.whl[all]"     # All output modes
-
-# Option C: Editable install from source (for development — changes apply immediately):
-pip install -e ".[torch]"
-pip install -e ".[all]"
-
-# From PyPI (coming soon):
-# pip install cuda-link[torch]
 ```
+
+> Manual wheel download, editable source installs, and PyPI: see
+> [Distribution → For Python Consumers](#for-python-consumers-streamdiffusion-aiml-pipelines).
 
 #### Use in your Python script
 
@@ -342,7 +343,7 @@ Disable for a single run: add `-p no:randomly`.
 pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 72` (branch-coverage-aware, baseline 74.65% measured 2026-06-29)
+The gate is `fail_under = 76` (branch-coverage-aware, baseline 79.46% measured 2026-07-12)
 in `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
 
@@ -371,43 +372,19 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 
 ### Performance Tuning (env vars)
 
+The six variables most consumers reach for:
+
 | Variable | Default | Effect |
 |---|---|---|
-| `CUDALINK_REQUIRE_SOURCE_SYNC` | `0` | Raise `ValueError` in `export()` when no producer-stream ordering has been armed (no `producer_stream` in `GpuFrame` and `record_source_sync()` not called). Default `0` emits a `logger.warning` once per exporter instance instead. Set to `1` to enforce ordering at call sites (recommended for new integrations). See *Producer-stream ordering* below. |
-| `CUDALINK_STRICT_DEVICE` | `0` | Raise `ValueError` in `export()` / `record_source_sync()` when the source pointer or stream belongs to a different CUDA device than the exporter. Default `0` logs an error but continues. |
-| `CUDALINK_LIB_STREAM_PRIO` | `high` | CUDA stream priority for the Python-lib IPC stream. Default `high` minimises GPU scheduling latency for the D2D copy. Set to `normal` to disable high-priority scheduling (e.g., to avoid priority inversion with other high-priority streams). |
-| `CUDALINK_BARRIER_STALE_NS` | `5000000000` | Staleness threshold in nanoseconds for the activation barrier's cross-process SHM counter. Frames are skipped while a Sender is settling; a counter older than this value is treated as stale and ignored. Default is 5 seconds. |
-| `CUDALINK_TORCH_GPU_WAIT` | `0` | GPU-side wait for `get_frame()` (torch backend, R1 opt-in). When `1`, issues `cudaStreamWaitEvent` on `torch.cuda.current_stream()` instead of CPU-polling; the tensor is valid in stream order, not at return. `ImportOutcome.TIMEOUT` is unreachable on this path — a hung producer stalls the stream. Default `0` preserves the existing CPU-spin/sleep behaviour and timeout detection. |
-| `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE` | `0` | Auto-promote to GPU-side wait (torch backend) once real sleep-blocking is detected at runtime (R1-adaptive). Monitors the cpu-spin/sleep ratio over a sliding window; latches into `cudaStreamWaitEvent` mode for the rest of the session when the sleep fraction exceeds `CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT` within a window of `CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW` frames. One-way — never reverts. Carries the same `ImportOutcome.TIMEOUT`-unreachable consequence as `CUDALINK_TORCH_GPU_WAIT`. Effective at 30 fps (high sleep rate); stays in cpu-spin at 60 fps (zero sleep). |
-| `CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW` | `120` | Frame window size for the adaptive gpu-wait detector (frames counted before a tumbling reset if threshold not reached). Only effective when `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`. |
-| `CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT` | `5` | Sleep-fraction threshold (integer percent of window) that triggers the adaptive gpu-wait latch. A value of `5` means ≥5 % of frames in the window must have actually slept (fallen through the spin budget) before the latch engages. Only effective when `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`. |
-| `CUDALINK_WAIT_SPIN_US` | `200` | Spin-wait window in microseconds for the importer's slot-available poll before yielding. Increase on systems with high OS scheduling jitter to reduce wake-up latency; decrease to reduce CPU burn on low-latency pipelines. |
-| `CUDALINK_D2H_STREAM_PRIO` | `normal` | CUDA stream priority for the importer's D2H copy stream. Default `normal`; set to `high` to prioritise the consumer's D2H transfer over background GPU work. |
-| `CUDALINK_ALLOW_PAGEABLE_FALLBACK` | `0` | Allow fallback to pageable (non-pinned) host memory when `cudaHostAlloc` fails. Default `0` raises instead. Useful on systems where pinned memory is exhausted by other processes. |
+| `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering. **TD Sender default: `1` (blocking)** — the TD source is a transient cook-scoped TOP texture reclaimed right after the cook, so the D2D read must finish first (CUDA 719 guard; see CHANGELOG 1.10.1). |
+| `CUDALINK_DOORBELL` | `0` | R2 Win32 named-event doorbell (opt-in). Producer signals a Win32 event after each `publish_frame()`; consumer blocks on it instead of poll-sleeping. Sub-300 µs notify latency, ~zero idle CPU. Single-consumer, Windows-only. |
+| `CUDALINK_WAIT_BACKEND` | `auto` | R5 native notification-wait backend (compiled into the core wheel on Windows, [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)). `auto` uses it when available with silent fallback; `python` forces the pre-R5 path; `native` skips the `auto` gate. Target: p50 < 10 µs vs 136–286 µs poll-sleep baseline. |
+| `CUDALINK_D2H_PIPELINED` | `0` | Opt-in pipelined D2H for `get_frame_numpy()` — overlaps the copy with consumer CPU work at the cost of +1 frame latency. Gain: 1080p −6% / 4K −20% with 5 ms consumer work. |
 | `CUDALINK_IMPORT_RECONNECT` | `1` | Enable automatic reconnect in the importer when the SHM segment disappears (e.g., producer restart). Set to `0` to raise immediately on a missing segment. |
-| `CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS` | `20` | Maximum reconnect attempts before the importer raises. Only effective when `CUDALINK_IMPORT_RECONNECT=1`. |
-| `CUDALINK_STICKY_ERROR_CHECK` | `1` | Check for sticky (latched) CUDA errors via `cudaPeekAtLastError` after each export frame. Default `1`; set to `0` to skip the check (saves one CUDA API call per frame on fault-free paths). |
-| `CUDALINK_USE_GRAPHS` | `1` | CUDA Graphs for `export()` (Python-side `Exporter`). Collapses the `stream_wait_event + memcpy_async + record_event` triplet into a single `cudaGraphLaunch`, cutting WDDM kernel-mode transitions from 3 → 1 per frame. With EXPORT_SYNC=0 (async, Python Exporter default) the gain is −4.0 µs p50 (22%) at 1080p; with EXPORT_SYNC=1 (blocking, TD Sender default) the GPU D2D copy dominates and savings are small (<5%). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the full 2×2 matrix. Set to `0` to revert to the legacy stream path (e.g., if a driver version rejects graph capture). |
-| `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender. Same mechanism as `CUDALINK_USE_GRAPHS`, gated independently because TD ships `cudart64_110.dll` and the per-frame `cudaGraphExecMemcpyNodeSetParams1D` API requires CUDA 11.3+. Auto-disabled on older runtimes (probed via `cudaRuntimeGetVersion` at `initialize()`). Disabled by default. Set to `1` to opt in; falls back to the legacy `cudaMemcpyAsync` stream path automatically on any capture or launch failure. |
-| `CUDALINK_D2H_STREAMS` | `1` | Number of parallel streams for `get_frame_numpy()` D2H copy. Values `2`/`4` may help on PCIe 3.0 systems or GPUs with dual DMA engines; on PCIe 4.0 a single stream already saturates the bus (~23–24 GB/s). Check `nvidia-smi -q \| findstr "Async Engines"` before tuning. |
-| `CUDALINK_D2H_PIPELINED` | `0` | Opt-in pipelined D2H for `get_frame_numpy()`. Enqueues the current slot's D2H copy and returns the previous frame, adding +1 frame latency in exchange for overlapping copy with consumer CPU work. First call returns `NO_FRAME`. On reconnect (v1.10.3), the pipeline drains and re-primes — one additional `NO_FRAME` per reconnect event. Gain measured at 1080p −6% (−309 µs) / 4K −20% (−1276 µs) with 5 ms consumer work. Only beneficial when consumer loop time > D2H copy time (~0.38 ms at 1080p, ~1.32 ms at 4K). Default `0` (opt-in). |
-| `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering; coexistence safety relies on explicit per-engine streams + producer-stream ordering. **TD Sender default: `1` (blocking)** — the TD source is TD's transient cook-scoped TOP texture (`cm.ptr`) reclaimed immediately after the cook, so the D2D read must complete before that happens (CUDA 719 source-lifetime guard; see CHANGELOG 1.10.1). Set `CUDALINK_EXPORT_SYNC=0` in the TD Sender only when the source buffer is guaranteed to outlive the async copy. |
-| `CUDALINK_ACTIVATION_BARRIER` | `1` | Python-lib side of the cross-process activation barrier (F9). Reads a tiny SHM counter each `export_frame()` and skips publishing while a TD Sender is in its WDDM-saturating init window. No-op in single-pair topologies (counter stays at 0); gracefully skipped if the SHM segment is absent. Set to `0` to opt out. |
-| `CUDALINK_TD_ACTIVATION_BARRIER` | `1` | TD-side counterpart of `CUDALINK_ACTIVATION_BARRIER` — increments the same SHM counter around Sender `initialize()` so the Python producer backs off. Same no-op / graceful-absence behaviour. Set to `0` to opt out. |
-| `CUDALINK_DOORBELL` | `0` | R2 Win32 named-event doorbell (single consumer, opt-in, default OFF). When `1` the producer (`Exporter`) creates a Win32 auto-reset named event and signals it after each `publish_frame()`; the consumer (`Importer.wait_for_doorbell()`) blocks on the event instead of poll-sleeping on `NO_FRAME`. Expected: sub-300 µs notify latency and ~zero idle CPU while waiting. Must be set on **both** producer and consumer. **Single-consumer only** — auto-reset wakes exactly one waiter. **Windows-only** — silently disabled on Linux/macOS (poll-sleep default is preserved). Default `0`. |
-| `CUDALINK_WAIT_BACKEND` | `auto` | R5 native notification-wait backend, compiled into the core wheel on Windows (see [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)). `auto` uses the native backend when the extension was compiled in, on Windows, and a CUDA runtime is already loaded in-process — with silent fallback to the Python spin/sleep path on any resolution failure. `python` always uses the pre-R5 path exactly. `native` skips the `auto` environment gate (same silent-fallback semantics otherwise). Activating the native backend forces the doorbell open for that connection even if `CUDALINK_DOORBELL=0` — the native backend's block phase cannot reach its <10 µs target without it. Target: p50 < 10 µs, p95 < 50 µs (vs 136–286 µs p50 poll-sleep baseline). |
-| `CUDALINK_TD_PERSIST_STREAM` | `1` | Skip `stream_destroy` in TD Sender `cleanup()` so the IPC CUDA stream survives `deactivate`→`reactivate` cycles (F8). Free in single-pair (no deactivation ever happens); load-bearing in concurrent — without it, stream recreate on each reactivation collides with in-flight Receiver work, doubling first-settle `post=` latency (Phase 3.6 confirmed). Set to `0` to opt out. |
-| `CUDALINK_TD_STREAM_PRIO` | `normal` | CUDA stream priority for the TD Sender's IPC stream. Default `normal` is safe for both single-pair and concurrent topologies — in single-pair only one stream exists per process so priority is moot; in concurrent, equal priorities prevent WDDM contention accumulation across reactivation cycles (high/high contention produces non-recovering cycle-3 shutdowns, Phase 3.6 Step C confirmed). Set to `high` only for explicit single-pair lowest-latency optimisation. |
-| `CUDALINK_EXPORT_FLUSH_PROBE` | `1` | Insert a non-blocking `cudaStreamQuery(ipc_stream)` after `check_sticky_error` when `EXPORT_SYNC=0`. Forces WDDM-deferred CUDA submissions to drain each frame, preventing Windows Task Manager's 3D-engine counter from inflating when true compute load (per NVML) is low. NVML readings are unchanged — purely cosmetic/observability. Set to `0` to disable. |
-| `CUDALINK_EXPORT_PROFILE` | `0` | Enable fine-grained per-region sub-timers in `export_frame()` and emit a `[PROFILE] pre=…us interop=…us post=…us memcpy=…us record=…us sync=…us sticky=…us flush_probe=…us shm=…us unacc=…us` line every 97 frames. Force-enables `verbose_performance` (TD) / `debug` (lib). Diagnostic-only; negligible overhead when on, zero when unset. |
-| `CUDALINK_RECEIVER_REPORT_EVERY` | `150` | How often the TD Receiver COMP emits its Debug timing summary line (`Frame N \| FPS \| shape=… \| latency=… ms \| copy=… µs avg`) to the Textport when **Debug** is ON. The `copy=` figure is a **windowed (~150-frame) average** (v1.10.3), not a lifetime cumulative mean — it resets with each report window. Default 150 matches `example_receiver_python.py`'s `REPORT_EVERY`. Increase to reduce log volume; decrease for higher-frequency monitoring. No effect when Debug is Off. |
-| `CUDALINK_SENDER_REPORT_EVERY` | `150` | How often the TD Sender COMP emits its Debug timing summary line (`Frame N \| FPS \| shape=… \| export=… µs avg`) to the Textport when **Debug** is ON. The `export=` figure is a **windowed (~150-frame) average** (v1.10.3), not a lifetime cumulative mean — it resets with each report window. Mirrors the receiver's report cadence; same tuning advice applies. No effect when Debug is Off. |
-| `CUDALINK_NVTX` | `0` | Enable NVTX range annotations on top-level phase boundaries (`cudalink.exporter.flush_probe`, `cudalink.receiver.import_frame`, `cudalink.receiver.event_wait`, etc.) for Nsight Systems GPU timeline correlation. Zero overhead when off. Set to `1` before running any `nsys` capture; see [docs/PROFILING.md](docs/PROFILING.md). |
-| `CUDALINK_NVTX_VERBOSE` | `0` | Enable additional sub-operation NVTX ranges (sticky-error check, D2A copy submit, SHM header read) inside the top-level phase ranges. Only useful for deep per-frame breakdown captures; implies `CUDALINK_NVTX=1`. |
-| `CUDALINK_TD_GRAPHS_DEFERRED` | `0` | Defer CUDA Graph capture to after the second `export_frame()` call (TD Sender). Avoids a first-frame graph-capture stall in latency-sensitive topologies where the graph build cost would be visible. |
-| `CUDALINK_TD_INIT_PACE` | `0` | Throttle the TD Sender init sequence to reduce WDDM saturation during activation windows (experimental). Adds a small sleep between consecutive CUDA API calls at `initialize()` time; useful when concurrent Sender+Receiver activation produces WDDM kernel-mode queue backpressure. |
-| `CUDALINK_TD_BARRIER_SETTLE_FRAMES` | `30` | Number of frames the TD activation barrier counter remains armed after a Sender `initialize()` completes, giving the Python producer time to back off before publishing resumes. Increase if your Python producer's poll loop is slower than 30 frames at your target rate; decrease for tighter single-pair topologies. |
-| `CUDALINK_NVML` | `0` | Append NVML GPU telemetry (utilization %, clocks MHz, PCIe Tx/Rx MB/s, temperature °C, power W, throttle reasons) to the 97-frame periodic stats line emitted by `CUDALINK_EXPORT_PROFILE`. Requires `nvidia-ml-py` (`pip install nvidia-ml-py`). Zero overhead when off. |
+| `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender — collapses 3 WDDM kernel-mode submissions into 1. Auto-disabled on CUDA runtimes older than 11.3; falls back to the legacy stream path on any capture or launch failure. |
+
+> Full reference (~40 variables, including TD-internal, profiling, and adaptive-barrier
+> knobs): [docs/ENV_VARS.md](docs/ENV_VARS.md).
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](docs/PROFILING.md).
 
@@ -557,6 +534,45 @@ Drag `TOXES/CUDAIPCLink_v1.12.1.tox` into your TouchDesigner network.
 
 Follow the manual build guide at [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) to assemble the `.tox` from `td_exporter/` source files.
 
+**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+
+Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
+DAT then loads the package automatically — the 14 mirror Text DATs (Env, SHMProtocol,
+Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-target installer
+(one-time):
+
+```bat
+install_td_library.cmd             REM interactive menu — auto-downloads the matching
+                                    REM prebuilt wheel; no build step needed (see ADR-0013)
+```
+
+**Install modes** (`python scripts/install_td_library.py --help`):
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| 1 | `--target DIR` | Install into a custom folder; set `CUDALINK_LIB_PATH=DIR` before launching TD |
+| 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
+| 3 | `--conda ENV` | Install into a conda environment |
+| 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
+| 5 | `--td-python EXE` | Install directly into TD's bundled Python (`app.pythonExecutable`) |
+
+**Mode 4 (recommended for most setups):** auto-discovers both the registered system Python
+(`py -3`) and the TouchDesigner install path; sets `Python64 Path` in TD Preferences so
+library mode activates on the next TD launch with zero env-var configuration.
+
+```bat
+REM Non-interactive mode 4 (auto-discover Python + TD):
+install_td_library.cmd --mode 4 --non-interactive
+
+REM Dry-run to preview what would be written:
+install_td_library.cmd --mode 4 --dry-run
+```
+
+The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
+If `CUDALINK_LIB_PATH` is unset and mode 4 was not used, the bootstrap no-ops and the
+classic mirror DATs take over silently. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
+for full instructions.
+
 The TouchDesigner extension (`td_exporter/`) is **not included in the pip package** because it uses TD-specific APIs (`parent()`, `op()`, `me`, COMP-scoped imports) that cannot run outside TouchDesigner.
 
 ### Use Cases
@@ -574,6 +590,23 @@ Both sides communicate through the 433-byte SharedMemory protocol — zero impor
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+---
+
+## Contributing
+
+1. Fork the repo and branch off **`development`** (`master` is release-only, promoted via
+   [`.github/workflows/merge-development-to-main.yml`](.github/workflows/merge-development-to-main.yml)).
+2. `pip install -e ".[all]"` for an editable install with every output backend.
+3. Run the checks CI enforces before opening a PR: `pytest tests/ -v` (see
+   [Testing](#testing) for the coverage gate) and `pyrefly` for static typing.
+4. Use [conventional-commit](https://www.conventionalcommits.org/) messages
+   (`feat:`, `fix:`, `docs:`, …).
+5. Open the PR against `development`. CI runs tests, typecheck, and docs validation, and
+   Claude's automated reviewer leaves feedback.
+
+Use plain `git`/`gh` for your fork — the `scripts/git/*` wrappers in this repo are the
+maintainer's local automation, not a contributor requirement.
 
 ---
 
