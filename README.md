@@ -8,6 +8,8 @@
 
 # cuda-link
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
 [![codecov](https://codecov.io/gh/forkni/cuda-link/graph/badge.svg)](https://codecov.io/gh/forkni/cuda-link)
 
 Zero-copy GPU texture transfer between TouchDesigner and Python processes using CUDA IPC.
