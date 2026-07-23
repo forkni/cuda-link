@@ -8,53 +8,6 @@
 
 # cuda-link
 
-<!--ts-->
-## Table of Contents
-
-* [cuda-link](#cuda-link)
-  * [Overview](#overview)
-    * [Key Features](#key-features)
-    * [Performance](#performance)
-  * [Requirements](#requirements)
-    * [Python Dependencies](#python-dependencies)
-  * [Quick Start](#quick-start)
-    * [1. TouchDesigner Side (Exporter)](#1-touchdesigner-side-exporter)
-    * [2. Python Side (Importer)](#2-python-side-importer)
-      * [Install the package](#install-the-package)
-      * [Use in your Python script](#use-in-your-python-script)
-    * [3. Python → TouchDesigner (AI Output)](#3-python--touchdesigner-ai-output)
-  * [Architecture](#architecture)
-    * [Ring Buffer (3 Slots)](#ring-buffer-3-slots)
-    * [SharedMemory Protocol (433 bytes for 3 slots)](#sharedmemory-protocol-433-bytes-for-3-slots)
-  * [Documentation](#documentation)
-  * [Testing](#testing)
-    * [Randomized ordering](#randomized-ordering)
-    * [Coverage gate](#coverage-gate)
-    * [Test doubles](#test-doubles)
-  * [Benchmarks](#benchmarks)
-    * [Performance Tuning (env vars)](#performance-tuning-env-vars)
-  * [Troubleshooting](#troubleshooting)
-    * ["SharedMemory not found"](#sharedmemory-not-found)
-    * ["CUDA IPC overhead unexpectedly high"](#cuda-ipc-overhead-unexpectedly-high)
-    * ["Version mismatch" or stale frames](#version-mismatch-or-stale-frames)
-    * [GPU memory leak](#gpu-memory-leak)
-  * [Distribution](#distribution)
-    * [For Python Consumers (StreamDiffusion, AI/ML pipelines)](#for-python-consumers-streamdiffusion-aiml-pipelines)
-      * [Method 1: Guided installer (recommended)](#method-1-guided-installer-recommended)
-      * [Method 2: Manual download from GitHub Releases](#method-2-manual-download-from-github-releases)
-      * [Method 3: Editable install from source (for development)](#method-3-editable-install-from-source-for-development)
-      * [Method 4: Build from source (dev-only, requires MSVC)](#method-4-build-from-source-dev-only-requires-msvc)
-      * [Method 5: From PyPI (coming soon)](#method-5-from-pypi-coming-soon)
-    * [For TouchDesigner Integration](#for-touchdesigner-integration)
-    * [Use Cases](#use-cases)
-  * [Changelog](#changelog)
-  * [Contributing](#contributing)
-  * [License](#license)
-  * [Credits](#credits)
-
-<!--te-->
-
-
 [![codecov](https://codecov.io/gh/forkni/cuda-link/graph/badge.svg)](https://codecov.io/gh/forkni/cuda-link)
 
 Zero-copy GPU texture transfer between TouchDesigner and Python processes using CUDA IPC.
@@ -96,7 +49,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 - **CUDA**: 12.x (tested with 12.4)
 - **GPU**: NVIDIA GPU with CUDA compute capability 3.5+
 - **TouchDesigner**: 2022.x or later (for producer side)
-- **Python**: 3.9+ (for consumer side)
+- **Python**: 3.11+ recommended (for consumer side; matches TouchDesigner's bundled interpreter). The pure-Python fallback wheel also installs on 3.9+ — see [Distribution](#distribution).
 
 ### Python Dependencies
 

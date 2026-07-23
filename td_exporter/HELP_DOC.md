@@ -377,4 +377,4 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 - **CUDA:** 11.x, 12.x, or 13.x runtime (the loader prefers 13.x/12.x, tested with 12.4 and 12.8; 11.x accepted as a fallback for systems that haven't migrated)
 - **GPU:** NVIDIA, CUDA compute capability 3.5 or higher
 - **TouchDesigner:** 2022.x or later
-- **Python (consumer side):** 3.9+. The prebuilt native wheel targets **cp311 (Python 3.11)**; a `py3-none-any` pure-Python fallback wheel covers other 3.9+ interpreters. Not published on PyPI — see [Quick Start](#quick-start) for install instructions.
+- **Python (consumer side):** 3.11+ recommended (matches TouchDesigner's bundled interpreter). The prebuilt native wheel targets **cp311 (Python 3.11)**; a `py3-none-any` pure-Python fallback wheel also installs on 3.9+ interpreters if needed. Not published on PyPI — see [Quick Start](#quick-start) for install instructions.
