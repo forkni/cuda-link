@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.8.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.12.1.tox` component in TouchDesigner.
 
-> **Previous release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
+> **Historical release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -293,11 +293,11 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```
-CUDA IPC Exporter v1.8.0
+CUDA IPC Exporter v1.12.1
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-05-29
+Date: 2026-07-12
 License: MIT
 ```
 
@@ -307,9 +307,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.8.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.12.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.8.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.12.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -317,7 +317,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.8.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.12.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -401,13 +401,13 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 **Error**: `AttributeError: 'NoneType' object has no attribute 'ext'`
 
-**Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the correct Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExporter`
+**Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the extension class in the Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExtension`
 
 ### CUDA runtime DLL not found
 
 **Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
 
-**Solution**: The extension probes full CUDA Toolkit install paths (`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin\cudart64_12.dll`) first, then falls back to bare DLL names already loaded in the process. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit 12.x installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
+**Solution**: The extension probes full CUDA Toolkit 13.x and 12.x install paths first, then falls back to bare DLL names already loaded in the process, including legacy 11.x names. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
 ### SharedMemory already exists
 
@@ -505,7 +505,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.8.0.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.12.1.tox` | `TOXES/` | Final built .tox component |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
