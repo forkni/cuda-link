@@ -105,6 +105,12 @@ class cudaPointerAttributes(ctypes.Structure):
     which is safe, whereas a 24-byte buffer handed to a 13.x cudart is an
     undersized out-parameter (out-of-bounds write risk). The four original
     fields keep their offsets, so .type/.device access is unaffected either way.
+
+    Uses `c_int32` (not `ctypes.c_long`) for `reserved`: this struct models the
+    target Windows/MSVC cudart ABI, where `long` is always 4 bytes, but
+    `ctypes.c_long` tracks the *host* platform's C `long` — 8 bytes on Linux/LP64
+    (e.g. the CI runner running this file's no-GPU tests). `c_long * 8` would
+    silently produce an 88-byte struct there instead of 56.
     """
 
     _fields_ = [
@@ -112,7 +118,7 @@ class cudaPointerAttributes(ctypes.Structure):
         ("device", c_int),  # GPU device index owning this allocation
         ("devicePointer", c_void_p),
         ("hostPointer", c_void_p),
-        ("reserved", ctypes.c_long * 8),  # CUDA 13.x+ only; unused, must be zero
+        ("reserved", ctypes.c_int32 * 8),  # CUDA 13.x+ only; unused, must be zero
     ]
 
 
