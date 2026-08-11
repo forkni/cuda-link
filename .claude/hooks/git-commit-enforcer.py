@@ -87,7 +87,10 @@ def main():
                 message = msg_match.group(1)
 
     # Build safe commit command
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "F:/RD_PROJECTS/COMPONENTS/claude-context-local")
+    # Fall back to this script's own repo root (not a hardcoded, unrelated path) if
+    # CLAUDE_PROJECT_DIR is ever unset/empty (see anthropics/claude-code#33815).
+    _self_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or _self_root
     safe_script = f"{project_dir}/scripts/git/commit_enhanced.sh"
     if not os.path.isfile(safe_script):
         sys.exit(0)

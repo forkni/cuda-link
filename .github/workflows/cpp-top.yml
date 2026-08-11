@@ -24,13 +24,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       # Pinned to the same LLVM 19.x line the repo-root .clang-format/.clang-tidy were
       # calibrated against locally (VS 2022's bundled VC/Tools/Llvm), rather than trusting
       # whatever LLVM build happens to ship in the windows-latest image today.
       - name: Install LLVM/Clang tools (clang-format, clang-tidy)
-        uses: KyleMayes/install-llvm-action@v2
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0  # v2
         with:
           version: '19.1.5'
 
@@ -49,7 +49,7 @@ jobs:
       # CMakeLists.txt only checks the CUDA *major* version, so this is compatible.
       - name: Install CUDA toolkit (cudart + nvcc only)
         id: cuda-toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d  # v0.2.19
         with:
           cuda: '12.6.2'
           sub-packages: '["cudart","nvcc"]'
@@ -58,7 +58,7 @@ jobs:
       # Ninja (unlike the Visual Studio generator) does not invoke vcvarsall on its own --
       # cl.exe/link.exe/rc.exe would otherwise fail to resolve even though VS is preinstalled.
       - name: Set up MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: x64
 
