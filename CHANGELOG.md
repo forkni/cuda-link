@@ -5,6 +5,56 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] - 2026-08-11
+
+### Fixed
+
+- **`cudaPointerAttributes` undersized against CUDA 13.x** (`cuda_runtime_types.py`) — the
+  struct grew a `long reserved[8]` field in CUDA 13.x driver_types.h (56 bytes vs. 24 in
+  12.x), but the ctypes binding still declared the 24-byte 12.x layout and the ABI guard
+  hard-checked that literal. The loader probes 13.3 before 12.x, so `pointer_get_attributes()`
+  — on the per-frame device-affinity path — was passing an undersized out-parameter to a
+  13.x cudart. Extended the struct with the `reserved` field and raised the guard to 56;
+  over-sizing is safe against both runtime generations, so no version branching is needed.
+  The field is typed `c_int32` rather than `ctypes.c_long`, whose width tracks the host
+  platform (8 bytes on LP64) instead of the MSVC cudart ABI this struct models.
+- **`cudaDevAttrAsyncEngineCount` documented as attribute 4** (`cuda_ipc_wrapper.py`) — the
+  real value is 40; 4 is `cudaDevAttrMaxBlockDimZ`. Latent (no production caller queried it
+  yet), but corrected before it could be relied on.
+- **IPC capability probe aborted initialization on CUDA 11.x** (`cuda_ipc_wrapper.py`) —
+  `check_ipc_capability()`, added earlier in this release and called unconditionally from
+  `Exporter.open()`, queries `cudaDevAttrIpcEventSupport` (125), which CUDA 12.0 introduced.
+  An 11.x runtime — still probed by the loader, and what TouchDesigner ships as
+  `cudart64_110.dll` — returns an invalid-attribute error that the strict `errcheck` turned
+  into a hard failure. The probe is now version-gated and its query is non-fatal, so a failed
+  probe degrades to a logged diagnostic; only an explicit `cudaDevAttrIpcEventSupport == 0`
+  still raises.
+
+### Added
+
+- **`check_ipc_capability()`** on the `CudaPort` protocol, `CTypesCUDAAdapter`, and
+  `FakeCUDAAdapter`, called once from `Exporter.open()` before any IPC handle is minted.
+  Queries `cudaDevAttrIpcEventSupport` and logs an informational note about the
+  Windows-WDDM-vs-NVIDIA-documented-support gap (see ADR-0004) rather than hard-failing,
+  since this project's whole premise is that legacy CUDA IPC works there in practice; raises
+  only when the driver reports IPC flatly unsupported (`cudaDevAttrIpcEventSupport == 0`).
+
+### Docs
+
+- Corrected the inverted CUDA-IPC platform-support claim in `README.md` and
+  `td_exporter/HELP_DOC.md` — NVIDIA documents the legacy IPC API as Linux/Windows-TCC only;
+  this project runs it on Windows WDDM, which is validated in practice (ADR-0004) but
+  outside NVIDIA's documented support envelope.
+- Fixed the stale 14-mirror-DAT count (actual: 15) across `README.md`, `ARCHITECTURE.md`,
+  the ADRs, and `TOX_BUILD_GUIDE.md` — the latter previously instructed builders to add "14
+  mirror DATs," silently omitting `Doorbell`.
+
+### Tests
+
+- Added coverage for the CUDA 11.x IPC-probe fallback and the ABI version warning path in
+  `tests/cuda/test_wrapper_cov_methods.py` and `tests/support/test_cuda_adapters_cov.py`
+  (~145 lines).
+
 ## [1.12.1] - 2026-07-12
 
 ### Fixed
@@ -488,9 +538,11 @@ already handled — no code change needed.
 - **Debug timing summary in Receiver mode** (`25a0514`, `fc45578`) — `TDReceiverEngine` now
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
+
   ```
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
+
   Fields: **FPS** (frames consumed ÷ wall time since first frame); **latency** (`now −
   producer_timestamp` — valid on single-machine TD→TD / TD→Python setups); **copy** (running
   average of `copyCUDAMemory` wall time — the receiver's analogue of `get_frame= µs avg` in the

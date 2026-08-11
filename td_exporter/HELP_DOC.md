@@ -240,7 +240,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.12.1.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -320,7 +320,7 @@ total (D2H streaming, activation barriers, CUDA Graphs, NVTX profiling, etc.). S
 | Cross-process IPC notify latency | ~136–286 µs | Poll-sleep baseline; `CUDALINK_WAIT_BACKEND=native` targets p50 < 10 µs |
 | First-frame initialization | 50–100 µs | One-time GPU buffer allocation + IPC handle creation |
 | `export_frame()` (1080p RGBA float32) | ~106 µs | Standalone Python `Exporter`, EXPORT_SYNC=1, RTX 4090 — full D2D copy + IPC record, runs on GPU |
-| Receiver `copyCUDAMemory` into TD (1080p) | ~130 µs | Typical measured value (see the Receiver Debug example above); includes CUDA→OpenGL interop inside TD |
+| Receiver `copyCUDAMemory` into TD (1080p) | ~130 µs | Typical measured value (see the Receiver Debug example above); includes CUDA→Vulkan interop inside TD |
 | D2H numpy copy (1080p RGBA float32) | ~1.3 ms | Only when using `get_frame_numpy()`; avoided entirely by `get_frame()` (zero-copy GPU tensor) |
 
 **Baseline comparison:** CPU SharedMemory at 1080p RGBA float32 costs **~5.4 ms** end-to-end
@@ -357,7 +357,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 **Sender `export=` windowed average is higher than expected**
 
-- The `top_op.cudaMemory()` OpenGL→CUDA interop call happens *before* the timed `export_frame()` region and is not broken out as a separate Debug metric — it is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
+- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region and is not broken out as a separate Debug metric — it is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
 
@@ -367,14 +367,18 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
   set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v1.12.1.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v1.12.2.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 
 ## Requirements
 
-- **OS:** Windows 10 / 11 (CUDA IPC handle sharing is Windows-only)
+- **OS:** Windows 10 / 11. NVIDIA documents the legacy `cudaIpc*` API as Linux-only, and on
+  Windows as supported only under the TCC driver model — this project runs it on the default
+  WDDM driver model instead, which works in practice (see
+  `docs/adr/0004-legacy-cuda-ipc-over-vmm.md`) but is outside NVIDIA's documented support
+  envelope.
 - **CUDA:** 11.x, 12.x, or 13.x runtime (the loader prefers 13.x/12.x, tested with 12.4 and 12.8; 11.x accepted as a fallback for systems that haven't migrated)
-- **GPU:** NVIDIA, CUDA compute capability 3.5 or higher
+- **GPU:** Any NVIDIA GPU supporting the CUDA runtime IPC and Graphs APIs used above
 - **TouchDesigner:** 2022.x or later
 - **Python (consumer side):** 3.11+ recommended (matches TouchDesigner's bundled interpreter). The prebuilt native wheel targets **cp311 (Python 3.11)**; a `py3-none-any` pure-Python fallback wheel also installs on 3.9+ interpreters if needed. Not published on PyPI — see [Quick Start](#quick-start) for install instructions.

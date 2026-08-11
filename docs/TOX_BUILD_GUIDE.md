@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.12.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.12.2.tox` component in TouchDesigner.
 
 > **Historical release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
 
@@ -16,9 +16,9 @@ There are two assembly modes. Choose one:
 
 Requires `cuda_link` installed externally (`install_td_library.cmd`) and `CUDALINK_LIB_PATH`
 set before launching TouchDesigner. The bootstrap module loads the package and registers the
-14 mirror names in `sys.modules` — so those mirror Text DATs are not needed.
+15 mirror names in `sys.modules` — so those mirror Text DATs are not needed.
 
-```
+```text
 CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
@@ -37,10 +37,10 @@ CUDAIPCExporter (Base COMP)
 
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
-All 14 mirror Text DATs must be present. The bootstrap still silently no-ops if
+All 15 mirror Text DATs must be present. The bootstrap still silently no-ops if
 `CUDALINK_LIB_PATH` is unset — sibling import resolution works as before.
 
-```
+```text
 CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── Env               (Text DAT)     ← Copy from td_exporter/Env.py  (mirror: src/cuda_link/_env.py)
@@ -51,6 +51,7 @@ CUDAIPCExporter (Base COMP)
 ├── NVMLObserver      (Text DAT)     ← Copy from td_exporter/NVMLObserver.py
 ├── SHMProtocol       (Text DAT)     ← Copy from td_exporter/SHMProtocol.py
 ├── ActivationBarrier (Text DAT)     ← Copy from td_exporter/ActivationBarrier.py
+├── Doorbell          (Text DAT)     ← Copy from td_exporter/Doorbell.py
 ├── NVTXShim          (Text DAT)     ← Copy from td_exporter/NVTXShim.py
 ├── ExporterPort      (Text DAT)     ← Copy from td_exporter/ExporterPort.py
 ├── ImporterPort      (Text DAT)     ← Copy from td_exporter/ImporterPort.py
@@ -100,11 +101,13 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
 **For `Numslots` menu parameter**:
+
 - Menu Source: **Constant**
 - Menu Names: `2 3 4`
 - Menu Labels: `2 Slots 3 Slots 4 Slots`
 
 **For `Mode` menu parameter**:
+
 - Menu Source: **Constant**
 - Menu Names: `Sender Receiver`
 - Menu Labels: `Sender Receiver`
@@ -114,9 +117,9 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 ### Step 3: Create Text DATs
 
 **Library mode** (with `cuda_link` installed via `install_td_library.cmd`): create the 6 DATs
-in section 3a–3f only — the 14 mirror DATs (3g+) are resolved from the installed package.
+in section 3a–3f only — the 15 mirror DATs (3g+) are resolved from the installed package.
 
-**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3q.
+**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3i.
 
 Inside the `CUDAIPCExporter` COMP, create Text DATs in the order shown below. Imports between
 them resolve automatically because all Text DATs in the same COMP share a module namespace.
@@ -171,16 +174,18 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 1. Create a **Text DAT**, rename to `CUDAIPCExporter`
 2. Paste contents from `td_exporter/CUDAIPCExtension.py`
 3. Confirm the import block reads:
+
    ```python
    with contextlib.suppress(ImportError):
        import CUDALinkBootstrap  # noqa: F401
    ```
+
    The `contextlib.suppress` guard ensures the extension loads cleanly in classic mode
    (no bootstrap DAT present).
 
 ---
 
-**Classic/fallback mode only — add these 14 mirror DATs (Steps 3g–3q):**
+**Classic/fallback mode only — add these 15 mirror DATs (Steps 3g–3i):**
 
 #### 3g. Env / FrameProfile / CUDAIPCWrapper / CUDARuntimeTypes / CUDAGraphs Text DATs
 
@@ -194,13 +199,14 @@ For each, create a **Text DAT** with the name shown and paste the matching file:
 | `CUDARuntimeTypes` | `td_exporter/CUDARuntimeTypes.py` |
 | `CUDAGraphs` | `td_exporter/CUDAGraphs.py` |
 
-#### 3h. NVMLObserver / SHMProtocol / ActivationBarrier / NVTXShim Text DATs
+#### 3h. NVMLObserver / SHMProtocol / ActivationBarrier / Doorbell / NVTXShim Text DATs
 
 | DAT name | Source file |
 |---|---|
 | `NVMLObserver` | `td_exporter/NVMLObserver.py` |
 | `SHMProtocol` | `td_exporter/SHMProtocol.py` |
 | `ActivationBarrier` | `td_exporter/ActivationBarrier.py` |
+| `Doorbell` | `td_exporter/Doorbell.py` |
 | `NVTXShim` | `td_exporter/NVTXShim.py` |
 
 #### 3i. ExporterPort / ImporterPort / CUDAAdapters / Exporter / Importer Text DATs
@@ -222,9 +228,11 @@ For each, create a **Text DAT** with the name shown and paste the matching file:
    - **Promote**: Toggle ON (this creates `me.ext.CUDAIPCExtension` accessor)
 
 **Verification**: Open the **Textport** (Alt+T) and type:
+
 ```python
 op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
 ```
+
 You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 ### Step 5: Create Execute DAT Callback
@@ -265,6 +273,7 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 3. Enable **Modify Outside of Cook** toggle (ON)
 
 **Benefits**:
+
 - Eliminates force-cook overhead (~0.03ms per frame)
 - Removes 1-frame resolution change delay
 - Simplifies data flow (Execute DAT drives import directly)
@@ -292,12 +301,12 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 
 Create a **Text DAT** named `info` with version/author information:
 
-```
-CUDA IPC Exporter v1.12.1
+```text
+CUDA IPC Exporter v1.12.2
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-07-12
+Date: 2026-08-11
 License: MIT
 ```
 
@@ -307,9 +316,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.12.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.12.2.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.12.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.12.2.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -317,7 +326,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.12.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.12.2.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -341,7 +350,7 @@ License: MIT
 
 Open the **Textport** (Alt+T) and look for:
 
-```
+```text
 [CUDAIPCExporter] Extension initialized on <CUDAIPCExporter>
 [CUDAIPCExporter] Loaded CUDA runtime
 [CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
@@ -363,6 +372,7 @@ When **Mode** = `Receiver`, the component imports GPU frames from a Python `Expo
 The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it calls `import_frame(ImportBuffer)` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
 
 If you see errors, check:
+
 - CUDA 12.x is installed
 - GPU is NVIDIA with CUDA support
 - No other process is using the same `Ipcmemname`
@@ -414,6 +424,7 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 **Error**: `FileExistsError: Cannot create SharedMemory '...' (already exists)`
 
 **Solution**: Another TD instance or Python process is using the same `Ipcmemname`. Either:
+
 1. Use a different name (append a suffix like `"_2"`)
 2. Restart TouchDesigner to clean up stale SharedMemory
 
@@ -422,6 +433,7 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 **Symptom**: No error messages, but Python importer receives zero frames or stale data.
 
 **Diagnosis**:
+
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
 3. Enable **Debug** in TD and look for `"Frame N: wrote to slot X"` messages every ~97 frames
@@ -434,7 +446,7 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 You can use multiple `CUDAIPCExporter` components in one project:
 
-```
+```text
 /project1
   ├─ MainExporter      (Ipcmemname="main_camera")
   │    └─ input  ←─  Camera TOP
@@ -443,6 +455,7 @@ You can use multiple `CUDAIPCExporter` components in one project:
 ```
 
 Python side:
+
 ```python
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
@@ -505,7 +518,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.12.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.12.2.tox` | `TOXES/` | Final built .tox component |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -520,5 +533,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.8.0
+**Component Version**: 1.12.2
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)

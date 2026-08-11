@@ -151,6 +151,7 @@ TOXES/CUDAIPCLink_v1.10.1.tox
 TOXES/CUDAIPCLink_v1.10.2.tox
 TOXES/CUDAIPCLink_v1.11.0.tox
 TOXES/CUDAIPCLink_v1.12.0.tox
+TOXES/CUDAIPCLink_v1.12.1.tox
 
 # Local-only tooling component (never distributed)
 TOXES/Semantic_Version_Control_v0.4.2.tox
@@ -227,6 +228,10 @@ CUDA_Link_CPP_Test.toe
 CUDA_Link_CPP_Test.*.toe
 CUDA_Link_CPP_Receiver_Test.toe
 CUDA_Link_CPP_Receiver_Test.*.toe
+
+# C++ Custom TOP CMake build output (local-only; cpp_top/build/ already covered by the
+# generic build/ rule above, but the Ninja-generator build tree needs its own entry)
+cpp_top/build_ninja/
 
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.

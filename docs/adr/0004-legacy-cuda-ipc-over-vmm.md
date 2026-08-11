@@ -16,9 +16,21 @@ CUDA 12.8+"* — arguing for migration to the VMM driver API
 (`cuMemCreate` + `CU_MEM_HANDLE_TYPE_WIN32` + `DuplicateHandle`) and claiming that legacy
 `cudaIpc*` memory IPC is Linux-only and fails on Windows WDDM with error 801.
 
-That claim is empirically refuted by this codebase: production IPC has been validated on Windows WDDM with
-CUDA 12.x across multiple format variants and teardown/reconnect cycles with no error 801. The "err 801"
-arises on the `torch.multiprocessing` IPC path, not on raw `cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`.
+NVIDIA's own documentation supports the "Linux-only" half of that claim. CUDA Programming Guide §4.15:
+*"The CUDA IPC API is only currently supported on Linux platforms."* §4.15.1 repeats it: *"The IPC API is
+only supported on Linux."* The `simpleIPC` sample gates its Windows path explicitly:
+`// CUDA IPC on Windows is only supported on TCC`, followed by
+`if (!prop.tccDriver) { printf("Device %d is not in TCC mode\n", i); continue; }`. This project runs on
+the default WDDM driver model, not TCC — so it is running outside NVIDIA's documented support envelope,
+not disproving it.
+
+What this codebase's testing does establish is that, *in practice*, it works there anyway: production IPC
+has been validated on Windows WDDM with CUDA 12.x across multiple format variants and teardown/reconnect
+cycles with no error 801. The "err 801" the migration brief cites arises on the `torch.multiprocessing`
+IPC path, not on raw `cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`. This is an engineering bet on
+observed behaviour outside the documented envelope, not a refutation of NVIDIA's stated support matrix —
+treat it as such: re-validate after driver/CUDA upgrades, and see the IPC capability probe
+(`CUDARuntimeAPI.check_ipc_capability()`) added to surface a diagnostic if this ever stops holding.
 
 Recording this as an ADR stops future explorers from spending time re-investigating a decision that has
 already been made with empirical evidence.
