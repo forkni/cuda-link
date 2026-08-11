@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.12.2] - 2026-08-10
+## [1.12.2] - 2026-08-11
 
 ### Fixed
 
@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — on the per-frame device-affinity path — was passing an undersized out-parameter to a
   13.x cudart. Extended the struct with the `reserved` field and raised the guard to 56;
   over-sizing is safe against both runtime generations, so no version branching is needed.
+  The field is typed `c_int32` rather than `ctypes.c_long`, whose width tracks the host
+  platform (8 bytes on LP64) instead of the MSVC cudart ABI this struct models.
 - **`cudaDevAttrAsyncEngineCount` documented as attribute 4** (`cuda_ipc_wrapper.py`) — the
   real value is 40; 4 is `cudaDevAttrMaxBlockDimZ`. Latent (no production caller queried it
   yet), but corrected before it could be relied on.
@@ -46,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the stale 14-mirror-DAT count (actual: 15) across `README.md`, `ARCHITECTURE.md`,
   the ADRs, and `TOX_BUILD_GUIDE.md` — the latter previously instructed builders to add "14
   mirror DATs," silently omitting `Doorbell`.
+
+### Tests
+
+- Added coverage for the CUDA 11.x IPC-probe fallback and the ABI version warning path in
+  `tests/cuda/test_wrapper_cov_methods.py` and `tests/support/test_cuda_adapters_cov.py`
+  (~145 lines).
 
 ## [1.12.1] - 2026-07-12
 
@@ -530,9 +538,11 @@ already handled — no code change needed.
 - **Debug timing summary in Receiver mode** (`25a0514`, `fc45578`) — `TDReceiverEngine` now
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
+
   ```
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
+
   Fields: **FPS** (frames consumed ÷ wall time since first frame); **latency** (`now −
   producer_timestamp` — valid on single-machine TD→TD / TD→Python setups); **copy** (running
   average of `copyCUDAMemory` wall time — the receiver's analogue of `get_frame= µs avg` in the

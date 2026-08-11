@@ -201,6 +201,7 @@ timestamp_offset = 20 + (N × 128) + 1 + 20
 ```
 
 **Examples**:
+
 - 2 slots: 20 + 2×128 + 1 + 20 + 8 = 305 bytes, shutdown at [276]
 - 3 slots: 20 + 3×128 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
 - 4 slots: 20 + 4×128 + 1 + 20 + 8 = 561 bytes, shutdown at [532]
@@ -243,7 +244,7 @@ Frame 4:
 
 ### Slot Selection Logic
 
-#### Producer (writes to current slot):
+#### Producer (writes to current slot)
 
 ```python
 write_idx += 1  # Increment before writing
@@ -252,7 +253,7 @@ slot = write_idx % NUM_SLOTS
 # Update write_idx in SharedMemory
 ```
 
-#### Consumer (reads from previous slot):
+#### Consumer (reads from previous slot)
 
 ```python
 write_idx = read_from_shm()  # Current write_idx
@@ -282,7 +283,7 @@ else:
 
 CUDA IPC events provide **GPU-side synchronization** without CPU involvement. This is critical for low-microsecond overhead.
 
-#### Producer Side (Record Event):
+#### Producer Side (Record Event)
 
 ```python
 cuda.memcpy(dst=gpu_buffer[slot], src=top_cuda_ptr, count=size, kind=D2D)
@@ -293,7 +294,7 @@ shm.buf[12:16] = struct.pack("<I", write_idx)
 
 **Performance**: `cudaEventRecord` takes ~0.5-2μs, does NOT block CPU.
 
-#### Consumer Side (Wait on Event):
+#### Consumer Side (Wait on Event)
 
 ```python
 read_slot = (write_idx - 1) % NUM_SLOTS
@@ -324,6 +325,7 @@ not before it.
 #### Two Equivalent APIs to Arm Ordering
 
 **Option A — GpuFrame.producer_stream (per-frame):**
+
 ```python
 stream_handle = torch.cuda.current_stream().cuda_stream   # PyTorch
 # stream_handle = cupy.cuda.get_current_stream().ptr       # CuPy
@@ -331,6 +333,7 @@ exporter.export(GpuFrame(ptr=..., size=..., producer_stream=stream_handle))
 ```
 
 **Option B — record_source_sync() (explicit, or one-time for same-stream callers):**
+
 ```python
 exporter.record_source_sync(stream_handle)  # records event on producer stream
 exporter.export(GpuFrame(ptr=..., size=...))
@@ -375,6 +378,7 @@ while the queued D2D copy is still executing → reads freed memory → CUDA 719
 outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDAMemory`).
 
 **Critical distinction — ordering vs. lifetime:**
+
 - `record_source_sync` / `producer_stream` / `_arm_same_stream_ordering` are *pre-copy
   ordering* primitives: ensure the source is fully written before the copy starts.
   They do **not** guarantee the source outlives the queued read.
@@ -403,13 +407,15 @@ See `docs/PROFILING.md §8 EXPORT_SYNC defaults` for the full hazard analysis an
 
 If IPC events are unavailable (older CUDA versions), fall back to CPU sync:
 
-#### Producer:
+#### Producer
+
 ```python
 if frame_count % 10 == 0:  # Only sync every 10 frames
     cuda.synchronize()  # ← Blocks CPU until GPU idle
 ```
 
-#### Consumer:
+#### Consumer
+
 ```python
 torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
 ```
@@ -485,11 +491,13 @@ producer advanced `write_idx` between the `get_frame()` poll and the `WaitForSin
 the function returns immediately — preventing a stall of up to `timeout_secs`.
 
 **Measured gains** (TD Sender → Python subprocess, 60 FPS):
+
 - CPU: ~3-4% → ~0.3-1%
 - Notify latency p95: ~10× tighter (0.02–0.10 ms vs 0.04–1.80 ms poll baseline)
 - Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
 
 **Scope and limitations**:
+
 - Windows-only (`CreateEventW` / `WaitForSingleObject`).
 - Single consumer only — one `SetEvent` releases exactly one waiter.
 - `TDReceiver.py` (in-TD COMP on the cook thread) is **excluded** from doorbell wiring; it returns
@@ -503,6 +511,7 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 ### Phase 1: Initialization
 
 **Producer**:
+
 1. Allocate N GPU buffers (`cuda.malloc()`)
 2. Create IPC handles for each buffer (`cuda.ipc_get_mem_handle()`)
 3. Create IPC events for each slot (`cuda.create_ipc_event()`)
@@ -510,6 +519,7 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 5. Write version=1, num_slots=N, write_idx=0, all handles to SharedMemory
 
 **Consumer**:
+
 1. Open SharedMemory (retry with backoff if not ready)
 2. Read version, num_slots from header
 3. For each slot:
@@ -528,6 +538,7 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 | **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
 
 The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
+
 1. Calls `set_warning_status(msg)` (sets `parent().color` to amber-yellow — visible on the COMP node body, idempotent).
 
 The frame is skipped, and `clear_status()` is called as soon as the upstream format is corrected (restoring the original COMP color). Engine-fatal errors (init failure, IPC handle failure, GPU alloc failure) instead call `set_error_status(msg)`, which tints the COMP red and emits a red `addScriptError` badge. No auto-conversion is performed; fix the upstream source TOP instead. Supported formats: `uint8`, `uint16` (fixed), `float32` in R/RG/RGBA/A channel configurations.
@@ -537,6 +548,7 @@ The frame is skipped, and `clear_status()` is called as soon as the upstream for
 ### Phase 2: Steady State (Per-Frame)
 
 **Producer** (~2-5µs IPC overhead, plus GPU D2D copy):
+
 ```
 get TOP's cudaMemory() → src_ptr
 slot = write_idx % NUM_SLOTS
@@ -547,6 +559,7 @@ shm.buf[12:16] = struct.pack("<I", write_idx) ← ~0.5µs
 ```
 
 **Consumer** (~1-3µs overhead):
+
 ```
 write_idx = struct.unpack("<I", shm.buf[12:16])  ← ~0.5µs
 read_slot = (write_idx - 1) % NUM_SLOTS
@@ -561,6 +574,7 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 **Trigger**: Producer detects resolution change (e.g., TOP resolution changed).
 
 **Producer**:
+
 1. Free old GPU buffers
 2. Re-allocate with new size
 3. Create new IPC handles
@@ -568,6 +582,7 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 5. Write new handles
 
 **Consumer**:
+
 1. Detect version change: `new_version != stored_version`
 2. Close old IPC handles
 3. Re-read num_slots (may have changed)
@@ -580,11 +595,13 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 ### Phase 4: Shutdown
 
 **Producer**:
+
 1. Set `shm.buf[shutdown_offset] = 1`
 2. Close SharedMemory (but don't unlink - consumer may still need it)
 3. Free GPU buffers
 
 **Consumer**:
+
 1. Detect shutdown flag: `shm.buf[shutdown_offset] == 1`
 2. Close IPC handles
 3. Close SharedMemory
@@ -846,5 +863,5 @@ See `docs/adr/` for the full Architecture Decision Record index:
 
 ---
 
-**Last Updated**: 2026-07-12
-**Version**: 1.12.1
+**Last Updated**: 2026-08-11
+**Version**: 1.12.2

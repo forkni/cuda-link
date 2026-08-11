@@ -73,7 +73,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.12.1.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -347,7 +347,6 @@ The six variables most consumers reach for:
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](docs/PROFILING.md).
 
-
 ## Troubleshooting
 
 ### "SharedMemory not found"
@@ -430,13 +429,13 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```bash
 # Download the wheel matching your interpreter from
 # https://github.com/forkni/cuda-link/releases, then:
-pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[all]"     # All output modes
+pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "cuda_link-1.12.1-cp311-cp311-win_amd64.whl[torch]"
+pip install --force-reinstall "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"
 ```
 
 #### Method 3: Editable install from source (for development)
@@ -483,7 +482,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.12.1.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -575,5 +574,5 @@ MIT License - See LICENSE file
 
 ## Credits
 
-Original implementation by Forkni (forkni@gmail.com).
+Original implementation by Forkni (<forkni@gmail.com>).
 Extracted and refactored from the StreamDiffusionTD project.

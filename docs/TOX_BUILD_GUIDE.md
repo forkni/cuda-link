@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.12.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.12.2.tox` component in TouchDesigner.
 
 > **Historical release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
 
@@ -119,7 +119,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 **Library mode** (with `cuda_link` installed via `install_td_library.cmd`): create the 6 DATs
 in section 3a–3f only — the 15 mirror DATs (3g+) are resolved from the installed package.
 
-**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3q.
+**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3i.
 
 Inside the `CUDAIPCExporter` COMP, create Text DATs in the order shown below. Imports between
 them resolve automatically because all Text DATs in the same COMP share a module namespace.
@@ -302,11 +302,11 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```text
-CUDA IPC Exporter v1.12.1
+CUDA IPC Exporter v1.12.2
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-07-12
+Date: 2026-08-11
 License: MIT
 ```
 
@@ -316,9 +316,9 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.12.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.12.2.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.12.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.12.2.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
 ---
 
@@ -326,7 +326,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.12.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.12.2.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -518,7 +518,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.12.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.12.2.tox` | `TOXES/` | Final built .tox component |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -533,5 +533,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.8.0
+**Component Version**: 1.12.2
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)

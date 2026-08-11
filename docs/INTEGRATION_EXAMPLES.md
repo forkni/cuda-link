@@ -19,11 +19,13 @@ Complete workflows for common CUDA IPC use cases.
 > ▶ Runnable: [examples/03_td_to_pytorch_pipeline.py](../examples/03_td_to_pytorch_pipeline.py)
 
 ### Use Case
+
 Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner video feed.
 
 ### TouchDesigner Setup
 
 1. **Network Layout**:
+
 ```
 Movie File In TOP → CUDAIPCExtension (Mode=Sender)
                     (Ipcmemname="ai_input")
@@ -100,6 +102,7 @@ with Importer.open(ImportSpec(
 > ▶ Runnable: [examples/04_td_to_opencv_numpy.py](../examples/04_td_to_opencv_numpy.py)
 
 ### Use Case
+
 Traditional computer vision (edge detection, feature tracking, etc.) on TouchDesigner feed.
 
 ### TouchDesigner Setup
@@ -156,6 +159,7 @@ cv2.destroyAllWindows()
 > ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part a`
 
 ### Use Case
+
 AI pipeline with two inputs: main image + control signal (depth map, edges, etc.).
 
 ### TouchDesigner Setup
@@ -235,6 +239,7 @@ finally:
 > ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part b`
 
 ### Use Case
+
 Source TOP resolution changes at runtime (user resizes window, switches camera, etc.).
 
 ### TouchDesigner Setup
@@ -282,6 +287,7 @@ steady-state resumes at `NEW_FRAME` with the new shape automatically.
 > ▶ Runnable: [examples/06_graceful_shutdown_and_reconnect.py](../examples/06_graceful_shutdown_and_reconnect.py)
 
 ### Use Case
+
 Cleanly shut down Python process when TouchDesigner exits.
 
 ### TouchDesigner Setup
@@ -340,6 +346,7 @@ print("Clean shutdown complete")
 > ▶ Runnable: [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py) (producer-side percentiles)
 
 ### Use Case
+
 Measure IPC overhead for your specific hardware.
 
 > **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99,
@@ -461,19 +468,21 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.12.1.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.12.2.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
 5. **Wire**: Script TOP → your display chain
 
 In the Script TOP's `onCook` callback:
+
 ```python
 def onCook(scriptOp):
     ext.CUDAIPCExtension.import_frame(scriptOp)
 ```
 
 **TouchDesigner Network**:
+
 ```
 Script TOP (receives AI frames via IPC)
     → Composite TOP
@@ -493,6 +502,7 @@ Script TOP (receives AI frames via IPC)
 Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENCHMARKS.md).
 
 **Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
+
 - AI inference: ~32ms/frame (31 FPS)
 - IPC export overhead: small fraction of inference time
 - TD display: 60 FPS locked (reads latest available frame)
@@ -555,6 +565,7 @@ with Importer.open(ImportSpec(
 ```
 
 **Performance** (TD Sender → Python subprocess, 60 FPS):
+
 - CPU idle: ~0.3-1% (vs ~3-4% poll baseline)
 - Notify latency p95: 0.02–0.10 ms (vs 0.04–1.80 ms poll baseline), ~10× tighter
 - Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
@@ -663,11 +674,12 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 **Cause**: GPU sync fallback to CPU, or AI model bottleneck.
 
 **Solution**:
+
 1. Enable IPC events in TD (`Numslots`=3)
 2. Profile AI model: `torch.cuda.synchronize()` before/after inference
 3. Check GPU utilization: `nvidia-smi` should show ~90%+ for real-time AI
 
 ---
 
-**Last Updated**: 2026-07-12
-**Version**: 1.12.1
+**Last Updated**: 2026-08-11
+**Version**: 1.12.2
