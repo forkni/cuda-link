@@ -724,6 +724,52 @@ def test_get_device_attribute_uses_explicit_device() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _check_pointer_attributes_abi
+# ---------------------------------------------------------------------------
+
+
+def test_check_pointer_attributes_abi_warns_on_unrecognized_future_runtime(caplog) -> None:
+    """A CUDA 14.x runtime post-dates every cudaPointerAttributes layout this binding
+
+    has verified, so the method must warn — that warning is its entire purpose.
+    """
+    import logging
+
+    api = make_bare_runtime_api()
+    _mock_runtime_version(api, 14000)
+
+    with caplog.at_level(logging.WARNING, logger="cuda_link.cuda_ipc_wrapper"):
+        api._check_pointer_attributes_abi()
+
+    assert any("newer than any" in rec.message for rec in caplog.records)
+
+
+def test_check_pointer_attributes_abi_debug_logs_13x_layout(caplog) -> None:
+    import logging
+
+    api = make_bare_runtime_api()
+    _mock_runtime_version(api, 13000)
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.cuda_ipc_wrapper"):
+        api._check_pointer_attributes_abi()
+
+    assert any("56 bytes" in rec.message for rec in caplog.records)
+    assert not any(rec.levelno >= logging.WARNING for rec in caplog.records)
+
+
+def test_check_pointer_attributes_abi_debug_logs_legacy_layout(caplog) -> None:
+    import logging
+
+    api = make_bare_runtime_api()
+    _mock_runtime_version(api, 12080)
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.cuda_ipc_wrapper"):
+        api._check_pointer_attributes_abi()
+
+    assert any("24 bytes" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # check_ipc_capability
 # ---------------------------------------------------------------------------
 
@@ -819,3 +865,42 @@ def test_check_ipc_capability_degrades_on_query_failure() -> None:
 
     assert msg is not None
     assert "could not query" in msg.lower()
+
+
+def test_check_ipc_capability_survives_runtime_version_failure() -> None:
+    """get_runtime_version() failing must not abort the probe — it degrades to
+
+    version 0, which then takes the pre-12.0 skip path. This probe is diagnostic
+    and must never be able to abort Exporter.open().
+    """
+    api = make_bare_runtime_api()
+    api.device = 0
+    api.cudart.cudaRuntimeGetVersion.side_effect = RuntimeError("cudart not loaded")
+
+    msg = api.check_ipc_capability()
+
+    assert msg is not None
+    assert "runtime version 0" in msg
+    api.cudart.cudaDeviceGetAttribute.assert_not_called()
+
+
+def test_check_ipc_capability_uses_explicit_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cuda_link.cuda_ipc_wrapper as _w
+
+    monkeypatch.setattr(_w, "os", SimpleNamespace(name="nt"))
+    api = make_bare_runtime_api()
+    api.device = 0
+    _mock_runtime_version(api, 12080)
+    seen: dict[str, int] = {}
+
+    def _attr(value_ptr, attr, device):
+        seen["device"] = device.value
+        _fill_scalar_byref(value_ptr, c_int, 1)
+        return 0
+
+    api.cudart.cudaDeviceGetAttribute.side_effect = _attr
+
+    msg = api.check_ipc_capability(device=3)
+
+    assert seen["device"] == 3
+    assert msg is not None and "device 3" in msg
