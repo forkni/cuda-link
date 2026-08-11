@@ -125,3 +125,20 @@ def test_record_event_external_uses_str_fallback_for_untagged_objects():
     # Exact fallback content, not just "something got recorded" — catches a swapped
     # event/stream order or a wrong/constant fallback value.
     assert adapter.recorded_events == [(str(event), str(stream))]
+
+
+# ---------------------------------------------------------------------------
+# FakeCUDAAdapter.check_ipc_capability — failure injection branch
+# ---------------------------------------------------------------------------
+
+
+def test_check_ipc_capability_returns_none_by_default():
+    adapter = FakeCUDAAdapter()
+    assert adapter.check_ipc_capability() is None
+
+
+def test_check_ipc_capability_raises_when_injected():
+    adapter = FakeCUDAAdapter()
+    adapter.fail_ipc_capability = True
+    with pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"):
+        adapter.check_ipc_capability()

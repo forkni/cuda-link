@@ -117,8 +117,8 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
-- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 14 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 14 mirror Text DATs can be removed from the `.tox` entirely.
-- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 14 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
 
 ---
 
@@ -427,7 +427,7 @@ it on every subsequent frame.  The graph folds `stream_wait_event` + `cudaMemcpy
 kernel dispatches.
 
 **Effect**: 3 WDDM submissions/frame → 1.  Measured gain at 1080p uint8 standalone:
-−3.8 µs p50 (22%) from 17.9 µs (async, no graphs) to 13.9 µs (async+graphs).  See
+−4.0 µs p50 (22%) from 17.9 µs (async, no graphs) to 13.9 µs (async+graphs).  See
 [docs/BENCHMARKS.md](BENCHMARKS.md) for the full 2×2 matrix.
 
 Graph replay is transparent: on the first frame after a geometry or dtype change the graph is
@@ -490,7 +490,7 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 - Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
 
 **Scope and limitations**:
-- Windows-only (`CreateNamedEvent` / `WaitForSingleObject`).
+- Windows-only (`CreateEventW` / `WaitForSingleObject`).
 - Single consumer only — one `SetEvent` releases exactly one waiter.
 - `TDReceiver.py` (in-TD COMP on the cook thread) is **excluded** from doorbell wiring; it returns
   immediately on `NO_FRAME` and must not block in a cook context.

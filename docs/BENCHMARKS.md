@@ -72,7 +72,7 @@ graphs ON → 1 submission/frame (`cudaGraphLaunch`, 550 calls; waitEvent/eventR
 Region            Cell A (µs)   Cell D (µs)   Notes
 --------------    -----------   -----------   ----------------------------------------
 stream_wait            1.26          0.00     folded into CUDA graph (P3)
-memcpy                 7.76          6.77     PCIe-bound, ~22 GB/s
+memcpy                 7.76          6.77     device-to-device (same GPU), HBM-bound, ~1 TB/s class
 record_event           4.50          0.00     folded into CUDA graph (P3)
 shm_write              1.92          1.21     SHM slot write (unaffected)
 sync                  17.91          0.00     cudaStreamSynchronize eliminated (P1)

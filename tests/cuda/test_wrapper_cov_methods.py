@@ -24,6 +24,7 @@ No @pytest.mark.requires_cuda / requires_native marker needed.
 from __future__ import annotations
 
 from ctypes import POINTER, c_float, c_int, c_void_p, cast
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -699,20 +700,70 @@ def test_malloc_host_alloc_uses_portable_flag_by_default() -> None:
 
 
 def test_get_device_attribute_defaults_to_self_device() -> None:
+    from cuda_link.cuda_runtime_types import CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT
+
     api = make_bare_runtime_api()
     api.device = 5
 
-    api.get_device_attribute(4)
+    api.get_device_attribute(CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT)
 
     args = api.cudart.cudaDeviceGetAttribute.call_args[0]
     assert args[2].value == 5
 
 
 def test_get_device_attribute_uses_explicit_device() -> None:
+    from cuda_link.cuda_runtime_types import CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT
+
     api = make_bare_runtime_api()
     api.device = 5
 
-    api.get_device_attribute(4, device=2)
+    api.get_device_attribute(CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT, device=2)
 
     args = api.cudart.cudaDeviceGetAttribute.call_args[0]
     assert args[2].value == 2
+
+
+# ---------------------------------------------------------------------------
+# check_ipc_capability
+# ---------------------------------------------------------------------------
+
+
+def test_check_ipc_capability_returns_none_when_not_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cuda_link.cuda_ipc_wrapper as _w
+
+    # Rebind the module-local `os` name (not the real os module — mutating the real
+    # os.name process-wide breaks pathlib.Path.__new__, which pytest itself uses).
+    monkeypatch.setattr(_w, "os", SimpleNamespace(name="posix"))
+    api = make_bare_runtime_api()
+    api.device = 0
+    api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
+        _fill_scalar_byref(value_ptr, c_int, 1) or 0
+    )
+
+    assert api.check_ipc_capability() is None
+
+
+def test_check_ipc_capability_returns_diagnostic_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cuda_link.cuda_ipc_wrapper as _w
+
+    monkeypatch.setattr(_w, "os", SimpleNamespace(name="nt"))
+    api = make_bare_runtime_api()
+    api.device = 0
+    api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
+        _fill_scalar_byref(value_ptr, c_int, 1) or 0
+    )
+
+    msg = api.check_ipc_capability()
+    assert msg is not None
+    assert "IPC" in msg
+
+
+def test_check_ipc_capability_raises_when_support_is_zero() -> None:
+    api = make_bare_runtime_api()
+    api.device = 0
+    api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
+        _fill_scalar_byref(value_ptr, c_int, 0) or 0
+    )
+
+    with pytest.raises(CudaIpcError, match="cudaDevAttrIpcEventSupport=0"):
+        api.check_ipc_capability()

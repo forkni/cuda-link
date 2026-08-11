@@ -8,6 +8,7 @@ matching the established pattern in tests/core/test_importer.py.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -149,8 +150,17 @@ def _fmt(shape=(2, 2, 4), dtype="uint8") -> Format:
     return Format.from_overrides(shape, dtype)
 
 
-def test_numpy_buffers_build_raises_for_dtype_with_no_numpy_representation() -> None:
-    """bfloat16 without ml_dtypes -> numpy_dtype is None -> explicit ValueError."""
+def test_numpy_buffers_build_raises_for_dtype_with_no_numpy_representation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bfloat16 without ml_dtypes -> numpy_dtype is None -> explicit ValueError.
+
+    ml_dtypes may or may not be installed in the ambient environment (it's an
+    optional dependency), so force the "absent" branch of _numpy_dtype_for()'s
+    inline `import ml_dtypes` by making that import raise ImportError -- this
+    is the documented sys.modules[name] = None technique, not a real removal.
+    """
+    monkeypatch.setitem(sys.modules, "ml_dtypes", None)
     conn, _, _ = make_fake_ipc_connection(num_slots=1)
     fmt = _fmt(dtype="bfloat16")
     assert fmt.numpy_dtype is None
