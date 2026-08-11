@@ -17,13 +17,13 @@ Library mode (this module's purpose):
     Set CUDALINK_LIB_PATH to a folder created by:
         pip install --target <folder> "dist/cuda_link-<ver>-py3-none-any.whl"
     This module injects that folder onto sys.path, imports the cuda_link package,
-    and registers all 14 mirror module names in sys.modules as aliases to the
-    installed submodules.  The 14 mirror Text DATs (Env, SHMProtocol, Exporter, …)
+    and registers all 15 mirror module names in sys.modules as aliases to the
+    installed submodules.  The 15 mirror Text DATs (Env, SHMProtocol, Exporter, …)
     can then be removed from the COMP.
 
 Fallback / classic mode:
     If CUDALINK_LIB_PATH is not set or cuda_link is not importable, this module
-    no-ops and prints a notice.  All 14 mirror Text DATs must be present in the COMP
+    no-ops and prints a notice.  All 15 mirror Text DATs must be present in the COMP
     as before (the original "paste all DATs" deployment story is fully preserved).
 
 Drift guard:

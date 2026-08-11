@@ -24,6 +24,11 @@ CUDAGraphNode_t = c_uint64  # cudaGraphNode_t opaque pointer (CUDA 10.0+)
 # cudaGraphExecEventWaitNodeSetEvent are all CUDA 11.4+ (version integer 11040).
 CUDART_GRAPHS_MIN_VERSION = 11040
 
+# Minimum cudart version that defines cudaDevAttrIpcEventSupport (125).
+# CUDA 11.x tops out at 121 (cudaDevAttrDeferredMappingCudaArraySupported); querying 125
+# against an 11.x runtime returns cudaErrorInvalidValue.
+CUDART_IPC_EVENT_SUPPORT_MIN_VERSION = 12000
+
 # --- CUDA Graph parameter structs ---
 
 
@@ -95,6 +100,22 @@ class cudaPointerAttributes(ctypes.Structure):
 
     .type values: 0=unregistered, 1=host, 2=device, 3=managed
     .device: GPU index that owns the allocation
+
+    ABI note: CUDA 13.x's driver_types.h added a fifth field, `long reserved[8]`
+    ("Must be zero"), that CUDA 12.x and earlier do not have. Under MSVC x64
+    (`long` = 4 bytes) that grows the struct from 24 to 56 bytes. Since this
+    binding's loader (_load_cuda_runtime() in cuda_ipc_wrapper.py) may attach to
+    either a 12.x or 13.x cudart at runtime, the buffer is always sized to the
+    larger (13.x) layout: an older cudart simply writes fewer bytes into it,
+    which is safe, whereas a 24-byte buffer handed to a 13.x cudart is an
+    undersized out-parameter (out-of-bounds write risk). The four original
+    fields keep their offsets, so .type/.device access is unaffected either way.
+
+    Uses `c_int32` (not `ctypes.c_long`) for `reserved`: this struct models the
+    target Windows/MSVC cudart ABI, where `long` is always 4 bytes, but
+    `ctypes.c_long` tracks the *host* platform's C `long` — 8 bytes on Linux/LP64
+    (e.g. the CI runner running this file's no-GPU tests). `c_long * 8` would
+    silently produce an 88-byte struct there instead of 56.
     """
 
     _fields_ = [
@@ -102,28 +123,37 @@ class cudaPointerAttributes(ctypes.Structure):
         ("device", c_int),  # GPU device index owning this allocation
         ("devicePointer", c_void_p),
         ("hostPointer", c_void_p),
+        ("reserved", ctypes.c_int32 * 8),  # CUDA 13.x+ only; unused, must be zero
     ]
 
 
-assert ctypes.sizeof(cudaIpcMemHandle_t) == 64, (
-    f"cudaIpcMemHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcMemHandle_t)}"
-)
-assert ctypes.sizeof(cudaIpcEventHandle_t) == 64, (
-    f"cudaIpcEventHandle_t ABI mismatch: expected 64 bytes, got {ctypes.sizeof(cudaIpcEventHandle_t)}"
-)
-assert ctypes.sizeof(cudaPointerAttributes) == 24, (
-    f"cudaPointerAttributes ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPointerAttributes)}"
-)
+def _abi_guard(actual: int, expected: int, name: str) -> None:
+    """Raise RuntimeError on ctypes struct size drift.
+
+    Deliberately NOT an `assert` — asserts are stripped under `python -O`, which would
+    let a struct layout mismatch pass silently instead of failing loudly at import time.
+    """
+    if actual != expected:
+        raise RuntimeError(f"{name} ABI mismatch: expected {expected} bytes, got {actual}")
+
+
+_abi_guard(ctypes.sizeof(cudaIpcMemHandle_t), 64, "cudaIpcMemHandle_t")
+_abi_guard(ctypes.sizeof(cudaIpcEventHandle_t), 64, "cudaIpcEventHandle_t")
+_abi_guard(ctypes.sizeof(cudaPointerAttributes), 56, "cudaPointerAttributes")
+# Note on what these guards do and don't prove: they only check that THIS module's
+# ctypes _fields_ produce the byte size we intend (a self-consistency check against
+# drift in this file). They cannot detect a struct layout mismatch against whichever
+# cudart DLL is actually loaded at runtime — see the runtime-version check in
+# CUDARuntimeAPI._load_cuda_runtime() / check_ipc_capability() in cuda_ipc_wrapper.py
+# for the runtime-vs-binding side of that problem.
 # Graph param struct ABI guards — cudaMemcpy3DParms is the largest and most alignment-sensitive.
-# All four values were verified against Python ctypes on a 64-bit Windows host (sizeof c_size_t=8).
-assert ctypes.sizeof(cudaPos) == 24, f"cudaPos ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaPos)}"
-assert ctypes.sizeof(cudaPitchedPtr) == 32, (
-    f"cudaPitchedPtr ABI mismatch: expected 32 bytes, got {ctypes.sizeof(cudaPitchedPtr)}"
-)
-assert ctypes.sizeof(cudaExtent) == 24, f"cudaExtent ABI mismatch: expected 24 bytes, got {ctypes.sizeof(cudaExtent)}"
-assert ctypes.sizeof(cudaMemcpy3DParms) == 160, (
-    f"cudaMemcpy3DParms ABI mismatch: expected 160 bytes, got {ctypes.sizeof(cudaMemcpy3DParms)}"
-)
+# All values were verified against the CUDA 12.8 and 13.3 headers on a 64-bit Windows host
+# (sizeof c_size_t=8); cudaPos/cudaPitchedPtr/cudaExtent/cudaMemcpy3DParms are unchanged
+# between those two toolkit versions.
+_abi_guard(ctypes.sizeof(cudaPos), 24, "cudaPos")
+_abi_guard(ctypes.sizeof(cudaPitchedPtr), 32, "cudaPitchedPtr")
+_abi_guard(ctypes.sizeof(cudaExtent), 24, "cudaExtent")
+_abi_guard(ctypes.sizeof(cudaMemcpy3DParms), 160, "cudaMemcpy3DParms")
 
 
 # CUDA Error codes (subset)
@@ -153,6 +183,46 @@ class CUDAError:
             704: "PEER_ACCESS_ALREADY_ENABLED",
         }
         return names.get(code, f"UNKNOWN_ERROR_{code}")
+
+
+# ---------------------------------------------------------------------------
+# Library-specific exception hierarchy
+# ---------------------------------------------------------------------------
+#
+# Previously every failure here raised a bare builtin (RuntimeError / ValueError /
+# TimeoutError), so callers could not `except CudaLinkError` without also catching
+# unrelated bugs that happen to raise the same builtin. Each subclass below ALSO
+# inherits the builtin it replaces, so this is purely additive: every existing
+# `except RuntimeError` / `except ValueError` / `except TimeoutError` call site in
+# this codebase keeps catching these unchanged, while new code can narrow to
+# `except CudaLinkError` (or a specific subclass) instead.
+
+
+class CudaLinkError(RuntimeError):
+    """Base class for all cuda-link library-specific exceptions."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code  # raw CUDA error code, when available — see CUDAError.get_name()
+
+
+class CudaIpcError(CudaLinkError):
+    """A CUDA driver/runtime call (alloc, IPC handle, event, memcpy, ...) failed."""
+
+
+class ProtocolError(CudaLinkError, ValueError):
+    """The SHM wire protocol was violated (bad magic, version, or field value).
+
+    Also inherits ValueError so existing `except ValueError` sites keep working.
+    """
+
+
+class ProducerTimeoutError(CudaLinkError, TimeoutError):
+    """Timed out waiting for the producer to signal a slot/doorbell.
+
+    Also inherits TimeoutError so existing `except TimeoutError` sites
+    (e.g. per-frame timeout handling in importer.py) keep working unchanged.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -189,3 +259,11 @@ IPC_MEM_LAZY_ENABLE_PEER_ACCESS: int = 1
 
 # cudaHostAllocPortable — pinned allocation visible from any CUDA context in the process.
 HOST_ALLOC_PORTABLE: int = 0x01
+
+# --- cudaDeviceAttr values used with get_device_attribute() ---
+# NOTE: cudaDevAttrAsyncEngineCount was previously documented (and used in tests) as 4.
+# Per CUDA 12.8/13.3 driver_types.h it is 40; attribute 4 is cudaDevAttrMaxBlockDimZ, an
+# unrelated value that a caller using the old constant would silently receive instead.
+CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT: int = 40  # cudaDevAttrAsyncEngineCount — DMA copy engine count
+CUDA_DEV_ATTR_IPC_EVENT_SUPPORT: int = 125  # cudaDevAttrIpcEventSupport — 0 if this device/driver
+# cannot support CUDA IPC events (used by check_ipc_capability() in cuda_ipc_wrapper.py)

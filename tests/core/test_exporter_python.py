@@ -165,6 +165,66 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
         exp.close()
 
 
+# ---------------------------------------------------------------------------
+# _initialize() — check_ipc_capability() wiring
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_logs_ipc_capability_note_when_present() -> None:
+    """A non-None check_ipc_capability() return is logged via logger.info before
+
+    any IPC handle is minted (see the ipc_capability_note comment in _initialize()).
+    """
+    from unittest.mock import patch
+
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
+    from cuda_link.exporter import Exporter
+
+    fake = FakeCUDAAdapter(device=0)
+    fake.check_ipc_capability = lambda device=None: "WDDM driver model; legacy CUDA IPC is undocumented here."
+    with patch("cuda_link.exporter.logger") as mock_logger:
+        exp = Exporter.open(
+            FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
+            policy=ExportPolicy.for_testing(),
+            cuda=fake,
+        )
+    try:
+        messages = [str(c.args[0]) for c in mock_logger.info.call_args_list if c.args]
+        assert any("WDDM driver model" in m for m in messages)
+    finally:
+        exp.close()
+
+
+def test_initialize_propagates_ipc_capability_failure_and_cleans_up() -> None:
+    """cudaDevAttrIpcEventSupport == 0 -> check_ipc_capability() raises -> open()
+
+    propagates it and still runs cleanup (mirrors the pre-existing device-mismatch
+    cleanup contract: open() must leave no half-initialized state on any failure
+    inside _initialize()).
+    """
+    from unittest.mock import patch
+
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
+    from cuda_link.exporter import Exporter
+
+    fake = FakeCUDAAdapter(device=0)
+    fake.fail_ipc_capability = True
+    original_do_cleanup = Exporter._do_cleanup
+    with (
+        patch.object(Exporter, "_do_cleanup", autospec=True, side_effect=original_do_cleanup) as mock_cleanup,
+        pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"),
+    ):
+        Exporter.open(
+            FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
+            policy=ExportPolicy.for_testing(),
+            cuda=fake,
+        )
+    mock_cleanup.assert_called_once()
+    assert mock_cleanup.call_args.kwargs["cuda_valid"] is False
+
+
 def test_read_hws_mode_returns_unknown_without_winreg() -> None:
     """_read_hws_mode degrades to 'unknown' on platforms without winreg.
 

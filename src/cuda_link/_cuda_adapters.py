@@ -133,6 +133,8 @@ class FakeCUDAAdapter:
       - Set fail_on_malloc_count = N to make the Nth malloc() call raise.
       - Set fail_on_stream_create = True to make create_stream / _with_priority raise.
       - Set fail_on_event_create = True to make create_ipc_event raise.
+      - Set fail_ipc_capability = True to make check_ipc_capability() raise (simulates
+        cudaDevAttrIpcEventSupport == 0).
 
     Graph simulation:
       - graph_instantiate / graph_launch are no-ops (returns _FakeHandle).
@@ -152,6 +154,7 @@ class FakeCUDAAdapter:
         self.fail_on_malloc_count: int | None = None
         self.fail_on_stream_create: bool = False
         self.fail_on_event_create: bool = False
+        self.fail_ipc_capability: bool = False
         self._malloc_call_count = 0
 
         # Sticky-error simulation
@@ -313,6 +316,18 @@ class FakeCUDAAdapter:
     def check_sticky_error(self, context: str) -> None:
         if self._sticky_error != 0:
             raise RuntimeError(f"FakeCUDAAdapter: sticky error {self._sticky_error} after {context}")
+
+    def check_ipc_capability(self, device: int | None = None) -> str | None:
+        """Simulated IPC capability probe.
+
+        Returns None (nothing to report) by default. Set
+        ``fail_ipc_capability = True`` to simulate cudaDevAttrIpcEventSupport == 0
+        (tests the Exporter.open() failure path without a real GPU).
+        """
+        if self.fail_ipc_capability:
+            resolved_device = device if device is not None else self.device
+            raise RuntimeError(f"FakeCUDAAdapter: simulated cudaDevAttrIpcEventSupport=0 for device {resolved_device}")
+        return None
 
     # --- CUDA Graphs -------------------------------------------------------
 

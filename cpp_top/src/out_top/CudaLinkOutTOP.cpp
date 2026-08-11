@@ -43,8 +43,8 @@ constexpr int32_t kNumInfoCHOPChans = 9;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
-// last_error_frame).
-constexpr int32_t kNumInfoDATRows = 4;
+// last_error_frame, init_note).
+constexpr int32_t kNumInfoDATRows = 5;
 
 // Monotonic seconds as a double, for the wire timestamp field consumed as a latency
 // measurement (importer.py subtracts this from a same-domain "now" to get elapsed time --
@@ -117,6 +117,7 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+    myInitNote = session.note;
 
     // CUDA Graphs opt-in (PLAN-005 §2.1, default OFF). Read once at construction --
     // checkParameterChanges() already refreshes myDebugLog per cook the same way Parameters
@@ -690,6 +691,21 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
         // Step 0/1: cached-diff parameter-change detection + Active gate.
         checkParameterChanges(inputs);
+
+        // One-time emission of the ctor's device-session diagnostic (skipped/failed IPC
+        // capability probe, WDDM/TCC support-envelope note, ...). myDebugLog isn't enabled
+        // yet at construction time (the Debug toggle is only readable via OP_Inputs, which
+        // the ctor doesn't have), so this is deferred to the first cook, right after
+        // checkParameterChanges() has refreshed myDebugLog's enabled state above. myInitNote
+        // itself is left intact (not cleared) so it stays reachable via the init_note Info
+        // DAT row for the rest of this instance's lifetime.
+        if (!myInitNoteLogged) {
+            myInitNoteLogged = true;
+            if (!myInitNote.empty()) {
+                debugLog("init: " + myInitNote);
+            }
+        }
+
         if (!Parameters::evalActive(inputs)) {
             myStatus = "Idle";
             return;
@@ -998,7 +1014,7 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
 }
 
 bool CudaLinkOutTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame
+    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
@@ -1021,6 +1037,12 @@ void CudaLinkOutTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEnt
         } else if (index == 3) {
             entries->values[0]->setString("last_error_frame");
             entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
+        } else if (index == 4) {
+            // Ctor-time device-session diagnostic (see the emission comment in execute()) --
+            // surfaced here too so it's reachable without turning Debug on. Empty when the
+            // IPC capability probe succeeded with nothing to report.
+            entries->values[0]->setString("init_note");
+            entries->values[1]->setString(myInitNote.c_str());
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

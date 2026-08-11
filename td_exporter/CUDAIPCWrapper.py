@@ -52,6 +52,8 @@ try:
     # cuda_link.cuda_runtime_types before this module is imported, so this succeeds.
     # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
     from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
+        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
         HOST_ALLOC_PORTABLE,
         IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
@@ -60,6 +62,8 @@ try:
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
+        CudaIpcError,
+        CudaLinkError,
         StreamFlags,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
@@ -70,6 +74,8 @@ except (ImportError, ModuleNotFoundError):
     # Fallback: pure package context where CUDARuntimeTypes is not yet in sys.modules
     # (e.g. imported before the bootstrap runs, or in a standalone test environment).
     from cuda_link.cuda_runtime_types import (  # noqa: E402
+        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
         HOST_ALLOC_PORTABLE,
         IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
@@ -78,6 +84,8 @@ except (ImportError, ModuleNotFoundError):
         CUDAGraphExec_t,
         CUDAGraphNode_t,
         CUDAStream_t,
+        CudaIpcError,
+        CudaLinkError,
         StreamFlags,
         cudaIpcEventHandle_t,
         cudaIpcMemHandle_t,
@@ -132,6 +140,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self._retained_ctx_device: int | None = None
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
+        self._check_pointer_attributes_abi()
         # Load the driver API (nvcuda.dll) for primary-context save/restore in set_device().
         # Must follow _setup_function_signatures() so cudart argtypes are already wired.
         self._drv: ctypes.CDLL | None = self._load_driver_api()
@@ -235,8 +244,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             if winerror == 126
             else ""
         )
-        raise RuntimeError(
-            "Could not load CUDA runtime. Please ensure CUDA 12.x or 13.x is installed.\n"
+        raise CudaLinkError(
+            "Could not load CUDA runtime. Please ensure CUDA 11.x, 12.x, or 13.x is installed.\n"
             f"Tried paths: {dll_paths}\n"
             f"Tried names: {dll_names}"
             f"{err_detail}{hint_126}"
@@ -271,6 +280,42 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                 print(f"[CUDAIPC] cudart loaded: {buf.value}", flush=True)
         except OSError as e:
             print(f"[CUDAIPC] cudart loaded: {hint} (could not resolve path: {e})", flush=True)
+
+    def _check_pointer_attributes_abi(self) -> None:
+        """Log which cudaPointerAttributes layout the loaded runtime implies.
+
+        cudaPointerAttributes changed shape between CUDA 12.x (24 bytes) and CUDA 13.x
+        (56 bytes — added ``long reserved[8]``); see the ABI note on the struct
+        definition in cuda_runtime_types.py. This binding's ctypes struct is sized to
+        the newest layout known at the time this code was written (13.x). The
+        `_abi_guard()` checks in that module only validate the ctypes definition
+        against itself — they cannot detect a future runtime introducing yet another
+        layout change. This method closes that blind spot by comparing the *actual
+        loaded runtime's* version against the newest layout this binding knows about,
+        and warns instead of silently risking a truncated/misaligned read.
+
+        Must run after _setup_function_signatures() (cudaRuntimeGetVersion argtypes).
+        """
+        version = self.get_runtime_version()
+        major = version // 1000
+        if major >= 14:
+            _logger.warning(
+                "Loaded CUDA runtime version %d (major %d.x) is newer than any "
+                "cudaPointerAttributes layout this binding has verified (checked "
+                "through CUDA 13.x: 56-byte struct with reserved[8]). If NVIDIA changed "
+                "the struct again in CUDA %d.x, pointer_get_attributes() may read a "
+                "stale/misaligned result. Check driver_types.h for this runtime and "
+                "update cuda_runtime_types.cudaPointerAttributes if the layout changed.",
+                version,
+                major,
+                major,
+            )
+        else:
+            _logger.debug(
+                "Loaded CUDA runtime version %d implies cudaPointerAttributes layout: %s",
+                version,
+                "56 bytes (reserved[8], CUDA 13.x+)" if major >= 13 else "24 bytes (legacy, pre-13.x)",
+            )
 
     def _load_driver_api(self) -> ctypes.CDLL | None:
         """Load nvcuda.dll (CUDA Driver API) and bind the 5 context-management symbols.
@@ -473,7 +518,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaHostAlloc.restype = c_int
 
         # cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr, int device)
-        # Used to query cudaDevAttrAsyncEngineCount (attr=4) — how many DMA copy engines exist.
+        # Used to query e.g. cudaDevAttrAsyncEngineCount (attr=40, CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT)
+        # — how many DMA copy engines exist — and cudaDevAttrIpcEventSupport (attr=125,
+        # CUDA_DEV_ATTR_IPC_EVENT_SUPPORT) — see check_ipc_capability() below.
         self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
         self.cudart.cudaDeviceGetAttribute.restype = c_int
 
@@ -578,7 +625,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             if result != 0:
                 cstr = cudart.cudaGetErrorString(result)
                 error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
-                raise RuntimeError(f"CUDA {func.__name__} failed: {error_str} (code {result})")
+                raise CudaIpcError(f"CUDA {func.__name__} failed: {error_str} (code {result})", code=result)
             return result
 
         _strict_funcs = (
@@ -1240,6 +1287,13 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
 
         Raises:
             RuntimeError: If query fails (e.g., unregistered host pointer passed)
+
+        Note:
+            The out-param buffer is deliberately sized to the largest known
+            cudaPointerAttributes layout (CUDA 13.x's 56-byte struct — see the
+            ABI note on the class) rather than the loaded cudart's actual layout,
+            since this wrapper does not branch on runtime version here. An older
+            cudart simply writes fewer bytes into a larger buffer, which is safe.
         """
         attrs = cudaPointerAttributes()
         self.cudart.cudaPointerGetAttributes(byref(attrs), c_void_p(ptr))
@@ -1298,8 +1352,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
     def get_device_attribute(self, attr: int, device: int | None = None) -> int:
         """Query a cudaDeviceAttr value for a given device.
 
-        Common attrs:
-            cudaDevAttrAsyncEngineCount = 4 — number of DMA copy engines
+        Common attrs (see cuda_runtime_types.py):
+            CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT (40) — number of DMA copy engines
+            CUDA_DEV_ATTR_IPC_EVENT_SUPPORT (125) — 0 if CUDA IPC events are unsupported
 
         Args:
             attr:   cudaDeviceAttr integer constant.
@@ -1316,6 +1371,86 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         value = c_int()
         self.cudart.cudaDeviceGetAttribute(byref(value), c_int(attr), c_int(device))
         return value.value
+
+    def check_ipc_capability(self, device: int | None = None) -> str | None:
+        """Probe whether this device/driver combination supports CUDA IPC.
+
+        NVIDIA documents the legacy ``cudaIpc*`` API as Linux-only, and on Windows
+        as supported only under the TCC driver model (see the ``simpleIPC`` sample,
+        which gates on ``prop.tccDriver``). cuda-link runs it on Windows WDDM, which
+        works in practice — see docs/adr/0004-legacy-cuda-ipc-over-vmm.md — but is
+        outside NVIDIA's documented support envelope. This method does NOT fail on
+        WDDM; that is this project's normal, supported-by-evidence configuration.
+
+        It raises only when the driver reports CUDA IPC events as flatly
+        unsupported for this device (cudaDevAttrIpcEventSupport == 0) — an
+        unambiguous "this cannot work here" signal, as opposed to the
+        undocumented-but-working WDDM configuration.
+
+        This probe is purely diagnostic and must never abort exporter initialization
+        on its own: cudaDevAttrIpcEventSupport (125) is a CUDA 12.0+ attribute (the
+        loader also accepts an 11.x cudart — see _load_cuda_runtime(), and TouchDesigner
+        ships cudart64_110.dll), so the query is version-gated, and any unexpected query
+        failure degrades to a logged note rather than propagating.
+
+        Args:
+            device: GPU device index. Defaults to self.device.
+
+        Returns:
+            A one-line diagnostic to log (present on Windows, or when the query was
+            skipped/failed, to give context if a later cudaIpc* call fails with error
+            400/801), or None if there is nothing noteworthy to report (e.g. non-Windows
+            with a successful query).
+
+        Raises:
+            CudaIpcError: If cudaDevAttrIpcEventSupport reports 0 for this device.
+        """
+        if device is None:
+            device = self.device
+
+        try:
+            runtime_version = self.get_runtime_version()
+        except (RuntimeError, OSError) as exc:
+            _logger.debug("check_ipc_capability: get_runtime_version() failed: %s", exc)
+            runtime_version = 0
+
+        if runtime_version < CUDART_IPC_EVENT_SUPPORT_MIN_VERSION:
+            return (
+                f"CUDA IPC capability probe skipped: runtime version {runtime_version} predates "
+                f"cudaDevAttrIpcEventSupport (added in CUDA {CUDART_IPC_EVENT_SUPPORT_MIN_VERSION}). "
+                "If IPC calls fail with error 400 (cudaErrorInvalidResourceHandle) or 801 "
+                "(cudaErrorNotSupported), this older runtime is a plausible cause."
+            )
+
+        try:
+            support = self.get_device_attribute(CUDA_DEV_ATTR_IPC_EVENT_SUPPORT, device)
+        except CudaIpcError as exc:
+            _logger.debug("check_ipc_capability: cudaDevAttrIpcEventSupport query failed: %s", exc)
+            return (
+                f"CUDA IPC capability probe: could not query cudaDevAttrIpcEventSupport for "
+                f"device {device} on runtime {runtime_version} ({exc}). Continuing without this "
+                "diagnostic; if IPC calls fail with error 400 or 801, this is a plausible cause."
+            )
+
+        if support == 0:
+            raise CudaIpcError(
+                f"CUDA device {device} reports cudaDevAttrIpcEventSupport=0 — this GPU/driver "
+                "combination does not support CUDA IPC events, so cuda-link cannot function on "
+                "it. NVIDIA documents legacy CUDA IPC as Linux-only, or Windows-TCC-only; this "
+                "project's Windows-WDDM support is an undocumented-but-validated configuration "
+                "(see docs/adr/0004-legacy-cuda-ipc-over-vmm.md) — if you are on WDDM and still "
+                "see this, the failure is specific to this device/driver, not the OS mode."
+            )
+        if os.name == "nt":
+            return (
+                f"CUDA IPC capability probe: device {device} reports IPC event support. Running "
+                "on Windows — NVIDIA documents legacy CUDA IPC as Linux-only / Windows-TCC-only; "
+                "cuda-link relies on Windows-WDDM behaviour that works in practice but is outside "
+                "NVIDIA's documented support envelope (see docs/adr/0004-legacy-cuda-ipc-over-vmm.md). "
+                "If IPC calls fail with error 400 (cudaErrorInvalidResourceHandle) or 801 "
+                "(cudaErrorNotSupported), this undocumented-support gap is the most likely cause."
+            )
+        return None
 
 
 # Global singleton instance (lazy initialization)

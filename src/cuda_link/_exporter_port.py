@@ -297,6 +297,15 @@ class CudaPort(Protocol):
         """Warn and raise if a sticky CUDA error is latched. No-op when all is well."""
         ...
 
+    def check_ipc_capability(self, device: int | None = None) -> str | None:
+        """Probe CUDA IPC support for this device; return a diagnostic string to log.
+
+        Raises only when the driver reports IPC as flatly unsupported (not merely
+        undocumented, e.g. Windows WDDM — which is this project's normal config).
+        See CUDARuntimeAPI.check_ipc_capability() in cuda_ipc_wrapper.py.
+        """
+        ...
+
     # --- CUDA Graphs (optional path; gated by ExportPolicy.use_graphs) ----
 
     def get_runtime_version(self) -> int:
