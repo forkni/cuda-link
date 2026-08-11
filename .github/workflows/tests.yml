@@ -35,10 +35,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -65,7 +65,7 @@ jobs:
         run: pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing --cov-report=xml -q
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5
         with:
           files: ./coverage.xml
           flags: main
@@ -76,7 +76,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: coverage-main-${{ matrix.python-version }}
           path: coverage.xml
@@ -88,10 +88,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: '3.11'
           cache: pip
@@ -116,7 +116,7 @@ jobs:
         run: cd spout && pytest tests -m "not requires_spout" --cov=cuda_link_spout --cov-report=term-missing --cov-report=xml -q
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5
         with:
           files: ./spout/coverage.xml
           flags: spout
@@ -125,7 +125,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: coverage-spout
           path: spout/coverage.xml
@@ -137,10 +137,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: '3.11'
           cache: pip
@@ -166,7 +166,7 @@ jobs:
         run: cd native && pytest tests -m "not requires_native" --cov=cuda_link_native --cov-report=term-missing --cov-report=xml -q
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5
         with:
           files: ./native/coverage.xml
           flags: native
@@ -175,7 +175,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: coverage-native
           path: native/coverage.xml

@@ -18,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Run markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@v15
+        uses: DavidAnson/markdownlint-cli2-action@510b996878fc0d1a46c8a04ec86b06dbfba09de7  # v15
         with:
           globs: |
             **/*.md
@@ -37,10 +37,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Check documentation links
-        uses: lycheeverse/lychee-action@v1
+        uses: lycheeverse/lychee-action@2b973e86fc7b1f6b36a93795fe2c9c6ae1118621  # v1
         with:
           args: |
             --verbose
@@ -59,10 +59,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Check spelling
-        uses: crate-ci/typos@master
+        uses: crate-ci/typos@5e38bf262baaf477ca9f241b3a7cd3d277fd7df8  # master (2026-08-11)
         with:
           files: docs/ README.md
         continue-on-error: true
