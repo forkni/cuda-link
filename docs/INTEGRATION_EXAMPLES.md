@@ -511,7 +511,7 @@ wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.
 
 ### Requirements
 
-- Windows only (Win32 `CreateNamedEvent`)
+- Windows only (Win32 `CreateEventW`)
 - `CUDALINK_DOORBELL=1` set on **both** TD Sender and Python consumer before either process starts
 - Single consumer per channel only
 
