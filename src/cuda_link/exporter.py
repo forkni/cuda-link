@@ -250,6 +250,15 @@ class Exporter:
             )
         logger.info("Loaded CUDA runtime on device %d", actual_device)
 
+        # Raises only when the driver reports CUDA IPC as flatly unsupported on this
+        # device; Windows WDDM (this project's normal, undocumented-but-validated
+        # configuration — see docs/adr/0004-legacy-cuda-ipc-over-vmm.md) returns a
+        # message here rather than raising. Logged before any IPC handle is minted so
+        # a later error 400/801 has this context available.
+        ipc_capability_note = self._cuda.check_ipc_capability()
+        if ipc_capability_note:
+            logger.info(ipc_capability_note)
+
         hws_mode = _read_hws_mode()
         logger.info("WDDM HwSchMode: %s (0=software, 2=hardware/GPU-P, unknown=non-Windows)", hws_mode)
         if hws_mode == "0":

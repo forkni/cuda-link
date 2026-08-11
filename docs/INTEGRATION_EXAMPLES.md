@@ -13,11 +13,13 @@ Complete workflows for common CUDA IPC use cases.
 ## Example 1: TouchDesigner → PyTorch AI Pipeline (Zero-Copy)
 
 ### Use Case
+
 Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner video feed.
 
 ### TouchDesigner Setup
 
 1. **Network Layout**:
+
 ```
 Movie File In TOP → CUDAIPCExtension (Mode=Sender)
                     (Ipcmemname="ai_input")
@@ -92,6 +94,7 @@ with Importer.open(ImportSpec(
 ## Example 2: TouchDesigner → OpenCV Processing (Numpy)
 
 ### Use Case
+
 Traditional computer vision (edge detection, feature tracking, etc.) on TouchDesigner feed.
 
 ### TouchDesigner Setup
@@ -146,6 +149,7 @@ cv2.destroyAllWindows()
 ## Example 3: Multiple Texture Streams (Main + ControlNet)
 
 ### Use Case
+
 AI pipeline with two inputs: main image + control signal (depth map, edges, etc.).
 
 ### TouchDesigner Setup
@@ -223,6 +227,7 @@ finally:
 ## Example 4: Dynamic Resolution Handling
 
 ### Use Case
+
 Source TOP resolution changes at runtime (user resizes window, switches camera, etc.).
 
 ### TouchDesigner Setup
@@ -268,6 +273,7 @@ steady-state resumes at `NEW_FRAME` with the new shape automatically.
 ## Example 5: Graceful Shutdown Handling
 
 ### Use Case
+
 Cleanly shut down Python process when TouchDesigner exits.
 
 ### TouchDesigner Setup
@@ -324,6 +330,7 @@ print("Clean shutdown complete")
 ## Example 6: Benchmarking IPC Performance
 
 ### Use Case
+
 Measure IPC overhead for your specific hardware.
 
 > **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99,
@@ -450,12 +457,14 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 5. **Wire**: Script TOP → your display chain
 
 In the Script TOP's `onCook` callback:
+
 ```python
 def onCook(scriptOp):
     ext.CUDAIPCExtension.import_frame(scriptOp)
 ```
 
 **TouchDesigner Network**:
+
 ```
 Script TOP (receives AI frames via IPC)
     → Composite TOP
@@ -475,6 +484,7 @@ Script TOP (receives AI frames via IPC)
 Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENCHMARKS.md).
 
 **Real-world example** (StreamDiffusion SDXL + ControlNet + V2V):
+
 - AI inference: ~32ms/frame (31 FPS)
 - IPC export overhead: small fraction of inference time
 - TD display: 60 FPS locked (reads latest available frame)
@@ -491,7 +501,7 @@ wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.
 
 ### Requirements
 
-- Windows only (Win32 `CreateNamedEvent`)
+- Windows only (Win32 `CreateEventW`)
 - `CUDALINK_DOORBELL=1` set on **both** TD Sender and Python consumer before either process starts
 - Single consumer per channel only
 
@@ -535,6 +545,7 @@ with Importer.open(ImportSpec(
 ```
 
 **Performance** (TD Sender → Python subprocess, 60 FPS):
+
 - CPU idle: ~0.3-1% (vs ~3-4% poll baseline)
 - Notify latency p95: 0.02–0.10 ms (vs 0.04–1.80 ms poll baseline), ~10× tighter
 - Teardown: IPC handles close in ~0.6 ms (no 2 s hang, no orphaned handles)
@@ -643,6 +654,7 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 **Cause**: GPU sync fallback to CPU, or AI model bottleneck.
 
 **Solution**:
+
 1. Enable IPC events in TD (`Numslots`=3)
 2. Profile AI model: `torch.cuda.synchronize()` before/after inference
 3. Check GPU utilization: `nvidia-smi` should show ~90%+ for real-time AI

@@ -72,7 +72,7 @@ graphs ON → 1 submission/frame (`cudaGraphLaunch`, 550 calls; waitEvent/eventR
 Region            Cell A (µs)   Cell D (µs)   Notes
 --------------    -----------   -----------   ----------------------------------------
 stream_wait            1.26          0.00     folded into CUDA graph (P3)
-memcpy                 7.76          6.77     PCIe-bound, ~22 GB/s
+memcpy                 7.76          6.77     device-to-device (same GPU), HBM-bound, ~1 TB/s class
 record_event           4.50          0.00     folded into CUDA graph (P3)
 shm_write              1.92          1.21     SHM slot write (unaffected)
 sync                  17.91          0.00     cudaStreamSynchronize eliminated (P1)
@@ -82,6 +82,7 @@ flush_probe            0.00          1.13     stream query kick (async path only
 Note: WDDM submission count/frame is inferred from nsys call counts ÷ frame count.
 
 Reproduce (all four cells; on Windows use `SET VAR=value &` prefix):
+
 ```bash
 CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_A.json
 CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_B.json
@@ -113,6 +114,7 @@ transitions but the net wall-clock difference is small (<5%). See the P1/P3 sect
 for the full breakdown including async mode (the large win).
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
 ```
@@ -152,6 +154,7 @@ P5 contract verified on real GPU: first `get_frame_numpy()` returns `NO_FRAME` (
 on all three resolutions.
 
 Reproduce:
+
 ```bash
 python scripts/profiling/bench_d2h_pipelined.py --resolution all --work-ms 5 --frames 150
 ```
@@ -175,6 +178,7 @@ PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_
 (default) is optimal for this platform.
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_d2h_streams.py --frames 2000 --streams 1 2 --sizes 512 1280 1920 3840
 ```
@@ -209,6 +213,7 @@ Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder
 > and are unaffected.
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
 python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
@@ -407,6 +412,7 @@ doorbell, never worse) and the seam is clean, tested, and fully reversible
 > explicitly points here instead of asserting a PASS/MISS against the wrong metric.
 
 Reproduce:
+
 ```bash
 python scripts/profiling/bench_doorbell.py --outfile .profiling/r5_doorbell.json
 python scripts/profiling/bench_r1_wait.py --outfile .profiling/r5_wait.json  # informational only, see note above

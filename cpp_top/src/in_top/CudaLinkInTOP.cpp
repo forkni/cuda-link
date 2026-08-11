@@ -36,7 +36,7 @@ namespace {
 constexpr int32_t kNumInfoCHOPChans = 15; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot,
                                           // num_slots, event_wait_us, gpu_copy_us, noframe_count,
                                           // version_changed_count, rescued_count, graph_hits, graph_builds
-constexpr int32_t kNumInfoDATRows = 4;    // ipc_version, status, last_error, last_error_frame
+constexpr int32_t kNumInfoDATRows = 5;    // ipc_version, status, last_error, last_error_frame, init_note
 } // namespace
 
 extern "C" {
@@ -90,6 +90,7 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+    myInitNote = session.note;
 
     // CUDA Graphs opt-in (PLAN-005 task #13 / ADR-0011, default OFF). Deliberately the SAME
     // env var the Out TOP reads: its parked path self-disables at frame 3 when set (harmless
@@ -626,6 +627,20 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         // Step 0: cached-diff parameter-change detection (no push notification exists).
         checkParameterChanges(inputs);
 
+        // One-time emission of the ctor's device-session diagnostic (skipped/failed IPC
+        // capability probe, WDDM/TCC support-envelope note, ...). myDebugLog isn't enabled
+        // yet at construction time (the Debug toggle is only readable via OP_Inputs, which
+        // the ctor doesn't have), so this is deferred to the first cook, right after
+        // checkParameterChanges() has refreshed myDebugLog's enabled state above. myInitNote
+        // itself is left intact (not cleared) so it stays reachable via the init_note Info
+        // DAT row for the rest of this instance's lifetime.
+        if (!myInitNoteLogged) {
+            myInitNoteLogged = true;
+            if (!myInitNote.empty()) {
+                debugLog("init: " + myInitNote);
+            }
+        }
+
         // Step 1: Active gate + SHM open (retried every cook -- no backoff needed for a
         // per-cook-polled Custom TOP).
         if (!Parameters::evalActive(inputs)) {
@@ -984,7 +999,7 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
 }
 
 bool CudaLinkInTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame
+    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
@@ -1009,6 +1024,12 @@ void CudaLinkInTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEntr
         } else if (index == 3) {
             entries->values[0]->setString("last_error_frame");
             entries->values[1]->setString(std::to_string(myLastErrorFrame).c_str());
+        } else if (index == 4) {
+            // Ctor-time device-session diagnostic (see the emission comment in execute()) --
+            // surfaced here too so it's reachable without turning Debug on. Empty when the
+            // IPC capability probe succeeded with nothing to report.
+            entries->values[0]->setString("init_note");
+            entries->values[1]->setString(myInitNote.c_str());
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

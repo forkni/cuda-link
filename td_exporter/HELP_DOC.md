@@ -2,7 +2,7 @@
 
 > **Name:** CUDA-Link
 > **Description:** Zero-copy GPU texture sharing via CUDA IPC
-> **Author:** forkni (forkni@gmail.com)
+> **Author:** forkni (<forkni@gmail.com>)
 
 **Zero-copy GPU texture sharing between TouchDesigner and external Python processes using CUDA Inter-Process Communication (IPC).**
 
@@ -82,6 +82,7 @@ If the Python consumer has `CUDALINK_D2H_PIPELINED=1` enabled, it drains the in-
 ## Parameters
 
 ### Active
+
 **Type:** Toggle | **Default:** On
 
 Master enable/disable switch for the CUDA IPC pipeline.
@@ -94,6 +95,7 @@ Master enable/disable switch for the CUDA IPC pipeline.
 ---
 
 ### Mode
+
 **Type:** Menu | **Default:** Sender | **Options:** Sender / Receiver
 
 Sets the direction of data flow.
@@ -106,6 +108,7 @@ Switching modes triggers a full cleanup of the current state and lazy re-initial
 ---
 
 ### Ipcmemname
+
 **Type:** String | **Default:** `cudalink_ipc_TD>>Python` (Sender mode) / `cudalink_ipc_Python>>TD` (Receiver mode)
 
 The name of the OS shared memory segment used to exchange GPU handles between the sender and receiver.
@@ -113,6 +116,7 @@ The name of the OS shared memory segment used to exchange GPU handles between th
 Both sides **must use the exact same name**. On Windows, this maps to a named `CreateFileMapping` kernel object.
 
 Changing this parameter while active triggers a full cleanup and reconnection:
+
 - In Sender mode: re-initializes on the next frame export.
 - In Receiver mode: immediately resets the retry counter and attempts to connect on the next frame start (without waiting through the current backoff interval).
 
@@ -121,6 +125,7 @@ Use different names to run multiple independent sender/receiver pairs simultaneo
 ---
 
 ### Numslots
+
 **Type:** Integer Menu | **Default:** 3 | **Options:** 2 / 3 / 4
 
 Number of ring buffer slots in the GPU pipeline.
@@ -130,6 +135,7 @@ Number of ring buffer slots in the GPU pipeline.
 - **3 slots (default)** is sufficient for the vast majority of use cases.
 
 **Lock behavior:**
+
 - Only editable when `Mode = Sender` and `Active = Off`.
 - Locked automatically when `Active` is turned On.
 - In Receiver mode: always locked. The actual slot count is read from the sender's shared memory and displayed here for reference.
@@ -139,6 +145,7 @@ Changing this parameter while active is silently ignored. Changing it while inac
 ---
 
 ### Status
+
 **Type:** String (read-only) | **Default:** `Idle`
 
 Live status display — updated every frame while the component is active. Cannot be edited.
@@ -153,6 +160,7 @@ Live status display — updated every frame while the component is active. Canno
 ---
 
 ### Debug
+
 **Type:** Toggle | **Default:** Off
 
 Enables verbose performance logging to the TouchDesigner Textport. Behaviour differs by mode.
@@ -172,9 +180,11 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
   - `sync mode` — whether GPU-event synchronization or CPU-sync fallback is active
 
   **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
+
   ```
   [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
   ```
+
   The `export=` figure is a **windowed (~150-frame) average** that resets with each report;
   it reflects the current session's performance, not a lifetime mean.
 
@@ -186,9 +196,11 @@ GPU timing events (`cudaEventElapsedTime`) are only created during initializatio
 
 - **On:** every 150 frames (configurable via `CUDALINK_RECEIVER_REPORT_EVERY` env var), prints a
   per-frame summary line:
+
   ```
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
+
   - **FPS** — frames consumed ÷ wall time since the first consumed frame
   - **shape** — texture dimensions in numpy H×W×C order
   - **latency** — `now − producer_timestamp`; valid when sender and receiver run on the same machine (TD→TD and Python→TD setups use `time.perf_counter` which is system-wide on Windows)
@@ -206,6 +218,7 @@ Hot-swappable in both modes: can be toggled at runtime without affecting the pip
 ---
 
 ### Hide Built-In
+
 **Type:** Toggle | **Default:** Off
 
 Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the parameter dialog, leaving only the CUDA IPC page visible.
@@ -229,6 +242,7 @@ Use this when distributing the component to end-users who should not need to int
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
 5. Toggle **Active** = On.
 6. In Python, install `cuda-link` and connect:
+
    ```python
    from cuda_link import Importer, ImportSpec, ImportOutcome
    importer = Importer.open(ImportSpec(shm_name="my_pipeline"))
@@ -245,6 +259,7 @@ to see all five install modes.
 ### Python → TD (Receiver mode)
 
 1. In Python, create an exporter:
+
    ```python
    from cuda_link import Exporter, FrameSpec, GpuFrame
    import torch
@@ -257,6 +272,7 @@ to see all five install modes.
        producer_stream=torch.cuda.current_stream().cuda_stream,
    ))
    ```
+
 2. Drop the component into TD and set **Mode** = `Receiver`.
 3. Set **Ipcmemname** to the same name (`ai_output`).
 4. Toggle **Active** = On. The receiver will connect automatically once the Python exporter is running.
@@ -275,7 +291,7 @@ Tuning table for break-even thresholds (1080p ~0.38 ms workload, 4K ~1.3 ms).
 | Per-frame IPC overhead | 0.5–2 µs | GPU event record + `write_idx` update |
 | First-frame initialization | 50–100 µs | One-time GPU buffer allocation + IPC handle creation |
 | D2D texture copy (1080p RGBA float32) | ~106 µs | Standalone, EXPORT_SYNC=1, RTX 4090 — runs fully on GPU |
-| Receiver `copyCUDAMemory` into TD (1080p) | ~3 ms | Includes CUDA→OpenGL interop inside TD |
+| Receiver `copyCUDAMemory` into TD (1080p) | ~3 ms | Includes CUDA→Vulkan interop inside TD |
 | D2H numpy copy (1080p RGBA float32) | 400–600 µs | Only when using `get_frame_numpy()` |
 
 **Baseline comparison:** CPU SharedMemory at 1080p RGBA float32 costs ~1.5 ms per frame — roughly **750× slower** than CUDA IPC.
@@ -285,27 +301,34 @@ Tuning table for break-even thresholds (1080p ~0.38 ms workload, 4K ~1.3 ms).
 ## Troubleshooting
 
 **Receiver stays in "waiting for sender" state**
+
 - Confirm the sender is running and `Active` is On before starting the receiver.
 - Verify `Ipcmemname` is identical on both sides (case-sensitive).
 - Check the Textport for retry messages — the receiver uses exponential backoff up to ~2 seconds between attempts.
 
 **"Stale SharedMemory" or version mismatch logged**
+
 - The sender was restarted while the receiver is still holding old IPC handles. Toggle the receiver's `Active` Off → On to force reconnection.
 
 **"Protocol magic mismatch" error**
+
 - Another process is using the same `Ipcmemname` for a different purpose. Change `Ipcmemname` to a unique value.
 
 **GPU memory not freed after deactivation**
+
 - `cudaFree` of ring buffer slots is deferred briefly after cleanup (a 100 ms grace period) to allow the consumer to finish its current frame. This is normal behavior.
 
 **`Numslots` is greyed out**
+
 - In Sender mode: toggle `Active` Off first to edit slot count.
 - In Receiver mode: slot count is controlled by the sender and cannot be set locally.
 
 **Debug shows high `cudaMemory` time (>0.5 ms)**
-- This is the OpenGL→CUDA interop step inside TouchDesigner's `top_op.cudaMemory()` call and is not controllable by this component. It is normal for large textures or when the GPU is under heavy load.
+
+- This is the Vulkan→CUDA interop step inside TouchDesigner's `top_op.cudaMemory()` call and is not controllable by this component. It is normal for large textures or when the GPU is under heavy load.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
+
 - This indicates a producer-side source-buffer lifetime race: the D2D memcpy read the TD
   texture after TD reclaimed it. From v1.10.1 the TD Sender **blocks by default** (post-copy
   `stream_synchronize`) so the source is live until `export()` returns — upgrade to
@@ -318,8 +341,12 @@ Tuning table for break-even thresholds (1080p ~0.38 ms workload, 4K ~1.3 ms).
 
 ## Requirements
 
-- **OS:** Windows 10 / 11 (CUDA IPC handle sharing is Windows-only)
+- **OS:** Windows 10 / 11. NVIDIA documents the legacy `cudaIpc*` API as Linux-only, and on
+  Windows as supported only under the TCC driver model — this project runs it on the default
+  WDDM driver model instead, which works in practice (see
+  `docs/adr/0004-legacy-cuda-ipc-over-vmm.md`) but is outside NVIDIA's documented support
+  envelope.
 - **CUDA:** 12.x (tested with 12.4 and 12.8)
-- **GPU:** NVIDIA, CUDA compute capability 3.5 or higher
+- **GPU:** Any NVIDIA GPU supporting the CUDA runtime IPC and Graphs APIs used above
 - **TouchDesigner:** 2022.x or later
 - **Python (consumer side):** 3.9+, `cuda-link` package (`pip install cuda-link`)

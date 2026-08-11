@@ -133,6 +133,19 @@ create the situation), and shipping any `cudart64_*.dll` beside the plugin (shad
 risk). Guard at init: `cudaRuntimeGetVersion()` major ≠ expected → error badge +
 refuse to cook.
 
+**Status: implemented** in `cudalink::common::CudaDeviceSession`
+(`cpp_top/src/common/cuda_device_session.h`) — `cudaRuntimeGetVersion()` is queried once
+in the ctor and compared as `runtimeVersion / 1000 != CUDART_VERSION / 1000`; a mismatch
+latches `error` + `fatal = true` before either TOP constructor proceeds to the IPC
+capability probe or stream creation, so a mismatched major version refuses to cook exactly
+as specified above (mixing runtime *major* versions is only supported statically linked,
+which this plugin deliberately never does). The same pass also hardened the adjacent IPC
+capability probe (`cudaDevAttrIpcEventSupport`, CUDA 12.0+) with the analogous compile-time
+(`#if CUDART_VERSION >= 12000`) and runtime gates the Python side already carried
+(`CUDARuntimeAPI.check_ipc_capability()`, `CUDART_IPC_EVENT_SUPPORT_MIN_VERSION`), plus a
+non-fatal `note` field for skipped/failed-probe and WDDM/TCC support-envelope diagnostics,
+surfaced via `debugLog()` on the first cook and a new `init_note` Info DAT row in both TOPs.
+
 ### D4 — Protocol core: TD-free, CUDA-free, golden-byte-pinned
 
 `src/core/shm_layout.h` transcribes the constants from `shm_protocol.py` **verbatim**

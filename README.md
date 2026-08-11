@@ -45,9 +45,13 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 ## Requirements
 
-- **OS**: Windows 10/11 (CUDA IPC is Windows-only)
-- **CUDA**: 12.x (tested with 12.4)
-- **GPU**: NVIDIA GPU with CUDA compute capability 3.5+
+- **OS**: Windows 10/11. NVIDIA documents the legacy `cudaIpc*` API as Linux-only, and on
+  Windows as supported only under the TCC driver model — this project runs it on the
+  default WDDM driver model instead, which works in practice (see
+  [ADR-0004](docs/adr/0004-legacy-cuda-ipc-over-vmm.md)) but is outside NVIDIA's documented
+  support envelope.
+- **CUDA**: 11.x / 12.x / 13.x (the loader prefers 13.x, then 12.x; tested with 12.4 and 12.8)
+- **GPU**: Any NVIDIA GPU supporting the CUDA runtime IPC and Graphs APIs used above
 - **TouchDesigner**: 2022.x or later (for producer side)
 - **Python**: 3.9+ (for consumer side)
 
@@ -85,7 +89,7 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 **Option C: Library mode (cleaner .tox — fewer Text DATs)**
 
 Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
-DAT then loads the package automatically — the 14 mirror Text DATs (Env, SHMProtocol,
+DAT then loads the package automatically — the 15 mirror Text DATs (Env, SHMProtocol,
 Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-target installer
 (one-time):
 
@@ -406,7 +410,6 @@ Full tables, per-resolution breakdowns, and CUDA Graphs A/B comparison: **[docs/
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](docs/PROFILING.md).
 
-
 ## Troubleshooting
 
 ### "SharedMemory not found"
@@ -545,5 +548,5 @@ MIT License - See LICENSE file
 
 ## Credits
 
-Original implementation by Forkni (forkni@gmail.com).
+Original implementation by Forkni (<forkni@gmail.com>).
 Extracted and refactored from the StreamDiffusionTD project.

@@ -195,6 +195,13 @@ private:
     std::string myLastError;
     uint64_t myLastErrorFrame = 0;
 
+    // Non-fatal diagnostic from CudaDeviceSession's ctor-time probe (skipped/failed IPC
+    // capability query, WDDM/TCC support-envelope note, ...). Persists for the lifetime of
+    // this instance (unlike myError/myWarning) so it stays reachable via the init_note Info
+    // DAT row even long after the one-time debugLog() emission on the first cook.
+    std::string myInitNote;
+    bool myInitNoteLogged = false;
+
     // Debug-gated diagnostics (see debugLog()). Enabled state is refreshed once per cook
     // from Parameters::evalDebug() so other methods don't need OP_Inputs threaded through.
     cudalink::common::DebugLogger myDebugLog{"cudalink_in_top_debug.log"};

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PLAN-001 §D3 runtime-version guard, implemented in
+  `cudalink::common::CudaDeviceSession`** (`cpp_top/src/common/cuda_device_session.h`):
+  `cudaRuntimeGetVersion()` is queried once at construction and compared against the
+  compile-time `CUDART_VERSION`; a major-version mismatch latches a fatal error before
+  either TOP proceeds, refusing to cook rather than risk mixing CUDA runtime *major*
+  versions (only supported statically linked, which this plugin deliberately never does).
+  Previously unimplemented (`git grep cudaRuntimeGetVersion cpp_top` returned nothing).
+  Also added a non-fatal `note` field on `CudaDeviceSession` for skipped/failed IPC
+  capability probes and a WDDM/TCC support-envelope diagnostic (see Fixed, below, and
+  [ADR-0004](docs/adr/0004-legacy-cuda-ipc-over-vmm.md)), surfaced via `debugLog()` on the
+  first cook and a new `init_note` Info DAT row in both `CudaLinkInTOP` and
+  `CudaLinkOutTOP`.
+
 - **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
   (opt-in via the `cuda-link-native` sidecar; `ImportPolicy.wait_backend`:
   `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
@@ -33,6 +46,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seam is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
 
 ### Fixed
+
+- **Ported a CUDA-docs verification pass (`fix/cuda-ipc-verification-findings`, merged to
+  `development` as PR #30) to this branch, in both Python and C++:**
+  - `cudaPointerAttributes`' ctypes layout was missing CUDA 13.x's added `reserved[8]`
+    field (24 bytes vs. the real 56-byte 13.x struct), silently handing an undersized
+    out-param to a 13.x `cudart` on the per-frame device-affinity path
+    (`src/cuda_link/cuda_runtime_types.py`); the `reserved` field is `ctypes.c_int32 * 8`,
+    not `ctypes.c_long` (which is host-platform-width and would inflate the struct further
+    on Linux). Also fixed `cudaDevAttrAsyncEngineCount` (was the wrong enum value, `4`
+    instead of `40`) and added `CUDARuntimeAPI.check_ipc_capability()`, version-gated below
+    CUDA 12.0 (`cudaDevAttrIpcEventSupport` is a 12.0+ attribute) so it degrades to a
+    logged note instead of aborting `Exporter.open()` on a CUDA 11.x runtime.
+  - **C++ `cudalink::common::CudaDeviceSession`'s own IPC capability probe had the same
+    class of defect**, independently discovered while porting the above: an unconditional
+    reference to `cudaDevAttrIpcEventSupport` (absent from CUDA 11.x's `driver_types.h`,
+    so a build against an 11.8 toolkit — a documented target leg, see PLAN-001 D3/D8 —
+    would not have compiled at all), no runtime gate for a pre-12 `cudart` loaded by a
+    12-built plugin (`cudaErrorInvalidValue`), and a query failure left silently
+    unhandled with the error still latched in the per-thread last-error slot for TD's own
+    CUDA code to trip over. Fixed with the same compile-time (`#if CUDART_VERSION >=
+    12000`) and runtime gates as the Python side, plus a `cudaGetLastError()` clear and a
+    diagnostic `note` on any query failure (see Added, above).
 
 - **`bench_r1_wait.py` R5 accept-gate measured the wrong metric.** The
   PASS/MISS check compared `get_frame()` total wall-clock time (spin + tensor
@@ -413,9 +448,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Debug timing summary in Receiver mode** (`25a0514`, `fc45578`) — `TDReceiverEngine` now
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
+
   ```
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
+
   Fields: **FPS** (frames consumed ÷ wall time since first frame); **latency** (`now −
   producer_timestamp` — valid on single-machine TD→TD / TD→Python setups); **copy** (running
   average of `copyCUDAMemory` wall time — the receiver's analogue of `get_frame= µs avg` in the
