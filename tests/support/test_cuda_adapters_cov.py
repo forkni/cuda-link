@@ -142,3 +142,12 @@ def test_check_ipc_capability_raises_when_injected():
     adapter.fail_ipc_capability = True
     with pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"):
         adapter.check_ipc_capability()
+
+
+def test_check_ipc_capability_message_preserves_explicit_device_zero():
+    # device=0 is falsy in Python — `device or self.device` would silently substitute
+    # self.device (1) here instead. Regression guard for that truthiness bug.
+    adapter = FakeCUDAAdapter(device=1)
+    adapter.fail_ipc_capability = True
+    with pytest.raises(RuntimeError, match="for device 0"):
+        adapter.check_ipc_capability(device=0)

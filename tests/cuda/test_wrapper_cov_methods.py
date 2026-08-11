@@ -728,6 +728,18 @@ def test_get_device_attribute_uses_explicit_device() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _mock_runtime_version(api: object, version: int) -> None:
+    """Make api.get_runtime_version() (cudaRuntimeGetVersion) report `version`.
+
+    Mirrors _fill_scalar_byref's byref-writeback trick, but cudaRuntimeGetVersion
+    takes a single out-param (no attr/device args), so the side_effect signature
+    differs from cudaDeviceGetAttribute's.
+    """
+    api.cudart.cudaRuntimeGetVersion.side_effect = lambda version_ptr: (
+        _fill_scalar_byref(version_ptr, c_int, version) or 0
+    )
+
+
 def test_check_ipc_capability_returns_none_when_not_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     import cuda_link.cuda_ipc_wrapper as _w
 
@@ -736,6 +748,7 @@ def test_check_ipc_capability_returns_none_when_not_windows(monkeypatch: pytest.
     monkeypatch.setattr(_w, "os", SimpleNamespace(name="posix"))
     api = make_bare_runtime_api()
     api.device = 0
+    _mock_runtime_version(api, 12080)
     api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
         _fill_scalar_byref(value_ptr, c_int, 1) or 0
     )
@@ -749,6 +762,7 @@ def test_check_ipc_capability_returns_diagnostic_on_windows(monkeypatch: pytest.
     monkeypatch.setattr(_w, "os", SimpleNamespace(name="nt"))
     api = make_bare_runtime_api()
     api.device = 0
+    _mock_runtime_version(api, 12080)
     api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
         _fill_scalar_byref(value_ptr, c_int, 1) or 0
     )
@@ -761,9 +775,47 @@ def test_check_ipc_capability_returns_diagnostic_on_windows(monkeypatch: pytest.
 def test_check_ipc_capability_raises_when_support_is_zero() -> None:
     api = make_bare_runtime_api()
     api.device = 0
+    _mock_runtime_version(api, 12080)
     api.cudart.cudaDeviceGetAttribute.side_effect = lambda value_ptr, attr, device: (
         _fill_scalar_byref(value_ptr, c_int, 0) or 0
     )
 
     with pytest.raises(CudaIpcError, match="cudaDevAttrIpcEventSupport=0"):
         api.check_ipc_capability()
+
+
+def test_check_ipc_capability_skips_query_on_pre_12_runtime() -> None:
+    """CUDA 11.x (e.g. TouchDesigner's cudart64_110.dll) predates attribute 125
+
+    (cudaDevAttrIpcEventSupport, added in CUDA 12.0). Querying it on an 11.x
+    runtime returns an invalid-attribute error; the probe must skip the query
+    entirely rather than let that error abort Exporter.open() (PR #30 review
+    finding: this previously aborted init on 11.x).
+    """
+    api = make_bare_runtime_api()
+    api.device = 0
+    _mock_runtime_version(api, 11080)  # CUDA 11.8 — last 11.x release
+
+    msg = api.check_ipc_capability()
+
+    assert msg is not None
+    assert "11080" in msg
+    api.cudart.cudaDeviceGetAttribute.assert_not_called()
+
+
+def test_check_ipc_capability_degrades_on_query_failure() -> None:
+    """An unexpected query failure (e.g. attribute unsupported on this driver)
+
+    must degrade to a diagnostic string rather than propagate — the probe's
+    sole job is diagnostics, and only an explicit support==0 result should be
+    able to raise.
+    """
+    api = make_bare_runtime_api()
+    api.device = 0
+    _mock_runtime_version(api, 12080)
+    api.cudart.cudaDeviceGetAttribute.side_effect = CudaIpcError("cudaDeviceGetAttribute failed: boom")
+
+    msg = api.check_ipc_capability()
+
+    assert msg is not None
+    assert "could not query" in msg.lower()

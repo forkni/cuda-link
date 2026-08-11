@@ -24,6 +24,11 @@ CUDAGraphNode_t = c_uint64  # cudaGraphNode_t opaque pointer (CUDA 10.0+)
 # cudaGraphExecEventWaitNodeSetEvent are all CUDA 11.4+ (version integer 11040).
 CUDART_GRAPHS_MIN_VERSION = 11040
 
+# Minimum cudart version that defines cudaDevAttrIpcEventSupport (125).
+# CUDA 11.x tops out at 121 (cudaDevAttrDeferredMappingCudaArraySupported); querying 125
+# against an 11.x runtime returns cudaErrorInvalidValue.
+CUDART_IPC_EVENT_SUPPORT_MIN_VERSION = 12000
+
 # --- CUDA Graph parameter structs ---
 
 

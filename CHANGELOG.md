@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cudaDevAttrAsyncEngineCount` documented as attribute 4** (`cuda_ipc_wrapper.py`) — the
   real value is 40; 4 is `cudaDevAttrMaxBlockDimZ`. Latent (no production caller queried it
   yet), but corrected before it could be relied on.
+- **IPC capability probe aborted initialization on CUDA 11.x** (`cuda_ipc_wrapper.py`) —
+  `check_ipc_capability()`, added earlier in this release and called unconditionally from
+  `Exporter.open()`, queries `cudaDevAttrIpcEventSupport` (125), which CUDA 12.0 introduced.
+  An 11.x runtime — still probed by the loader, and what TouchDesigner ships as
+  `cudart64_110.dll` — returns an invalid-attribute error that the strict `errcheck` turned
+  into a hard failure. The probe is now version-gated and its query is non-fatal, so a failed
+  probe degrades to a logged diagnostic; only an explicit `cudaDevAttrIpcEventSupport == 0`
+  still raises.
 
 ### Added
 

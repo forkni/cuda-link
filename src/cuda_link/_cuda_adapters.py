@@ -325,9 +325,8 @@ class FakeCUDAAdapter:
         (tests the Exporter.open() failure path without a real GPU).
         """
         if self.fail_ipc_capability:
-            raise RuntimeError(
-                f"FakeCUDAAdapter: simulated cudaDevAttrIpcEventSupport=0 for device {device or self.device}"
-            )
+            resolved_device = device if device is not None else self.device
+            raise RuntimeError(f"FakeCUDAAdapter: simulated cudaDevAttrIpcEventSupport=0 for device {resolved_device}")
         return None
 
     # --- CUDA Graphs -------------------------------------------------------

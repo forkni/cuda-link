@@ -54,6 +54,7 @@ try:
     # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
     from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
         CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
         HOST_ALLOC_PORTABLE,
         IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
@@ -75,6 +76,7 @@ except (ImportError, ModuleNotFoundError):
     # (e.g. imported before the bootstrap runs, or in a standalone test environment).
     from cuda_link.cuda_runtime_types import (  # noqa: E402
         CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
         HOST_ALLOC_PORTABLE,
         IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
         CUDAError,
@@ -248,7 +250,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             else ""
         )
         raise CudaLinkError(
-            "Could not load CUDA runtime. Please ensure CUDA 12.x or 13.x is installed.\n"
+            "Could not load CUDA runtime. Please ensure CUDA 11.x, 12.x, or 13.x is installed.\n"
             f"Tried paths: {dll_paths}\n"
             f"Tried names: {dll_names}"
             f"{err_detail}{hint_126}"
@@ -1421,20 +1423,51 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         unambiguous "this cannot work here" signal, as opposed to the
         undocumented-but-working WDDM configuration.
 
+        This probe is purely diagnostic and must never abort exporter initialization
+        on its own: cudaDevAttrIpcEventSupport (125) is a CUDA 12.0+ attribute (the
+        loader also accepts an 11.x cudart — see _load_cuda_runtime(), and TouchDesigner
+        ships cudart64_110.dll), so the query is version-gated, and any unexpected query
+        failure degrades to a logged note rather than propagating.
+
         Args:
             device: GPU device index. Defaults to self.device.
 
         Returns:
-            A one-line diagnostic to log (present on Windows, to give context if a
-            later cudaIpc* call fails with error 400/801), or None if there is
-            nothing noteworthy to report (e.g. non-Windows).
+            A one-line diagnostic to log (present on Windows, or when the query was
+            skipped/failed, to give context if a later cudaIpc* call fails with error
+            400/801), or None if there is nothing noteworthy to report (e.g. non-Windows
+            with a successful query).
 
         Raises:
             CudaIpcError: If cudaDevAttrIpcEventSupport reports 0 for this device.
         """
         if device is None:
             device = self.device
-        support = self.get_device_attribute(CUDA_DEV_ATTR_IPC_EVENT_SUPPORT, device)
+
+        try:
+            runtime_version = self.get_runtime_version()
+        except (RuntimeError, OSError) as exc:
+            _logger.debug("check_ipc_capability: get_runtime_version() failed: %s", exc)
+            runtime_version = 0
+
+        if runtime_version < CUDART_IPC_EVENT_SUPPORT_MIN_VERSION:
+            return (
+                f"CUDA IPC capability probe skipped: runtime version {runtime_version} predates "
+                f"cudaDevAttrIpcEventSupport (added in CUDA {CUDART_IPC_EVENT_SUPPORT_MIN_VERSION}). "
+                "If IPC calls fail with error 400 (cudaErrorInvalidResourceHandle) or 801 "
+                "(cudaErrorNotSupported), this older runtime is a plausible cause."
+            )
+
+        try:
+            support = self.get_device_attribute(CUDA_DEV_ATTR_IPC_EVENT_SUPPORT, device)
+        except CudaIpcError as exc:
+            _logger.debug("check_ipc_capability: cudaDevAttrIpcEventSupport query failed: %s", exc)
+            return (
+                f"CUDA IPC capability probe: could not query cudaDevAttrIpcEventSupport for "
+                f"device {device} on runtime {runtime_version} ({exc}). Continuing without this "
+                "diagnostic; if IPC calls fail with error 400 or 801, this is a plausible cause."
+            )
+
         if support == 0:
             raise CudaIpcError(
                 f"CUDA device {device} reports cudaDevAttrIpcEventSupport=0 — this GPU/driver "
