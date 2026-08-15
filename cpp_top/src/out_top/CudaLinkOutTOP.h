@@ -146,6 +146,15 @@ private:
     //      whenever the source image has more than one row, so even a live-graph update
     //      would still be rejected for the shipped shape. Confirmed by the same probe with
     //      the graph-lifetime issue (1) controlled for.
+    // What did NOT break this: the same §4.2.3.4 also disallows changing a memcpy node's
+    // source/destination memory type (cudaArray_t, etc.) or its cudaMemcpyKind. This code
+    // never changes either -- source is always cudaArray_t, kind is always
+    // cudaMemcpyDeviceToDevice every cook -- so that restriction was satisfied. It just
+    // wasn't SUFFICIENT: the 1D restriction above is independent and applies regardless of
+    // how stable the kind/type are. Nor is cudaGraphExecUpdate() (whole-graph update) an
+    // escape hatch -- §4.2.3.4 governs both individual node update and whole-graph update,
+    // so it would hit the same 1D wall. The keyed re-capture cache below is therefore the
+    // only correct fix, not one option among several.
     // Fix: mirror the In TOP's keyed exec cache (GraphCacheEntry) -- capture a fresh graph
     // per (slot, srcArray) key and never call an exec-level memcpy update. On cache hit:
     // launch. On miss (including first use): capture+instantiate+launch this cook. Sized
