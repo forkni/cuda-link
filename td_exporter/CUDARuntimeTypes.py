@@ -165,7 +165,14 @@ class CUDAError:
     MEMORY_ALLOCATION = 2
     INVALID_DEVICE_POINTER = 17
     INVALID_DEVICE = 101
-    INVALID_CONTEXT = 201  # Common in same-process IPC testing
+    # Runtime API name for 201 is cudaErrorDeviceUninitialized (driver_types.h). The similarly
+    # numbered CUDA_ERROR_INVALID_CONTEXT belongs to the separate Driver API CUresult enum
+    # (cuda.h) -- a different code space this module's cudaError_t-based error handling does
+    # not use. Kept the old name as an alias for one release cycle since nothing in this
+    # codebase branches on it by name (get_name() is diagnostic-only), but corrected the
+    # canonical constant per the CUDA 12.8 driver_types.h ground truth.
+    DEVICE_UNINITIALIZED = 201  # Common in same-process IPC testing
+    INVALID_CONTEXT = DEVICE_UNINITIALIZED  # deprecated alias -- use DEVICE_UNINITIALIZED
     NOT_READY = 600
     PEER_ACCESS_ALREADY_ENABLED = 704
 
@@ -178,7 +185,7 @@ class CUDAError:
             2: "MEMORY_ALLOCATION",
             17: "INVALID_DEVICE_POINTER",
             101: "INVALID_DEVICE",
-            201: "INVALID_CONTEXT",
+            201: "DEVICE_UNINITIALIZED",
             600: "NOT_READY",
             704: "PEER_ACCESS_ALREADY_ENABLED",
         }
