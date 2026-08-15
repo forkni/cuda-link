@@ -16,6 +16,7 @@
 #include "../common/bench_accumulator.h"
 #include "../common/debug_log.h"
 #include "../common/gpu_timer.h"
+#include "../common/raii_handles.h"
 #include "../core/ring_writer.h"
 #include "../core/shm_layout.h"
 #include "pixel_format_map.h"
@@ -68,17 +69,19 @@ private:
     bool reallocate(uint32_t width, uint32_t height, const cudalink::out_top::WireFormat& fmt, int numSlots,
                     const char* name);
 
-    // Frees all per-slot graph execs and resets myGraphBuilt -- called before rebuilding
-    // device buffers/events in reallocate() (the graphs reference them) and from teardown().
+    // Frees all cached per-slot graph execs and empties myGraphCache -- called before
+    // rebuilding device buffers/events in reallocate() (the graphs reference them) and from
+    // teardown().
     void destroyGraphs();
 
     // Attempts the CUDA-Graphs launch path for 'slot' using this cook's srcArray as the
-    // IPC-copy source: captures (first use after (re)allocation) or updates-and-relaunches
-    // (subsequent cooks) a 2-node graph (memcpy + interprocess event-record) that replaces
-    // those two ops' separate WDDM submissions with one cudaGraphLaunch. See the capture-site
-    // comment in CudaLinkOutTOP.cpp for the full design/rationale (PLAN-005 §2.1). Returns
-    // false and latches myGraphsDisabled on ANY failure -- caller must run the legacy per-op
-    // path for this cook instead (a failed capture performs none of the enclosed work).
+    // IPC-copy source: looks up a cached exec keyed on (slot, srcArray) and launches it on a
+    // hit, or captures a fresh 2-node graph (memcpy + interprocess event-record) and caches
+    // it on a miss -- either way collapsing those two ops' separate WDDM submissions into one
+    // cudaGraphLaunch. See the header comment on myGraphCache and the capture-site comment in
+    // CudaLinkOutTOP.cpp for the full design/rationale (PLAN-005 §2.1). Returns false and
+    // latches myGraphsDisabled on ANY failure -- caller must run the legacy per-op path for
+    // this cook instead (a failed capture performs none of the enclosed work).
     bool tryGraphCopy(uint32_t slot, cudaArray_t srcArray, size_t rowBytes, uint32_t height);
 
     // Debug-gated diagnostics: neither the error/warning badges nor GPU% are enough to
@@ -125,16 +128,44 @@ private:
     std::vector<cudaEvent_t> mySlotEvents;
 
     // CUDA Graphs (env-gated PLAN-005 §2.1, default OFF; see the capture-site comment in
-    // CudaLinkOutTOP.cpp for the full design). myGraphsRequested is latched once from
+    // tryGraphCopy() for the full design). myGraphsRequested is latched once from
     // CUDALINK_CPP_USE_GRAPHS at construction; myGraphsDisabled latches permanently (for the
     // rest of the session) on the first graph-path failure, falling back to the always-correct
-    // legacy path. The three vectors are one-per-slot and stay empty until the first
-    // reallocate(), which sizes them alongside mySlotDevPtrs/mySlotEvents.
+    // legacy path.
+    //
+    // Originally this cached ONE exec per slot and refreshed its memcpy node every cook via
+    // cudaGraphExecMemcpyNodeSetParams(). A standalone repro (probe_graph_memcpy_update.cpp,
+    // during diagnosis of PLAN-005) proved that is invalid on two INDEPENDENT counts, either
+    // one alone sufficient to break it:
+    //   1. The saved cudaGraphNode_t came from the template cudaGraph_t, which this function
+    //      destroyed (cudaGraphDestroy) immediately after cudaGraphInstantiate() -- a node
+    //      handle from an already-destroyed graph is not valid for a LATER exec-level update,
+    //      even though the instantiated cudaGraphExec_t itself remains launchable.
+    //   2. Independently of (1): CUDA Programming Guide §4.2.3.4 "Only 1D cudaMemset/
+    //      cudaMemcpy nodes can be changed" -- this copy's extent is 2D (height > 1)
+    //      whenever the source image has more than one row, so even a live-graph update
+    //      would still be rejected for the shipped shape. Confirmed by the same probe with
+    //      the graph-lifetime issue (1) controlled for.
+    // Fix: mirror the In TOP's keyed exec cache (GraphCacheEntry) -- capture a fresh graph
+    // per (slot, srcArray) key and never call an exec-level memcpy update. On cache hit:
+    // launch. On miss (including first use): capture+instantiate+launch this cook. Sized
+    // lazily inside tryGraphCopy() (not in reallocate()), same as the In TOP; destroyGraphs()
+    // resets it to empty on every reallocation.
+    struct GraphCacheEntry {
+        cudaArray_t srcArray = nullptr;
+        cudalink::common::CudaGraphExecGuard exec;
+    };
+    static constexpr size_t kGraphCacheCapPerSlot = 4;
     bool myGraphsRequested = false;
     bool myGraphsDisabled = false;
-    std::vector<cudaGraphExec_t> myGraphExecs;
-    std::vector<cudaGraphNode_t> myGraphCopyNodes;
-    std::vector<bool> myGraphBuilt;
+    std::vector<std::vector<GraphCacheEntry>> myGraphCache;
+
+    // Session-lifetime graph counters (Debug-gated increments, mirroring the In TOP's
+    // myGraphHits/myGraphBuilds): builds should plateau at (num_slots x observed source
+    // arrays) within seconds; a climbing count is the live pre-signal of the cache-cap
+    // latch. Feed the graph_hits/graph_builds Info CHOP channels.
+    uint64_t myGraphHits = 0;
+    uint64_t myGraphBuilds = 0;
 
     // Status/error/warning surfaces.
     std::string myError;
