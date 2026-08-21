@@ -10,9 +10,7 @@ SharedMemory segment — no GPU required.
 
 from __future__ import annotations
 
-import contextlib
 import logging
-from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 from fakes import FakeShmAdapter
@@ -20,7 +18,6 @@ from fakes import FakeShmAdapter
 from cuda_link.activation_barrier import (
     _STRUCT,
     MAGIC,
-    SHM_NAME,
     SHM_SIZE,
     VERSION,
     CheckerBarrier,
@@ -33,35 +30,16 @@ from cuda_link.activation_barrier import (
 )
 
 # ---------------------------------------------------------------------------
-# Helpers (duplicated from test_activation_barrier.py — new test files must
-# not edit existing ones)
+# Isolation — every test in this module gets a unique SHM segment name (see
+# tests/conftest.py::isolated_barrier_shm) so a leaked handle from one test
+# can never block create=True in another (Windows: unlink() is a no-op and
+# segment lifetime is handle-bound, not name-bound).
 # ---------------------------------------------------------------------------
 
 
-def _cleanup(name: str) -> None:
-    try:
-        shm = SharedMemory(name=name)
-        shm.close()
-        shm.unlink()
-    except FileNotFoundError:
-        pass
-
-
 @pytest.fixture(autouse=True)
-def cleanup_barrier():
-    _cleanup(SHM_NAME)
-    # On Windows a live TD session (or a not-yet-GC'd handle elsewhere in this
-    # process) can keep the named SHM alive past unlink() because SHM lifetime
-    # is handle-bound (not name-bound like POSIX). If the segment persists,
-    # re-zero its contents so each test starts from a deterministic zero state.
-    with contextlib.suppress(FileNotFoundError):
-        shm = SharedMemory(name=SHM_NAME)
-        try:
-            _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
-        finally:
-            shm.close()
-    yield
-    _cleanup(SHM_NAME)
+def _isolate_barrier(isolated_barrier_shm: str) -> None:
+    """All tests in this module operate on a private segment."""
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +298,6 @@ def test_open_or_create_initializes_full_header_to_zero(monkeypatch):
         assert fields == (MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
     finally:
         shm.close()
-        _cleanup(SHM_NAME)
 
 
 # ---------------------------------------------------------------------------

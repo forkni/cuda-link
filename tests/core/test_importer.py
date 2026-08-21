@@ -168,7 +168,7 @@ def test_release_connection_state_shared_teardown_path() -> None:
     imp_reconnect = _make_connected_importer()
     with patch.object(imp_reconnect._retry, "request_immediate_reconnect") as mock_reconnect:
         imp_reconnect._partial_cleanup_for_reconnect()
-        mock_reconnect.assert_called_once()
+        mock_reconnect.assert_called_once_with()
     assert imp_reconnect._conn is None
     assert imp_reconnect._numpy is None
     assert not imp_reconnect._initialized
@@ -707,9 +707,7 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
 
     imp._reinitialize()
 
-    # Trailing message dropped: `assert_called_once(), "msg"` builds a dead tuple, never
-    # surfaces "msg" — the check itself (assert_called_once) still enforces correctly.
-    mock_numpy.close.assert_called_once()
+    mock_numpy.close.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

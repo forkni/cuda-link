@@ -12,16 +12,8 @@ and call _maybe_report_stats directly so no cuda_memory() / CUDA path is exercis
 
 from __future__ import annotations
 
-import sys
 import types
 import uuid
-from pathlib import Path
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
 
 # ---------------------------------------------------------------------------
 # Helpers

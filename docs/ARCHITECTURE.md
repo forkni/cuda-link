@@ -117,8 +117,8 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
-- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
-- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`. Ensure TouchDesigner can import it either by setting `CUDALINK_LIB_PATH` to that folder before launching TD or by adding the folder to TD Preferences → Python 32/64 bit Module Path. The bootstrap injects the environment-variable path when set, imports the installed package, and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if `cuda_link` cannot be imported or alias registration fails, the bootstrap falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
 
 ---
 

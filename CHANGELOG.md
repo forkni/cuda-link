@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since this project's whole premise is that legacy CUDA IPC works there in practice; raises
   only when the driver reports IPC flatly unsupported (`cudaDevAttrIpcEventSupport == 0`).
 
-### Docs
+### Documentation
 
 - Corrected the inverted CUDA-IPC platform-support claim in `README.md` and
   `td_exporter/HELP_DOC.md` — NVIDIA documents the legacy IPC API as Linux/Windows-TCC only;
@@ -989,7 +989,7 @@ already handled — no code change needed.
   editing the script:
 
   | Variable | Default | Effect |
-  |---|---|---|
+  | --- | --- | --- |
   | `CUDALINK_RECEIVER_SHM_NAME` | `cudalink_input_ipc` | IPC channel name |
   | `CUDALINK_RECEIVER_DEVICE` | `0` | GPU device index |
   | `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout ms |

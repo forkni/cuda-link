@@ -522,5 +522,6 @@ def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
     assert result is True
     assert len(handle.copy_cuda_calls) == 1, "GPU path must call copy_cuda_memory once"
     assert len(handle.copy_numpy_calls) == 0, "GPU path must not call copy_numpy_array"
-    # ExternalStream context manager must be used
-    mock_cp.cuda.ExternalStream.assert_called_once()
+    # ExternalStream context manager must be used, wrapping the connection's
+    # stream handle (mock_stream.value = 0x1234, set in the helper above).
+    mock_cp.cuda.ExternalStream.assert_called_once_with(0x1234)

@@ -28,7 +28,26 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
+## Current baseline (2026-08-20, post Phase E/F)
+
+**Supersedes the 2026-07-12 table below.** That table's "20/20 consecutive randomized-order
+runs green" claim was re-audited on 2026-08-20 and found **false** (4 failures in 13 runs) —
+see Phase E in the campaign record. The number here is freshly re-earned, not re-asserted.
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1196 passed + 3 skipped (Windows) · ubuntu CI runs the same selection (Windows-only tests skip there) |
+| Full-suite wall clock | ~17.2 s |
+| Branch coverage, clean run | 99.14 % (`--cov=cuda_link`) · 87.10 % combined incl. `td_exporter`, post the F4 untestable-demo-script omit |
+| Coverage gate (`fail_under`) | 85 (honest floor: ⌊87.10⌋ − 1.5, rounded down; one-way ratchet — bump only upward. See F4.) |
+| Order independence / flakiness | 20/20 consecutive randomized-order runs green, **re-verified after the Phase E fix** — skip count a stable 3 in every run (was 3 or 4, order-dependent, before Phase E) |
+| Slowest test | 3.63 s (subprocess `-O` import test; by design — see Phase B) |
+| Mutation score | see Phase D table below (unchanged by Phase E/F — no mutation targets touched) |
+| Complexity ceiling (`C901 max-complexity`) | 43, ratcheted downward-only from unenforced. See F3. |
+
 ## Baseline metrics (2026-07-12, post-campaign)
+
+(Historical — see the current baseline above. Retained for the Phase A–D record below.)
 
 | Metric | Value |
 |--------|-------|
@@ -36,7 +55,7 @@ ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the h
 | Full-suite wall clock | ~19.4 s |
 | Branch coverage, clean run | 99.10 % (`--cov=cuda_link`) · 79.46 % combined incl. `td_exporter` |
 | Coverage gate (`fail_under`) | 76 (honest floor: ⌊79.46⌋ − 3; one-way ratchet — bump only upward) |
-| Order independence / flakiness | 20/20 consecutive randomized-order runs green |
+| Order independence / flakiness | 20/20 consecutive randomized-order runs green — **later found false on re-audit; see Phase E** |
 | Slowest test | 3.63 s (subprocess `-O` import test; by design — see Phase B) |
 | Mutation score | see Phase D table below |
 
@@ -177,6 +196,204 @@ the STEP6 `if dev_ptr:` full-guard-deletion mutant in `exporter.py` is partially
 masked because frees run on daemon threads; the strengthened assertion still catches
 inversion and wrong-slot regressions.
 
+## Campaign record — Phase E/F (2026-08-20)
+
+The prior campaign's **"20/20 consecutive randomized-order runs green"** claim (Phase A above)
+was false when re-audited: 4 of 13 randomized-order runs failed, and three checklist steps from
+the audit skill (Step 0 triage, Phase 0.5 prune, Phase 3.5 complexity/CRAP gate) had never been
+executed. This campaign kills the flake at its root cause and closes those three gaps.
+
+### Phase E — Kill the activation-barrier flake
+
+**Root cause:** every barrier test shared the single fixed-name SHM segment
+`cudalink_activation_barrier`. On Windows, `SharedMemory.unlink()` is a no-op and segment
+lifetime is handle-bound, not name-bound — a not-yet-GC'd handle elsewhere in the process kept
+the name alive, so `SharedMemory(name=..., create=True)` intermittently raised `FileExistsError`
+in `test_open_or_create_initializes_full_header_to_zero`. This is the **external shared-state
+corruption** anti-pattern: a shared out-of-process resource, not a timing race, so the fix is
+hermeticity, not retries.
+
+A second test papered over the same defect with a runtime `pytest.skip()`, producing an
+**order-dependent skip** — 4 skipped instead of a stable 3 depending on what ran before it.
+
+Fix:
+
+- Added `isolated_barrier_shm` fixture (`tests/conftest.py`) — redirects `activation_barrier`'s
+  module-global `SHM_NAME` to a unique `cudalink_barrier_test_<uuid8>` segment per test via
+  `monkeypatch.setattr`, with teardown that closes/unlinks it if still present.
+- Both `tests/core/test_activation_barrier.py` and `tests/core/test_activation_barrier_cov.py`
+  adopt it through a thin autouse wrapper (`_isolate_barrier`), replacing the old module-local
+  `_cleanup()` / `cleanup_barrier` fixture. `_isolate_barrier` is scoped to these two modules
+  only — no new autouse fixture leaks into the rest of the suite.
+- Deleted the order-dependent `pytest.skip()` guard in `test_activation_barrier.py` — with a
+  guaranteed-absent unique segment, the skip's premise (segment sometimes already exists) can no
+  longer occur, so the bare `with pytest.raises(FileNotFoundError): open_or_create(create=False)`
+  now always exercises the real path.
+
+**Verified:** 20/20 consecutive randomized-order full-suite runs green, skip count a stable
+**3** in every run (proving the order-dependent skip is gone, not just hidden by luck).
+`cr-activation_barrier.toml`'s concurrency warning was updated to match: the two SHM-touching
+test files are now hermetic against concurrent pytest runs (each test gets its own segment
+name); the only surviving caution is against running concurrently with a **live TD session**,
+which opens the real fixed-name segment through production code paths that are never
+monkeypatched — a genuinely different entry point onto the same name.
+
+### Phase F — Close three unrecorded audit gaps
+
+#### F1 — Test-value triage (Step 0)
+
+Classifying each module by risk quadrant, anchored to measured numbers, so future coverage and
+mutation work aims at the right targets instead of picking by file size or mock density:
+
+| Module | Quadrant | Evidence |
+|--------|----------|----------|
+| `_exporter_port.py`, `_importer_port.py`, `_env.py` | **Unit-test hard** | Zero direct *and* transitive mocks; 61 / 25 / 20 tests. Prime untapped mutation targets. |
+| `activation_barrier.py`, `shm_protocol.py`, `_profile.py` | **Unit-test hard** | Already mutation-tested (99.4 % / 99.78 % / 100 %) — see Phase D table above. |
+| `td_exporter/TDReceiver.py` | **Refactor first** | 51 % covered *and* CC 35 / 24 / 23 in `initialize_receiver` / `_refresh_on_version_change` / `import_frame` → est. CRAP(`initialize_receiver`) ≈ 179. The genuine risk hotspot; deferred (see table below). |
+| `src/cuda_link/exporter.py::export` | **Refactor first** | CC 43 (ruff) — over the CRAP-30 ceiling on complexity alone, even at 100 % coverage (CRAP = 43 at cov=1). |
+| `td_exporter/CUDAIPCExtension.py` | **Integration-test briefly** | Facade dispatching to two engines; many collaborators, low per-method complexity. |
+| Demo / launcher / benchmark scripts | **Don't test** | Not runnable outside TouchDesigner → drives F4's coverage-omit list. |
+
+#### F2 — Phase 0.5 prune
+
+1. **48 redundant `sys.path.insert` calls removed, across 21 files.** All targeted the repo
+   root, `src/`, or `td_exporter/` — already provided by `pythonpath = [".", "src",
+   "td_exporter", "tests"]` in `pyproject.toml`. Kept the 2 legitimate ones
+   (`tests/support/test_wrapper_sync.py`, `tests/support/test_installer_staleness.py`), which
+   insert `scripts/` — not on `pythonpath`. This makes the "no `sys.path` hacks" claim in this
+   guide's intro actually true, not just true of `conftest.py`.
+2. **37 unpinned interaction assertions reclassified**, across 14 files (`assert_called_once()`
+   / `assert_called()` with no argument pinning; the other 3 of the original 40 grep hits were
+   comment-only, not code). Each was judged individually against the mock/stub principle — a
+   mock verifies an outgoing effect; asserting an interaction with a stub is the anti-pattern:
+   - Most were pinned to `assert_called_once_with(...)` with the real argument values, traced
+     through production code (e.g. `close_spy.assert_called_once_with()`,
+     `fake_drv.cuInit.assert_called_once_with(0)`).
+   - Opaque `byref(...)` ctypes out-params with no derivable literal were pinned with
+     `unittest.mock.ANY` instead of left unpinned (e.g.
+     `cudaGraphExecMemcpyNodeSetParams.assert_called_once_with(graph_exec, node, ANY)`).
+   - **7 kept as bare `assert_called_once()`**, each followed by a manual
+     `call_args[0][i].value ==` check — `c_int`/`c_void_p` ctypes simple types have no
+     value-based `__eq__`, so `assert_called_once_with(c_int(3))` can never pass. Matches the
+     files' own pre-existing convention (`tests/core/test_exporter_cov_graphs.py`,
+     `tests/cuda/test_wrapper_cov_methods.py` — 2 of the 6 there had no follow-up check
+     originally and were strengthened with one).
+   - Zero interactions were deleted outright — every occurrence was a genuine mock (an outgoing
+     effect worth verifying), not a misused stub.
+3. **`fake_exporter_open` hoisted** from 4 duplicated `tests/td/*.py` copies into
+   `tests/fakes/__init__.py`, dispatching to each requesting module's own `_FakeExporter` via
+   `request.module._FakeExporter` (the 4 local doubles differ slightly — grow-safety's tracks
+   an extra `export_calls` list — so the fixture stays generic rather than picking one copy as
+   canonical). Required 4 new `per-file-ignores` (`F811`) in `pyproject.toml`, scoped to exactly
+   the 4 consuming files — pyflakes doesn't recognize the imported-fixture-as-parameter-name
+   pytest idiom and flags a false redefinition.
+4. **The imperative `pytest.xfail()`** at `test_graph_coexistence_capture.py` converted to
+   `@pytest.mark.xfail(strict=True, reason=...)` + an explicit `raise AssertionError(...)` in
+   the error branch (which the decorator catches as XFAIL); the `pytest.skip(...)` branch for
+   "driver serialized the captures" is unchanged. Now strict-checked: if the underlying C2
+   regression is ever fixed, this test starts failing loudly (XPASS) instead of silently
+   staying green.
+5. **`pytest-mock` — no-op.** Zero `mocker.` usages found, and it was never actually declared
+   in `dev` deps in the first place (only `pytest`, `pytest-randomly`, `pytest-cov` are) —
+   nothing to remove.
+
+#### F3 — Phase 3.5: complexity + CRAP baseline
+
+Added `C901` to `[tool.ruff.lint] select` with `[tool.ruff.lint.mccabe] max-complexity = 43` — a
+**downward-only ratchet** set at today's true worst offender (measured directly, not estimated),
+so it produces zero new failures today while making any new function worse than the current
+worst a hard error.
+
+McCabe complexity (ruff), production hotspots ≥ 20:
+
+| Location | CC (ruff) |
+|----------|-----------|
+| `src/cuda_link/exporter.py:534 export` | **43** |
+| `td_exporter/TDReceiver.py:638 initialize_receiver` | 35 |
+| `td_exporter/TDSender.py:510 export_frame` | 30 |
+| `src/cuda_link/exporter.py:780 _do_cleanup` | 26 |
+| `td_exporter/TDReceiver.py:1095 _refresh_on_version_change` | 24 |
+| `td_exporter/TDReceiver.py:386 import_frame` | 23 |
+
+**46 total** violations at `max-complexity=10` (measured; supersedes an earlier estimate of 37):
+11 in shipping product code, 6 duplicated in the generated `Exporter.py`/`Importer.py` mirrors,
+9 in `scripts/profiling/*`, 2 in `scripts/install_td_library.py`, 2 in
+`td_exporter/example_*_python.py`, 7 in `tests/td/*` helpers, 1 in
+`.claude/hooks/git-commit-enforcer.py`, 8 in `examples/*.py` (files 02–08) — the last two
+categories weren't in the original estimate, which never scanned `.claude/hooks/` or
+`examples/`. None of the 46 are touched by this campaign; that refactor stays deferred (below).
+
+Tooling for this pass (`cosmic-ray`, `radon`, `crap4py`) installs via `pip install -e ".[quality]"`
+— a separate extra from `dev`, kept out of it deliberately so a resolver failure in these
+manual, local-only analysis tools can never break CI's Python 3.9 gate (`branch-protection.yml`
+installs `.[dev]`; `tests.yml` never installs an extra at all). crap4py's only PyPI release is
+0.1.1 and it requires Python ≥3.10, so it's marker-gated (`python_version >= '3.10'`) and simply
+skipped on 3.9 rather than failing the install — the CRAP table below can only be regenerated on
+3.10+.
+
+CRAP pass (`crap4py src/cuda_link --lcov lcov.info --max-crap 30`, `src/cuda_link` only — 100 %
+line coverage everywhere in that package, so CRAP reduces to radon's own complexity number for
+every entry): **2 functions exceed the 30 ceiling**, both already known hotspots —
+
+| Function | comp (radon) | CRAP |
+|----------|---------------|------|
+| `Exporter.export` | 46 | **46.0** |
+| `Exporter._do_cleanup` | 32 | **32.0** |
+
+Next tier (comp 12–17, all under the ceiling, all `importer.py`/`exporter.py`):
+`CupyBuffers.build` / `NumpyBuffers.build` / `TorchBuffers.build` / `Importer._open_ipc_slots`
+(17), `Exporter._initialize` / `Importer._wait_for_slot` / `Importer.get_stats` (14),
+`Exporter._build_export_graphs` / `Importer._resolve_format` (12).
+
+Note: radon's `comp` (46 for `export`, 32 for `_do_cleanup`) runs higher than ruff's McCabe
+count (43, 26 respectively) for the same two functions — a different metric, same discrepancy
+pattern already seen between ruff and the code-search index's `complexity_score`. **Ruff's
+number is the one the `max-complexity` ratchet is set against**; CRAP is a stop condition on
+coverage-chasing, not a second complexity authority.
+
+This is a **stop condition, not a discovery instrument** — `export` and `_do_cleanup` were
+already the two hotspots flagged in F1's triage and in the pre-existing deferral table below;
+CRAP just confirms coverage can't buy their way under 30 without a complexity reduction. Not
+fixed here — recorded as the trigger condition in the deferral table.
+
+#### F4 — Honest coverage denominator + ratchet
+
+Added a second, separately-commented block to `[tool.coverage.run] omit` in `pyproject.toml`
+covering `td_exporter/example_receiver_python.py`, `example_sender_python.py`,
+`callbacks_template.py`, `benchmark_timestamp.py` — kept distinct from the pre-existing 15-file
+mirror block (omitted for a different reason: double-counting, not untestability). All four run
+only inside a live TD process, are not importable standalone, and have zero tests referencing
+them (F1's "Don't test" quadrant). Deliberately **not** added:
+`example_receiver_launcher.py` / `example_sender_launcher.py` (38 % each, exercised by F5's
+tests), `parexecute_callbacks.py` (32 %), `script_top_callbacks.py` (98 %) — tests genuinely
+exercise these, so omitting them would hide real gaps instead of an artifact of the denominator.
+
+Re-measured clean-run baseline post-omit: **87.10 %** combined (vs. the plan's ≈86.6 %
+projection — measured, not assumed). Ratcheted `fail_under` **76 → 85**: `⌊87.10⌋ − 1.5`,
+rounded down. This replaces the old `⌊baseline⌋ − 3` convention with a tighter ~1.5-point
+margin — the wider 3-point margin existed partly to absorb exactly the 4 files just removed
+from the denominator, so keeping it unchanged after they're gone would leave slack that
+catches nothing. Verified both CI invocations still pass against the new gate: combined
+(bare `--cov`) 87.10 %, `--cov=cuda_link` 99.14 %.
+
+#### F5 — Receiver-launcher parity fix
+
+`td_exporter/example_receiver_launcher.py` was at 0 % coverage and carried a known, previously
+undiagnosed-as-fixed bug: its final Python-interpreter-resolution fallback unconditionally
+returned the literal string `"python"`, so on a machine where nothing actually resolved on
+`PATH`, `subprocess.Popen` would raise deep inside the subprocess with an opaque error instead
+of failing clearly at launch time. `example_sender_launcher.py` had already been hardened
+against exactly this; the receiver launcher had not.
+
+Fix: ported the sender's pattern — `_find_python_exe() -> str | None` now checks
+`shutil.which("python")` for the bare fallback and returns `None` if it doesn't resolve;
+`onStart()` checks for `None` first and prints an actionable error (env var + PATH guidance)
+without spawning anything and without touching the TD `project` global (which doesn't exist
+outside a live TD process). Added `tests/td/test_example_receiver_launcher.py`, a direct mirror
+of the existing sender test (4 tests total between the two files, all passing). The sender
+test's docstring — which had documented the receiver's bug as unfixed — now points to the new
+test instead.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
@@ -188,3 +405,9 @@ inversion and wrong-slot regressions.
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
+| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (est. ≈179) — see F1 |
+| `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
+| Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
+| Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | `.pre-commit-config.yaml` pins `v0.14.11`, CI (`branch-protection.yml`) pins `0.14.13`, dev extra unpinned, local is `0.14.10` |
+| 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

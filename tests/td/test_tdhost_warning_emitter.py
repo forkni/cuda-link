@@ -9,15 +9,7 @@ every frame) from force-cooking the emitter repeatedly.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from TDHost import RealTDHost  # noqa: E402
+from TDHost import RealTDHost
 
 _WARNING_COLOR = (0.9137, 1.0, 0.0)
 _ERROR_COLOR = (0.7, 0.0, 0.0)

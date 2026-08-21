@@ -213,7 +213,7 @@ def test_numpy_backend_prepare_closes_and_rebuilds_on_format_change() -> None:
     imp._format = Format.from_overrides((8, 8, 4), "uint8")
     backend.prepare(imp)
 
-    close_spy.assert_called_once()
+    close_spy.assert_called_once_with()
     assert imp._numpy is not old_numpy
     assert imp._numpy.buffer.shape == (8, 8, 4)
 
@@ -343,7 +343,7 @@ def test_cupy_backend_wait_default_stream_uses_get_current_stream() -> None:
         waited = backend.wait(conn, 0)
 
     assert waited == 0.0
-    mock_cp.cuda.get_current_stream.assert_called_once()
+    mock_cp.cuda.get_current_stream.assert_called_once_with()
     # Pin the resolved stream's .ptr (0xAAAA), not just "called once" -- a bug
     # that threads the wrong pointer (e.g. 0, or self._stream instead of the
     # resolved current stream) would still satisfy a bare assert_called_once().

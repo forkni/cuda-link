@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import types
 import uuid
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -108,8 +108,7 @@ def test_open_device_mismatch_raises_cuda_ipc_error_and_cleans_up() -> None:
         pytest.raises(CudaIpcError, match="Device mismatch"),
     ):
         Exporter.open(_spec(device=0), policy=ExportPolicy.for_testing(), cuda=fake)
-    mock_cleanup.assert_called_once()
-    assert mock_cleanup.call_args.kwargs["cuda_valid"] is False
+    mock_cleanup.assert_called_once_with(ANY, cuda_valid=False)
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +141,7 @@ def test_initialize_propagates_ipc_capability_failure_and_cleans_up() -> None:
         pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"),
     ):
         Exporter.open(_spec(), policy=ExportPolicy.for_testing(), cuda=fake)
-    mock_cleanup.assert_called_once()
-    assert mock_cleanup.call_args.kwargs["cuda_valid"] is False
+    mock_cleanup.assert_called_once_with(ANY, cuda_valid=False)
 
 
 # ---------------------------------------------------------------------------
