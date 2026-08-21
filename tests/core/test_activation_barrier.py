@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
-from multiprocessing.shared_memory import SharedMemory
-
 import pytest
 
 from cuda_link.activation_barrier import (
     _STRUCT,
     MAGIC,
-    SHM_NAME,
     SHM_SIZE,
     VERSION,
     bump_skip,
@@ -21,34 +17,16 @@ from cuda_link.activation_barrier import (
 )
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Isolation — every test in this module gets a unique SHM segment name (see
+# tests/conftest.py::isolated_barrier_shm) so a leaked handle from one test
+# can never block create=True in another (Windows: unlink() is a no-op and
+# segment lifetime is handle-bound, not name-bound).
 # ---------------------------------------------------------------------------
 
 
-def _cleanup(name: str) -> None:
-    try:
-        shm = SharedMemory(name=name)
-        shm.close()
-        shm.unlink()
-    except FileNotFoundError:
-        pass
-
-
 @pytest.fixture(autouse=True)
-def cleanup_barrier():
-    _cleanup(SHM_NAME)
-    # On Windows a live TD session can keep the named SHM alive past unlink()
-    # because SHM lifetime is handle-bound (not name-bound like POSIX).
-    # If the segment persists, re-zero its contents so each test starts from
-    # a deterministic zero state regardless of accumulated production counters.
-    with contextlib.suppress(FileNotFoundError):
-        shm = SharedMemory(name=SHM_NAME)
-        try:
-            _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
-        finally:
-            shm.close()
-    yield
-    _cleanup(SHM_NAME)
+def _isolate_barrier(isolated_barrier_shm: str) -> None:
+    """All tests in this module operate on a private segment."""
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +47,6 @@ def test_layout_magic_version_roundtrip() -> None:
         assert fields[1] == VERSION
     finally:
         shm.close()
-        _cleanup(SHM_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -95,18 +72,9 @@ def test_open_or_create_opens_existing() -> None:
 
 
 def test_open_or_create_raises_when_missing_and_no_create() -> None:
-    # If an external process (e.g. live TD session) holds the SHM open, the
-    # cleanup fixture cannot actually remove it on Windows; the
-    # missing-create-no-raise premise is unachievable in that environment.
-    try:
-        _probe = SharedMemory(name=SHM_NAME)
-        _probe.close()
-        pytest.skip(
-            f"activation_barrier SHM {SHM_NAME!r} is held by an external process "
-            "— cannot exercise the FileNotFoundError path on Windows"
-        )
-    except FileNotFoundError:
-        pass
+    # isolated_barrier_shm guarantees a fresh, never-created segment name for
+    # this test, so the FileNotFoundError path is always reachable — no
+    # external-process skip guard needed (see conftest.py::isolated_barrier_shm).
     with pytest.raises(FileNotFoundError):
         open_or_create(create=False)
 
