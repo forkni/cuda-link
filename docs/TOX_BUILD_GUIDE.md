@@ -14,9 +14,11 @@ There are two assembly modes. Choose one:
 
 ### Library mode (recommended — fewer DATs)
 
-Requires `cuda_link` installed externally (`install_td_library.cmd`) and `CUDALINK_LIB_PATH`
-set before launching TouchDesigner. The bootstrap module loads the package and registers the
-15 mirror names in `sys.modules` — so those mirror Text DATs are not needed.
+Requires `cuda_link` installed externally (for example, via `install_td_library.cmd`) in a
+location TouchDesigner can import. Activate that location either by setting
+`CUDALINK_LIB_PATH` before launching TouchDesigner or by adding it to TouchDesigner Preferences
+→ Python 32/64 bit Module Path. The bootstrap module loads the package and registers the 15 mirror
+names in `sys.modules` — so those mirror Text DATs are not needed.
 
 ```text
 CUDAIPCExporter (Base COMP)
@@ -37,8 +39,8 @@ CUDAIPCExporter (Base COMP)
 
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
-All 15 mirror Text DATs must be present. The bootstrap still silently no-ops if
-`CUDALINK_LIB_PATH` is unset — sibling import resolution works as before.
+All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap silently
+no-ops — sibling import resolution works as before.
 
 ```text
 CUDAIPCExporter (Base COMP)
@@ -133,9 +135,10 @@ them resolve automatically because all Text DATs in the same COMP share a module
 2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
-appear in the COMP editor). It injects `CUDALINK_LIB_PATH` onto `sys.path` and registers
-`sys.modules` aliases. If `CUDALINK_LIB_PATH` is unset, it silently no-ops and fallback mode
-takes effect automatically.
+appear in the COMP editor). When set, it injects `CUDALINK_LIB_PATH` onto `sys.path`, then
+imports `cuda_link` from the paths already visible to TouchDesigner and registers `sys.modules`
+aliases. If `cuda_link` cannot be imported, it silently no-ops and fallback mode takes effect
+automatically.
 
 > **Library mode verify**: After loading, you should see in the Textport:
 > `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
