@@ -1,6 +1,16 @@
 # Mutation-testing config for src/cuda_link/activation_barrier.py (cosmic-ray 8.4.x).
-# NOTE: these tests use the fixed-name SHM segment (SHM_NAME) — never run this
-# exec concurrently with another pytest run or a live TD session on this machine.
+# NOTE (updated Phase E, 2026-08-20): the two files below that touch SHM
+# (test_activation_barrier.py, test_activation_barrier_cov.py) now redirect every
+# test onto a unique per-test segment name via the isolated_barrier_shm fixture
+# (tests/conftest.py) — the fixed-name production segment is never touched by these
+# tests, so this exec is safe to run concurrently with another pytest run.
+# test_activation_barrier_checker.py / test_activation_barrier_holder.py never
+# touched SHM at all. The one caution that still applies: don't run this exec
+# concurrently with a *live TD session* on this machine — a live TD process opens
+# the real fixed-name segment ("cudalink_activation_barrier") through production
+# code paths that are never monkeypatched, so it's a genuinely different, real
+# entry point onto the same name that a per-test-randomized pytest run cannot collide
+# with but a live TD process can.
 [cosmic-ray]
 module-path = "src/cuda_link/activation_barrier.py"
 # Barrier wait loops have time-based deadlines; a mutated comparison can spin

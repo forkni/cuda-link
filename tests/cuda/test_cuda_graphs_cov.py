@@ -18,6 +18,7 @@ No @pytest.mark.requires_cuda / requires_native marker needed.
 from __future__ import annotations
 
 from ctypes import POINTER, c_int, c_void_p, cast
+from unittest.mock import ANY
 
 from cuda_link.cuda_runtime_types import MemcpyKind
 from tests.fakes import make_bare_runtime_api
@@ -169,10 +170,10 @@ def test_graph_exec_memcpy_node_set_params_builds_params_and_forwards() -> None:
 
     api.graph_exec_memcpy_node_set_params(graph_exec, node, dst, src, 128, MemcpyKind.DEVICE_TO_DEVICE)
 
-    api.cudart.cudaGraphExecMemcpyNodeSetParams.assert_called_once()
-    call_args = api.cudart.cudaGraphExecMemcpyNodeSetParams.call_args[0]
-    assert call_args[0] is graph_exec
-    assert call_args[1] is node
+    # 3rd positional arg is byref(params) -- a freshly-built cudaMemcpy3DParms
+    # struct with no independently derivable literal to compare against, so
+    # it's pinned with ANY; graph_exec/node identity is still checked.
+    api.cudart.cudaGraphExecMemcpyNodeSetParams.assert_called_once_with(graph_exec, node, ANY)
 
 
 def test_graph_exec_memcpy_node_set_params_1d_converts_pointers_to_raw_ints() -> None:
@@ -248,5 +249,6 @@ def test_get_runtime_version_returns_int() -> None:
 
     result = api.get_runtime_version()
 
-    api.cudart.cudaRuntimeGetVersion.assert_called_once()
+    # byref(version) is a fresh out-param pointer -- pinned with ANY.
+    api.cudart.cudaRuntimeGetVersion.assert_called_once_with(ANY)
     assert result == 12080

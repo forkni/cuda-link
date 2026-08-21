@@ -160,7 +160,7 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
     try:
         with patch.object(fake_cuda, "stream_synchronize") as mock_sync:
             exp.export(GpuFrame(ptr=1000, size=exp.data_size))
-        mock_sync.assert_called_once()
+        mock_sync.assert_called_once_with(exp.ipc_stream)
     finally:
         exp.close()
 

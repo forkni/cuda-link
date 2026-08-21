@@ -76,11 +76,6 @@ def _make_importer_stub():
     We only need the object identity of the cached backend fields — we never
     actually call _consume_frame or open an IPC connection.
     """
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
     from unittest.mock import MagicMock
 
     from cuda_link._importer_port import ImportPolicy, ImportSpec

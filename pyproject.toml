@@ -47,6 +47,9 @@ dev = [
     "py-heat>=0.0.6",
     "nvtx>=0.2",
     "scalene>=1.5",
+    "cosmic-ray>=8.4",
+    "radon>=6.0",
+    "crap4py>=0.3",
 ]
 
 [project.urls]
@@ -82,8 +85,18 @@ line-length = 120
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "C901"]
 ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.lint.mccabe]
+# Complexity ceiling, ratcheted downward only. 43 = today's worst offender
+# (src/cuda_link/exporter.py:534 export, mirrored at td_exporter/Exporter.py:535,
+# measured 2026-08-20). New code may not exceed the current worst; each refactor
+# of export/_do_cleanup (see the deferral table in TESTING_GUIDE.md) lowers this
+# number. Never raise it. 46 total functions exceed max-complexity=10 today
+# (11 shipping, 6 generated mirrors, 29 scripts/hooks/examples/test-helpers) --
+# none fixed by this ratchet; it only stops new code from adding a 47th.
+max-complexity = 43
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
@@ -94,6 +107,10 @@ ignore = ["E501"]  # Line length handled by formatter
 "src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
 "examples/*" = ["N999"]  # Numbered example scripts (01_..., 02_...) are run as files, never imported as modules
+"tests/td/test_tdsender_grow_safety.py" = ["F811"]  # fake_exporter_open (tests/fakes/__init__.py) is imported and reused as a parameter name across tests -- standard pytest fixture-import pattern, pyflakes false positive
+"tests/td/test_tdsender_h2_channel_inference.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_tdsender_pixelformat_override.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_td_status_emission.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 
 [tool.ruff.format]
 quote-style = "double"
@@ -261,20 +278,34 @@ omit = [
     "td_exporter/CUDAAdapters.py",
     "td_exporter/Exporter.py",
     "td_exporter/Importer.py",
+    # TouchDesigner demo/benchmark scripts: run only inside a live TD process,
+    # have no tests referencing them, and are not importable standalone.
+    # "Don't test" quadrant (TESTING_GUIDE.md F1 triage) — counting them
+    # understates real coverage of code that's actually exercised. Omitted for
+    # untestability, not double-counting (that's the block above) — kept
+    # separate deliberately. example_receiver_launcher.py, example_sender_launcher.py,
+    # parexecute_callbacks.py, and script_top_callbacks.py are NOT here: tests do
+    # exercise them (see TESTING_GUIDE.md F4/F5).
+    "td_exporter/example_receiver_python.py",
+    "td_exporter/example_sender_python.py",
+    "td_exporter/callbacks_template.py",
+    "td_exporter/benchmark_timestamp.py",
 ]
 
 [tool.coverage.report]
-# Soft regression gate: 79.46% measured 2026-07-12 (1112 tests, -m "not requires_cuda
-# and not requires_native", branch=true, bare `--cov` so `source` above applies:
-# cuda_link + TD-only td_exporter files). The cuda_link package alone measures 99.10%
-# (`--cov=cuda_link`, CI's invocation) after the 2026-07-12 coverage push; the gate is
-# set against the weaker combined run so both invocations pass. The remaining gap is
-# the TD integration layer (TDReceiver/TDSender/example scripts) — still tracked as T2
-# (TD integration-layer characterization tests). Auto-generated td_exporter/*.py mirrors
-# stay omitted above to avoid double-counting already-tested logic.
-# fail_under = floor(79.46) - 3 = 76. Raise incrementally as coverage grows (T2 work);
-# never lower without a documented reason.
-fail_under = 76
+# Soft regression gate, re-measured 2026-08-20 (1196 tests, -m "not requires_cuda and
+# not requires_native", branch=true, bare `--cov` so `source` above applies: cuda_link +
+# TD-only td_exporter files) after omitting the 4 untestable TD demo/benchmark scripts
+# above: 87.10%. The cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's
+# invocation); the gate is set against the weaker combined run so both invocations pass.
+# The remaining gap is the TD integration layer (TDReceiver.py at 51% is the largest —
+# see TESTING_GUIDE.md F1 triage / deferral table).
+# fail_under = floor(87.10) - 1.5, rounded down = 85. Replaces the old floor(baseline) - 3
+# convention with a tighter ~1.5-point margin now that the denominator excludes code that
+# was never testable in the first place (the previous 3-point margin was partly
+# compensating for those same 4 files dragging the number down). Raise incrementally as
+# coverage grows; never lower without a documented reason.
+fail_under = 85
 show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------

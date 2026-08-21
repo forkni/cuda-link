@@ -13,17 +13,10 @@ Source of truth: verification/results/cuda_memory_probe_20260510_090919.json
 
 from __future__ import annotations
 
-import sys
 import types
 import uuid
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def _make_engine_with_spy(shm_name: str):

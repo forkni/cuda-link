@@ -18,17 +18,10 @@ Fix: track `shm_handle` independently of `connection_committed` and close it in 
 from __future__ import annotations
 
 import contextlib
-import sys
 import uuid
 from multiprocessing.shared_memory import SharedMemory
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def _make_receiver(shm_name: str):

@@ -303,4 +303,4 @@ def test_reinitialize_falls_back_to_partial_cleanup_on_failure(monkeypatch: pyte
 
     imp._reinitialize()  # must not raise
 
-    spy.assert_called_once()
+    spy.assert_called_once_with()

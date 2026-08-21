@@ -22,17 +22,10 @@ All helpers tested here are pure (no CUDA, no SHM) — can run without hardware.
 
 from __future__ import annotations
 
-import sys
 import types
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from TDSender import _cm_dtype_to_str, _guess_dtype_from_buffer_size, _resolve_frame_dtype  # noqa: E402
+from TDSender import _cm_dtype_to_str, _guess_dtype_from_buffer_size, _resolve_frame_dtype
 
 # ---------------------------------------------------------------------------
 # _cm_dtype_to_str — unchanged but exercised for completeness

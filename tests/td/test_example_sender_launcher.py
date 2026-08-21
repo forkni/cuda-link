@@ -3,25 +3,21 @@ Regression test: example_sender_launcher._find_python_exe() / onStart() must not
 to spawning a bare, unverified "python" when no interpreter can be resolved (#4 in the
 td_exporter audit).
 
-Background: the sibling receiver launcher (example_receiver_launcher.py) blindly returns the
-literal string "python" as its final fallback -- if nothing is actually on PATH, Popen raises
-deep inside the subprocess with an opaque error. The sender launcher was hardened instead: its
-final fallback checks shutil.which("python") and returns None if it doesn't resolve, and
-onStart() prints a clear, actionable error and returns without spawning anything (and without
-touching the TD `project` global, which does not exist outside a TouchDesigner process).
+Fix: the final fallback checks shutil.which("python") and returns None if it doesn't resolve,
+and onStart() prints a clear, actionable error and returns without spawning anything (and
+without touching the TD `project` global, which does not exist outside a TouchDesigner
+process). The sibling receiver launcher (example_receiver_launcher.py) originally had the bug
+this test guards against -- it blindly returned the literal string "python" as its final
+fallback, so a missing PATH entry would make Popen raise deep inside the subprocess with an
+opaque error. It was hardened to match this module; see test_example_receiver_launcher.py.
 """
 
 from __future__ import annotations
 
 import importlib
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
 
 
 def _reset_module():

@@ -50,6 +50,14 @@ def test_concurrent_captures_mode_relaxed(cuda_runtime: object) -> None:
 
 
 @pytest.mark.requires_cuda
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "mode=0 may produce cudaErrorStreamCaptureInvalidated (901) on some "
+        "CUDA/driver combos -- documents the C2 regression. If this stops "
+        "xfailing, the driver changed behaviour and C2's fix may need re-evaluation."
+    ),
+)
 def test_mode0_invalidates_concurrent_capture(cuda_runtime: object) -> None:
     """Verify that mode=0 DOES cause the collision (documents the regression).
 
@@ -80,11 +88,11 @@ def test_mode0_invalidates_concurrent_capture(cuda_runtime: object) -> None:
     t2.join()
 
     # With mode=0 on some CUDA/driver combinations this will fail (error 901).
-    # We mark xfail so CI does not hard-fail if the driver happens to serialize
-    # captures, but we document the expected bad outcome.
-    if errors:
-        pytest.xfail(f"mode=0 produced errors as expected (C2 regression confirmed): {errors}")
-    else:
+    # The class-level xfail marker (strict=True) turns that failure into an
+    # expected-failure outcome instead of a hard CI failure. If the driver
+    # happens to serialize captures instead, skip rather than XPASS.
+    if not errors:
         pytest.skip(
             "mode=0 did not produce errors on this driver — driver may serialize captures; C2 fix still safe to land."
         )
+    raise AssertionError(f"mode=0 produced errors as expected (C2 regression confirmed): {errors}")
