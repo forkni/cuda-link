@@ -47,9 +47,18 @@ dev = [
     "py-heat>=0.0.6",
     "nvtx>=0.2",
     "scalene>=1.5",
+]
+quality = [
+    # Manual, local-only analysis tools -- never installed by CI. Kept out of `dev` so a
+    # resolver failure here can't break the Python 3.9 gate in branch-protection.yml, which
+    # installs `.[dev]` (tests.yml installs an explicit package list and never sees this).
     "cosmic-ray>=8.4",
     "radon>=6.0",
-    "crap4py>=0.3",
+    # crap4py's ONLY PyPI release is 0.1.1 and it requires Python >=3.10, while this project
+    # supports >=3.9 (requires-python above). The marker keeps `pip install -e .[quality]`
+    # resolvable on 3.9 (crap4py is simply skipped) instead of hard-failing the whole install.
+    # A prior >=0.3 pin here referenced a version that has never existed on PyPI.
+    "crap4py>=0.1.1; python_version >= '3.10'",
 ]
 
 [project.urls]
