@@ -23,17 +23,22 @@ TD Setup:
     5. Paste THIS script into an Execute DAT — enable Start, Frame Start, On Exit
     6. Press Play (or reopen the project) to trigger onStart()
 
-Python executable resolution (priority order):
+Python executable resolution (priority order) — mirrors example_sender_launcher.py:
     1. CUDALINK_RECEIVER_PYTHON_EXE env var — full path, highest priority.
     2. Windows Python Launcher: 'py -3' resolves the system Python 3 installation
        and returns its full path (e.g. C:\\Users\\...\\Python311\\python.exe).
        Reliable on any Windows machine with the standard Python installer.
-    3. 'python' — bare fallback if the Launcher is unavailable (may be TD's
-       bundled Python, which lacks third-party packages like torch/cupy).
+    3. 'python' — bare fallback, only used if it actually resolves on PATH
+       (checked via shutil.which). If it does not resolve, onStart() prints a
+       clear error and does not spawn — a bare "python" that resolves to TD's
+       own bundled interpreter (or to nothing) fails with an opaque
+       ImportError deep in the subprocess console instead of here.
 
     The resolved path is printed on each onStart() so you can verify which
     interpreter is used without opening a terminal.
 """
+
+from __future__ import annotations
 
 import os
 import shutil
@@ -41,10 +46,11 @@ import signal
 import subprocess
 
 
-def _find_python_exe() -> str:
+def _find_python_exe() -> str | None:
     """Resolve the Python executable for the receiver subprocess.
 
     Runs once at Execute DAT load time so the path is ready before onStart().
+    Returns None only if no usable interpreter could be resolved at all.
     """
     # 1. Explicit env-var override — highest priority.
     if env := os.environ.get("CUDALINK_RECEIVER_PYTHON_EXE", ""):
@@ -66,8 +72,12 @@ def _find_python_exe() -> str:
         except Exception:
             pass
 
-    # 3. Bare fallback — first 'python' in PATH.
-    return "python"
+    # 3. Bare fallback — only if 'python' actually resolves on PATH. We do NOT
+    #    blindly return "python" here: inside a TD Execute DAT, sys.executable
+    #    resolves to TD's own bundled Python (not the receiver's env), so a
+    #    PATH-less "python" would spawn something that fails with an opaque
+    #    ImportError instead of a clear message here.
+    return shutil.which("python")
 
 
 _RECEIVER_PYTHON_EXE = _find_python_exe()
@@ -78,6 +88,12 @@ _process = None  # Receiver subprocess handle
 def onStart() -> None:
     """Launch the Python receiver as a separate subprocess."""
     global _process
+
+    if _RECEIVER_PYTHON_EXE is None:
+        print("[CUDA-Link Receiver Launcher] ERROR: could not resolve a Python interpreter for the receiver.")
+        print("  Set CUDALINK_RECEIVER_PYTHON_EXE to a full python.exe path, or ensure 'py' or")
+        print("  'python' is on PATH. Not spawning — see docstring for resolution order.")
+        return
 
     script = os.path.join(project.folder, "td_exporter", "example_receiver_python.py")
 

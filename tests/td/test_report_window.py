@@ -8,13 +8,7 @@ and import directly from the canonical src/cuda_link/_profile module.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from cuda_link._profile import ReportWindow  # noqa: E402
+from cuda_link._profile import ReportWindow
 
 # ---------------------------------------------------------------------------
 # add_sample / avg_and_reset basics

@@ -61,7 +61,7 @@ def test_export_size_mismatch_returns_failed() -> None:
         with patch("cuda_link.exporter.logger") as mock_logger:
             outcome = exp.export(GpuFrame(ptr=0x1000, size=_DATA_SIZE + 1))
         assert outcome == FrameOutcome.FAILED
-        mock_logger.error.assert_called_once()
+        mock_logger.error.assert_called_once_with("Size mismatch: expected %d, got %d", _DATA_SIZE, _DATA_SIZE + 1)
     finally:
         exp.close()
 

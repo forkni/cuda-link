@@ -11,7 +11,6 @@ Three groups:
 from __future__ import annotations
 
 import os
-import sys
 
 import pytest
 
@@ -36,7 +35,6 @@ def test_doorbell_event_name_format() -> None:
 
 def _make_importer(write_idx: int = 1, last_write_idx: int = 0) -> object:
     """Return a connected Importer via fakes.make_connected_importer()."""
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
     from fakes import make_connected_importer  # type: ignore[import]
 
     return make_connected_importer(write_idx=write_idx, last_write_idx=last_write_idx)

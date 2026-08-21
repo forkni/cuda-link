@@ -230,11 +230,11 @@ def test_context_manager_calls_start_and_stop():
 
     with obs as ctx:
         assert ctx is obs
-        obs.start.assert_called_once()
+        obs.start.assert_called_once_with()
         obs.stop.assert_not_called()
 
-    obs.start.assert_called_once()
-    obs.stop.assert_called_once()
+    obs.start.assert_called_once_with()
+    obs.stop.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

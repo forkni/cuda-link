@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from ctypes import POINTER, c_float, c_int, c_void_p, cast
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -100,7 +100,7 @@ def test_peek_last_error_returns_int() -> None:
     api.cudart.cudaPeekAtLastError.return_value = 17
 
     assert api.peek_last_error() == 17
-    api.cudart.cudaPeekAtLastError.assert_called_once()
+    api.cudart.cudaPeekAtLastError.assert_called_once_with()
 
 
 def test_check_sticky_error_noop_when_disabled() -> None:
@@ -249,6 +249,9 @@ def test_set_device_success_pushes_retained_ctx_stack() -> None:
     assert api._retained_ctx_stack == [2]
     assert isinstance(token, int)
     api._drv.cuDevicePrimaryCtxRetain.assert_called_once()
+    # 2nd arg is cu_dev, filled by cuDeviceGet -- mocked to succeed (return 0) without
+    # actually writing through byref, so it retains its zero-initialized default.
+    assert api._drv.cuDevicePrimaryCtxRetain.call_args[0][1].value == 0
 
 
 def test_set_device_failure_releases_retain_and_reraises() -> None:
@@ -265,6 +268,8 @@ def test_set_device_failure_releases_retain_and_reraises() -> None:
 
     assert api._retained_ctx_stack == []  # popped back out
     api._drv.cuDevicePrimaryCtxRelease.assert_called_once()
+    # Same cu_dev object retained above -- still zero-initialized (see retain test).
+    assert api._drv.cuDevicePrimaryCtxRelease.call_args[0][0].value == 0
 
 
 def test_set_device_fallback_when_no_driver_api() -> None:
@@ -386,7 +391,7 @@ def test_ipc_close_mem_handle_forwards_pointer() -> None:
 def test_synchronize_calls_device_synchronize() -> None:
     api = make_bare_runtime_api()
     api.synchronize()
-    api.cudart.cudaDeviceSynchronize.assert_called_once()
+    api.cudart.cudaDeviceSynchronize.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +558,7 @@ def test_get_device_returns_int() -> None:
 
     result = api.get_device()
 
-    api.cudart.cudaGetDevice.assert_called_once()
+    api.cudart.cudaGetDevice.assert_called_once_with(ANY)  # byref(device) -- opaque out-param
     assert result == 7
 
 
@@ -570,8 +575,10 @@ def test_create_stream_with_priority_queries_range_when_priority_none() -> None:
 
     api.create_stream_with_priority(priority=None)
 
-    api.cudart.cudaDeviceGetStreamPriorityRange.assert_called_once()
-    api.cudart.cudaStreamCreateWithPriority.assert_called_once()
+    api.cudart.cudaDeviceGetStreamPriorityRange.assert_called_once_with(ANY, ANY)  # opaque byref out-params
+    # priority is greatest.value -- the side_effect above never writes through byref,
+    # so greatest keeps its zero-initialized default; flags uses its NON_BLOCKING default.
+    api.cudart.cudaStreamCreateWithPriority.assert_called_once_with(ANY, StreamFlags.NON_BLOCKING, 0)
 
 
 def test_create_stream_with_priority_skips_range_query_when_explicit() -> None:
@@ -623,7 +630,7 @@ def test_memcpy_async_forwards_all_args() -> None:
 def test_mem_get_info_returns_tuple() -> None:
     api = make_bare_runtime_api()
     result = api.mem_get_info()
-    api.cudart.cudaMemGetInfo.assert_called_once()
+    api.cudart.cudaMemGetInfo.assert_called_once_with(ANY, ANY)  # opaque byref(free)/byref(total) out-params
     assert result == (0, 0)  # MagicMock never writes through byref; c_size_t() defaults to 0
 
 
@@ -680,7 +687,7 @@ def test_pointer_get_attributes_returns_struct() -> None:
 def test_device_can_access_peer_returns_bool() -> None:
     api = make_bare_runtime_api()
     result = api.device_can_access_peer(0, 1)
-    api.cudart.cudaDeviceCanAccessPeer.assert_called_once()
+    api.cudart.cudaDeviceCanAccessPeer.assert_called_once_with(ANY, 0, 1)  # byref(can_access) is opaque
     assert isinstance(result, bool)
 
 

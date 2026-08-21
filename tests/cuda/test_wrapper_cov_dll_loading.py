@@ -82,7 +82,8 @@ def test_load_cuda_runtime_full_path_tier_oserror_falls_through_to_bare_name() -
 
     assert result is fake_dll
     assert mock_cdll.called
-    mock_log.assert_called_once()
+    # All 8 absolute paths fail; the bare-name tier's first candidate succeeds.
+    mock_log.assert_called_once_with(fake_dll, "cudart64_13.dll")
 
 
 def test_load_cuda_runtime_bare_name_tier_skips_failures_then_succeeds() -> None:
@@ -109,7 +110,7 @@ def test_load_cuda_runtime_bare_name_tier_skips_failures_then_succeeds() -> None
     # Both failing names were tried (except/continue branch) before the success.
     assert attempts[:2] == ["cudart64_13.dll", "cudart64_12.dll"]
     assert attempts[2] == "cudart64_11.dll"
-    mock_log.assert_called_once()
+    mock_log.assert_called_once_with(fake_dll, "cudart64_11.dll")
 
 
 def test_load_cuda_runtime_raises_with_winerror_126_hint() -> None:
@@ -295,7 +296,7 @@ def test_load_driver_api_cuinit_nonzero_returns_none() -> None:
         result = api._load_driver_api()
 
     assert result is None
-    fake_drv.cuInit.assert_called_once()
+    fake_drv.cuInit.assert_called_once_with(0)
 
 
 def test_load_driver_api_success_returns_drv() -> None:

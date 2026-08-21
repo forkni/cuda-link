@@ -226,7 +226,7 @@ def test_enter_calls_connect_when_not_connected():
     imp = CUDAIPCImporter(shm_name="x")
     with patch.object(imp, "connect") as mock_connect:
         result = imp.__enter__()
-    mock_connect.assert_called_once()
+    mock_connect.assert_called_once_with()
     assert result is imp
 
 
@@ -243,7 +243,7 @@ def test_exit_calls_cleanup():
     imp = CUDAIPCImporter(shm_name="x")
     with patch.object(imp, "cleanup") as mock_cleanup:
         imp.__exit__(None, None, None)
-    mock_cleanup.assert_called_once()
+    mock_cleanup.assert_called_once_with()
 
 
 def test_context_manager_full_roundtrip():

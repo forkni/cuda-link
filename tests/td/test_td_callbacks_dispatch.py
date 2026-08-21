@@ -26,18 +26,11 @@ handler must fire per parameter name, and unrecognized names must dispatch to no
 
 from __future__ import annotations
 
-import sys
 import types
-from pathlib import Path
 
+import parexecute_callbacks
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-import parexecute_callbacks  # noqa: E402
-import script_top_callbacks  # noqa: E402
+import script_top_callbacks
 
 # ---------------------------------------------------------------------------
 # script_top_callbacks.onCook

@@ -95,8 +95,11 @@ def test_record_source_sync_wrong_device_logs_error_by_default() -> None:
             patch("cuda_link.exporter.logger") as mock_logger,
         ):
             exp.record_source_sync(12345)
-        mock_logger.error.assert_called_once()
-        assert "ExportPolicy(strict_device=True)" in mock_logger.error.call_args[0][0]
+        mock_logger.error.assert_called_once_with(
+            "record_source_sync: current CUDA device (1) does not match exporter device (0). "
+            "Call cudaSetDevice(device) before creating your producer stream. "
+            "Set ExportPolicy(strict_device=True) to raise instead of warn."
+        )
         assert exp._source_sync_device_warned is True
     finally:
         exp.close()
@@ -179,7 +182,9 @@ def test_export_host_ptr_logs_error() -> None:
         from cuda_link import FrameOutcome
 
         assert outcome != FrameOutcome.FAILED  # continues in non-strict mode
-        mock_logger.error.assert_called_once()
+        mock_logger.error.assert_called_once_with(
+            "export: gpu_ptr 0x00000000dead0000 is not device/managed memory (type=1). Pass a GPU-resident pointer."
+        )
     finally:
         exp.close()
 
@@ -209,8 +214,9 @@ def test_export_wrong_device_ptr_logs_error() -> None:
         from cuda_link import FrameOutcome
 
         assert outcome != FrameOutcome.FAILED
-        mock_logger.error.assert_called_once()
-        assert "belongs to device" in mock_logger.error.call_args[0][0]
+        mock_logger.error.assert_called_once_with(
+            "export: gpu_ptr 0x00000000dead0000 belongs to device 1, but exporter is bound to device 0."
+        )
     finally:
         exp.close()
 

@@ -23,18 +23,10 @@ from __future__ import annotations
 
 import contextlib
 import struct
-import sys
 import uuid
 from multiprocessing.shared_memory import SharedMemory
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
 
 # ---------------------------------------------------------------------------
 # Shared harness (mirrors test_tdreceiver_dtype_refresh)
