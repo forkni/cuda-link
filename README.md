@@ -291,7 +291,7 @@ run uses a fresh seed and tests must be order-independent. To reproduce a specif
 
 ```bash
 # --randomly-seed prints at the top of each run (e.g. "Using --randomly-seed=12345")
-pytest tests/ -m "not requires_cuda" -p randomly --randomly-seed=12345
+pytest tests/ -m "not requires_cuda and not requires_native" -p randomly --randomly-seed=12345
 ```
 
 Disable for a single run: add `-p no:randomly`.
@@ -299,10 +299,10 @@ Disable for a single run: add `-p no:randomly`.
 ### Coverage gate
 
 ```bash
-pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing
+pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 76` (branch-coverage-aware, baseline 79.46% measured 2026-07-12)
+The gate is `fail_under = 85` (branch-coverage-aware, combined baseline 87.10% measured 2026-08-20)
 in `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
 
@@ -527,8 +527,10 @@ install_td_library.cmd --mode 4 --dry-run
 ```
 
 The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
-If `CUDALINK_LIB_PATH` is unset and mode 4 was not used, the bootstrap no-ops and the
-classic mirror DATs take over silently. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
+The bootstrap activates whenever `cuda_link` is importable from TouchDesigner's active Python
+paths, including TD Preferences; `CUDALINK_LIB_PATH` is only needed when that path is not
+already configured. If `cuda_link` cannot be imported or its aliases cannot be registered, the
+bootstrap falls back to the classic mirror DATs. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
 for full instructions.
 
 The TouchDesigner extension (`td_exporter/`) is **not included in the pip package** because it uses TD-specific APIs (`parent()`, `op()`, `me`, COMP-scoped imports) that cannot run outside TouchDesigner.
