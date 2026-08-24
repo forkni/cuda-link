@@ -615,9 +615,17 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 **Scenario**: TD crashes after `cudaMemcpy` but before `cudaEventRecord`.
 
-**Impact**: Consumer waits indefinitely on IPC event.
+**Impact**: On the default CPU-side wait paths, the consumer waits until
+`ImportSpec.timeout_ms` (5 seconds by default) and then returns
+`ImportOutcome.TIMEOUT`; it does not wait indefinitely.
 
-**Mitigation**: Consumer uses timeout on `wait_event` (future enhancement). Currently, consumer will hang - restart required.
+**Mitigation**: Handle `ImportOutcome.TIMEOUT` and inspect the producer's logs.
+The opt-in torch GPU-side wait (`CUDALINK_TORCH_GPU_WAIT=1`, or an explicit
+consumer stream) and the CuPy path enqueue the event wait on the GPU instead;
+those paths intentionally do not report `TIMEOUT`, so a hung producer can
+stall the consumer stream. Exception: if a ring slot carries no IPC event at
+all, both GPU-side paths fall back to the CPU wait so the read stays ordered —
+in that case `TIMEOUT` is still reachable.
 
 ### Consumer Crashes
 
