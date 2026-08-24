@@ -16,7 +16,7 @@ on:
 
 jobs:
   merge:
-    name: Merge development → main
+    name: Merge development → master
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -52,15 +52,15 @@ jobs:
       - name: Update branches from remote
         run: |
           git fetch origin development:development
-          git fetch origin main:main
+          git fetch origin master:master
 
       - name: Create backup tag
         if: ${{ inputs.create_backup == true && inputs.dry_run == false }}
         run: |
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          BACKUP_TAG="backup-main-before-merge-$TIMESTAMP"
+          BACKUP_TAG="backup-master-before-merge-$TIMESTAMP"
 
-          git checkout main
+          git checkout master
           git tag "$BACKUP_TAG"
           git push origin "$BACKUP_TAG"
 
@@ -70,23 +70,23 @@ jobs:
       - name: Preview merge (Dry Run)
         if: ${{ inputs.dry_run == true }}
         run: |
-          git checkout main
+          git checkout master
 
           echo "=== DRY RUN: Files that would change ==="
-          git diff --name-status main development || true
+          git diff --name-status master development || true
 
           echo ""
           echo "=== Commits to be merged ==="
-          git log main..development --oneline
+          git log master..development --oneline
 
       - name: Perform merge
         if: ${{ inputs.dry_run == false }}
         run: |
-          git checkout main
+          git checkout master
 
-          echo "Merging development into main..."
+          echo "Merging development into master..."
           git merge --no-ff development -m "$(cat <<'EOF'
-          chore: Merge development to main
+          chore: Merge development to master
 
           - Applied .gitattributes merge strategies
           - Automated merge via GitHub Actions
@@ -108,14 +108,14 @@ jobs:
 
           for file in CLAUDE.md MEMORY.md GEMINI.md; do
             if git ls-files | grep -q "^$file$"; then
-              echo "❌ ERROR: $file is tracked in main branch (should be local-only)"
+              echo "❌ ERROR: $file is tracked in master branch (should be local-only)"
               VERIFICATION_FAILED=1
             fi
           done
 
           for dir in TD_RAG Backup; do
             if git ls-files | grep -q "^$dir/"; then
-              echo "❌ ERROR: $dir/ is tracked in main branch (should be local-only)"
+              echo "❌ ERROR: $dir/ is tracked in master branch (should be local-only)"
               VERIFICATION_FAILED=1
             fi
           done
@@ -129,17 +129,17 @@ jobs:
 
           echo "✅ All local-only file exclusions verified"
 
-      - name: Push to main
+      - name: Push to master
         if: ${{ inputs.dry_run == false }}
         run: |
-          git push origin main
-          echo "✅ Main branch updated successfully"
+          git push origin master
+          echo "✅ Master branch updated successfully"
 
       - name: Create merge summary
         if: ${{ inputs.dry_run == false }}
         run: |
           echo "=== MERGE SUMMARY ==="
-          echo "✅ Development → Main merge successful"
+          echo "✅ Development → Master merge successful"
           echo "✅ Method: Git merge with .gitattributes"
 
           if [ -n "$BACKUP_TAG" ]; then
