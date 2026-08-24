@@ -39,8 +39,9 @@ CUDAIPCExporter (Base COMP)
 
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
-All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap silently
-no-ops — sibling import resolution works as before.
+All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap
+no-ops (printing a fallback-mode notice to the Textport) — sibling import resolution works
+as before.
 
 ```text
 CUDAIPCExporter (Base COMP)
@@ -137,8 +138,8 @@ them resolve automatically because all Text DATs in the same COMP share a module
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
 appear in the COMP editor). When set, it injects `CUDALINK_LIB_PATH` onto `sys.path`, then
 imports `cuda_link` from the paths already visible to TouchDesigner and registers `sys.modules`
-aliases. If `cuda_link` cannot be imported, it silently no-ops and fallback mode takes effect
-automatically.
+aliases. If `cuda_link` cannot be imported, it no-ops (printing a fallback-mode notice to the
+Textport — see below) and fallback mode takes effect automatically.
 
 > **Library mode verify**: After loading, you should see in the Textport:
 > `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
