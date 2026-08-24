@@ -623,7 +623,9 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 The opt-in torch GPU-side wait (`CUDALINK_TORCH_GPU_WAIT=1`, or an explicit
 consumer stream) and the CuPy path enqueue the event wait on the GPU instead;
 those paths intentionally do not report `TIMEOUT`, so a hung producer can
-stall the consumer stream.
+stall the consumer stream. Exception: if a ring slot carries no IPC event at
+all, both GPU-side paths fall back to the CPU wait so the read stays ordered —
+in that case `TIMEOUT` is still reachable.
 
 ### Consumer Crashes
 
