@@ -2,7 +2,7 @@ name: Documentation Validation
 
 on:
   push:
-    branches: [development, main]
+    branches: [development, main, master]
     paths:
       - 'docs/**'
       - 'README.md'
