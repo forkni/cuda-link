@@ -302,8 +302,9 @@ Disable for a single run: add `-p no:randomly`.
 pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 85` (branch-coverage-aware, combined baseline 87.10% measured 2026-08-20)
-in `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
+The gate is `fail_under = 85`, set against the combined bare-`--cov` run (87.10% measured
+2026-08-20, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
+See `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
 
 ### Test doubles
