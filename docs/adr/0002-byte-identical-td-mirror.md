@@ -40,7 +40,7 @@ Extend `sync_td_wrapper.py` with a **rewrite mode** for pairs where the canonica
 
 **1B — dual-import `try/except` preamble in canonical source**: Each relative import becomes `try: from ._foo import X; except ImportError: from Foo import X`. Rejected because it leaks TD-environment awareness into canonical source; 8+ try/except blocks per file obscure the module's actual dependencies.
 
-**1C — TD path-shim (no derived files for exporter/importer)**: A loader Text DAT adds `cuda_link` to `sys.path`, eliminating the need for `td_exporter/Exporter.py` entirely. **Adopted in ADR-0003 (2026-05-29)** as `CUDALinkBootstrap.py`, which injects `CUDALINK_LIB_PATH` onto `sys.path` and registers `sys.modules` aliases for all 14 mirror names. The drop-in-Text-DAT fallback is preserved alongside it.
+**1C — TD path-shim (no derived files for exporter/importer)**: A loader Text DAT adds `cuda_link` to `sys.path`, eliminating the need for `td_exporter/Exporter.py` entirely. **Adopted in ADR-0003 (2026-05-29)** as `CUDALinkBootstrap.py`, which injects `CUDALINK_LIB_PATH` onto `sys.path` and registers `sys.modules` aliases for all 15 mirror names, including `Doorbell`. The drop-in-Text-DAT fallback is preserved alongside it.
 
 ## Consequences
 
