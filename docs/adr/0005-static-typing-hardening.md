@@ -106,7 +106,7 @@ must be a narrow per-file sub-config or a line-level `# type: ignore[code]`
   in CI. Extending the matrix to Python 3.9 is left for when a 3.9 runner is
   validated.
 - **Extend type checking to `td_exporter/` — done.** `pyrefly check` (project
-  mode) now covers `td_exporter/` engine files and the 14 generated mirrors.
+  mode) now covers `td_exporter/` engine files and the 15 generated mirrors.
   Pure-TD glue scripts (callbacks, example launchers) are excluded via
   `project-excludes`. Bare TD ambient globals (`op`, `run`, `CUDAMemoryShape`)
   are resolved through `if TYPE_CHECKING: from _td_builtins import …` stubs in
