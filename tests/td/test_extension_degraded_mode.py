@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import CUDAIPCExtension as ext_module
+import CUDAIPCExtension as ext_module  # noqa: N813
 from fakes import FakeTDHost
 
 

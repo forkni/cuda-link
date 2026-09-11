@@ -81,7 +81,7 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
         export_profile = False
 
         @classmethod
-        def from_env(cls) -> "TDSenderConfig":
+        def from_env(cls) -> TDSenderConfig:
             return cls()
 
     class TDReceiverConfig:  # type: ignore[no-redef]
