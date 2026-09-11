@@ -87,6 +87,7 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
     class TDReceiverConfig:  # type: ignore[no-redef]
         pass
 
+
 # TDHost is stdlib-only (no bare-name cuda_link imports) -- always importable, so
 # RealTDHost.set_warning_status() is available even in degraded mode.
 from TDHost import RealTDHost, TDHost  # noqa: E402
@@ -110,7 +111,7 @@ cp = None
 # Session-level dedup guard: track which COMP paths have already shown the install banner.
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
 _banner_shown_for_comps: set[str] = set()
-_notice_printed: bool = False              # fallback dedup when COMP storage is unavailable
+_notice_printed: bool = False  # fallback dedup when COMP storage is unavailable
 _NOTICE_STORE_KEY = "cuda_link_notice_shown"
 
 
@@ -132,20 +133,47 @@ class _NullEngine:
 
     verbose_performance = False
 
-    def initialize(self, *a, **k) -> bool: return False
-    def initialize_receiver(self) -> bool: return False
-    def export_frame(self, *a, **k) -> bool: return False
-    def import_frame(self, *a, **k) -> bool: return False
-    def has_new_frame(self) -> bool: return False          # receiver loop does nothing
-    def is_ready(self) -> bool: return False
-    def _check_deferred_cleanup(self) -> None: return None
-    def update_receiver_resolution(self, *a, **k) -> None: return None
-    def update_receiver_format(self, *a, **k) -> None: return None
-    def request_immediate_reconnect(self) -> None: return None
-    def consume_pending_resolution(self): return None
-    def consume_pending_format(self): return None
-    def cleanup(self) -> None: return None
-    def get_stats(self) -> dict: return {"ready": False, "error": LIBRARY_ERROR}
+    def initialize(self, *a, **k) -> bool:
+        return False
+
+    def initialize_receiver(self) -> bool:
+        return False
+
+    def export_frame(self, *a, **k) -> bool:
+        return False
+
+    def import_frame(self, *a, **k) -> bool:
+        return False
+
+    def has_new_frame(self) -> bool:
+        return False  # receiver loop does nothing
+
+    def is_ready(self) -> bool:
+        return False
+
+    def _check_deferred_cleanup(self) -> None:
+        return None
+
+    def update_receiver_resolution(self, *a, **k) -> None:
+        return None
+
+    def update_receiver_format(self, *a, **k) -> None:
+        return None
+
+    def request_immediate_reconnect(self) -> None:
+        return None
+
+    def consume_pending_resolution(self):
+        return None
+
+    def consume_pending_format(self):
+        return None
+
+    def cleanup(self) -> None:
+        return None
+
+    def get_stats(self) -> dict:
+        return {"ready": False, "error": LIBRARY_ERROR}
 
 
 class CUDAIPCExtension:

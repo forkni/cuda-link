@@ -46,7 +46,7 @@ def test_degraded_sender_public_methods_never_raise(monkeypatch: object) -> None
     assert sender.initialize(16, 16, 4) is False
     assert sender.export_frame(None) is False
     assert sender.import_frame(None) is False  # wrong-mode guard fires first, also inert
-    assert sender.has_new_frame() is True       # Sender mode: unconditionally True (unused path)
+    assert sender.has_new_frame() is True  # Sender mode: unconditionally True (unused path)
     assert sender.is_ready() is False
     sender._check_deferred_cleanup()
     sender.update_receiver_resolution(None)
