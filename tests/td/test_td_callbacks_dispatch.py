@@ -32,6 +32,25 @@ import parexecute_callbacks
 import pytest
 import script_top_callbacks
 
+
+class _TDAttributeError(RuntimeError):
+    """Stand-in for td.tdAttributeError (NOT an AttributeError subclass in real TD)."""
+
+
+class _RaisingExt:
+    """Simulates TD's actual failure mode: `ext.ext.CUDAIPCExtension` RAISES rather than
+    evaluating to None, e.g. when the extension failed to compile (td.tdAttributeError).
+
+    getattr(obj, name, default) only swallows AttributeError, so a bare
+    `getattr(parent().ext, "CUDAIPCExtension", None)` would NOT save a caller here.
+    These tests prove _extension()'s broad `except Exception` -- not getattr's default
+    -- is what actually fixes the reported per-frame crash."""
+
+    @property
+    def CUDAIPCExtension(self) -> object:
+        raise _TDAttributeError("'td.Ext' object has no attribute 'CUDAIPCExtension'")
+
+
 # ---------------------------------------------------------------------------
 # script_top_callbacks.onCook
 # ---------------------------------------------------------------------------
@@ -111,6 +130,21 @@ def test_warning_emitter_no_message_emits_nothing() -> None:
 
 def test_import_buffer_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_global_parent(monkeypatch, None)
+    scriptOp = _StubScriptOp("ImportBuffer")
+    script_top_callbacks.onCook(scriptOp)  # must not raise
+    assert scriptOp.warnings == []
+
+
+def test_import_buffer_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduces the reported bug directly: parent().ext.CUDAIPCExtension raises
+    td.tdAttributeError (uncompiled extension) instead of returning None. Before the
+    _extension() fix, this propagated out of onCook on every single cook."""
+    monkeypatch.setattr(
+        script_top_callbacks,
+        "parent",
+        lambda: types.SimpleNamespace(ext=_RaisingExt()),
+        raising=False,
+    )
     scriptOp = _StubScriptOp("ImportBuffer")
     script_top_callbacks.onCook(scriptOp)  # must not raise
     assert scriptOp.warnings == []
@@ -223,6 +257,19 @@ def _patch_exec_parent(monkeypatch: pytest.MonkeyPatch, ext: object | None) -> N
 
 def test_onvaluechange_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_exec_parent(monkeypatch, None)
+    par = _StubPar("Active", True)
+    parexecute_callbacks.onValueChange(par, False)  # must not raise
+
+
+def test_onvaluechange_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduces the reported bug directly: parent().ext.CUDAIPCExtension raises
+    td.tdAttributeError instead of returning None."""
+    monkeypatch.setattr(
+        parexecute_callbacks,
+        "parent",
+        lambda: types.SimpleNamespace(ext=_RaisingExt()),
+        raising=False,
+    )
     par = _StubPar("Active", True)
     parexecute_callbacks.onValueChange(par, False)  # must not raise
 
