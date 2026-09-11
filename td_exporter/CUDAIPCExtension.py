@@ -20,9 +20,9 @@ import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # op, run are TD ambient globals injected into the COMP namespace at runtime.
+    # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
     # Declared here so pyrefly can resolve the bare names used in this file.
-    from _td_builtins import CUDAMemoryShape, op, run  # noqa: F401
+    from _td_builtins import CUDAMemoryShape, op, run, ui  # noqa: F401
 
 CUDALinkBootstrap = None  # type: ignore[assignment]  -- fallback if the sibling DAT is absent
 with contextlib.suppress(ImportError):
@@ -202,7 +202,7 @@ class CUDAIPCExtension:
         if _hide_val is not None:
             self._host.show_custom_only(bool(_hide_val))
 
-        self._engine: TDSenderEngine | TDReceiverEngine = self._make_engine()
+        self._engine: TDSenderEngine | TDReceiverEngine | _NullEngine = self._make_engine()
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
@@ -304,11 +304,15 @@ class CUDAIPCExtension:
     def _make_engine(self) -> TDSenderEngine | TDReceiverEngine | _NullEngine:
         if not LIBRARY_READY:
             return _NullEngine()
+        # Reached only when the cuda_link import above succeeded, so TDSenderEngine /
+        # TDReceiverEngine / *Config are the real classes here, never the None / stand-in
+        # fallbacks bound in the except branch -- pyrefly can't see that control-flow
+        # invariant across the module-level try/except, hence the targeted ignores below.
         rs = self._runtime_state
         if self._mode == "Sender":
-            return TDSenderEngine(
+            return TDSenderEngine(  # type: ignore[not-callable]
                 host=self._host,
-                config=self._config,
+                config=self._config,  # type: ignore[bad-argument-type]
                 cuda=None,
                 log_fn=self._log,
                 num_slots=rs.num_slots,
@@ -316,9 +320,9 @@ class CUDAIPCExtension:
                 shm_name=rs.shm_name,
                 verbose=rs.verbose,
             )
-        return TDReceiverEngine(
+        return TDReceiverEngine(  # type: ignore[not-callable]
             host=self._host,
-            config=TDReceiverConfig(),
+            config=TDReceiverConfig(),  # type: ignore[bad-argument-type]
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,
