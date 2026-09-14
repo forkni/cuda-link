@@ -68,9 +68,32 @@ def _engage_native_seam(imp, backend, *, doorbell_handle: int = 0xDEAD_BEEF, eve
     imp._conn.doorbell_handle = doorbell_handle
 
 
-def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
+@pytest.fixture
+def connected_importer(request: pytest.FixtureRequest):
+    """make_connected_importer(), closed on teardown.
+
+    An uncollected Importer with a non-None doorbell_handle (as set by
+    _engage_native_seam's 0xDEAD_BEEF default) reaches CUDALINK_DOORBELL's
+    close() from its __del__ finalizer whenever the cyclic GC happens to
+    collect it — which, left to chance, can land during an unrelated later
+    test that has cuda_link._doorbell.close mocked (e.g.
+    test_exporter_cov_doorbell.py), inflating that mock's call count.
+    Closing explicitly here keeps the handle from outliving this test.
+    """
+    made: list = []
+
+    def _make(**kwargs):
+        imp = make_connected_importer(**kwargs)
+        made.append(imp)
+        return imp
+
+    request.addfinalizer(lambda: [imp.close() for imp in made])
+    return _make
+
+
+def test_ready_spin_updates_spin_counters_and_returns_waited_us(connected_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=3.3)
-    imp = make_connected_importer(write_idx=1)
+    imp = connected_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -90,9 +113,9 @@ def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
     assert imp.total_wait_spin_us == pytest.approx(3.3)
 
 
-def test_ready_doorbell_updates_sleep_counters() -> None:
+def test_ready_doorbell_updates_sleep_counters(connected_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_DOORBELL, waited_us=42.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = connected_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -103,9 +126,9 @@ def test_ready_doorbell_updates_sleep_counters() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(42.0)
 
 
-def test_ready_late_also_counts_as_sleep_bucket() -> None:
+def test_ready_late_also_counts_as_sleep_bucket(connected_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_LATE, waited_us=7.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = connected_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -115,9 +138,9 @@ def test_ready_late_also_counts_as_sleep_bucket() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(7.0)
 
 
-def test_timeout_status_raises_timeout_error_same_as_python_path() -> None:
+def test_timeout_status_raises_timeout_error_same_as_python_path(connected_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
-    imp = make_connected_importer(write_idx=1, timeout_ms=1.0)
+    imp = connected_importer(write_idx=1, timeout_ms=1.0)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
