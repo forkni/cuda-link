@@ -299,11 +299,12 @@ Disable for a single run: add `-p no:randomly`.
 ### Coverage gate
 
 ```bash
-pytest tests/ -m "not requires_cuda" --cov=cuda_link --cov-report=term-missing
+pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 76` (branch-coverage-aware, baseline 79.46% measured 2026-07-12)
-in `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
+The gate is `fail_under = 85` (branch-coverage-aware) in `[tool.coverage.report]` in
+`pyproject.toml`. The current clean baseline is 99.14% for `cuda_link`; the combined baseline
+including `td_exporter` is 87.10% (both measured 2026-08-20). For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
 
 ### Test doubles
