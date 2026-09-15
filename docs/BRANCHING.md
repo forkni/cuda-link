@@ -38,18 +38,19 @@ events).
 **Inputs:**
 
 - `create_backup` (default `true`) — tags `master` at its pre-merge tip
-  (`backup-master-before-merge-<timestamp>`) before touching it, so a bad promotion is a
-  `git reset --hard <tag>` away from undone.
+  (`backup-master-before-merge-<timestamp>`) and pushes that tag to the remote before
+  touching `master`, so a bad promotion is a `git reset --hard <tag>` away from undone.
 - `dry_run` (default `false`) — when `true`, prints the file diff and commit log between
   `master` and `development` without merging or pushing anything. Use this first when
   you're unsure what a promotion will bring in.
 
 **What it does, in order:** checks out `master`, verifies `.gitattributes` exists,
-optionally tags a backup, then runs `git merge --no-ff development`. A local-only-file
-guard checks the merge result doesn't accidentally introduce `CLAUDE.md`, `MEMORY.md`,
-`GEMINI.md`, or the `TD_RAG/` / `Backup/` directories into `master` — if it does, the
-merge commit is rolled back (`git reset --hard HEAD~1`) and the job fails before
-pushing. Only on success does it push `master`.
+optionally tags and pushes a backup, then runs `git merge --no-ff development`. A
+local-only-file guard then scans the whole post-merge tree (`git ls-files`, not a diff
+of what the merge introduced) for `CLAUDE.md`, `MEMORY.md`, `GEMINI.md`, or the
+`TD_RAG/` / `Backup/` directories — if any is tracked, for any reason, the merge commit
+is rolled back (`git reset --hard HEAD~1`) and the job fails before pushing. Only on
+success does it push `master`.
 
 ## The `--no-ff` consequence
 
@@ -67,13 +68,13 @@ into `development`.
 [`.gitattributes`](../.gitattributes) sets exactly one merge strategy:
 `CHANGELOG.md merge=union`, so changelog entries added independently on both branches
 combine instead of conflicting. Nothing else in this repo uses a custom merge driver —
-earlier revisions of `.gitattributes` carried a set of `merge=ours` rules for docs that
-never actually existed in this repository's history, plus an inert `merge=diff3` block
-(`diff3` is a *conflict display style*, not a merge driver — it's registered
-per-invocation via `-c merge.conflictStyle=...` in
+earlier revisions of `.gitattributes` carried a `merge=ours` rule for each of ten `docs/`
+paths, but none of those ten paths ever existed anywhere in this repository's history,
+plus an inert `merge=diff3` block (`diff3` is a *conflict display style*, not a merge
+driver — it's registered per-invocation via `-c merge.conflictStyle=...` in
 [`scripts/git/merge_with_validation.sh`](../scripts/git/merge_with_validation.sh), not
-through `.gitattributes`). Both were removed as dead weight; see the CHANGELOG entry for
-this cleanup.
+through `.gitattributes`). Both were removed as dead weight; see the `[Unreleased]`
+section of [`CHANGELOG.md`](../CHANGELOG.md) for this cleanup.
 
 Confirm what's actually active at any time with:
 

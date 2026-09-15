@@ -559,7 +559,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 ## Contributing
 
 1. Fork the repo and branch off **`development`** (`master` is release-only, promoted via
-   [`.github/workflows/merge-development-to-main.yml`](.github/workflows/merge-development-to-main.yml)).
+   [`.github/workflows/merge-development-to-master.yml`](.github/workflows/merge-development-to-master.yml)).
 2. `pip install -e ".[all]"` for an editable install with every output backend.
 3. Run the checks CI enforces before opening a PR: `pytest tests/ -v` (see
    [Testing](#testing) for the coverage gate) and `pyrefly` for static typing.

@@ -83,7 +83,6 @@ jobs:
           git merge --no-ff development -m "$(cat <<'EOF'
           chore: Merge development to master
 
-          - Applied .gitattributes merge strategies
           - Automated merge via GitHub Actions
           EOF
           )"
@@ -135,7 +134,7 @@ jobs:
         run: |
           echo "=== MERGE SUMMARY ==="
           echo "✅ Development → Master merge successful"
-          echo "✅ Method: Git merge with .gitattributes"
+          echo "✅ Method: git merge --no-ff (CHANGELOG.md merge=union honored)"
 
           if [ -n "$BACKUP_TAG" ]; then
             echo "✅ Backup tag: $BACKUP_TAG"

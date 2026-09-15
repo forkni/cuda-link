@@ -178,11 +178,14 @@ stat_sender.txt
 stat_receiver.txt
 nul
 
-# Scalene profiling output (local-only; only .profiling/baseline.json is committed)
+# Scalene profiling output (local-only; only README.md and baseline.json are committed)
 .profiling/scalene_*.json
 .profiling/current.json
-# All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
-.profiling/
+# All other .profiling/ output is local-only (exp_*, d2h_*, current.json, ad-hoc runs)
+# except the two files checked in to document the directory.
+.profiling/*
+!.profiling/README.md
+!.profiling/baseline.json
 
 # Test artifacts
 test_timeout_manual.py
@@ -251,7 +254,7 @@ unnamed.png
 init_heatmap.png
 
 # Reference materials (local-only)
-References/
+/References/
 
 # Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
 benchmarks/
