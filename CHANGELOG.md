@@ -539,7 +539,7 @@ already handled — no code change needed.
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
 
-  ```
+  ```text
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
 

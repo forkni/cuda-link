@@ -41,7 +41,7 @@ methodology and hardware caveats.
 **2×2 matrix** at 1080p uint8 RGBA, 2000 frames, single-process standalone.
 Measured 2026-06-10 via `scripts/profiling/profile_export.py --frames 2000 --export-profile`.
 
-```
+```text
 Cell   EXPORT_SYNC   USE_GRAPHS   median µs   p95 µs   p99 µs   sync region µs   WDDM subs/frame
 ----   -----------   ----------   ---------   ------   ------   ---------------   ---------------
 A      1 (blocking)  0 (off)         45.2      51.2    106.3         17.91               3
@@ -64,11 +64,11 @@ are folded into the CUDA graph; only `cudaGraphLaunch` fires per frame. nsys con
 graphs OFF → 3 submissions/frame (waitEvent + memcpyAsync + eventRecord = 550 calls each);
 graphs ON → 1 submission/frame (`cudaGraphLaunch`, 550 calls; waitEvent/eventRecord absent).
 
-**Full P1+P3 (A→D): −31.3 µs p50 (69%)**
+### Full P1+P3 (A→D): −31.3 µs p50 (69%)
 
 `per_region_avg_us` breakdown for reference:
 
-```
+```text
 Region            Cell A (µs)   Cell D (µs)   Notes
 --------------    -----------   -----------   ----------------------------------------
 stream_wait            1.26          0.00     folded into CUDA graph (P3)
@@ -82,6 +82,7 @@ flush_probe            0.00          1.13     stream query kick (async path only
 Note: WDDM submission count/frame is inferred from nsys call counts ÷ frame count.
 
 Reproduce (all four cells; on Windows use `SET VAR=value &` prefix):
+
 ```bash
 CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_A.json
 CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_B.json
@@ -99,7 +100,7 @@ Historical baseline pre-P1/P3 (v1.4.1 era). Updated blocking-arm numbers via
 1080p f32 → **106 µs**, 4K f32 → **357 µs** (see Summary table above; graphs ON,
 driver 596.36). Historical table retained for the graphs ON vs OFF comparison.
 
-```
+```text
 Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
 ----------    -------------------   ------------------
 512x512                      22.4                 19.4
@@ -113,6 +114,7 @@ transitions but the net wall-clock difference is small (<5%). See the P1/P3 sect
 for the full breakdown including async mode (the large win).
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
 ```
@@ -133,7 +135,7 @@ event (same priming contract as initial open).
 Measured 2026-06-10 via `scripts/profiling/bench_d2h_pipelined.py`, 5 ms synthetic CPU
 workload, 150 measurement frames (30 warmup), spawn-process IPC pair.
 
-```
+```text
 Resolution   non-pipe d2h µs   non-pipe cycle µs   pipe d2h µs   pipe cycle µs   gain µs   gain %   priming NO_FRAME
 ----------   ---------------   -----------------   -----------   -------------   -------   ------   ----------------
 512x512                  97              5099              89            5091         8       0%      YES
@@ -152,6 +154,7 @@ P5 contract verified on real GPU: first `get_frame_numpy()` returns `NO_FRAME` (
 on all three resolutions.
 
 Reproduce:
+
 ```bash
 python scripts/profiling/bench_d2h_pipelined.py --resolution all --work-ms 5 --frames 150
 ```
@@ -162,7 +165,7 @@ python scripts/profiling/bench_d2h_pipelined.py --resolution all --work-ms 5 --f
 
 Standalone D2H copy, no IPC overhead, 2000 frames.
 
-```
+```text
 Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 ----------    -----------------   ------------------   -------------
 512x512                    0.18                 0.19            22.2
@@ -175,6 +178,7 @@ PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_
 (default) is optimal for this platform.
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_d2h_streams.py --frames 2000 --streams 1 2 --sizes 512 1280 1920 3840
 ```
@@ -188,7 +192,7 @@ at 60 FPS. `export p50` and `get_numpy p50` are inflated vs standalone because b
 processes share PCIe bandwidth concurrently. `IPC notify p50` measures
 producer-publish → consumer-detects-write_idx (signaling latency, resolution-independent).
 
-```
+```text
 Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC notify p50 (µs)
 ----------    -------   ------   ---------------   ------------------   -------------------
 512x512       float32   off                898                 1.33                     172
@@ -209,6 +213,7 @@ Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder
 > and are unaffected.
 
 Reproduce with:
+
 ```bash
 python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
 python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
@@ -221,7 +226,7 @@ python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
 End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU
 SharedMemory baseline (PCIe 4.0):
 
-```
+```text
 Resolution    Method              Producer write   Consumer read   E2E
 ----------    ----------------    --------------   -------------   ---------
 1920x1080     CPU SharedMemory          2.60 ms         2.48 ms     5.37 ms
@@ -255,7 +260,7 @@ Measured 2026-07-04 via `scripts/profiling/bench_doorbell.py` (this script, not
 float32, 300 measurement frames + 40 warmup, single producer/consumer process pair,
 30 and 60 fps:
 
-```
+```text
 fps   Arm         CPU%   latency p50   latency p95
 ---   --------    ----   -----------   -----------
 30    doorbell    1.1%      69.3 us       141.4 us
@@ -288,6 +293,7 @@ doorbell, never worse) and the seam is clean, tested, and fully reversible
 > explicitly points here instead of asserting a PASS/MISS against the wrong metric.
 
 Reproduce:
+
 ```bash
 python scripts/profiling/bench_doorbell.py --outfile .profiling/r5_doorbell.json
 python scripts/profiling/bench_r1_wait.py --outfile .profiling/r5_wait.json  # informational only, see note above

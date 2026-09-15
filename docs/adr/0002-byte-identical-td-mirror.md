@@ -45,12 +45,14 @@ Extend `sync_td_wrapper.py` with a **rewrite mode** for pairs where the canonica
 ## Consequences
 
 **Positive**:
+
 - Canonical source stays clean — no TD-environment awareness, no try/except noise.
 - The adapter (sync script) absorbs the transform. Canonical → derived is a deterministic, auditable, re-runnable operation.
 - `TDSender` collapse (ADR-0001 step 7) is now unblocked: once `Exporter.py` exists as a derived module in `td_exporter/`, `TDSenderEngine` can collapse to a thin TD-COMP adapter over `Exporter`.
 - CI and pre-commit reject hand-edits to derived files.
 
 **Negative / trade-offs**:
+
 - Derived files are no longer byte-identical to canonical — the SHA-256 invariant is replaced by "re-run and diff" for `rewrite_relative` pairs. This is weaker but sufficient: the derived file is still fully determined by the canonical source + the transform.
 - The `NAMES` mapping must be kept in sync with the actual filenames. If a canonical file is renamed, the mapping must be updated or `--check` will fail.
 

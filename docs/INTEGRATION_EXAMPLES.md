@@ -7,7 +7,7 @@ Complete workflows for common CUDA IPC use cases.
 > before reading `result.frame`.  Producer side — `from cuda_link import Exporter, FrameSpec, GpuFrame`;
 > call `Exporter.open(FrameSpec(...))` and `exporter.export(GpuFrame(...))`.
 > The TouchDesigner COMP facade is `CUDAIPCExtension` (Sender or Receiver mode).
-
+>
 > **▶ Runnable versions:** every workflow below has a standalone, heavily-commented script in
 > [`examples/`](../examples/README.md) that spawns its own demo producer — no TouchDesigner
 > needed to run them. Each example heading links to its script.
@@ -26,12 +26,12 @@ Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner
 
 1. **Network Layout**:
 
-```
+```text
 Movie File In TOP → CUDAIPCExtension (Mode=Sender)
                     (Ipcmemname="ai_input")
 ```
 
-2. **Parameters**:
+1. **Parameters**:
    - `Mode`: `Sender`
    - `Ipcmemname`: `"ai_input"`
    - `Active`: ON
@@ -109,7 +109,7 @@ Traditional computer vision (edge detection, feature tracking, etc.) on TouchDes
 
 Same as Example 1, but use a different `Ipcmemname`:
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender)
              (Ipcmemname="cv_input")
 ```
@@ -164,7 +164,7 @@ AI pipeline with two inputs: main image + control signal (depth map, edges, etc.
 
 ### TouchDesigner Setup
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="main_input")
 
 Edge Detection TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="controlnet_input")
@@ -244,7 +244,7 @@ Source TOP resolution changes at runtime (user resizes window, switches camera, 
 
 ### TouchDesigner Setup
 
-```
+```text
 Select TOP → CUDAIPCExtension (Mode=Sender)
 (Resolution changes dynamically based on Select TOP input)
 ```
@@ -483,7 +483,7 @@ def onCook(scriptOp):
 
 **TouchDesigner Network**:
 
-```
+```text
 Script TOP (receives AI frames via IPC)
     → Composite TOP
     → Out TOP

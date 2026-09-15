@@ -10,7 +10,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction A: TouchDesigner → Python (TD is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   TouchDesigner Process (Producer)     │
 │                                         │
@@ -55,7 +55,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction B: Python → TouchDesigner (Python is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   Python Process (Producer)            │
 │                                         │
@@ -99,7 +99,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
 
-```
+```text
 CUDAIPCExtension  (~300 LOC facade)
 ├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
 ├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
@@ -126,7 +126,7 @@ CUDAIPCExtension  (~300 LOC facade)
 
 ### Binary Layout (433 bytes for 3 slots)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │ HEADER (20 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
@@ -192,7 +192,7 @@ Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
 
 For `N` slots:
 
-```
+```text
 Total Size = 20 + (N × 128) + 1 + 20 + 8 bytes
 
 shutdown_offset = 20 + (N × 128)
@@ -216,7 +216,7 @@ A single-buffer approach would require producer and consumer to synchronize on e
 
 ### 3-Slot Pipeline Flow
 
-```
+```text
 Time →
 
 Frame 0:
@@ -312,7 +312,7 @@ relationship with any other stream, including the producer's default or compute 
 
 #### The Race — What Happens Without Ordering
 
-```
+```text
 Producer stream:   [kernel writes to src_buffer] ...
 IPC stream:                                        [D2D memcpy src→ring_slot]  ← reads before write!
 ```
@@ -449,7 +449,7 @@ When `CUDALINK_TORCH_GPU_WAIT=1`, the torch consumer path replaces the host-side
 `cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
 batches into a multi-hundred-microsecond stall.
 
-```
+```text
 Default (CUDALINK_TORCH_GPU_WAIT=0):
   cudaEventSynchronize(ipc_event[slot])              <- CPU blocks until GPU signal, ~50-200 us WDDM-batched
 
@@ -478,7 +478,7 @@ call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between 
 
 **Flow**:
 
-```
+```text
 Producer (after advancing write_idx):
   SetEvent(doorbell_handle)                      <- ~0.02-0.10 ms, cook-thread safe, no FPS dip
 
@@ -549,7 +549,7 @@ The frame is skipped, and `clear_status()` is called as soon as the upstream for
 
 **Producer** (~2-5µs IPC overhead, plus GPU D2D copy):
 
-```
+```text
 get TOP's cudaMemory() → src_ptr
 slot = write_idx % NUM_SLOTS
 cudaMemcpy D2D (src_ptr → gpu_buffer[slot])  ← GPU work, scales with frame size
@@ -560,7 +560,7 @@ shm.buf[12:16] = struct.pack("<I", write_idx) ← ~0.5µs
 
 **Consumer** (~1-3µs overhead):
 
-```
+```text
 write_idx = struct.unpack("<I", shm.buf[12:16])  ← ~0.5µs
 read_slot = (write_idx - 1) % NUM_SLOTS
 cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
@@ -689,7 +689,7 @@ RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. Full tables and per-resolu
 
 **Theoretical max FPS** (ignoring application logic; isolated export, EXPORT_SYNC=1):
 
-```
+```text
 FPS_max = 1 / export_frame_p50
         = 1 / 106 us   (1080p f32)  ~= 9,400 FPS
         = 1 / 357 us   (4K f32)     ~= 2,800 FPS
@@ -697,7 +697,7 @@ FPS_max = 1 / export_frame_p50
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
 
-```
+```text
 FPS_actual = min(TD_FPS, 1 / inference_time)
            = min(60, 1 / 0.016)
            = 60 FPS
@@ -705,7 +705,7 @@ FPS_actual = min(TD_FPS, 1 / inference_time)
 
 **Latency** (producer write -> consumer read, bench_sweep + bench_d2h_streams, 1080p f32):
 
-```
+```text
 Latency ~= IPC_notify + D2H_copy
         ~= 136 us + 1,320 us
         ~= 1.5 ms

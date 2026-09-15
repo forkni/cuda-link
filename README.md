@@ -1,3 +1,4 @@
+<!-- markdownlint-disable-next-line MD041 -->
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="logo_w.png">
@@ -84,11 +85,11 @@ faults, and `"Idle"` when inactive. A `warning_emitter` Script TOP inside the CO
 shows a local warning badge when the component is open. See [`td_exporter/HELP_DOC.md`](td_exporter/HELP_DOC.md)
 for per-parameter documentation.
 
-**Option B: Build from source**
+#### Option B: Build from source
 
 See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assembly.
 
-**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+#### Option C: Library mode (cleaner .tox — fewer Text DATs)
 
 For a leaner `.tox` (package installed once into a Python environment TD can see, instead
 of 15 mirror Text DATs), see [Distribution → For TouchDesigner Integration](#for-touchdesigner-integration).
@@ -194,7 +195,7 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 
 ## Architecture
 
-```
+```text
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
 CUDAIPCExtension facade
@@ -228,7 +229,7 @@ This prevents blocking - producer never waits for consumer, consumer is always 1
 
 ### SharedMemory Protocol (433 bytes for 3 slots)
 
-```
+```text
 [0-3]     magic "CIPD" (4B)       - Protocol validation (0x43495044)
 [4-11]    version (8B)             - Increments on TD re-initialization
 [12-15]   num_slots (4B)           - Number of ring buffer slots (3)
@@ -256,7 +257,7 @@ For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 
 The suite lives in `tests/` split into five purpose-named packages:
 
-```
+```text
 tests/
   core/         protocol layer — SHM layout, format negotiation, ports, activation barriers
   cuda/         CUDA runtime seam — IPC wrapper, errcheck, handle guards, NVML, probe scripts
@@ -489,11 +490,11 @@ Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TouchDesigner network.
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
 > matching the TouchDesigner build you target.
 
-**Option B: Build from source**
+#### Option B: Build from source
 
 Follow the manual build guide at [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) to assemble the `.tox` from `td_exporter/` source files.
 
-**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+#### Option C: Library mode (cleaner .tox — fewer Text DATs)
 
 Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
 DAT then loads the package automatically — the 15 mirror Text DATs (Env, SHMProtocol,

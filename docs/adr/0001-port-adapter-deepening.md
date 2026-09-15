@@ -37,11 +37,13 @@ Apply the **Port + Adapters + value-object** template to every module that owns 
 ## Consequences
 
 **Positive**:
+
 - All construction and export logic is testable without a GPU; the test suite runs on any machine.
 - The interface a caller must understand shrinks from "a class with 25+ private attributes and a 4-step initialisation sequence" to "`open()`, `export()`, context manager".
 - Bug fixes are local: the Port makes it obvious which CUDA operations the module uses; the adapter absorbs any ctypes-layer changes.
 
 **Negative / trade-offs**:
+
 - Every canonical `src/cuda_link/` module that uses this template uses relative imports (`from ._exporter_port import …`), which prevents byte-identical mirroring into `td_exporter/` without a transform step. See ADR-0002.
 - The Spec/Policy split adds a pair of extra dataclasses per module. Callers who previously passed everything as keyword arguments to `__init__` now build two frozen objects. Migration guides are provided.
 
@@ -82,6 +84,7 @@ pointer reclaimed by TD the instant the cook returns.  Async export lets TD recl
 source while the queued IPC-stream D2D copy is still executing → reads freed memory → 719.
 
 **Critical distinction — ordering vs. lifetime:**
+
 - `record_source_sync` / `producer_stream` / `_arm_same_stream_ordering` are **pre-copy
   ordering** primitives: they guarantee the source is fully *written* before the copy
   starts.  They do **not** guarantee the source outlives the queued read.
