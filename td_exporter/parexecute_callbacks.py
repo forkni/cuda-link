@@ -10,6 +10,18 @@ Handles parameter changes with debug logging and triggers appropriate re-initial
 import contextlib
 
 
+def _extension():
+    """Return the CUDAIPCExtension, or None if it is not available.
+
+    `parent().ext.CUDAIPCExtension` raises td.tdAttributeError when the extension did
+    not compile; a callback must never raise, so catch broadly.
+    """
+    try:
+        return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
+    except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
+        return None
+
+
 def onValueChange(par: object, prev: object) -> None:
     """Called when any monitored parameter changes.
 
@@ -17,7 +29,7 @@ def onValueChange(par: object, prev: object) -> None:
         par: The parameter that changed
         prev: The previous value of the parameter
     """
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
 
     if ext is None:
         return

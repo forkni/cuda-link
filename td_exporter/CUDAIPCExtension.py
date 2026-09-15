@@ -20,10 +20,11 @@ import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # op, run are TD ambient globals injected into the COMP namespace at runtime.
+    # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
     # Declared here so pyrefly can resolve the bare names used in this file.
-    from _td_builtins import CUDAMemoryShape, op, run  # noqa: F401
+    from _td_builtins import CUDAMemoryShape, op, run, ui  # noqa: F401
 
+CUDALinkBootstrap = None  # type: ignore[assignment]  -- fallback if the sibling DAT is absent
 with contextlib.suppress(ImportError):
     import CUDALinkBootstrap  # noqa: F401  -- registers sys.modules aliases when present
 
@@ -35,19 +36,61 @@ except ImportError:
 
     CUDAMemoryShape = None
 
-from SHMProtocol import (  # noqa: E402
-    FLAGS_BFLOAT16,
-    FORMAT_KIND_FLOAT,
-    FORMAT_KIND_SIGNED,
-    FORMAT_KIND_UNSIGNED,
-    PROTOCOL_MAGIC,
-    SHM_HEADER_SIZE,
-    SLOT_SIZE,
-)
-from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig  # noqa: E402
+# The extension MUST compile even when cuda_link is unresolved.  If this module raises,
+# TD leaves ext.CUDAIPCExtension undefined and every Execute DAT callback throws
+# td.tdAttributeError once per frame.  Degrade to an inert extension instead.
+LIBRARY_READY: bool = True
+LIBRARY_ERROR: str = ""
+try:
+    from SHMProtocol import (  # noqa: E402
+        FLAGS_BFLOAT16,
+        FORMAT_KIND_FLOAT,
+        FORMAT_KIND_SIGNED,
+        FORMAT_KIND_UNSIGNED,
+        PROTOCOL_MAGIC,
+        SHM_HEADER_SIZE,
+        SLOT_SIZE,
+    )
+    from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig  # noqa: E402
+    from TDReceiver import TDReceiverEngine  # noqa: E402
+    from TDSender import TDSenderEngine  # noqa: E402
+except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failure must not break compile
+    LIBRARY_READY = False
+    LIBRARY_ERROR = f"{type(_library_error).__name__}: {_library_error}"
+
+    # Names stay bound for __all__ / back-compat, but are None so misuse fails loudly
+    # instead of silently reading a wrong protocol constant.
+    FLAGS_BFLOAT16 = FORMAT_KIND_FLOAT = FORMAT_KIND_SIGNED = FORMAT_KIND_UNSIGNED = None
+    PROTOCOL_MAGIC = SHM_HEADER_SIZE = SLOT_SIZE = None
+    TDSenderEngine = TDReceiverEngine = None  # type: ignore[assignment]
+
+    from dataclasses import dataclass as _dataclass
+
+    @_dataclass
+    class TDRuntimeState:  # type: ignore[no-redef]
+        """Field-compatible stand-in so __init__ needs no degraded branch."""
+
+        shm_name: str = ""
+        num_slots: int = 3
+        verbose: bool = False
+
+        def update(self, field_name: str, value: object) -> None:
+            setattr(self, field_name, value)
+
+    class TDSenderConfig:  # type: ignore[no-redef]
+        export_profile = False
+
+        @classmethod
+        def from_env(cls) -> TDSenderConfig:
+            return cls()
+
+    class TDReceiverConfig:  # type: ignore[no-redef]
+        pass
+
+
+# TDHost is stdlib-only (no bare-name cuda_link imports) -- always importable, so
+# RealTDHost.set_warning_status() is available even in degraded mode.
 from TDHost import RealTDHost, TDHost  # noqa: E402
-from TDReceiver import TDReceiverEngine  # noqa: E402
-from TDSender import TDSenderEngine  # noqa: E402
 
 # Re-export protocol constants for backward compatibility (tests import these from here)
 __all__ = [
@@ -68,6 +111,69 @@ cp = None
 # Session-level dedup guard: track which COMP paths have already shown the install banner.
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
 _banner_shown_for_comps: set[str] = set()
+_notice_printed: bool = False  # fallback dedup when COMP storage is unavailable
+_NOTICE_STORE_KEY = "cuda_link_notice_shown"
+
+
+def _bootstrap_active() -> bool:
+    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
+    return bool(getattr(CUDALinkBootstrap, "_active", False))
+
+
+def _bootstrap_error() -> str:
+    return str(getattr(CUDALinkBootstrap, "last_error", "") or "")
+
+
+class _NullEngine:
+    """Inert engine used when cuda_link is unresolved.
+
+    Exposes every method the facade delegates to, so CUDAIPCExtension constructs,
+    ext.CUDAIPCExtension resolves, and the frame loop runs without raising.
+    """
+
+    verbose_performance = False
+
+    def initialize(self, *a, **k) -> bool:
+        return False
+
+    def initialize_receiver(self) -> bool:
+        return False
+
+    def export_frame(self, *a, **k) -> bool:
+        return False
+
+    def import_frame(self, *a, **k) -> bool:
+        return False
+
+    def has_new_frame(self) -> bool:
+        return False  # receiver loop does nothing
+
+    def is_ready(self) -> bool:
+        return False
+
+    def _check_deferred_cleanup(self) -> None:
+        return None
+
+    def update_receiver_resolution(self, *a, **k) -> None:
+        return None
+
+    def update_receiver_format(self, *a, **k) -> None:
+        return None
+
+    def request_immediate_reconnect(self) -> None:
+        return None
+
+    def consume_pending_resolution(self):
+        return None
+
+    def consume_pending_format(self):
+        return None
+
+    def cleanup(self) -> None:
+        return None
+
+    def get_stats(self) -> dict:
+        return {"ready": False, "error": LIBRARY_ERROR}
 
 
 class CUDAIPCExtension:
@@ -124,27 +230,29 @@ class CUDAIPCExtension:
         if _hide_val is not None:
             self._host.show_custom_only(bool(_hide_val))
 
-        self._engine: TDSenderEngine | TDReceiverEngine = self._make_engine()
+        self._engine: TDSenderEngine | TDReceiverEngine | _NullEngine = self._make_engine()
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
         if self._mode == "Receiver":
             self._host.set_param_enabled("Numslots", False)
 
-        # Schedule the install banner if neither library mode nor classic mirror DATs are
-        # available.  Deferred 5 frames so all COMP operators finish loading first.
-        # delayRef=op.TDResources fires even when the TD timeline is paused.
+        # Non-blocking availability notice.  NEVER ui.messageBox here: it is modal and
+        # blocks TD's main thread, and each of the four shmem COMPs compiles its OWN
+        # module object -- a module-level set cannot dedup across them (that is what
+        # produced four stacked dialogs).  Deferred 5 frames so COMP operators finish
+        # loading; delayRef=op.TDResources fires even when the timeline is paused.
         _comp_path = getattr(ownerComp, "path", str(ownerComp))
         if (
             _comp_path not in _banner_shown_for_comps
-            and not CUDALinkBootstrap._active
+            and (not LIBRARY_READY or not _bootstrap_active())
             and not self._sibling_mirrors_available()
         ):
             _banner_shown_for_comps.add(_comp_path)
             with contextlib.suppress(NameError):
                 run(  # noqa: F821  -- td global; NameError suppressed (non-TD context)
                     "args[0]()",
-                    self._show_install_banner,
+                    self._notify_library_unavailable,
                     delayFrames=5,
                     delayRef=op.TDResources,  # noqa: F821
                 )
@@ -169,56 +277,70 @@ class CUDAIPCExtension:
                     return True
         return False
 
-    def _show_install_banner(self) -> None:
-        """Show a native TD modal dialog when cuda_link is missing.
+    def _claim_notice_once(self) -> bool:
+        """True only for the first caller across all four sibling COMPs.
 
-        Called via run() with delayFrames=5 so the dialog fires after the project
-        finishes loading.  Guards for the non-TD context (tests / editable installs)
-        where 'ui' is not available.
-
-        Button mapping:
-          0 → Open Preferences  (opens Edit → Preferences so user can set Python Module Path)
-          1 → Copy Install Command  (puts 'install_td_library.cmd' on the clipboard)
-          2 → Dismiss
-        Always sets COMP warning status so the yellow tint persists after the dialog closes.
+        Module globals cannot dedup: TD compiles a separate module object per Text DAT,
+        so each shmem COMP has its own copy of this file's globals.  COMP storage is
+        real shared state in the TD process, so the flag lives on the owning tox
+        (parent of the shmem COMP), falling back to op.TDResources.
         """
+        global _notice_printed
+        holder = None
+        with contextlib.suppress(AttributeError, RuntimeError, NameError):
+            holder = self.ownerComp.parent()
+        if holder is None:
+            with contextlib.suppress(AttributeError, RuntimeError, NameError):
+                holder = op.TDResources  # noqa: F821
+        if holder is None:  # non-TD context (tests)
+            if _notice_printed:
+                return False
+            _notice_printed = True
+            return True
         try:
-            from td import ui  # noqa: PLC0415  -- deferred; not available outside TD
-        except (ImportError, NameError):
+            if holder.fetch(_NOTICE_STORE_KEY, False, storeDefault=False):
+                return False
+            holder.store(_NOTICE_STORE_KEY, True)
+        except (AttributeError, RuntimeError, TypeError):
+            return True
+        return True
+
+    def _notify_library_unavailable(self) -> None:
+        """Non-modal 'cuda_link not ready' notice.
+
+        Under the Base Folder contract this state is NORMAL on every cold project load
+        until Startstream, so it must never stall the main thread.  Per-COMP feedback is
+        the yellow tint + Status par + warning_emitter badge; the textport line and the
+        status bar fire once per tox.
+        """
+        detail = LIBRARY_ERROR or _bootstrap_error() or "Base Folder not set"
+        short = "cuda_link not ready - set the StreamDiffusionTD Base Folder, then start the stream."
+
+        with contextlib.suppress(AttributeError, RuntimeError):
+            self._host.set_warning_status(short)
+
+        if not self._claim_notice_once():
             return
-
-        msg = (
-            "The cuda_link package is not installed and no mirror Text DATs were found.\n\n"
-            "To fix, choose one of:\n"
-            "  • Run install_td_library.cmd and pick an install target\n"
-            "  • Set CUDALINK_LIB_PATH=<install folder> before launching TD\n"
-            "  • Edit → Preferences → Python 32/64 bit Module Path → add the folder\n\n"
-            "The component will not export or receive frames until cuda_link is available."
-        )
-        result = ui.messageBox(
-            "cuda-link: Library Not Found",
-            msg,
-            buttons=["Open Preferences", "Copy Install Command", "Dismiss"],
-        )
-        if result == 0:  # Open Preferences
-            ui.openPreferences()
-        elif result == 1:  # Copy install_td_library.cmd path to clipboard
-            ui.clipboard = "install_td_library.cmd"
-            ui.status = "install_td_library.cmd name copied — run it from the repo root in a terminal."
-
-        # Always tint the COMP yellow so the missing-library state is visible in the network.
-        self._host.set_warning_status("cuda_link not available — run install_td_library.cmd or set CUDALINK_LIB_PATH")
+        print(f"[CUDAIPCExtension] {short} ({detail})")
+        with contextlib.suppress(NameError, AttributeError, RuntimeError):
+            ui.status = short  # noqa: F821  -- non-blocking status bar
 
     # ------------------------------------------------------------------
     # Engine factory
     # ------------------------------------------------------------------
 
-    def _make_engine(self) -> TDSenderEngine | TDReceiverEngine:
+    def _make_engine(self) -> TDSenderEngine | TDReceiverEngine | _NullEngine:
+        if not LIBRARY_READY:
+            return _NullEngine()
+        # Reached only when the cuda_link import above succeeded, so TDSenderEngine /
+        # TDReceiverEngine / *Config are the real classes here, never the None / stand-in
+        # fallbacks bound in the except branch -- pyrefly can't see that control-flow
+        # invariant across the module-level try/except, hence the targeted ignores below.
         rs = self._runtime_state
         if self._mode == "Sender":
-            return TDSenderEngine(
+            return TDSenderEngine(  # type: ignore[not-callable]
                 host=self._host,
-                config=self._config,
+                config=self._config,  # type: ignore[bad-argument-type]
                 cuda=None,
                 log_fn=self._log,
                 num_slots=rs.num_slots,
@@ -226,9 +348,9 @@ class CUDAIPCExtension:
                 shm_name=rs.shm_name,
                 verbose=rs.verbose,
             )
-        return TDReceiverEngine(
+        return TDReceiverEngine(  # type: ignore[not-callable]
             host=self._host,
-            config=TDReceiverConfig(),
+            config=TDReceiverConfig(),  # type: ignore[bad-argument-type]
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,
@@ -253,6 +375,11 @@ class CUDAIPCExtension:
     @property
     def mode(self) -> str:
         return self._mode
+
+    @property
+    def library_ready(self) -> bool:
+        """False while this instance is running inert (cuda_link was unresolved at compile)."""
+        return LIBRARY_READY and not isinstance(self._engine, _NullEngine)
 
     def initialize(self, width: int, height: int, channels: int = 4, buffer_size: int | None = None) -> bool:
         """Delegate to sender engine's initialize() (kept for test injection)."""
