@@ -58,6 +58,12 @@ issue: `TDReceiver.py` imports 15+ symbols from `SHMProtocol` (including the pri
 is a single 80-line module that centralises all dual-mode logic. The alias map is explicitly
 cross-referenced against `PAIRS` by `tests/td/test_td_bootstrap.py::test_alias_map_covers_all_pairs`.
 
+> **Superseded (2026-09-14):** the byte-for-byte invariant above no longer holds for
+> `CUDAIPCExtension.py`. PR #44 rewrites it to compile unconditionally and never raise from TD
+> callbacks (degraded-mode import handling) — see the Consequences section below.
+> `TDSender.py`, `TDReceiver.py`, and `TDConfig.py` are unaffected and remain byte-for-byte
+> unchanged.
+
 ### Why this is safe for TD's embedded Python
 
 `cuda_link` is a **pure-ctypes, zero-required-dependency, `py3-none-any`** wheel. There is no
@@ -98,7 +104,9 @@ out-of-process design is architecturally incompatible with these operations.
 **Positive:**
 - Primary `.tox` drops 15 mirror Text DATs (from ~24 to ~10). `.tox` size shrinks significantly.
 - `CUDAIPCExtension.py`, `TDSender.py`, `TDReceiver.py`, `TDConfig.py` are byte-for-byte
-  unchanged — zero regression risk in the glue layer.
+  unchanged — zero regression risk in the glue layer. **Superseded (2026-09-14) for
+  `CUDAIPCExtension.py`** — see the note under "Why sys.modules aliasing rather than editing
+  the glue files" above; the other three glue files remain unchanged.
 - `install_td_library.cmd` gives users a one-step, no-venv install path.
 - The fallback is transparent and automatic: unset `CUDALINK_LIB_PATH` and the classic
   deployment just works.
