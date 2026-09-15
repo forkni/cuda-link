@@ -4,12 +4,10 @@ on:
   push:
     branches: [development, main, master]
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
   pull_request:
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
 
 permissions:
   contents: read
@@ -36,11 +34,6 @@ jobs:
         with:
           globs: |
             **/*.md
-            !node_modules
-            !.venv
-            !TD_RAG
-            !Backup
-        continue-on-error: true
 
   link-check:
     name: Link Validation
