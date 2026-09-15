@@ -252,6 +252,7 @@ For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 - **[Architecture](docs/ARCHITECTURE.md)** - Protocol spec, ring buffer design, GPU sync
 - **[Integration Examples](docs/INTEGRATION_EXAMPLES.md)** - TD→PyTorch, TD→OpenCV, multi-stream
 - **[Runnable Examples](examples/README.md)** - 8 standalone, heavily-commented scripts (`examples/`) — each spawns its own demo producer, so they run without TouchDesigner
+- **[Branching & Promotion](docs/BRANCHING.md)** - development-first PR rule, how the master promotion workflow runs
 
 ## Testing
 

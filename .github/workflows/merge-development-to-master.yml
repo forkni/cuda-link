@@ -1,4 +1,4 @@
-name: Merge Development to Main
+name: Merge Development to Master
 
 on:
   workflow_dispatch:
@@ -32,11 +32,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Configure merge driver
-        run: |
-          git config --global merge.ours.driver true
-          git config --global merge.ours.name "Keep ours merge driver"
 
       - name: Verify .gitattributes exists
         run: |
