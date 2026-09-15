@@ -102,6 +102,7 @@ out-of-process design is architecturally incompatible with these operations.
 ## Consequences
 
 **Positive:**
+
 - Primary `.tox` drops 15 mirror Text DATs (from ~24 to ~10). `.tox` size shrinks significantly.
 - `CUDAIPCExtension.py`, `TDSender.py`, `TDReceiver.py`, `TDConfig.py` are byte-for-byte
   unchanged — zero regression risk in the glue layer. **Superseded (2026-09-14) for
@@ -112,6 +113,7 @@ out-of-process design is architecturally incompatible with these operations.
   deployment just works.
 
 **Negative / trade-offs:**
+
 - One new file in the COMP (`CUDALinkBootstrap`) and one new import line in
   `CUDAIPCExtension.py`.
 - The bootstrap's alias map must be kept in sync with `PAIRS`; the drift-guard test enforces

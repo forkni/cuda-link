@@ -1,0 +1,13 @@
+{
+  // markdownlint-cli2 tool config (separate from the rule set in
+  // .markdownlint.json, which takes precedence for rules in this directory).
+  // Skips gitignored files (e.g. local-only CLAUDE.md, MEMORY.md, session
+  // logs) automatically, without needing manual "!file" exclusions in
+  // CGW_MARKDOWNLINT_ARGS -- see cgw.conf.example.
+  "gitignore": ".gitignore",
+
+  // .claude/Charlie_DOC.md is tracked but vendored -- a verbatim copy of
+  // https://docs.charlielabs.ai/customization. Excluded rather than
+  // reformatted so we don't redo the churn on every upstream refresh.
+  "ignores": [".claude/Charlie_DOC.md"]
+}

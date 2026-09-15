@@ -28,7 +28,7 @@ This prevents misinterpreting WDDM enqueue overhead as a kernel performance prob
 
 Payload: 1 MB (typical HD frame slice). GPU: RTX-class with ~600 GB/s device bandwidth.
 
-```
+```text
 Expected GPU kernel time = 1 MB / 600 GB/s ≈ 1.7 µs
 Expected GPU kernel time = 1 MB / 3,350 GB/s (H100 HBM3) ≈ 0.3 µs
 ```
@@ -67,7 +67,7 @@ Without this package the `CUDALINK_NVTX` env var is a no-op (the shim degrades s
 
 Default after CUDA 12 install:
 
-```
+```text
 C:/Program Files/NVIDIA Corporation/Nsight Systems <version>/target-windows-x64/nsys.exe
 C:/Program Files/NVIDIA Corporation/Nsight Compute <version>/ncu.exe
 ```
@@ -127,6 +127,7 @@ nsys-ui run.nsys-rep
 ```
 
 **What to look for:**
+
 - NVTX ranges aligned with CUDA kernel activity on the correct stream
 - No unexpected serialisation between `ipc_stream` and `_rx_stream` in the steady state
 - `cudalink.sender.export_frame.*` and `cudalink.receiver.import_frame.*` do not overlap when
@@ -212,7 +213,7 @@ context manager; disable for production.
 `.nsys-rep` per process (they share wall-clock). In nsys-ui tile the two reports to align
 their timelines:
 
-```
+```text
 File → Open → run.nsys-rep        (producer/TD process)
 File → Open in Same Window → run_1.nsys-rep  (consumer process)
 ```
@@ -229,7 +230,7 @@ probing (see `SESSION_LOG.md` Phase 3.6 for the full timeline).
 
 ### Correct topology (flags set)
 
-```
+```cmd
 SET CUDALINK_TD_STREAM_PRIO=normal
 SET CUDALINK_TD_PERSIST_STREAM=1
 ```
@@ -250,7 +251,7 @@ blocking. Post-settle latency stabilises within 3 frames.
 
 ### Regression signature (flags wrong)
 
-```
+```cmd
 SET CUDALINK_TD_STREAM_PRIO=high
 SET CUDALINK_TD_PERSIST_STREAM=0
 ```
@@ -328,7 +329,7 @@ nsys profile --force-overwrite=true --trace=cuda,nvtx,wddm --output "$out/run" .
 capture (where nsys attaches to a process you don't control via a wrapper script), pass it
 explicitly on the command line, e.g.:
 
-```
+```powershell
 nsys profile --force-overwrite=true --output td_pipeline_producer/producer ...
 ```
 
@@ -338,7 +339,7 @@ nsys profile --force-overwrite=true --output td_pipeline_producer/producer ...
 `cudaIpcOpenMemHandle`) that connects while the producer or first consumer is
 being profiled by nsys with `--trace=cuda` sees:
 
-```
+```text
 [CUDAIPCExtension:Receiver] Slot N: cudaIpcOpenMemHandle failed:
     invalid resource handle (error 400: UNKNOWN_ERROR_400)
 ```
@@ -433,7 +434,8 @@ With HWS enabled, the GPU hardware processes the queue directly, reducing batch 
 3. **Reboot required** — the change does not take effect until restart.
 
 Or via registry (requires reboot):
-```
+
+```text
 HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers
   HwSchMode  REG_DWORD  0 = disabled, 2 = enabled
 ```
@@ -457,7 +459,7 @@ After each capture, run `v4_analyze.cmd` and compare:
 
 The exporter emits the current HWS state as an NVTX startup range at initialization:
 
-```
+```text
 cudalink.startup.hws_mode=<value>
 ```
 
@@ -576,7 +578,7 @@ The default differs between the two producer implementations:
 
 Run `v5_analyze.cmd` after a capture and check:
 
-```
+```cmd
 nsys stats --report cuda_api_sum producer.nsys-rep | findstr cudaStreamSynchronize
 ```
 

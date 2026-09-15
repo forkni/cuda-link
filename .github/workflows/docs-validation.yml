@@ -4,12 +4,10 @@ on:
   push:
     branches: [development, main, master]
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
   pull_request:
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
 
 permissions:
   contents: read
@@ -30,15 +28,12 @@ jobs:
           persist-credentials: false
 
       - name: Run markdownlint
+        # v24.2.0 bundles markdownlint-cli2 0.23.2 -- keep CGW_MARKDOWNLINT_CMD
+        # in .cgw.conf pinned to the same version when bumping this SHA.
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # v24.2.0
         with:
           globs: |
             **/*.md
-            !node_modules
-            !.venv
-            !TD_RAG
-            !Backup
-        continue-on-error: true
 
   link-check:
     name: Link Validation

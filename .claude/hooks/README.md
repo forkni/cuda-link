@@ -209,7 +209,7 @@ bash .claude/hooks/enable-strict-mode.sh
 
 **Error Threshold Reminder**:
 
-```
+```text
 ╔════════════════════════════════════════════════╗
 ║  ⚠️  MULTIPLE BASH ERRORS DETECTED             ║
 ║  Consider consulting BASH_STYLE_GUIDE.md       ║
@@ -245,7 +245,7 @@ Last error: 5 seconds ago
 
 **If errors occurred during session**:
 
-```
+```text
 ╔════════════════════════════════════════════════╗
 ║  📊 SESSION SUMMARY: Bash Errors Detected      ║
 ╚════════════════════════════════════════════════╝
@@ -276,7 +276,7 @@ Tip: bash-pre-validator.sh can catch errors BEFORE execution
 
 ## File Structure
 
-```
+```text
 .claude/
 ├── hooks/
 │   ├── README.md                      # This file
@@ -361,13 +361,13 @@ Hooks are registered in `.claude/settings.json`:
 
 **Test explicit MCP request**:
 
-```
+```text
 User: "Please use MCP search to find authentication code"
 ```
 
 **Expected Output**:
 
-```
+```text
 ╔═══════════════════════════════════════════════════════╗
 ║  🔴 USER EXPLICITLY REQUESTED MCP SEARCH              ║
 ║  THIS IS MANDATORY - NOT A SUGGESTION                ║
@@ -387,13 +387,13 @@ USER'S REQUEST: "Please use MCP search to find authentication code"
 
 **Test implicit MCP trigger**:
 
-```
+```text
 User: "Can you help me find the function that handles user registration?"
 ```
 
 **Expected Output**:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 SKILL ACTIVATION CHECK
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -414,13 +414,13 @@ User: "Can you help me find the function that handles user registration?"
 
 **Test Windows CMD detection in user prompt**:
 
-```
+```text
 User: "Run bash: dir /s /b *.py"
 ```
 
 **Expected Output**:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️  BASH COMMAND VALIDATION WARNING
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -451,7 +451,7 @@ COMMAND: dir /s /b *.py
 
 **Test critical error blocking**:
 
-```
+```text
 Claude attempts: copy file1.txt file2.txt
 ```
 
@@ -463,7 +463,7 @@ Claude attempts: copy file1.txt file2.txt
 
 **Expected Output**:
 
-```
+```text
 ╔═══════════════════════════════════════════════╗
 ║  🔴 CRITICAL: Command Blocked by Strict Mode   ║
 ╚═══════════════════════════════════════════════╝
@@ -492,7 +492,7 @@ CRITICAL ISSUE: Windows CMD Command
 
 **Expected Output after 2nd error**:
 
-```
+```text
 ╔════════════════════════════════════════════════╗
 ║  ⚠️  MULTIPLE BASH ERRORS DETECTED             ║
 ║  Consider consulting BASH_STYLE_GUIDE.md       ║
