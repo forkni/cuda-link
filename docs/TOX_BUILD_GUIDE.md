@@ -417,6 +417,38 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 **Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the extension class in the Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExtension`
 
+This error means the extension registration itself is missing. A missing or unresolved
+`cuda_link` library is handled differently:
+
+### cuda_link not ready
+
+**Symptom**: The extension accessor exists, but no frames are transferred. The Textport or
+status bar reports `cuda_link not ready - set the StreamDiffusionTD Base Folder, then start the stream.`
+
+`CUDAIPCExtension` is designed to compile even when its `cuda_link` imports cannot be resolved.
+In that degraded state, `library_ready` is `False`, `initialize()`, `export_frame()`, and
+`import_frame()` return `False`, and the callback templates return without raising. This keeps
+an unavailable library from failing once per frame while TouchDesigner is starting up.
+
+Check the state of the registered extension in the Textport:
+
+```python
+ext = op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
+print(ext.library_ready)
+```
+
+If it prints `False`:
+
+1. In **Library mode**, verify that `cuda_link` is installed and available through
+   `CUDALINK_LIB_PATH` or TouchDesigner’s Python Module Path (see [Step 3](#step-3-create-text-dats)
+   above).
+2. In the StreamDiffusionTD Base Folder workflow, set the Base Folder and start the stream as
+   instructed by the status message.
+3. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
+   the mirror DAT sections under [Step 3](#step-3-create-text-dats).
+
+After the component compiles with the library available, `ext.library_ready` should be `True`.
+
 ### CUDA runtime DLL not found
 
 **Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
