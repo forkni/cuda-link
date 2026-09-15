@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Markdown lint is now enforced**: `.markdownlint.json` synced to the CGW baseline,
+  the local and CI engines both pinned to `markdownlint-cli2` 0.23.2, and the
+  `markdown-lint` CI job in `docs-validation.yml` no longer carries
+  `continue-on-error`. The `paths:` filter widened from `docs/** + README.md` to
+  `**/*.md`, matching the action's `globs:`.
+
+### Removed
+
+- **Vestigial merge-driver configuration**: ten `docs/*.md merge=ours` rules in
+  `.gitattributes` whose target paths never existed in this repository's history,
+  plus an inert `merge=diff3` block (`diff3` is a conflict *display style*, set via
+  `merge.conflictStyle` in `scripts/git/merge_with_validation.sh`, not a registered
+  merge driver). Only `CHANGELOG.md merge=union` remains active. The promotion
+  workflow was renamed `merge-development-to-main.yml` →
+  `merge-development-to-master.yml` and no longer registers the now-unreferenced
+  `merge.ours.driver`. See `docs/BRANCHING.md` for how promotion actually runs.
+
 ## [1.12.2] - 2026-08-11
 
 ### Fixed
