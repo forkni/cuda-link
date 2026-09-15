@@ -27,7 +27,7 @@ Fallback / classic mode:
     as before (the original "paste all DATs" deployment story is fully preserved).
 
 Drift guard:
-    tests/test_td_bootstrap.py verifies that _ALIAS_MAP keys and values stay in sync
+    tests/td/test_td_bootstrap.py verifies that _ALIAS_MAP keys and values stay in sync
     with the PAIRS list in scripts/sync_td_wrapper.py.  If a new mirror module is added,
     update PAIRS first; the test will then fail here until this dict is updated too.
 """
@@ -45,7 +45,7 @@ import sys
 # Key  = derived td_exporter stem (importable bare name inside TD's COMP namespace)
 # Value = fully-qualified cuda_link submodule to alias it to
 #
-# tests/test_td_bootstrap.py::test_alias_map_covers_all_pairs enforces this.
+# tests/td/test_td_bootstrap.py::test_alias_map_covers_all_pairs enforces this.
 # ---------------------------------------------------------------------------
 _ALIAS_MAP: dict[str, str] = {
     # byte_identical pairs (no relative imports in canonical source)
