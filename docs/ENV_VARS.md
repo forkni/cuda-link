@@ -51,5 +51,6 @@ is the complete list.
 | `CUDALINK_RECEIVER_FRAME_MODE` | `torch` | Frame-fetch backend selected by the standalone Python receiver example: `torch`, `cupy`, or `numpy`. If the selected optional backend is unavailable, the example falls back to `numpy`. |
 | `CUDALINK_RECEIVER_PYTHON_EXE` | unset | Full-path Python executable override for `td_exporter/example_receiver_launcher.py`. When unset, the launcher tries `py -3` and then a `python` executable found on `PATH`. |
 | `CUDALINK_SENDER_PYTHON_EXE` | unset | Full-path Python executable override for `td_exporter/example_sender_launcher.py`. When unset, the launcher tries `py -3` and then a `python` executable found on `PATH`. |
+| `CUDALINK_NCU_MIN` | unset | Set to `1` before running `scripts/profiling/capture_ncu_td_pipeline.cmd` to launch its `NCU-Sender-Capture` helper window minimised (`START /MIN`), rather than in the foreground. Purely a window-visibility convenience for unattended `ncu` capture runs; has no effect on the captured profile data. |
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](PROFILING.md).
