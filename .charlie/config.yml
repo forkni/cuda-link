@@ -1,8 +1,8 @@
 checkCommands:
   fix: ruff check --fix . && ruff format .
   lint: pip install ruff && ruff check .
-  types: pip install mypy && mypy src/
-  test: pip install pytest && pytest tests/ -x -q -m "not requires_cuda"
+  types: pip install pyrefly==1.0.0 && pyrefly check
+  test: pip install pytest && pytest tests/ -x -q -m "not requires_cuda and not requires_native"
 beta:
   canApprovePullRequests: false
   # proactive:  # Uncomment to enable automated playbooks

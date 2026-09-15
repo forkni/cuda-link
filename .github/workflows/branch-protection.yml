@@ -82,19 +82,19 @@ jobs:
 
           # Allowed public documentation files (top-level docs/ only).
           # adr/ and plans/ subdirectories are always permitted — excluded below.
-          ALLOWED_DOCS="ARCHITECTURE\.md|AUTOMATED_GIT_WORKFLOW\.md|BASH_STYLE_GUIDE\.md|BATCH_STYLE_GUIDE\.md|BENCHMARKS\.md|IMPLEMENTATION_SUMMARY\.md|INTEGRATION_EXAMPLES\.md|PERFORMANCE_OPTIMIZATIONS\.md|PROFILING\.md|PYTHON_DEBUGGING_PROTOCOL\.md|PYTHON_STYLE_GUIDE\.md|PYTHON_STYLE_GUIDE_QUICK\.md|SHELL_STYLE_GUIDE\.md|TOX_BUILD_GUIDE\.md"
+          ALLOWED_DOCS="ARCHITECTURE\.md|AUTOMATED_GIT_WORKFLOW\.md|BASH_STYLE_GUIDE\.md|BATCH_STYLE_GUIDE\.md|BENCHMARKS\.md|ENV_VARS\.md|IMPLEMENTATION_SUMMARY\.md|INTEGRATION_EXAMPLES\.md|PERFORMANCE_OPTIMIZATIONS\.md|PROFILING\.md|PYTHON_DEBUGGING_PROTOCOL\.md|PYTHON_STYLE_GUIDE\.md|PYTHON_STYLE_GUIDE_QUICK\.md|SHELL_STYLE_GUIDE\.md|TOX_BUILD_GUIDE\.md"
 
-          # Find unauthorized docs (only check on main branch)
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          # Find unauthorized docs (only check on master branch)
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
             UNAUTHORIZED=$(git ls-files docs/ \
               | grep -v -E "docs/($ALLOWED_DOCS)$" \
               | grep -v -E "^docs/(adr|plans)/" || true)
 
             if [ -n "$UNAUTHORIZED" ]; then
-              echo "❌ ERROR: Unauthorized documentation files found on main branch:"
+              echo "❌ ERROR: Unauthorized documentation files found on master branch:"
               echo "$UNAUTHORIZED"
               echo ""
-              echo "Only these 15 top-level docs are allowed in main branch (plus adr/ and plans/ subdirs):"
+              echo "Only these 16 top-level docs are allowed in master branch (plus adr/ and plans/ subdirs):"
               echo "$ALLOWED_DOCS" | tr '|' '\n' | sed 's/\\//g'
               exit 1
             fi
