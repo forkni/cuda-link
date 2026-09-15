@@ -82,3 +82,9 @@ git check-attr merge -- CHANGELOG.md docs/ARCHITECTURE.md src/cuda_link/exporter
 ```
 
 Only `CHANGELOG.md` should report `union`; everything else reports `unspecified`.
+
+## Scratch gate-verification heading
+
+```
+bare fence, no language tag -- should trip MD040
+```
