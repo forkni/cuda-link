@@ -349,10 +349,11 @@ print("Clean shutdown complete")
 
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99,
-> CSV + JSON export), run `python benchmarks/bench_sweep.py` (full 16-cell, ~12 min) or
-> `python benchmarks/bench_sweep.py --quick` (1 cell, ~1 min). See
-> [docs/BENCHMARKS.md](BENCHMARKS.md) for pre-measured results.
+> **Availability**: The historical `benchmarks/bench_sweep.py` script is not included in this
+> repository, so the full IPC roundtrip sweep commands from older versions are not runnable from
+> a fresh checkout. Use the linked producer-side benchmark for a tracked runnable example, or
+> follow the manual consumer-side profiling script below. See [docs/BENCHMARKS.md](BENCHMARKS.md)
+> for pre-measured results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a
 live TD sender.
