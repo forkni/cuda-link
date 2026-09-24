@@ -189,12 +189,13 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 3. Confirm the import block reads:
 
    ```python
-   with contextlib.suppress(ImportError):
+   with contextlib.suppress(Exception):
        import CUDALinkBootstrap  # noqa: F401
    ```
 
-   The `contextlib.suppress` guard ensures the extension loads cleanly in classic mode
-   (no bootstrap DAT present).
+   The broad `contextlib.suppress` guard ensures the extension still loads when the
+   bootstrap DAT is absent or cannot resolve a library candidate; inspect the bootstrap's
+   Textport message and yellow status for the resolution reason.
 
 ---
 
