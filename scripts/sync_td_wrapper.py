@@ -20,6 +20,9 @@ The authoritative pair list is PAIRS below.  Keep this docstring free of a
 duplicate listing so it cannot drift.  NAMES is derived from PAIRS at module
 load time — do not maintain it separately.
 
+Besides the pairs, the script stamps ``MIRROR_VERSION`` in td_exporter/CUDALinkBootstrap.py
+from ``cuda_link.__version__`` (ADR-0014); --check fails when the stamp is stale.
+
 Usage:
     python scripts/sync_td_wrapper.py           # copy/rewrite src → td_exporter (update)
     python scripts/sync_td_wrapper.py --check   # verify only; exit 1 if any pair differs
@@ -157,6 +160,37 @@ def _derived_text(src_text: str, mode: str) -> str:
     return rewrite_relative_imports(src_text)
 
 
+# ---------------------------------------------------------------------------
+# Version stamp: td_exporter/CUDALinkBootstrap.py::MIRROR_VERSION
+#
+# The bootstrap only activates an installed cuda_link whose __version__ equals the stamp,
+# so the mirrors inside the .tox and the package they alias can never drift apart
+# (ADR-0014).  The stamp is derived from src/cuda_link/__init__.py here; --check fails
+# when it is stale, exactly like an out-of-sync pair.
+# ---------------------------------------------------------------------------
+
+_PACKAGE_INIT = _SRC / "__init__.py"
+_BOOTSTRAP = _TD / "CUDALinkBootstrap.py"
+_VERSION_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE)
+_STAMP_RE = re.compile(r"^MIRROR_VERSION = \"[^\"]*\"$", re.MULTILINE)
+
+
+def read_package_version() -> str:
+    """cuda_link.__version__ as written in src/cuda_link/__init__.py (read, not imported)."""
+    match = _VERSION_RE.search(_PACKAGE_INIT.read_text(encoding="utf-8"))
+    if not match:
+        raise ValueError(f"{_PACKAGE_INIT} has no __version__ assignment")
+    return match.group(1)
+
+
+def stamp_mirror_version(bootstrap_text: str, version: str) -> str:
+    """Return *bootstrap_text* with its ``MIRROR_VERSION = "..."`` line set to *version*."""
+    stamped, count = _STAMP_RE.subn(f'MIRROR_VERSION = "{version}"', bootstrap_text, count=1)
+    if count != 1:
+        raise ValueError(f'{_BOOTSTRAP.name} has no MIRROR_VERSION = "..." line to stamp')
+    return stamped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync td_exporter copies from canonical sources.")
     parser.add_argument("--check", action="store_true", help="Check only; exit 1 if any pair differs.")
@@ -194,6 +228,28 @@ def main() -> int:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(expected, encoding="utf-8")
             print(f"Synced [{mode}] {src.relative_to(REPO_ROOT)} -> {dst.relative_to(REPO_ROOT)}")
+
+    try:
+        version = read_package_version()
+        on_disk = _BOOTSTRAP.read_text(encoding="utf-8")
+        stamped = stamp_mirror_version(on_disk, version)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR in {_BOOTSTRAP.name}: {exc}", file=sys.stderr)
+        return 1
+
+    if args.check:
+        if on_disk == stamped:
+            print(f"OK [version stamp]: {_BOOTSTRAP.name} MIRROR_VERSION = {version}")
+        else:
+            print(
+                f"FAIL [version stamp]: {_BOOTSTRAP.name} MIRROR_VERSION != {version}. "
+                "Run: python scripts/sync_td_wrapper.py",
+                file=sys.stderr,
+            )
+            exit_code = 1
+    elif on_disk != stamped:
+        _BOOTSTRAP.write_text(stamped, encoding="utf-8")
+        print(f"Stamped MIRROR_VERSION = {version} into {_BOOTSTRAP.relative_to(REPO_ROOT)}")
 
     return exit_code
 

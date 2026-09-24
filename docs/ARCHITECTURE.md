@@ -117,8 +117,8 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
-- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`. Ensure TouchDesigner can import it either by setting `CUDALINK_LIB_PATH` to that folder before launching TD or by adding the folder to TD Preferences → Python 32/64 bit Module Path. The bootstrap injects the environment-variable path when set, imports the installed package, and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
-- **Fallback / classic mode**: if `cuda_link` cannot be imported or alias registration fails, the bootstrap falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+- **Library mode** (recommended): install `cuda_link` once with `install_td_library.cmd`. The bootstrap resolves the install through a layered lookup — the COMP's `Libpath` custom parameter, then `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, or the folder itself), then `CUDALINK_LIB_PATH`, then whatever `sys.path` already provides (TD Preferences → Python 64-bit Module Path). Each root is probed as a venv (`venv/`, `.venv/`) or a `pip --target` folder. Only a candidate whose `__version__` equals the `MIRROR_VERSION` stamp written by `sync_td_wrapper.py` is imported; a mismatching install is skipped without being imported, and a different `cuda_link` that is already loaded in the process aborts resolution with a "restart TouchDesigner" message. On success all 15 mirror module names are registered as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if no layer resolves, the bootstrap records why in `last_error` (surfaced as the COMP's yellow status text) and falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 and ADR-0014 for rationale.
 
 ---
 
@@ -860,6 +860,7 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
 - **ADR-0012** — Fold the native extension into the core wheel (supersedes ADR-0006's packaging conclusion)
 - **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
+- **ADR-0014** — Project-anchored install resolution: layered lookup (`Libpath` → project folder → `CUDALINK_LIB_PATH` → `sys.path`), `MIRROR_VERSION` stamp checked before import, rival install refused (amends ADR-0003)
 
 ---
 

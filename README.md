@@ -509,7 +509,7 @@ install_td_library.cmd             REM interactive menu — auto-downloads the m
 
 | Mode | Flag | Description |
 |------|------|-------------|
-| 1 | `--target DIR` | Install into a custom folder; set `CUDALINK_LIB_PATH=DIR` before launching TD |
+| 1 | `--target DIR` | Install into a custom folder; point the COMP's `Libpath` parameter at DIR (or set `CUDALINK_LIB_PATH=DIR` before launching TD) |
 | 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
 | 3 | `--conda ENV` | Install into a conda environment |
 | 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
@@ -528,11 +528,17 @@ install_td_library.cmd --mode 4 --dry-run
 ```
 
 The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
-The bootstrap activates whenever `cuda_link` is importable from TouchDesigner's active Python
-paths, including TD Preferences; `CUDALINK_LIB_PATH` is only needed when that path is not
-already configured. If `cuda_link` cannot be imported or its aliases cannot be registered, the
-bootstrap falls back to the classic mirror DATs. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
-for full instructions.
+The bootstrap looks for the install in a fixed order — the COMP's `Libpath` parameter, the
+`.toe`'s project folder (`cuda_link/`, `StreamDiffusion/`, or the folder itself, each probed as
+a venv or a `pip --target` folder), `CUDALINK_LIB_PATH`, then TouchDesigner's own Python paths
+including TD Preferences — and imports the first candidate whose version matches the mirrors
+shipped in the `.tox`. A mismatching install is skipped without being imported, and a second
+`cuda_link` that is already loaded in the process is refused rather than mixed in, so several
+installs can coexist on one machine (a project venv next to a system copy) and each `.toe`
+still gets its own. If nothing resolves, the bootstrap falls back to the classic mirror DATs and
+the COMP's yellow status says which layer failed and why. See
+[`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions and
+[ADR-0014](docs/adr/0014-project-anchored-install-resolution.md) for the rationale.
 
 The TouchDesigner extension (`td_exporter/`) is **not included in the pip package** because it uses TD-specific APIs (`parent()`, `op()`, `me`, COMP-scoped imports) that cannot run outside TouchDesigner.
 

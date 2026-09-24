@@ -17,6 +17,7 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0009](0009-cpp-custom-top-in-process.md) | Accept in-process native code inside TD as a C++ Custom TOP | Proposed | 2026-07-04 |
 | [0012](0012-native-extension-in-core-wheel.md) | Fold the native extension into the core wheel | Accepted | 2026-07-07 |
 | [0013](0013-prebuilt-wheel-distribution.md) | Prebuilt wheel distribution — Windows-only, cp311 native + py3-none-any fallback | Accepted | 2026-07-07 |
+| [0014](0014-project-anchored-install-resolution.md) | Project-anchored install resolution with a mirror version stamp (amends 0003) | Accepted | 2026-09-23 |
 
 ## Adding a new ADR
 
