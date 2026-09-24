@@ -25,7 +25,9 @@ if TYPE_CHECKING:
     from _td_builtins import CUDAMemoryShape, op, run, ui  # noqa: F401
 
 CUDALinkBootstrap = None  # type: ignore[assignment]  -- fallback if the sibling DAT is absent
-with contextlib.suppress(ImportError):
+# Any failure inside the bootstrap (absent DAT, or a bug it did not catch itself) must
+# degrade to mirror mode, never stop this module from compiling -- see the note below.
+with contextlib.suppress(Exception):
     import CUDALinkBootstrap  # noqa: F401  -- registers sys.modules aliases when present
 
 try:

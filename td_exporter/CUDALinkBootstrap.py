@@ -13,9 +13,9 @@ sys.modules are visible to all later imports:
 
 Resolution is layered (ADR-0014).  The first layer that yields a cuda_link whose
 ``__version__`` equals MIRROR_VERSION wins.  A mismatching install is skipped WITHOUT
-being imported, and a cuda_link that is already loaded from somewhere else -- or an
-import hook that redirects the name elsewhere -- aborts resolution outright instead of
-silently mixing two installations:
+being imported.  A cuda_link that is already loaded from somewhere else, an import hook
+that redirects the name elsewhere, or a sibling mirror Text DAT imported ahead of this
+module all abort resolution outright instead of silently mixing two copies:
   (a) an explicitly supplied folder             _bootstrap(basefolder=...)
   (b) the ``Libpath`` custom parameter           on this COMP or any ancestor
   (c) <project.folder>/cuda_link, /StreamDiffusion, then <project.folder> itself
@@ -103,11 +103,13 @@ _VERSION_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE
 
 
 class _RivalInstallError(RuntimeError):
-    """A different cuda_link is already loaded in this process.
+    """Library mode would mix two copies of cuda_link in this process.
 
-    Must abort resolution immediately rather than fall through to the next layer --
-    falling through risks silently accepting whichever install happens to already be
-    loaded even though the caller asked for a specific, different one.
+    Raised when a different cuda_link is already loaded, when an import hook redirects
+    the name, or when a bare alias name is already owned by a mirror Text DAT.  Must
+    abort resolution immediately rather than fall through to the next layer -- no later
+    layer can unload a module that is already imported, and falling through risks
+    silently accepting whichever copy happens to be loaded.
     """
 
 
@@ -218,7 +220,9 @@ def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool]]:
 def _site_package_candidates(root: str) -> list[str]:
     """A project holding a venv, a venv root, and a pre-resolved site-packages / --target dir.
 
-    ``Lib/site-packages`` is the Windows venv layout, the only one TouchDesigner runs on.
+    Only the Windows venv layout (``Lib/site-packages``) is probed: cuda-link's CUDA IPC
+    transport targets TouchDesigner on Windows, so the POSIX ``lib/pythonX.Y/site-packages``
+    layout never holds an install for this COMP.
     """
     expanded = _expand(root)
     if not expanded:
@@ -265,6 +269,32 @@ def _check_origin(module: object, package_dir: str, *, fresh: bool = False) -> o
     )
 
 
+def _check_alias_owner(name: str, module: object, package_dir: str) -> None:
+    """Raise unless the module registered under bare *name* comes from *package_dir*.
+
+    Library mode aliases every bare name to the installed package.  A name that another
+    module owns before this runs -- a sibling mirror Text DAT imported ahead of this DAT,
+    or a different cuda_link copy -- cannot be aliased without leaving the COMP with two
+    copies of that module (two ctypes handle classes, two sets of protocol constants),
+    which is exactly the mixed-copy failure ADR-0014 exists to prevent.  Refuse library
+    mode instead; the mirrors then serve every name from one consistent copy.
+    """
+    origin = _package_dir(module)
+    if origin and _within(origin, package_dir):
+        return  # this same installation, aliased by an earlier run -- leave it
+    if origin and "cuda_link" in _normalized(origin).split(os.sep):
+        raise _RivalInstallError(
+            f"CUDA-Link is already loaded from {origin}; the selected installation is "
+            f"{package_dir}. Restart TouchDesigner to switch installations."
+        )
+    raise _RivalInstallError(
+        f"{name} was imported from a sibling mirror Text DAT (or another module) before "
+        f"CUDALinkBootstrap ran, so library mode from {package_dir} would mix two copies "
+        f"of it. Make CUDALinkBootstrap the first import in the COMP, or remove the mirror "
+        f"Text DATs, then restart TouchDesigner."
+    )
+
+
 def _activate(site_packages: str, *, inject: bool = True) -> bool:
     """Import cuda_link from *site_packages* and register the bare-name aliases."""
     global last_error, _active, resolved_site_packages
@@ -276,10 +306,11 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
         _check_origin(loaded, package_dir)
     for name in _ALIAS_MAP:  # preflight before mutating anything
         if name in sys.modules:
-            _check_origin(sys.modules[name], package_dir)
+            _check_alias_owner(name, sys.modules[name], package_dir)
 
+    previous_index = sys.path.index(site_packages) if site_packages in sys.path else None
     if inject:
-        if site_packages in sys.path:
+        if previous_index is not None:
             sys.path.remove(site_packages)
         sys.path.insert(0, site_packages)
     try:
@@ -288,14 +319,14 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
         _check_origin(importlib.import_module("cuda_link"), package_dir, fresh=True)
         for name, target in _ALIAS_MAP.items():
             if name in sys.modules:
-                # Already owned by a sibling Text DAT loaded before us (preflight above
-                # proved it is not a rival package copy) -- leave it; never swap a module
-                # other code may already hold references into.
-                continue
+                continue  # preflight proved it is this same installation, already aliased
             sys.modules[name] = _check_origin(importlib.import_module(target), package_dir, fresh=True)  # type: ignore[assignment]
     except BaseException:
-        if inject and site_packages in sys.path:  # do not leave a dead path entry behind
-            sys.path.remove(site_packages)
+        if inject:  # put sys.path back exactly as it was, including a pre-existing entry
+            if site_packages in sys.path:
+                sys.path.remove(site_packages)
+            if previous_index is not None:
+                sys.path.insert(previous_index, site_packages)
         for key in list(sys.modules):  # drop only what this call imported
             if key not in before and (key == "cuda_link" or key.startswith("cuda_link.") or key in _ALIAS_MAP):
                 del sys.modules[key]
@@ -307,13 +338,12 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
     return True
 
 
-def _abort(error: BaseException) -> bool:
-    """A rival install was detected -- stop resolving, do not try later layers."""
+def _fail(message: str) -> bool:
+    """Record why library mode is off; the COMP then stays on its mirror Text DATs."""
     global last_error, _active, resolved_site_packages
-    last_error = str(error)
+    last_error = message
     resolved_site_packages = ""
     _active = False
-    logger.warning("%s", last_error)
     return False
 
 
@@ -323,7 +353,6 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     On failure ``last_error`` names every layer that was tried and why it was skipped;
     the extension shows it as a yellow status and the COMP falls back to its mirrors.
     """
-    global last_error, _active, resolved_site_packages
     notes: list[str] = []
 
     for label, root, inject in _layers(basefolder):
@@ -345,14 +374,17 @@ def _bootstrap(basefolder: str | None = None) -> bool:
             try:
                 return _activate(site_packages, inject=inject)
             except _RivalInstallError as error:
-                return _abort(error)
-            except (ImportError, OSError, RuntimeError, ValueError) as error:
-                notes.append(f"{label}: {error}")
+                logger.warning("%s", error)
+                return _fail(str(error))  # hard stop: no later layer can unload a module
+            except Exception as error:
+                # Anything the candidate raised while importing (ImportError, but also a
+                # SyntaxError in a half-copied install or an AttributeError from a
+                # dependency) means "not this one"; _activate has already rolled back.
+                # This runs at Text DAT load time, so an escaping exception would leave
+                # ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
+                notes.append(f"{label}: {type(error).__name__}: {error}")
 
-    last_error = "CUDA-Link could not be resolved -- " + "; ".join(notes)
-    resolved_site_packages = ""
-    _active = False
-    return False
+    return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes))
 
 
 # Run at Text DAT load time.

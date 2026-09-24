@@ -61,9 +61,12 @@ more than once:
    copy) is already loaded from a different folder than the selected install, resolution aborts
    with `_RivalInstallError`, `last_error` names both folders and tells the user to restart
    TouchDesigner. It does not fall through to later layers, because the only thing a later
-   layer could do is silently accept the copy the user did not ask for. A bare name owned by a
-   classic mirror Text DAT is not a rival and is left in place (the original skip-existing
-   behaviour). The same stop applies when nothing was loaded but importing the selected
+   layer could do is silently accept the copy the user did not ask for. A bare alias name
+   already owned by a classic mirror Text DAT (one imported ahead of the bootstrap) is refused
+   the same way: aliasing the remaining names would leave the COMP with the mirror's copy of
+   one module and the package's copy of the rest, the same two-class failure by another route.
+   `last_error` names the DAT and the remedy (make the bootstrap the first import, or drop the
+   mirror DATs). The same stop applies when nothing was loaded but importing the selected
    install lands somewhere else because an import hook ahead of `sys.path` (an editable
    install's redirecting finder, such as scikit-build-core's) serves the name; `last_error`
    then names the hook, and the modules that import pulled in are dropped again.
