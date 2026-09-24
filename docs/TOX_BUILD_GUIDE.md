@@ -102,6 +102,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
+| `Libpath` | Library Path | Folder | (empty) | Optional. Folder holding the installed `cuda_link` for library mode: a project folder holding `venv/` or `.venv/`, the venv itself (probed as `Lib/site-packages`), a `pip install --target` folder, or a site-packages dir. Empty = try `<project.folder>`, then `CUDALINK_LIB_PATH`, then TD's own module path (ADR-0014). |
 
 **For `Numslots` menu parameter**:
 
@@ -136,14 +137,22 @@ them resolve automatically because all Text DATs in the same COMP share a module
 2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
-appear in the COMP editor). When set, it injects `CUDALINK_LIB_PATH` onto `sys.path`, then
-imports `cuda_link` from the paths already visible to TouchDesigner and registers `sys.modules`
-aliases. If `cuda_link` cannot be imported, it no-ops (printing a fallback-mode notice to the
-Textport — see below) and fallback mode takes effect automatically.
+appear in the COMP editor). It looks for an installed `cuda_link` in this order — the COMP's
+`Libpath` parameter (Step 2), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, or the
+folder itself), `CUDALINK_LIB_PATH`, then the paths already visible to TouchDesigner — and
+imports the first candidate whose `__version__` matches the `MIRROR_VERSION` stamp at the top
+of the DAT (written by `scripts/sync_td_wrapper.py`; never edit it by hand). A mismatching
+install is skipped without being imported; a different `cuda_link` already loaded in the
+process stops resolution with a "Restart TouchDesigner" message. If nothing resolves, it
+no-ops (printing the reason to the Textport — see below) and fallback mode takes effect
+automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 1.12.2 from <folder>`
 > **Fallback mode**: `[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors.`
+> followed by one clause per layer that was tried (e.g. `Libpath parameter: not set;
+> CUDALINK_LIB_PATH: cuda_link 1.12.1 under C:\... does not match the component's 1.12.2`).
+> The same text is shown as the COMP's yellow status.
 
 #### 3b. TDHost Text DAT
 

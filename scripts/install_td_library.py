@@ -558,7 +558,7 @@ def _print_activation(
             print(f"       Add:  {site_packages}")
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
-        print("    [CUDALinkBootstrap] Library mode active — cuda_link submodules aliased")
+        print(f"    [CUDALinkBootstrap] Library mode active — cuda_link {_installed_version()} from {site_packages}")
     print()
 
 

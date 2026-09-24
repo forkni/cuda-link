@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.machinery
 import importlib.util
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -67,27 +69,16 @@ def _load_sync_script() -> Any:
 def _isolate_sys_modules():
     """Remove CUDALinkBootstrap and all alias keys before and after each test.
 
-    Pre-warms the cuda_link package import BEFORE clearing alias names.
-    Without this, tests that clear sys.modules["cuda_link.*"] (the noops tests
-    below, which do ``for k in sys.modules: sys.modules.pop(k)`` for cuda_link)
-    leave cuda_link absent.  The next _bootstrap() call then triggers a fresh
-    import of cuda_link.cuda_ipc_wrapper, whose bare-name fallback:
-
-        from CUDARuntimeTypes import (...)   # first-try TD flat-namespace path
-
-    finds td_exporter/CUDARuntimeTypes.py on sys.path (pythonpath=["td_exporter"])
-    because CUDARuntimeTypes was cleared by this fixture.  _bootstrap()'s
-    skip-guard (``if bare_name in sys.modules: continue``) then leaves
-    sys.modules["CUDARuntimeTypes"] pointing at the td_exporter module instead
-    of cuda_link.cuda_runtime_types, causing the alias correctness test to fail.
-
-    The pre-warm guarantees cuda_link and cuda_link.cuda_ipc_wrapper are cached
-    before alias names are cleared, so _bootstrap()'s import_module("cuda_link")
-    call returns immediately and never re-executes cuda_ipc_wrapper's bare-name
-    import.  If cuda_link is not importable (mocked ImportError in the noops
-    tests), the pre-warm is silently skipped — the noops tests patch
-    importlib.import_module in the test body, after this fixture runs, so the
-    pre-warm always uses the real import_module.
+    Pre-warms the cuda_link package import BEFORE clearing alias names so that
+    ``_bootstrap()``'s ``import_module("cuda_link")`` hits the module cache and
+    never re-executes the package under a half-cleared ``sys.modules``.  The
+    package imports its own dependencies relatively since ADR-0002 was enforced
+    for every mirrored file, so the historical hazard (a bare
+    ``from CUDARuntimeTypes import ...`` fallback resolving against the
+    td_exporter copy on ``pythonpath``) is gone; the pre-warm is kept as cheap
+    insurance for the noops tests, which pop every ``cuda_link*`` entry.  If
+    cuda_link is not importable the pre-warm is silently skipped — the noops
+    tests patch importlib.import_module in the test body, after this fixture.
     """
     # Pre-warm: cache cuda_link before alias names are cleared.
     # Uses a bare importlib.import_module (not the patched version — noops tests
@@ -378,3 +369,415 @@ def test_show_install_banner_is_noop_outside_td():
         ext._show_install_banner()
     except Exception as exc:
         pytest.fail(f"_show_install_banner() raised outside TD context: {exc!r}")
+
+
+# ---------------------------------------------------------------------------
+# 5. Project-anchored resolver: layered lookup, version stamp, rival-install guard
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_install(root: Path, version: str, alias_map: dict[str, str]) -> str:
+    """A minimal cuda_link package under *root*: __init__ carrying __version__ plus one
+    empty module per _ALIAS_MAP target, so every alias import succeeds with no real code."""
+    package = root / "cuda_link"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    for target in alias_map.values():
+        stem = target.split(".")[-1]
+        (package / f"{stem}.py").write_text("# fake alias target for tests\n", encoding="utf-8")
+    return str(root)
+
+
+def _forget_loaded_cuda_link(bootstrap: Any) -> None:
+    """Drop every cuda_link.* module and every bare alias so the next _bootstrap() call
+    resolves from scratch (the module-scope run at load time already aliased src/)."""
+    for key in list(sys.modules):
+        if key == "cuda_link" or key.startswith("cuda_link."):
+            del sys.modules[key]
+    for key in bootstrap._ALIAS_MAP:
+        sys.modules.pop(key, None)
+    importlib.invalidate_caches()
+
+
+def _is_editable_finder(finder: object) -> bool:
+    """True for the redirecting finder an editable install parks on sys.meta_path
+    (scikit-build-core ``_cuda_link_editable``, setuptools ``__editable___*_finder``,
+    hatchling ``_editable_impl_*``) -- it serves cuda_link from src/ ahead of sys.path."""
+    cls = finder if isinstance(finder, type) else type(finder)
+    return "editable" in f"{cls.__module__}.{cls.__qualname__}".lower()
+
+
+class _RedirectingFinder:
+    """Stand-in for that editable finder: serves ``cuda_link`` from one fixed folder no
+    matter what sys.path says, exactly like ``pip install -e .`` does in CI."""
+
+    def __init__(self, site_packages: str) -> None:
+        self._search = [site_packages]
+
+    def find_spec(self, fullname: str, path: object = None, target: object = None) -> Any:
+        if fullname == "cuda_link":
+            return importlib.machinery.PathFinder.find_spec(fullname, self._search)
+        return None
+
+
+class _FakePar:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def eval(self) -> str:
+        return self._value
+
+
+class _FakePars:
+    def __init__(self, libpath: str | None) -> None:
+        if libpath is not None:
+            self.Libpath = _FakePar(libpath)
+
+
+class _FakeComp:
+    def __init__(self, parent: _FakeComp | None = None, libpath: str | None = None) -> None:
+        self._parent = parent
+        self.par = _FakePars(libpath)
+
+    def parent(self) -> _FakeComp | None:
+        return self._parent
+
+
+class _FakeDat:
+    def __init__(self, comp: _FakeComp) -> None:
+        self._comp = comp
+
+    def parent(self) -> _FakeComp:
+        return self._comp
+
+
+class _FakeProject:
+    """Stand-in for TD's ``project`` global: only ``.folder`` is read by the bootstrap."""
+
+    def __init__(self, folder: str) -> None:
+        self.folder = folder
+
+
+class _SysPathLayer:
+    """Stand-in for layer (e) installed by ``isolated_resolver``: quiet by default so the
+    src/ checkout on pytest's pythonpath never resolves behind a test's back; set
+    ``enabled`` to run the real ``_sys_path_root`` (find_spec) again."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.enabled = False
+
+    def __call__(self) -> str:
+        return self._real() if self.enabled else ""
+
+
+@pytest.fixture
+def isolated_resolver(monkeypatch):
+    """Fresh bootstrap module with every implicit layer silenced.
+
+    Snapshots sys.path and the loaded cuda_link.* modules (after the module-scope run
+    has imported all of them from src/) and restores both afterwards, so activating a
+    fake install inside a test never leaks into the rest of the suite.  Layers (b) COMP
+    parameter and (c) project folder are quiet on their own outside TD (no ``me`` /
+    ``project`` globals); (d) CUDALINK_LIB_PATH is cleared and (e) sys.path is silenced
+    by a ``_SysPathLayer`` stand-in, until a test enables one explicitly.
+
+    An editable install of this repo (``pip install -e .``, as branch-protection.yml
+    does) adds a finder ahead of sys.path that would hijack every activation below;
+    it is hidden here and covered on its own by
+    test_import_hook_ahead_of_sys_path_is_refused.
+    """
+    bootstrap = _load_bootstrap()
+    saved_modules = {k: v for k, v in sys.modules.items() if k == "cuda_link" or k.startswith("cuda_link.")}
+    saved_path = list(sys.path)
+    monkeypatch.setattr(sys, "meta_path", [f for f in sys.meta_path if not _is_editable_finder(f)])
+    monkeypatch.delenv("CUDALINK_LIB_PATH", raising=False)
+    monkeypatch.setattr(bootstrap, "_sys_path_root", _SysPathLayer(bootstrap._sys_path_root))
+    yield bootstrap
+    for key in list(sys.modules):
+        if key == "cuda_link" or key.startswith("cuda_link."):
+            del sys.modules[key]
+    sys.modules.update(saved_modules)
+    sys.path[:] = saved_path
+    importlib.invalidate_caches()
+
+
+def test_explicit_folder_activates_a_matching_install(isolated_resolver, tmp_path):
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=site) is True
+    assert bootstrap._active is True
+    assert bootstrap.last_error == ""
+    assert bootstrap.resolved_site_packages == site
+    origin = Path(str(getattr(sys.modules["cuda_link"], "__file__", ""))).resolve()
+    assert origin.parent == (tmp_path / "lib" / "cuda_link").resolve()
+    for bare_name, target in bootstrap._ALIAS_MAP.items():
+        assert sys.modules[bare_name] is sys.modules[target]
+
+
+def test_venv_layout_is_probed_under_the_given_root(isolated_resolver, tmp_path):
+    bootstrap = isolated_resolver
+    site_dir = tmp_path / "proj" / "venv" / "Lib" / "site-packages"
+    site = _make_fake_install(site_dir, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=str(tmp_path / "proj")) is True
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_venv_root_itself_is_probed(isolated_resolver, tmp_path):
+    """``Libpath`` may name the venv itself (install_td_library.py --venv D:/proj/.venv)."""
+    bootstrap = isolated_resolver
+    venv = tmp_path / "proj" / ".venv"
+    site = _make_fake_install(venv / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=str(venv)) is True
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_failed_activation_is_rolled_back_before_the_next_candidate(isolated_resolver, tmp_path):
+    """An install whose alias import blows up half-way must leave no cuda_link.* or alias
+    entries behind: the next candidate under the same root then activates instead of
+    being refused as a rival, and with no other candidate the COMP falls back cleanly."""
+    bootstrap = isolated_resolver
+    root = tmp_path / "proj"
+    broken = _make_fake_install(root / "venv" / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(broken) / "cuda_link" / "importer.py").write_text("raise ImportError('boom')\n", encoding="utf-8")
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=broken) is False
+    assert bootstrap._active is False
+    assert "boom" in bootstrap.last_error
+    assert not [k for k in sys.modules if k == "cuda_link" or k.startswith("cuda_link.")]
+    assert not [k for k in bootstrap._ALIAS_MAP if k in sys.modules]
+    assert broken not in sys.path
+
+    good = _make_fake_install(root, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    assert bootstrap._bootstrap(basefolder=str(root)) is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == good
+    origin = Path(str(getattr(sys.modules["cuda_link"], "__file__", ""))).resolve()
+    assert origin.parent == (root / "cuda_link").resolve()
+
+
+def test_failed_activation_restores_a_pre_existing_sys_path_entry(isolated_resolver, tmp_path):
+    """Rollback must not strip a path entry the host put there (TD Preferences module path,
+    an earlier activation): sys.path ends up exactly as it was before the attempt."""
+    bootstrap = isolated_resolver
+    broken = _make_fake_install(tmp_path / "prefs", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(broken) / "cuda_link" / "importer.py").write_text("raise ImportError('boom')\n", encoding="utf-8")
+    _forget_loaded_cuda_link(bootstrap)
+    sys.path.append(broken)  # the fixture restores sys.path afterwards
+    snapshot = list(sys.path)
+
+    assert bootstrap._bootstrap(basefolder=broken) is False
+    assert "boom" in bootstrap.last_error
+    assert sys.path == snapshot
+
+
+def test_any_exception_from_a_candidate_is_recorded_instead_of_escaping(isolated_resolver, tmp_path):
+    """A candidate that raises something other than ImportError (a SyntaxError in a
+    half-copied install, an AttributeError from a dependency) is skipped like any other
+    failure.  The module-scope run would otherwise propagate it out of
+    ``import CUDALinkBootstrap`` and leave ext.CUDAIPCExtension undefined."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(site) / "cuda_link" / "shm_protocol.py").write_text("def broken(:\n", encoding="utf-8")
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=site) is False
+    assert bootstrap._active is False
+    assert "SyntaxError" in bootstrap.last_error
+    assert "cuda_link" not in sys.modules
+    assert site not in sys.path
+
+
+def test_mirror_dat_imported_ahead_of_the_bootstrap_refuses_library_mode(isolated_resolver, tmp_path, monkeypatch):
+    """A bare alias name already owned by a sibling Text DAT (a module with no file on disk)
+    is never mixed with the installed package: library mode is refused outright, the DAT's
+    module is left untouched and nothing from the install is imported."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+    mirror = types.ModuleType("CUDARuntimeTypes")  # TD DAT modules carry no __file__
+    monkeypatch.setitem(sys.modules, "CUDARuntimeTypes", mirror)
+
+    assert bootstrap._bootstrap(basefolder=site) is False
+    assert bootstrap._active is False
+    assert "CUDARuntimeTypes" in bootstrap.last_error
+    assert "mirror Text DAT" in bootstrap.last_error
+    assert sys.modules["CUDARuntimeTypes"] is mirror
+    assert "cuda_link" not in sys.modules
+    assert not [k for k in bootstrap._ALIAS_MAP if k in sys.modules and k != "CUDARuntimeTypes"]
+    assert site not in sys.path
+
+
+def test_project_folder_layer_prefers_a_cuda_link_folder_next_to_the_toe(isolated_resolver, tmp_path, monkeypatch):
+    """Layer (c), first root: <project.folder>/cuda_link (a ``pip install --target`` folder)
+    wins over a StreamDiffusion venv in the same project."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    target = _make_fake_install(proj / "cuda_link", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _make_fake_install(
+        proj / "StreamDiffusion" / "venv" / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP
+    )
+    monkeypatch.setattr(bootstrap, "project", _FakeProject(str(proj)), raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == target
+    origin = Path(str(getattr(sys.modules["cuda_link"], "__file__", ""))).resolve()
+    assert origin.parent == (proj / "cuda_link" / "cuda_link").resolve()
+
+
+def test_project_folder_layer_prefers_streamdiffusion_venv_over_the_folder_itself(
+    isolated_resolver, tmp_path, monkeypatch
+):
+    """Layer (c), second root: <project.folder>/StreamDiffusion (StreamDiffusionTD's venv)
+    wins over an install sitting directly in the project folder."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    sdtd = _make_fake_install(
+        proj / "StreamDiffusion" / "venv" / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP
+    )
+    _make_fake_install(proj, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "project", _FakeProject(str(proj)), raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == sdtd
+
+
+def test_project_folder_layer_falls_back_to_the_folder_itself(isolated_resolver, tmp_path, monkeypatch):
+    """Layer (c), last root: an install dropped straight into the project folder."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    here = _make_fake_install(proj, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "project", _FakeProject(str(proj)), raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == here
+
+
+def test_sys_path_layer_activates_in_place_without_touching_sys_path(isolated_resolver, tmp_path, monkeypatch):
+    """Layer (e): a cuda_link that a plain ``import cuda_link`` already finds (TD Preferences
+    module path, pip) is activated where it is; sys.path is left exactly as it was."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "prefs", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.syspath_prepend(site)
+    bootstrap._sys_path_root.enabled = True
+    _forget_loaded_cuda_link(bootstrap)
+    snapshot = list(sys.path)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == site
+    assert sys.path == snapshot
+    origin = Path(str(getattr(sys.modules["cuda_link"], "__file__", ""))).resolve()
+    assert origin.parent == (tmp_path / "prefs" / "cuda_link").resolve()
+    for bare_name, target in bootstrap._ALIAS_MAP.items():
+        assert sys.modules[bare_name] is sys.modules[target]
+
+
+def test_rival_install_is_refused_when_another_cuda_link_is_loaded(isolated_resolver, tmp_path):
+    bootstrap = isolated_resolver
+    loaded = sys.modules["cuda_link"]  # src/cuda_link, imported by the module-scope run
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+
+    assert bootstrap._bootstrap(basefolder=site) is False
+    assert bootstrap._active is False
+    assert "already loaded" in bootstrap.last_error
+    assert "Restart TouchDesigner" in bootstrap.last_error
+    assert sys.modules["cuda_link"] is loaded, "a rival install must never replace the loaded package"
+    assert site not in sys.path
+
+
+def test_import_hook_ahead_of_sys_path_is_refused(isolated_resolver, tmp_path, monkeypatch):
+    bootstrap = isolated_resolver
+    selected = _make_fake_install(tmp_path / "selected", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    hooked = _make_fake_install(tmp_path / "hooked", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(sys, "meta_path", [_RedirectingFinder(hooked), *sys.meta_path])
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=selected) is False
+    assert bootstrap._active is False
+    assert "import hook" in bootstrap.last_error
+    assert "hooked" in bootstrap.last_error and "selected" in bootstrap.last_error
+    assert "cuda_link" not in sys.modules, "a refused import must not leave the redirected package behind"
+    assert selected not in sys.path
+
+
+def test_version_mismatch_is_rejected_before_import(isolated_resolver, tmp_path):
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", "0.0.1", bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=site) is False
+    assert bootstrap._active is False
+    assert "0.0.1" in bootstrap.last_error
+    assert bootstrap.MIRROR_VERSION in bootstrap.last_error
+    assert "cuda_link" not in sys.modules, "a mismatching install must be rejected without importing it"
+    assert site not in sys.path
+
+
+def test_libpath_parameter_is_found_on_an_ancestor_comp(isolated_resolver, tmp_path, monkeypatch):
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    me = _FakeDat(_FakeComp(parent=_FakeComp(libpath=site)))  # par lives on the grandparent
+    monkeypatch.setattr(bootstrap, "me", me, raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_env_var_layer_still_resolves_an_install(isolated_resolver, tmp_path, monkeypatch):
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setenv("CUDALINK_LIB_PATH", site)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_libpath_parameter_beats_env_var(isolated_resolver, tmp_path, monkeypatch):
+    bootstrap = isolated_resolver
+    from_par = _make_fake_install(tmp_path / "par", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    from_env = _make_fake_install(tmp_path / "env", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "me", _FakeDat(_FakeComp(libpath=from_par)), raising=False)
+    monkeypatch.setenv("CUDALINK_LIB_PATH", from_env)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True
+    assert bootstrap.resolved_site_packages == from_par
+    assert from_env not in sys.path
+
+
+def test_every_layer_failing_reports_each_layer_and_stays_inactive(isolated_resolver, tmp_path):
+    bootstrap = isolated_resolver
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=str(tmp_path / "nowhere")) is False
+    assert bootstrap._active is False
+    assert bootstrap.resolved_site_packages == ""
+    assert bootstrap.last_error.startswith("CUDA-Link could not be resolved")
+    assert "nowhere" in bootstrap.last_error
+    assert "CUDALINK_LIB_PATH: not set" in bootstrap.last_error
+    assert "cuda_link" not in sys.modules
+
+
+def test_mirror_version_stamp_matches_package_version():
+    bootstrap = _load_bootstrap()
+    assert _load_sync_script().read_package_version() == bootstrap.MIRROR_VERSION, (
+        "td_exporter/CUDALinkBootstrap.py::MIRROR_VERSION is stale. Run: python scripts/sync_td_wrapper.py"
+    )
+
+
+def test_sync_script_stamp_is_idempotent_on_current_bootstrap():
+    sync = _load_sync_script()
+    text = (TD_EXPORTER / "CUDALinkBootstrap.py").read_text(encoding="utf-8")
+    assert sync.stamp_mirror_version(text, sync.read_package_version()) == text
+    assert sync.stamp_mirror_version(text, "9.9.9") != text

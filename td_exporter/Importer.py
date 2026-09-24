@@ -1128,9 +1128,13 @@ class Importer:
         self._format_provisional = format_provisional
         self._initialized = True
 
-    def _connect(self) -> None:
-        """Open SHM, read IPC handles, build buffer views. Called once by open()."""
-        shm, num_slots, ipc_version = self._open_and_validate_shm()
+    def _connect(self, *, quiet: bool = False) -> None:
+        """Open SHM, read IPC handles, build buffer views. Called once by open().
+
+        ``quiet=True`` is used by the reconnect driver, where a missing segment is
+        the expected state for a few frames and must not be logged as an error.
+        """
+        shm, num_slots, ipc_version = self._open_and_validate_shm(quiet=quiet)
         try:
             fmt, provisional = self._resolve_format(shm, num_slots)
             conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
@@ -1148,12 +1152,17 @@ class Importer:
         )
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
-    def _open_and_validate_shm(self) -> tuple[SharedMemory, int, int]:
-        """Open SharedMemory and validate protocol magic, version, num_slots, shutdown."""
+    def _open_and_validate_shm(self, *, quiet: bool = False) -> tuple[SharedMemory, int, int]:
+        """Open SharedMemory and validate protocol magic, version, num_slots, shutdown.
+
+        A missing segment is logged at ERROR on a first explicit open, but only at
+        DEBUG when ``quiet`` is set (reconnect polling — see _connect_silent()).
+        """
         try:
             shm = SharedMemory(name=self._spec.shm_name)
         except FileNotFoundError:
-            logger.error("SharedMemory %r not found — producer must be running first", self._spec.shm_name)
+            log = logger.debug if quiet else logger.error
+            log("SharedMemory %r not found — producer must be running first", self._spec.shm_name)
             raise
 
         logger.info("Opened SharedMemory: %s", self._spec.shm_name)
@@ -1377,9 +1386,13 @@ class Importer:
     # ------------------------------------------------------------------
 
     def _connect_silent(self) -> bool:
-        """Attempt _connect(); return True on success, False on any connection failure."""
+        """Attempt _connect(); return True on success, False on any connection failure.
+
+        Runs _connect(quiet=True): while polling for a producer, "segment not found"
+        is the expected state and is logged at DEBUG, not ERROR.
+        """
         try:
-            self._connect()
+            self._connect(quiet=True)
             return True
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
             logger.debug("Connect attempt failed: %s", e)
