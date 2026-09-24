@@ -239,3 +239,27 @@ def test_write_handles_skips_falsy_event_handle_slot() -> None:
         assert bytes(exp.shm_handle.buf[evt_off_1 : evt_off_1 + IPC_HANDLE_SIZE]) == bytes(truthy_handle.reserved)
     finally:
         exp.close()
+
+
+# ---------------------------------------------------------------------------
+# _initialize() — 2 MiB slot alignment (NVIDIA cudaMalloc IPC guidance)
+# ---------------------------------------------------------------------------
+
+
+def test_slot_buffer_size_is_2mib_aligned() -> None:
+    """Every IPC slot must be allocated as a whole number of 2 MiB pages: the
+    CUDA IPC docs recommend 2 MiB-aligned cudaMalloc sizes so a shared handle
+    never exposes a neighbouring allocation's tail. Guards the rounding in
+    Exporter._initialize() so it cannot silently regress."""
+    fake = FakeCUDAAdapter(device=0)
+    exp = Exporter.open(_spec(num_slots=3), policy=ExportPolicy.for_testing(), cuda=fake)
+    try:
+        two_mib = 2 * 1024 * 1024
+        assert exp.data_size == _DATA_SIZE
+        assert exp.buffer_size >= exp.data_size
+        assert exp.buffer_size % two_mib == 0
+        assert exp.buffer_size == two_mib  # 64-byte payload rounds up to exactly one page
+        slot_sizes = [fake.allocations[ptr.value] for ptr in exp.dev_ptrs]
+        assert slot_sizes == [exp.buffer_size] * 3
+    finally:
+        exp.close()
