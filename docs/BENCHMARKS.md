@@ -113,11 +113,8 @@ With EXPORT_SYNC=1 the GPU D2D copy dominates; CUDA Graphs saves WDDM submission
 transitions but the net wall-clock difference is small (<5%). See the P1/P3 section above
 for the full breakdown including async mode (the large win).
 
-Reproduce with:
-
-```bash
-python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
-```
+The historical `bench_graphs.py` script used for this table is not included in the repository,
+so this comparison is reference data rather than a command that can be run from a fresh checkout.
 
 ---
 
@@ -177,11 +174,8 @@ Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_STREAMS=1`
 (default) is optimal for this platform.
 
-Reproduce with:
-
-```bash
-python benchmarks/bench_d2h_streams.py --frames 2000 --streams 1 2 --sizes 512 1280 1920 3840
-```
+The historical `bench_d2h_streams.py` script used for this table is not included in the repository,
+so this comparison is reference data rather than a command that can be run from a fresh checkout.
 
 ---
 
@@ -212,12 +206,9 @@ Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder
 > lower than in pre-v1.10.2 measurements. Sweep figures above use a 60 FPS active producer
 > and are unaffected.
 
-Reproduce with:
-
-```bash
-python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
-python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
-```
+The historical `bench_sweep.py` script used for this table is not included in the repository, so
+these results are reference data rather than commands that can be run from a fresh checkout. For
+a tracked runnable benchmark, see [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py).
 
 ---
 
