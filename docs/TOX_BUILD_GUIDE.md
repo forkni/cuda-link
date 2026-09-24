@@ -102,7 +102,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
-| `Libpath` | Library Path | Folder | (empty) | Optional. Folder holding the installed `cuda_link` for library mode: a venv root (probed as `venv/Lib/site-packages`), a `pip install --target` folder, or a site-packages dir. Empty = try `<project.folder>`, then `CUDALINK_LIB_PATH`, then TD's own module path (ADR-0014). |
+| `Libpath` | Library Path | Folder | (empty) | Optional. Folder holding the installed `cuda_link` for library mode: a project folder holding `venv/` or `.venv/`, the venv itself (probed as `Lib/site-packages`), a `pip install --target` folder, or a site-packages dir. Empty = try `<project.folder>`, then `CUDALINK_LIB_PATH`, then TD's own module path (ADR-0014). |
 
 **For `Numslots` menu parameter**:
 

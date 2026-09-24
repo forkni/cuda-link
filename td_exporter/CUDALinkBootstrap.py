@@ -21,8 +21,9 @@ silently mixing two installations:
   (c) <project.folder>/cuda_link, /StreamDiffusion, then <project.folder> itself
   (d) CUDALINK_LIB_PATH                          (ADR-0003 compatibility)
   (e) whatever sys.path already provides         (TD Preferences module path, pip)
-Each root is probed as <root>/venv/Lib/site-packages, <root>/.venv/Lib/site-packages
-and <root> itself (a ``pip install --target`` folder).
+Each root is probed as <root>/venv/Lib/site-packages, <root>/.venv/Lib/site-packages,
+<root>/Lib/site-packages (the root is itself a venv) and <root> itself (a
+``pip install --target`` folder).
 
 Two deployment modes
 ---------------------
@@ -215,13 +216,17 @@ def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool]]:
 
 
 def _site_package_candidates(root: str) -> list[str]:
-    """venv, .venv, and the root itself (a pre-resolved site-packages / --target dir)."""
+    """A project holding a venv, a venv root, and a pre-resolved site-packages / --target dir.
+
+    ``Lib/site-packages`` is the Windows venv layout, the only one TouchDesigner runs on.
+    """
     expanded = _expand(root)
     if not expanded:
         return []
     return [
         os.path.join(expanded, "venv", "Lib", "site-packages"),
         os.path.join(expanded, ".venv", "Lib", "site-packages"),
+        os.path.join(expanded, "Lib", "site-packages"),
         expanded,
     ]
 

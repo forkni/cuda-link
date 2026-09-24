@@ -516,6 +516,41 @@ def test_venv_layout_is_probed_under_the_given_root(isolated_resolver, tmp_path)
     assert bootstrap.resolved_site_packages == site
 
 
+def test_venv_root_itself_is_probed(isolated_resolver, tmp_path):
+    """``Libpath`` may name the venv itself (install_td_library.py --venv D:/proj/.venv)."""
+    bootstrap = isolated_resolver
+    venv = tmp_path / "proj" / ".venv"
+    site = _make_fake_install(venv / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=str(venv)) is True
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_failed_activation_is_rolled_back_before_the_next_candidate(isolated_resolver, tmp_path):
+    """An install whose alias import blows up half-way must leave no cuda_link.* or alias
+    entries behind: the next candidate under the same root then activates instead of
+    being refused as a rival, and with no other candidate the COMP falls back cleanly."""
+    bootstrap = isolated_resolver
+    root = tmp_path / "proj"
+    broken = _make_fake_install(root / "venv" / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(broken) / "cuda_link" / "importer.py").write_text("raise ImportError('boom')\n", encoding="utf-8")
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=broken) is False
+    assert bootstrap._active is False
+    assert "boom" in bootstrap.last_error
+    assert not [k for k in sys.modules if k == "cuda_link" or k.startswith("cuda_link.")]
+    assert not [k for k in bootstrap._ALIAS_MAP if k in sys.modules]
+    assert broken not in sys.path
+
+    good = _make_fake_install(root, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    assert bootstrap._bootstrap(basefolder=str(root)) is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == good
+    origin = Path(str(getattr(sys.modules["cuda_link"], "__file__", ""))).resolve()
+    assert origin.parent == (root / "cuda_link").resolve()
+
+
 def test_rival_install_is_refused_when_another_cuda_link_is_loaded(isolated_resolver, tmp_path):
     bootstrap = isolated_resolver
     loaded = sys.modules["cuda_link"]  # src/cuda_link, imported by the module-scope run

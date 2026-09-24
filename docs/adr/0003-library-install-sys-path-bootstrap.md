@@ -49,6 +49,16 @@ mode (ADR-0002 mirrors retained):
    **unchanged**. The fallback / classic deployment (all DATs in the COMP, no install) remains
    fully functional without any modifications.
 
+   > **Amended (2026-09-23, ADR-0014, commit `be95662`):** `cuda_ipc_wrapper`,
+   > `nvml_observer` and `cuda_graphs` moved from `byte_identical` to `rewrite_relative` in
+   > `PAIRS`. Their canonical copies now use package-relative imports (`from ._env import …`),
+   > so the mirrors say `from Env import …` and never import the bare `cuda_link` name. The
+   > earlier `try: from cuda_link._env … except ImportError: from Env …` fallback let a
+   > classic-mode mirror pull its dependencies from whichever `cuda_link` happened to be on
+   > `sys.path`, which is the mixed-version failure ADR-0014 closes. The fallback deployment
+   > is unaffected: `rewrite_relative` is a mode ADR-0002 already defines, and the mirrors
+   > still resolve every dependency from sibling Text DATs.
+
 ### Why sys.modules aliasing rather than editing the glue files
 
 The "1B" alternative (try/except in each glue import) was rejected in ADR-0002 because it

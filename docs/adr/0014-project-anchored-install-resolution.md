@@ -43,9 +43,10 @@ more than once:
    4. `CUDALINK_LIB_PATH` (ADR-0003 compatibility, now a fallback rather than the source);
    5. whatever `sys.path` already provides (TD Preferences module path, pip).
 
-   Every root is probed as `<root>/venv/Lib/site-packages`, `<root>/.venv/Lib/site-packages`
-   and `<root>` itself, so a project venv, a `pip install --target` folder and a bare
-   site-packages directory all work without configuration.
+   Every root is probed as `<root>/venv/Lib/site-packages`, `<root>/.venv/Lib/site-packages`,
+   `<root>/Lib/site-packages` and `<root>` itself, so a project folder holding a venv, the
+   venv itself, a `pip install --target` folder and a bare site-packages directory all work
+   without configuration.
 
 2. **Version stamp, checked before import.** `scripts/sync_td_wrapper.py` writes
    `MIRROR_VERSION = "<cuda_link.__version__>"` into the bootstrap alongside the mirror sync,
