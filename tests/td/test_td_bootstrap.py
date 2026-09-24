@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.machinery
 import importlib.util
 import sys
 from pathlib import Path
@@ -407,6 +408,27 @@ def _forget_loaded_cuda_link(bootstrap: Any) -> None:
     importlib.invalidate_caches()
 
 
+def _is_editable_finder(finder: object) -> bool:
+    """True for the redirecting finder an editable install parks on sys.meta_path
+    (scikit-build-core ``_cuda_link_editable``, setuptools ``__editable___*_finder``,
+    hatchling ``_editable_impl_*``) -- it serves cuda_link from src/ ahead of sys.path."""
+    cls = finder if isinstance(finder, type) else type(finder)
+    return "editable" in f"{cls.__module__}.{cls.__qualname__}".lower()
+
+
+class _RedirectingFinder:
+    """Stand-in for that editable finder: serves ``cuda_link`` from one fixed folder no
+    matter what sys.path says, exactly like ``pip install -e .`` does in CI."""
+
+    def __init__(self, site_packages: str) -> None:
+        self._search = [site_packages]
+
+    def find_spec(self, fullname: str, path: object = None, target: object = None) -> Any:
+        if fullname == "cuda_link":
+            return importlib.machinery.PathFinder.find_spec(fullname, self._search)
+        return None
+
+
 class _FakePar:
     def __init__(self, value: str) -> None:
         self._value = value
@@ -447,10 +469,16 @@ def isolated_resolver(monkeypatch):
     fake install inside a test never leaks into the rest of the suite.  Layers (b) COMP
     parameter, (c) project folder, (d) CUDALINK_LIB_PATH and (e) sys.path stay quiet
     unless a test enables one explicitly.
+
+    An editable install of this repo (``pip install -e .``, as branch-protection.yml
+    does) adds a finder ahead of sys.path that would hijack every activation below;
+    it is hidden here and covered on its own by
+    test_import_hook_ahead_of_sys_path_is_refused.
     """
     bootstrap = _load_bootstrap()
     saved_modules = {k: v for k, v in sys.modules.items() if k == "cuda_link" or k.startswith("cuda_link.")}
     saved_path = list(sys.path)
+    monkeypatch.setattr(sys, "meta_path", [f for f in sys.meta_path if not _is_editable_finder(f)])
     monkeypatch.delenv("CUDALINK_LIB_PATH", raising=False)
     monkeypatch.setattr(bootstrap, "_sys_path_root", lambda: "")
     monkeypatch.setattr(bootstrap, "_project_roots", lambda: iter(()))
@@ -499,6 +527,21 @@ def test_rival_install_is_refused_when_another_cuda_link_is_loaded(isolated_reso
     assert "Restart TouchDesigner" in bootstrap.last_error
     assert sys.modules["cuda_link"] is loaded, "a rival install must never replace the loaded package"
     assert site not in sys.path
+
+
+def test_import_hook_ahead_of_sys_path_is_refused(isolated_resolver, tmp_path, monkeypatch):
+    bootstrap = isolated_resolver
+    selected = _make_fake_install(tmp_path / "selected", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    hooked = _make_fake_install(tmp_path / "hooked", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(sys, "meta_path", [_RedirectingFinder(hooked), *sys.meta_path])
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=selected) is False
+    assert bootstrap._active is False
+    assert "import hook" in bootstrap.last_error
+    assert "hooked" in bootstrap.last_error and "selected" in bootstrap.last_error
+    assert "cuda_link" not in sys.modules, "a refused import must not leave the redirected package behind"
+    assert selected not in sys.path
 
 
 def test_version_mismatch_is_rejected_before_import(isolated_resolver, tmp_path):

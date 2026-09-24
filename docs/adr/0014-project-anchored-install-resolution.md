@@ -62,7 +62,10 @@ more than once:
    TouchDesigner. It does not fall through to later layers, because the only thing a later
    layer could do is silently accept the copy the user did not ask for. A bare name owned by a
    classic mirror Text DAT is not a rival and is left in place (the original skip-existing
-   behaviour).
+   behaviour). The same stop applies when nothing was loaded but importing the selected
+   install lands somewhere else because an import hook ahead of `sys.path` (an editable
+   install's redirecting finder, such as scikit-build-core's) serves the name; `last_error`
+   then names the hook, and the modules that import pulled in are dropped again.
 
 When every layer fails, the module records why in `last_error` (one clause per layer, e.g.
 `Libpath parameter: not set; CUDALINK_LIB_PATH: cuda_link 1.12.1 under C:\... does not match

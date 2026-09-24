@@ -13,8 +13,9 @@ sys.modules are visible to all later imports:
 
 Resolution is layered (ADR-0014).  The first layer that yields a cuda_link whose
 ``__version__`` equals MIRROR_VERSION wins.  A mismatching install is skipped WITHOUT
-being imported, and a cuda_link that is already loaded from somewhere else aborts
-resolution outright instead of silently mixing two installations:
+being imported, and a cuda_link that is already loaded from somewhere else -- or an
+import hook that redirects the name elsewhere -- aborts resolution outright instead of
+silently mixing two installations:
   (a) an explicitly supplied folder             _bootstrap(basefolder=...)
   (b) the ``Libpath`` custom parameter           on this COMP or any ancestor
   (c) <project.folder>/cuda_link, /StreamDiffusion, then <project.folder> itself
@@ -232,8 +233,13 @@ def _has_package(site_packages: str) -> bool:
 # --------------------------------------------------------------------------- activate
 
 
-def _check_origin(module: object, package_dir: str) -> object:
-    """Return *module* if it may coexist with the install at *package_dir*, else raise."""
+def _check_origin(module: object, package_dir: str, *, fresh: bool = False) -> object:
+    """Return *module* if it may coexist with the install at *package_dir*, else raise.
+
+    *fresh* marks a module this call has just imported: a wrong origin then means an
+    import hook ahead of sys.path (an editable install's redirecting finder, for
+    example) is serving the name -- nothing was loaded before we asked.
+    """
     origin = _package_dir(module)
     if not origin:
         return module  # TD Text DAT module (no file on disk) -- not a rival install
@@ -241,6 +247,13 @@ def _check_origin(module: object, package_dir: str) -> object:
         return module  # same installation (equality included) -- never fires spuriously
     if "cuda_link" not in _normalized(origin).split(os.sep):
         return module  # unrelated module owning the bare name (classic mirror DAT)
+    if fresh:
+        raise _RivalInstallError(
+            f"importing cuda_link resolved to {origin} instead of the selected installation "
+            f"{package_dir}; an import hook ahead of sys.path (for example an editable "
+            f"'pip install -e' of cuda-link) is redirecting it. Remove that install or point "
+            f"the component at it."
+        )
     raise _RivalInstallError(
         f"CUDA-Link is already loaded from {origin}; the selected installation is "
         f"{package_dir}. Restart TouchDesigner to switch installations."
@@ -251,6 +264,7 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
     """Import cuda_link from *site_packages* and register the bare-name aliases."""
     global last_error, _active, resolved_site_packages
     package_dir = os.path.join(site_packages, "cuda_link")
+    before = set(sys.modules)
 
     loaded = sys.modules.get("cuda_link")
     if loaded is not None:
@@ -266,17 +280,20 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
     try:
         # Triggers the package __init__, which is torch-safe: it re-exports torch/numpy/
         # cupy only as guarded *_AVAILABLE flags.
-        _check_origin(importlib.import_module("cuda_link"), package_dir)
+        _check_origin(importlib.import_module("cuda_link"), package_dir, fresh=True)
         for name, target in _ALIAS_MAP.items():
             if name in sys.modules:
                 # Already owned by a sibling Text DAT loaded before us (preflight above
                 # proved it is not a rival package copy) -- leave it; never swap a module
                 # other code may already hold references into.
                 continue
-            sys.modules[name] = _check_origin(importlib.import_module(target), package_dir)  # type: ignore[assignment]
+            sys.modules[name] = _check_origin(importlib.import_module(target), package_dir, fresh=True)  # type: ignore[assignment]
     except BaseException:
         if inject and site_packages in sys.path:  # do not leave a dead path entry behind
             sys.path.remove(site_packages)
+        for key in list(sys.modules):  # drop only what this call imported
+            if key not in before and (key == "cuda_link" or key.startswith("cuda_link.") or key in _ALIAS_MAP):
+                del sys.modules[key]
         raise
 
     last_error = ""
