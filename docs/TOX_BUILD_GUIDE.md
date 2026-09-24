@@ -439,7 +439,14 @@ In that degraded state, `library_ready` is `False`, `initialize()`, `export_fram
 `import_frame()` return `False`, and the callback templates return without raising. This keeps
 an unavailable library from failing once per frame while TouchDesigner is starting up.
 
-Check the state of the registered extension in the Textport:
+First read the `[CUDALinkBootstrap]` line the bootstrap printed to the Textport when the COMP
+loaded (the same text is the COMP's yellow status). In fallback mode it lists every place the
+resolver looked and why each was rejected — a version that does not match the component's
+`MIRROR_VERSION`, a folder with no `cuda_link` in it, a different `cuda_link` already loaded —
+which usually answers the question directly (see 3a under
+[Step 3](#step-3-create-text-dats)).
+
+Then check the state of the registered extension in the Textport:
 
 ```python
 ext = op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
@@ -448,9 +455,11 @@ print(ext.library_ready)
 
 If it prints `False`:
 
-1. In **Library mode**, verify that `cuda_link` is installed and available through
-   `CUDALINK_LIB_PATH` or TouchDesigner’s Python Module Path (see [Step 3](#step-3-create-text-dats)
-   above).
+1. In **Library mode**, verify that an installed `cuda_link` whose `__version__` matches the
+   component sits in one of the places the resolver probes, in order: the COMP's `Libpath`
+   parameter, `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, or the folder itself),
+   `CUDALINK_LIB_PATH`, then TouchDesigner’s Python Module Path (see 3a under
+   [Step 3](#step-3-create-text-dats) and ADR-0014).
 2. In the StreamDiffusionTD Base Folder workflow, set the Base Folder and start the stream as
    instructed by the status message.
 3. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
