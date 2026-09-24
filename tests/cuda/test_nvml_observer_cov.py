@@ -6,8 +6,6 @@ temperature/power specifically), the env-var gate, ref-count lifecycle
 across multiple observers, and Exporter/Importer get_stats() integration.
 
 This file fills the remaining gaps:
-  - the ``from Env import env_bool`` td_exporter-flat-namespace fallback
-    when ``cuda_link._env`` is unimportable (lines 39-40).
   - _NvmlRefCounter.acquire()/release() early-returns when NVML_AVAILABLE
     is False (lines 71, 79).
   - NVMLObserver.start() short-circuits: disabled (line 147) and
@@ -24,8 +22,6 @@ This file fills the remaining gaps:
 
 from __future__ import annotations
 
-import importlib
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -74,32 +70,6 @@ def _make_started_observer(mock_pynvml: MagicMock):
     obs._started = True
     obs._handle = mock_pynvml.nvmlDeviceGetHandleByIndex(0)
     return obs
-
-
-# ---------------------------------------------------------------------------
-# env_bool import fallback (lines 39-40)
-# ---------------------------------------------------------------------------
-
-
-def test_env_bool_falls_back_to_flat_env_module_when_cuda_link_env_missing():
-    """Reload with cuda_link._env forced unimportable -> falls back to `from Env import env_bool`."""
-    import cuda_link.nvml_observer as mod
-
-    original = sys.modules.get("cuda_link._env", "SENTINEL")
-    sys.modules["cuda_link._env"] = None  # type: ignore[assignment]
-
-    try:
-        importlib.reload(mod)
-        # The flat td_exporter namespace module must be importable and used.
-        import Env
-
-        assert mod.env_bool is Env.env_bool
-    finally:
-        if original == "SENTINEL":
-            sys.modules.pop("cuda_link._env", None)
-        else:
-            sys.modules["cuda_link._env"] = original
-        importlib.reload(mod)
 
 
 # ---------------------------------------------------------------------------

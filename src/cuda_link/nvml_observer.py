@@ -34,10 +34,7 @@ import logging
 import threading
 import warnings
 
-try:
-    from cuda_link._env import env_bool
-except (ImportError, ModuleNotFoundError):
-    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+from ._env import env_bool
 
 logger = logging.getLogger(__name__)
 

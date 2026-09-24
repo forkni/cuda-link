@@ -10,6 +10,7 @@ monkeypatched so results never depend on this dev machine's actual GPU.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -304,3 +305,62 @@ def test_reinitialize_falls_back_to_partial_cleanup_on_failure(monkeypatch: pyte
     imp._reinitialize()  # must not raise
 
     spy.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Log severity on the reconnect path
+# ---------------------------------------------------------------------------
+
+
+def _make_unconnected_importer(shm_name: str) -> Importer:
+    """Fresh Importer (never connected) pointing at a segment that does not exist."""
+    spec = ImportSpec(shm_name=shm_name, device=0, timeout_ms=1000.0)
+    policy = ImportPolicy(
+        wait_spin_us=0,
+        allow_pageable_fallback=True,
+        reconnect_enabled=True,
+        wait_backend="python",
+    )
+    return Importer(spec, policy, FakeCUDAAdapter())
+
+
+def test_retry_driver_logs_missing_shm_below_error(caplog: pytest.LogCaptureFixture) -> None:
+    """While the retry driver is polling for a producer, a missing segment is the
+    expected state for a few frames -- it must not paint ERROR lines. The
+    "not found" message still surfaces at DEBUG so the attempt stays traceable."""
+    import uuid
+
+    imp = _make_unconnected_importer(f"cl_missing_{uuid.uuid4().hex[:8]}")
+    imp.request_immediate_reconnect()
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.importer"):
+        for _ in range(40):  # backoff 1,2,4,8,16 frames -> 5 attempts within 31 frames
+            imp._drive_retry()
+
+    assert imp._retry.connect_attempts == 5
+    records = [r for r in caplog.records if r.name == "cuda_link.importer"]
+    assert [r for r in records if r.levelno >= logging.ERROR] == []
+    not_found = [r for r in records if "not found" in r.getMessage()]
+    assert not_found and all(r.levelno == logging.DEBUG for r in not_found)
+
+
+def test_first_connect_still_logs_missing_shm_at_error(caplog: pytest.LogCaptureFixture) -> None:
+    """An explicit Importer.open() against a missing producer (reconnect disabled)
+    is a real error and keeps the ERROR line -- only the silent retry path is
+    downgraded."""
+    import uuid
+
+    spec = ImportSpec(shm_name=f"cl_missing_{uuid.uuid4().hex[:8]}", device=0, timeout_ms=1000.0)
+    policy = ImportPolicy(
+        wait_spin_us=0,
+        allow_pageable_fallback=True,
+        reconnect_enabled=False,
+        wait_backend="python",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.importer"), pytest.raises(FileNotFoundError):
+        Importer.open(spec, policy=policy, cuda=FakeCUDAAdapter())
+
+    errors = [r for r in caplog.records if r.name == "cuda_link.importer" and r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "not found" in errors[0].getMessage()

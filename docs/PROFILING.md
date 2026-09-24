@@ -209,9 +209,10 @@ context manager; disable for production.
 
 ### Cross-process timeline
 
-`bench_sweep.py` spawns producer and consumer as separate processes. nsys produces one
-`.nsys-rep` per process (they share wall-clock). In nsys-ui tile the two reports to align
-their timelines:
+When the producer and consumer run as separate processes (the historical `bench_sweep.py`
+used for [BENCHMARKS.md](BENCHMARKS.md) did this, and is not included in the repository), nsys
+produces one `.nsys-rep` per process (they share wall-clock). In nsys-ui tile the two reports
+to align their timelines:
 
 ```text
 File → Open → run.nsys-rep        (producer/TD process)
