@@ -43,5 +43,14 @@ is the complete list.
 | `CUDALINK_TD_INIT_PACE` | `0` | Throttle the TD Sender init sequence to reduce WDDM saturation during activation windows (experimental). Adds a small sleep between consecutive CUDA API calls at `initialize()` time; useful when concurrent Sender+Receiver activation produces WDDM kernel-mode queue backpressure. |
 | `CUDALINK_TD_BARRIER_SETTLE_FRAMES` | `30` | Number of frames the TD activation barrier counter remains armed after a Sender `initialize()` completes, giving the Python producer time to back off before publishing resumes. Increase if your Python producer's poll loop is slower than 30 frames at your target rate; decrease for tighter single-pair topologies. |
 | `CUDALINK_NVML` | `0` | Append NVML GPU telemetry (utilization %, clocks MHz, PCIe Tx/Rx MB/s, temperature °C, power W, throttle reasons) to the 97-frame periodic stats line emitted by `CUDALINK_EXPORT_PROFILE`. Requires `nvidia-ml-py` (`pip install nvidia-ml-py`). Zero overhead when off. |
+| `CUDALINK_IMPORT_PROFILE` | `0` | Enable debug/profile output in the standalone Python receiver example (`td_exporter/example_receiver_python.py`). Set to `1` to configure debug logging and include the receiver's import profiling output. |
+| `CUDALINK_PROBE_LOG_FILE` | unset | When set, the standalone Python sender and receiver examples add a file handler at this path for their Python logging output. |
+| `CUDALINK_RECEIVER_SHM_NAME` | `cudalink_ipc_TD>>Python` | Shared-memory IPC channel name passed to the standalone Python receiver example's `ImportSpec`. |
+| `CUDALINK_RECEIVER_DEVICE` | `0` | CUDA device index passed to the standalone Python receiver example's `ImportSpec`. |
+| `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout in milliseconds passed to the standalone Python receiver example's `ImportSpec`. |
+| `CUDALINK_RECEIVER_FRAME_MODE` | `torch` | Frame-fetch backend selected by the standalone Python receiver example: `torch`, `cupy`, or `numpy`. If the selected optional backend is unavailable, the example falls back to `numpy`. |
+| `CUDALINK_RECEIVER_PYTHON_EXE` | unset | Full-path Python executable override for `td_exporter/example_receiver_launcher.py`. When unset, the launcher tries `py -3` and then a `python` executable found on `PATH`. |
+| `CUDALINK_SENDER_PYTHON_EXE` | unset | Full-path Python executable override for `td_exporter/example_sender_launcher.py`. When unset, the launcher tries `py -3` and then a `python` executable found on `PATH`. |
+| `CUDALINK_NCU_MIN` | unset | Set to `1` before running `scripts/profiling/capture_ncu_td_pipeline.cmd` to launch its `NCU-Sender-Capture` helper window minimised (`START /MIN`), rather than in the foreground. Purely a window-visibility convenience for unattended `ncu` capture runs; has no effect on the captured profile data. |
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer) see [docs/PROFILING.md](PROFILING.md).
