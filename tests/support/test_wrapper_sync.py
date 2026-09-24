@@ -18,6 +18,7 @@ hook will reject the commit.
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -28,7 +29,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 # Import the sync script's PAIRS list and rewrite function directly so the
 # test and the script always agree on the transform.
 sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-from sync_td_wrapper import CANONICAL_ONLY, PAIRS, rewrite_relative_imports  # noqa: E402
+from sync_td_wrapper import CANONICAL_ONLY, NAMES, PAIRS, rewrite_relative_imports  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Parametrise by mode
@@ -140,3 +141,93 @@ def test_wrapper_contains_key_definitions() -> None:
     assert "def ipc_close_mem_handle(" in wrapper_content
     assert "def record_event(" in wrapper_content
     assert "def stream_wait_event(" in wrapper_content
+
+
+# ---------------------------------------------------------------------------
+# Import-shape invariants: each deployment resolves its dependencies against ONE
+# installation (ADR-0014).  The sync script can only guarantee that when every
+# mirrored dependency is reached through a relative import it can rewrite.
+# ---------------------------------------------------------------------------
+
+_ALL_CANONICALS = [src for src, _, _ in PAIRS]
+_ALL_IDS = [src.stem for src, _, _ in PAIRS]
+_BYTE_IDENTICAL_CANONICALS = [src for src, _, mode in PAIRS if mode == "byte_identical"]
+_CANONICAL_ONLY_STEMS = {Path(name).stem for name in CANONICAL_ONLY}
+_BARE_TD_NAMES = set(NAMES.values())
+
+
+def _import_nodes(path: Path) -> list[ast.Import | ast.ImportFrom]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)]
+
+
+@pytest.mark.parametrize("canonical", _ALL_CANONICALS, ids=_ALL_IDS)
+def test_paired_source_never_imports_a_mirrored_module_absolutely(canonical: Path) -> None:
+    """A paired module reaches its mirrored siblings through relative imports only.
+
+    ``from cuda_link.x import ...`` inside a paired module resolves against whichever
+    cuda_link is importable in the process -- not necessarily the installation the COMP
+    was resolved against.  In TouchDesigner that silently mixes a sibling Text DAT with a
+    system-installed copy of a different version.  A relative import is rewritten by the
+    sync script to the bare TD name, so both deployments stay self-contained.  Modules in
+    CANONICAL_ONLY have no TD twin and may be imported absolutely (guarded at the call site).
+    """
+    offenders: list[str] = []
+    for node in _import_nodes(canonical):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level or not (module == "cuda_link" or module.startswith("cuda_link.")):
+                continue
+            stem = module.partition("cuda_link.")[2]
+            if stem in _CANONICAL_ONLY_STEMS:
+                continue
+            offenders.append(f"line {node.lineno}: from {module} import ...")
+        else:
+            for alias in node.names:
+                if alias.name == "cuda_link" or alias.name.startswith("cuda_link."):
+                    offenders.append(f"line {node.lineno}: import {alias.name}")
+
+    assert not offenders, (
+        f"{canonical.name} imports mirrored modules by absolute package path:\n"
+        + "".join(f"  {line}\n" for line in offenders)
+        + "Use a relative import (from ._env import ...) and register the pair as\n"
+        "rewrite_relative in scripts/sync_td_wrapper.py::PAIRS."
+    )
+
+
+@pytest.mark.parametrize("canonical", _ALL_CANONICALS, ids=_ALL_IDS)
+def test_paired_source_never_imports_a_mirror_by_its_td_name(canonical: Path) -> None:
+    """The package must not import ``Env``, ``CUDARuntimeTypes``, ... by bare TD name.
+
+    That name is the sync script's OUTPUT.  Inside a package context it resolves to
+    whatever module of that name sits on sys.path (td_exporter/ is on the test pythonpath),
+    which is a second copy of the same code -- ctypes argtypes compare handle classes by
+    identity, so a second ``cudaIpcMemHandle_t`` class breaks every IPC call.
+    """
+    offenders: list[str] = []
+    for node in _import_nodes(canonical):
+        if isinstance(node, ast.ImportFrom):
+            if not node.level and node.module in _BARE_TD_NAMES:
+                offenders.append(f"line {node.lineno}: from {node.module} import ...")
+        else:
+            offenders.extend(f"line {node.lineno}: import {a.name}" for a in node.names if a.name in _BARE_TD_NAMES)
+
+    assert not offenders, (
+        f"{canonical.name} imports a mirror by its TD name:\n"
+        + "".join(f"  {line}\n" for line in offenders)
+        + "Use the relative package import; the sync script derives the TD name."
+    )
+
+
+@pytest.mark.parametrize("canonical", _BYTE_IDENTICAL_CANONICALS, ids=_BYTE_IDS)
+def test_byte_identical_source_has_no_relative_imports(canonical: Path) -> None:
+    """byte_identical copies are verbatim: a relative import would break in TD's flat namespace.
+
+    Move the pair to rewrite_relative in scripts/sync_td_wrapper.py::PAIRS instead.
+    """
+    relative = [
+        f"line {node.lineno}: from {'.' * node.level}{node.module or ''} import ..."
+        for node in _import_nodes(canonical)
+        if isinstance(node, ast.ImportFrom) and node.level
+    ]
+    assert not relative, f"{canonical.name} is byte_identical but uses relative imports:\n" + "\n".join(relative)

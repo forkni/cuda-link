@@ -48,14 +48,14 @@ PAIRS: list[tuple[Path, Path, Literal["byte_identical", "rewrite_relative"]]] = 
     # ---- byte_identical pairs -----------------------------------------------
     (_SRC / "_env.py", _TD / "Env.py", "byte_identical"),
     (_SRC / "_profile.py", _TD / "FrameProfile.py", "byte_identical"),
-    (_SRC / "cuda_ipc_wrapper.py", _TD / "CUDAIPCWrapper.py", "byte_identical"),
     (_SRC / "cuda_runtime_types.py", _TD / "CUDARuntimeTypes.py", "byte_identical"),
-    (_SRC / "cuda_graphs.py", _TD / "CUDAGraphs.py", "byte_identical"),
-    (_SRC / "nvml_observer.py", _TD / "NVMLObserver.py", "byte_identical"),
     (_SRC / "shm_protocol.py", _TD / "SHMProtocol.py", "byte_identical"),
     (_SRC / "activation_barrier.py", _TD / "ActivationBarrier.py", "byte_identical"),
     (_SRC / "_doorbell.py", _TD / "Doorbell.py", "byte_identical"),
     # ---- rewrite_relative pairs (deep modules + their dependencies) ---------
+    (_SRC / "nvml_observer.py", _TD / "NVMLObserver.py", "rewrite_relative"),
+    (_SRC / "cuda_graphs.py", _TD / "CUDAGraphs.py", "rewrite_relative"),
+    (_SRC / "cuda_ipc_wrapper.py", _TD / "CUDAIPCWrapper.py", "rewrite_relative"),
     (_SRC / "_nvtx.py", _TD / "NVTXShim.py", "rewrite_relative"),
     (_SRC / "_exporter_port.py", _TD / "ExporterPort.py", "rewrite_relative"),
     (_SRC / "_importer_port.py", _TD / "ImporterPort.py", "rewrite_relative"),
