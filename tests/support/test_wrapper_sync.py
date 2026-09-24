@@ -158,7 +158,7 @@ _BARE_TD_NAMES = set(NAMES.values())
 
 def _import_nodes(path: Path) -> list[ast.Import | ast.ImportFrom]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    return [node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)]
+    return [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
 
 
 @pytest.mark.parametrize("canonical", _ALL_CANONICALS, ids=_ALL_IDS)
