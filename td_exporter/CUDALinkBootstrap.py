@@ -175,7 +175,7 @@ def _expand(path: object) -> str:
         return ""
     expander = _td_name("tdu")  # TD-only: expands $VAR and project-relative paths
     if expander is not None:
-        with contextlib.suppress(AttributeError, TypeError, ValueError):
+        with contextlib.suppress(Exception):  # a broken tdu must not crash the bootstrap
             text = expander.expandPath(text)
     return os.path.expandvars(text)
 
@@ -268,8 +268,15 @@ def _site_package_candidates(root: str, *, forgive_package_dir: bool = False) ->
         os.path.join(expanded, "Lib", "site-packages"),
         expanded,
     ]
-    if forgive_package_dir and os.path.basename(os.path.normpath(expanded)) == "cuda_link":
-        candidates.append(os.path.dirname(os.path.normpath(expanded)))
+    normalized = os.path.normpath(expanded)
+    if forgive_package_dir and os.path.normcase(os.path.basename(normalized)) == "cuda_link":
+        parent = os.path.dirname(normalized)
+        # Skip a bare relative name's empty parent ("cuda_link" -> "") and a drive root
+        # ("C:\cuda_link" -> "C:\", whose own dirname is itself) -- neither is a real
+        # parent folder to probe, and the drive root would otherwise get injected onto
+        # sys.path wholesale.
+        if parent and parent != os.path.dirname(parent):
+            candidates.append(parent)
     return candidates
 
 
@@ -370,6 +377,17 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
                 del sys.modules[key]
         raise
 
+    if inject:
+        # Submodules already resolve through cuda_link.__path__, set at import time, so
+        # the injected root no longer needs sys.path[0] for the rest of the process --
+        # leaving it there would shadow every other same-named top-level module TD has.
+        # Put it back where it was (or at the tail, if it is new) instead.
+        sys.path.remove(site_packages)
+        if previous_index is not None:
+            sys.path.insert(previous_index, site_packages)
+        else:
+            sys.path.append(site_packages)
+
     last_error = ""
     resolved_site_packages = site_packages
     _active = True
@@ -392,6 +410,27 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     the extension prints it to the Textport and the COMP falls back to its mirrors.
     """
     notes: list[str] = []
+
+    # A matching-version cuda_link already loaded from elsewhere in this process (another
+    # COMP's bootstrap run, or a second open project) is reused outright, before any layer
+    # is walked. Restarting TouchDesigner could never "fix" the rival error the layer walk
+    # would otherwise raise here: both COMPs would just resolve to the same already-loaded
+    # copy again on the next load. A version mismatch still falls through to the layer walk,
+    # which raises the ordinary rival hard stop -- reusing a *wrong*-version copy would let
+    # two different-version copies of the ctypes/protocol code coexist in one process.
+    loaded = sys.modules.get("cuda_link")
+    if loaded is not None:
+        origin_dir = _package_dir(loaded)
+        if origin_dir:
+            already_at = os.path.dirname(origin_dir)
+            if _read_version(already_at) == MIRROR_VERSION:
+                try:
+                    return _activate(already_at, inject=False)
+                except _RivalInstallError as error:
+                    logger.warning("%s", error)
+                    return _fail(str(error))
+                except Exception as error:
+                    notes.append(f"already-loaded cuda_link: {type(error).__name__}: {error}")
 
     for label, root, inject, forgive in _layers(basefolder):
         if not str(root).strip():
@@ -425,8 +464,12 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes))
 
 
-# Run at Text DAT load time.
-_bootstrap()
+# Run at Text DAT load time. This runs at import time inside TD, so an escaping exception
+# would leave ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
+try:
+    _bootstrap()
+except Exception as _bootstrap_error:  # noqa: BLE001 -- last resort, see comment above
+    _fail(f"{type(_bootstrap_error).__name__}: {_bootstrap_error}")
 
 if _active:
     print(f"[CUDALinkBootstrap] Library mode active — cuda_link {MIRROR_VERSION} from {resolved_site_packages}")
