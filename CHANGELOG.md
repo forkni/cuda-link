@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wheel actually installed. `_find_wheel()` now matches the exact
   `cuda_link-<version>-<tag>.whl` filename for the source checkout's version, and the
   verify line prints the resolved wheel's own version.
+- **Stale warning/error tint never cleared in real TD**: `RealTDHost._reset_stale_tint()` /
+  `_capture_default_color()` compared `comp.color` against `_WARNING_COLOR`/`_ERROR_COLOR`
+  with exact tuple equality, but TD stores `comp.color` internally as float32 — a value
+  set from a float64 literal (e.g. `0.7`) reads back as `0.699999988...`, so the
+  comparison never matched on a live TD instance (only the unit tests' float64 fakes
+  passed). COMPs saved mid-warning during 1.13.0 resolver testing stayed permanently
+  yellow even after `cuda_link` loaded cleanly. Both comparisons now use
+  `math.isclose(..., abs_tol=1e-3)`.
 - Relative-import mirrors for `cuda_graphs`/`cuda_ipc_wrapper`/`nvml_observer`,
   fixing a mixed-version ctypes handle class-identity bug.
 - SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.
