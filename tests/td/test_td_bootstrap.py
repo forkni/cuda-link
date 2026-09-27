@@ -421,37 +421,6 @@ class _RedirectingFinder:
         return None
 
 
-class _FakePar:
-    def __init__(self, value: str) -> None:
-        self._value = value
-
-    def eval(self) -> str:
-        return self._value
-
-
-class _FakePars:
-    def __init__(self, libpath: str | None) -> None:
-        if libpath is not None:
-            self.Libpath = _FakePar(libpath)
-
-
-class _FakeComp:
-    def __init__(self, parent: _FakeComp | None = None, libpath: str | None = None) -> None:
-        self._parent = parent
-        self.par = _FakePars(libpath)
-
-    def parent(self) -> _FakeComp | None:
-        return self._parent
-
-
-class _FakeDat:
-    def __init__(self, comp: _FakeComp) -> None:
-        self._comp = comp
-
-    def parent(self) -> _FakeComp:
-        return self._comp
-
-
 class _FakeProject:
     """Stand-in for TD's ``project`` global: only ``.folder`` is read by the bootstrap."""
 
@@ -478,10 +447,10 @@ def isolated_resolver(monkeypatch):
 
     Snapshots sys.path and the loaded cuda_link.* modules (after the module-scope run
     has imported all of them from src/) and restores both afterwards, so activating a
-    fake install inside a test never leaks into the rest of the suite.  Layers (b) COMP
-    parameter and (c) project folder are quiet on their own outside TD (no ``me`` /
-    ``project`` globals); (d) CUDALINK_LIB_PATH is cleared and (e) sys.path is silenced
-    by a ``_SysPathLayer`` stand-in, until a test enables one explicitly.
+    fake install inside a test never leaks into the rest of the suite.  Layer (b) project
+    folder is quiet on its own outside TD (no ``project`` global); (c) CUDALINK_LIB_PATH
+    is cleared and (d) sys.path is silenced by a ``_SysPathLayer`` stand-in, until a test
+    enables one explicitly.
 
     An editable install of this repo (``pip install -e .``, as branch-protection.yml
     does) adds a finder ahead of sys.path that would hijack every activation below;
@@ -529,7 +498,7 @@ def test_venv_layout_is_probed_under_the_given_root(isolated_resolver, tmp_path)
 
 
 def test_venv_root_itself_is_probed(isolated_resolver, tmp_path):
-    """``Libpath`` may name the venv itself (install_td_library.py --venv D:/proj/.venv)."""
+    """A root may name the venv itself (install_td_library.py --venv D:/proj/.venv)."""
     bootstrap = isolated_resolver
     venv = tmp_path / "proj" / ".venv"
     site = _make_fake_install(venv / "Lib" / "site-packages", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
@@ -739,47 +708,38 @@ def test_project_folder_layer_resolves_when_project_lives_only_in_builtins(isola
     assert bootstrap.resolved_site_packages == here
 
 
-def test_relative_libpath_is_expanded_via_tdu_from_builtins(isolated_resolver, tmp_path, monkeypatch):
-    """``tdu`` is TD-only and, like ``project``, lives only in ``__builtins__`` -- a relative
-    ``Libpath`` value must still be expanded against the project folder through it."""
+def test_project_folder_layer_prefers_src_over_the_folder_itself(isolated_resolver, tmp_path, monkeypatch):
+    """Layer (b), third root: <project.folder>/src (a repo checkout's src-layout package)
+    wins over an install sitting directly in the project folder -- the gap that used to
+    require a ``Libpath`` value on these example projects."""
     bootstrap = isolated_resolver
     proj = tmp_path / "proj"
-    site = _make_fake_install(proj / "src", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    src = _make_fake_install(proj / "src", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    _make_fake_install(proj, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "project", _FakeProject(str(proj)), raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == src
+
+
+def test_relative_env_var_is_expanded_via_tdu_from_builtins(isolated_resolver, tmp_path, monkeypatch):
+    """``tdu`` is TD-only and, like ``project``, lives only in ``__builtins__`` -- a relative
+    ``CUDALINK_LIB_PATH`` value must still be expanded against the project folder through it."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    site = _make_fake_install(proj / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
 
     class _FakeTdu:
         def expandPath(self, text: str) -> str:
             return text if Path(text).is_absolute() else str(proj / text)
 
-    monkeypatch.setattr(bootstrap, "me", _FakeDat(_FakeComp(libpath="src")), raising=False)
     fake_builtins = {**vars(builtins), "tdu": _FakeTdu()}
     monkeypatch.setitem(vars(bootstrap), "__builtins__", fake_builtins)
+    monkeypatch.setenv("CUDALINK_LIB_PATH", "lib")
     _forget_loaded_cuda_link(bootstrap)
 
     assert bootstrap._bootstrap() is True, bootstrap.last_error
-    assert bootstrap.resolved_site_packages == site
-
-
-def test_libpath_parameter_empty_on_comp_does_not_shadow_ancestor(isolated_resolver, tmp_path, monkeypatch):
-    """The shipped default is an empty ``Libpath`` par on the COMP itself; that must not stop
-    the ancestor walk before it reaches a project-level ``Libpath`` set higher up."""
-    bootstrap = isolated_resolver
-    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
-    me = _FakeDat(_FakeComp(parent=_FakeComp(libpath=site), libpath=""))
-    monkeypatch.setattr(bootstrap, "me", me, raising=False)
-    _forget_loaded_cuda_link(bootstrap)
-
-    assert bootstrap._bootstrap() is True, bootstrap.last_error
-    assert bootstrap.resolved_site_packages == site
-
-
-def test_libpath_parameter_is_found_on_an_ancestor_comp(isolated_resolver, tmp_path, monkeypatch):
-    bootstrap = isolated_resolver
-    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
-    me = _FakeDat(_FakeComp(parent=_FakeComp(libpath=site)))  # par lives on the grandparent
-    monkeypatch.setattr(bootstrap, "me", me, raising=False)
-    _forget_loaded_cuda_link(bootstrap)
-
-    assert bootstrap._bootstrap() is True
     assert bootstrap.resolved_site_packages == site
 
 
@@ -793,17 +753,48 @@ def test_env_var_layer_still_resolves_an_install(isolated_resolver, tmp_path, mo
     assert bootstrap.resolved_site_packages == site
 
 
-def test_libpath_parameter_beats_env_var(isolated_resolver, tmp_path, monkeypatch):
+def test_env_var_pointing_at_the_package_dir_itself_still_resolves(isolated_resolver, tmp_path, monkeypatch):
+    """CUDALINK_LIB_PATH may name the cuda_link package folder itself rather than its
+    parent -- the exact mistake a ``Libpath`` value used to make on these example
+    projects. There is no per-COMP parameter to catch it anymore, so the site-package
+    probe itself must forgive a root one level too deep."""
     bootstrap = isolated_resolver
-    from_par = _make_fake_install(tmp_path / "par", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
-    from_env = _make_fake_install(tmp_path / "env", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
-    monkeypatch.setattr(bootstrap, "me", _FakeDat(_FakeComp(libpath=from_par)), raising=False)
-    monkeypatch.setenv("CUDALINK_LIB_PATH", from_env)
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setenv("CUDALINK_LIB_PATH", str(Path(site) / "cuda_link"))
     _forget_loaded_cuda_link(bootstrap)
 
-    assert bootstrap._bootstrap() is True
-    assert bootstrap.resolved_site_packages == from_par
-    assert from_env not in sys.path
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_leftover_libpath_par_on_a_comp_is_ignored(isolated_resolver, tmp_path, monkeypatch):
+    """Pre-1.13.0 .toe files may still carry a ``Libpath`` custom par (it shipped, briefly,
+    before being withdrawn). The resolver must not read it: a par present on ``me``'s
+    parent COMP, even one pointing at a matching install, must not activate library mode,
+    and must never be mentioned in last_error."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+
+    class _FakePar:
+        def eval(self) -> str:
+            return site
+
+    class _FakeComp:
+        par = types.SimpleNamespace(Libpath=_FakePar())
+
+        def parent(self) -> None:
+            return None
+
+    class _FakeDat:
+        def parent(self) -> _FakeComp:
+            return _FakeComp()
+
+    monkeypatch.setattr(bootstrap, "me", _FakeDat(), raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is False
+    assert "Libpath" not in bootstrap.last_error
+    assert "cuda_link" not in sys.modules
 
 
 def test_every_layer_failing_reports_each_layer_and_stays_inactive(isolated_resolver, tmp_path):

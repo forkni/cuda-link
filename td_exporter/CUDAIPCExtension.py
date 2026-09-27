@@ -327,15 +327,15 @@ class CUDAIPCExtension:
 
         This state is NORMAL on every cold project load until a matching install is
         resolved, so it must never stall the main thread.  The short Status line names
-        the one parameter to fix (``Libpath``) and the version that must match; the full
-        reason CUDALinkBootstrap gives up -- every layer it tried and why -- goes to the
+        the version that must match and where to put it; the full reason
+        CUDALinkBootstrap gives up -- every layer it tried and why -- goes to the
         Textport only, where it fits.  Per-COMP feedback is the yellow tint + Status par
         + warning_emitter badge; the textport line and the status bar fire once per
         process across all sibling COMPs.
         """
         ver = _mirror_version()
         version_clause = f"cuda_link {ver}" if ver else "cuda_link"
-        short = f"{version_clause} not found - set Libpath to a folder with a matching install (see Textport)"
+        short = f"{version_clause} not found - install it next to this .toe or into TD's Python, then restart TD (see Textport)"
         detail = _bootstrap_error() or LIBRARY_ERROR or "cuda_link unavailable"
 
         with contextlib.suppress(AttributeError, RuntimeError):

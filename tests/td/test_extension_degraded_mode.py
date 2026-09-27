@@ -10,7 +10,7 @@ see StreamDiffusionTD modal-storm / SHMProtocol ImportError incident.
 
 No live TD or CUDA device required: these tests exercise the LIBRARY_READY=False path
 directly via monkeypatching, the same way a real machine hits it before an ADR-0014
-layer (the ``Libpath`` par, the project folder, ``CUDALINK_LIB_PATH``, ``sys.path``)
+layer (an explicit folder, the project folder, ``CUDALINK_LIB_PATH``, ``sys.path``)
 resolves a matching cuda_link install.
 """
 
@@ -128,14 +128,15 @@ def test_bootstrap_helpers_read_real_bootstrap_state(monkeypatch: object) -> Non
     assert ext_module._bootstrap_error() == ""
 
     fake_bootstrap._active = False
-    fake_bootstrap.last_error = "CUDA-Link could not be resolved -- Libpath parameter: not set"
+    fake_bootstrap.last_error = "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
     assert ext_module._bootstrap_active() is False
-    assert ext_module._bootstrap_error() == "CUDA-Link could not be resolved -- Libpath parameter: not set"
+    assert ext_module._bootstrap_error() == "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
 
 
-def test_notify_library_unavailable_status_names_version_and_libpath(monkeypatch: object) -> None:
-    """The short Status line must point at the version + Libpath par to fix, not the
-    retired StreamDiffusionTD 'Base Folder' wording."""
+def test_notify_library_unavailable_status_names_version_and_how_to_install(monkeypatch: object) -> None:
+    """The short Status line must point at the version and where to install it -- there is
+    no per-COMP parameter to fix anymore, and not the retired StreamDiffusionTD
+    'Base Folder' wording."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
     monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
@@ -154,7 +155,8 @@ def test_notify_library_unavailable_status_names_version_and_libpath(monkeypatch
     kind, msg = host.status_calls[-1]
     assert kind == "warning"
     assert "1.13.0" in msg
-    assert "Libpath" in msg
+    assert "restart" in msg.lower()
+    assert "Libpath" not in msg
     assert "StreamDiffusionTD" not in msg
 
 
@@ -170,7 +172,7 @@ def test_notify_library_unavailable_detail_prefers_bootstrap_last_error(monkeypa
         "CUDALinkBootstrap",
         SimpleNamespace(
             _active=False,
-            last_error="folder argument: not set; Libpath parameter: not set",
+            last_error="folder argument: not set; CUDALINK_LIB_PATH: not set",
             MIRROR_VERSION="1.13.0",
         ),
     )
@@ -182,7 +184,7 @@ def test_notify_library_unavailable_detail_prefers_bootstrap_last_error(monkeypa
 
     ext._notify_library_unavailable()
 
-    assert any("Libpath parameter: not set" in line for line in printed)
+    assert any("CUDALINK_LIB_PATH: not set" in line for line in printed)
     assert not any("SHMProtocol" in line for line in printed)
 
 

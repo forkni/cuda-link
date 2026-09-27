@@ -17,20 +17,24 @@ being imported.  A cuda_link that is already loaded from somewhere else, an impo
 that redirects the name elsewhere, or a sibling mirror Text DAT imported ahead of this
 module all abort resolution outright instead of silently mixing two copies:
   (a) an explicitly supplied folder             _bootstrap(basefolder=...)
-  (b) the ``Libpath`` custom parameter           on this COMP or any ancestor
-  (c) <project.folder>/cuda_link, /StreamDiffusion, then <project.folder> itself
-  (d) CUDALINK_LIB_PATH                          (ADR-0003 compatibility)
-  (e) whatever sys.path already provides         (TD Preferences module path, pip)
+  (b) <project.folder>/cuda_link, /StreamDiffusion, /src, then <project.folder> itself
+  (c) CUDALINK_LIB_PATH                          (ADR-0003 compatibility)
+  (d) whatever sys.path already provides         (TD Preferences module path, pip)
 Each root is probed as <root>/venv/Lib/site-packages, <root>/.venv/Lib/site-packages,
 <root>/Lib/site-packages (the root is itself a venv) and <root> itself (a
-``pip install --target`` folder).
+``pip install --target`` folder). For the two manually supplied roots -- (a) and (c) --
+a root whose basename is itself ``cuda_link`` is also probed one level up, so pointing
+CUDALINK_LIB_PATH at the package folder (rather than its parent) still resolves; the
+synthetic (b) roots are exempt; forgiving ``<project.folder>/cuda_link`` the same way
+would make it swallow <project.folder> itself, the fallback root tried right after it.
 
 Two deployment modes
 ---------------------
 Library mode (this module's purpose):
     Install cuda_link once (install_td_library.cmd, or
-    ``pip install --target <folder> dist/cuda_link-<ver>-py3-none-any.whl``) and point
-    the COMP's ``Libpath`` parameter -- or CUDALINK_LIB_PATH -- at that folder.  The
+    ``pip install --target <folder> dist/cuda_link-<ver>-py3-none-any.whl``) next to the
+    .toe, into a venv the project layer probes, or into a Python already on TD's
+    sys.path -- see the layer list above; there is no per-COMP parameter to set.  The
     resolved package is imported and all 15 mirror module names are registered in
     sys.modules as aliases to its submodules.  The 15 mirror Text DATs (Env,
     SHMProtocol, Exporter, …) can then be removed from the COMP.
@@ -196,25 +200,6 @@ def _read_version(site_packages: str) -> str:
 # --------------------------------------------------------------------------- layers
 
 
-def _libpath_parameter() -> str:
-    """``Libpath`` custom parameter on the owning COMP or any ancestor (TD only).
-
-    An ancestor's ``Libpath`` (a project-level default, say) must still be reachable when
-    a nearer COMP has the parameter but leaves it at its empty default -- an empty value
-    is "not set here", not "stop looking".
-    """
-    dat = _td_name("me")
-    component = dat.parent() if dat is not None else None
-    while component is not None:
-        parameter = getattr(component.par, "Libpath", None)
-        if parameter is not None:
-            value = str(parameter.eval()).strip()
-            if value:
-                return value
-        component = component.parent()
-    return ""
-
-
 def _project_roots() -> Iterator[str]:
     """Folders next to the .toe that conventionally hold a per-project install."""
     proj = _td_name("project")
@@ -223,6 +208,7 @@ def _project_roots() -> Iterator[str]:
         return
     yield os.path.join(folder, "cuda_link")
     yield os.path.join(folder, "StreamDiffusion")  # StreamDiffusionTD's venv lives here
+    yield os.path.join(folder, "src")  # a repo checkout's src-layout package
     yield folder
 
 
@@ -242,33 +228,49 @@ def _sys_path_root() -> str:
     return os.path.dirname(os.path.dirname(origin))
 
 
-def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool]]:
-    """(label, root, inject-on-sys.path) -- lazy, so later layers (operator walk,
-    find_spec) never run once an earlier layer has already resolved."""
-    yield "folder argument", basefolder or "", True
-    yield "Libpath parameter", _libpath_parameter(), True
+def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool, bool]]:
+    """(label, root, inject-on-sys.path, forgive-package-dir) -- lazy, so later layers
+    (project-root walk, find_spec) never run once an earlier layer has already resolved.
+
+    ``forgive-package-dir`` is only set for the two layers a human can mistype: the
+    ``basefolder`` argument and ``CUDALINK_LIB_PATH``. The synthetic project-folder roots
+    already include a root named literally ``cuda_link`` (``<project>/cuda_link``); forgiving
+    that one too would make it swallow its parent -- ``<project>`` itself, the fallback root
+    tried after it -- whenever a project keeps its install directly in the project folder,
+    which defeats the roots' own preference order.
+    """
+    yield "folder argument", basefolder or "", True, True
     for root in _project_roots():
-        yield "project folder", root, True
-    yield "CUDALINK_LIB_PATH", _env_libpath(), True
-    yield "sys.path", _sys_path_root(), False
+        yield "project folder", root, True, False
+    yield "CUDALINK_LIB_PATH", _env_libpath(), True, True
+    yield "sys.path", _sys_path_root(), False, False
 
 
-def _site_package_candidates(root: str) -> list[str]:
+def _site_package_candidates(root: str, *, forgive_package_dir: bool = False) -> list[str]:
     """A project holding a venv, a venv root, and a pre-resolved site-packages / --target dir.
 
     Only the Windows venv layout (``Lib/site-packages``) is probed: cuda-link's CUDA IPC
     transport targets TouchDesigner on Windows, so the POSIX ``lib/pythonX.Y/site-packages``
     layout never holds an install for this COMP.
+
+    When *forgive_package_dir* is set and *root* itself is named ``cuda_link`` -- the package
+    folder, not its parent -- the parent is probed too. There is no per-COMP parameter to catch
+    this mistake anymore, so a manually supplied root (``CUDALINK_LIB_PATH`` or the
+    ``basefolder`` argument) pointing one level too deep still resolves rather than silently
+    failing.
     """
     expanded = _expand(root)
     if not expanded:
         return []
-    return [
+    candidates = [
         os.path.join(expanded, "venv", "Lib", "site-packages"),
         os.path.join(expanded, ".venv", "Lib", "site-packages"),
         os.path.join(expanded, "Lib", "site-packages"),
         expanded,
     ]
+    if forgive_package_dir and os.path.basename(os.path.normpath(expanded)) == "cuda_link":
+        candidates.append(os.path.dirname(os.path.normpath(expanded)))
+    return candidates
 
 
 def _has_package(site_packages: str) -> bool:
@@ -391,11 +393,11 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     """
     notes: list[str] = []
 
-    for label, root, inject in _layers(basefolder):
+    for label, root, inject, forgive in _layers(basefolder):
         if not str(root).strip():
             notes.append(f"{label}: not set")  # quiet deferral, not a warning
             continue
-        candidates = [p for p in _site_package_candidates(root) if _has_package(p)]
+        candidates = [p for p in _site_package_candidates(root, forgive_package_dir=forgive) if _has_package(p)]
         if not candidates:
             notes.append(f"{label}: no cuda_link under {_expand(root)}")
             continue
