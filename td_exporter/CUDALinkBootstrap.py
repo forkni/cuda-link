@@ -104,6 +104,12 @@ _ALIAS_MAP: dict[str, str] = {
 last_error = ""
 resolved_site_packages = ""  # diagnostics: which folder won
 _active = False
+# Specific reason the last _bootstrap() call gave up, so the extension can show a
+# cause-specific Status line instead of always saying "not found": "missing" (no
+# candidate anywhere), "mismatch" (a candidate exists but its version doesn't match),
+# "rival" (a different cuda_link is already loaded), or "" (active, or an unexpected
+# exception this module doesn't specifically classify).
+failure_kind = ""
 
 _VERSION_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE)
 
@@ -342,7 +348,7 @@ def _check_alias_owner(name: str, module: object, package_dir: str) -> None:
 
 def _activate(site_packages: str, *, inject: bool = True) -> bool:
     """Import cuda_link from *site_packages* and register the bare-name aliases."""
-    global last_error, _active, resolved_site_packages
+    global last_error, _active, resolved_site_packages, failure_kind
     package_dir = os.path.join(site_packages, "cuda_link")
     before = set(sys.modules)
 
@@ -391,15 +397,17 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
     last_error = ""
     resolved_site_packages = site_packages
     _active = True
+    failure_kind = ""
     return True
 
 
-def _fail(message: str) -> bool:
+def _fail(message: str, *, kind: str = "") -> bool:
     """Record why library mode is off; the COMP then stays on its mirror Text DATs."""
-    global last_error, _active, resolved_site_packages
+    global last_error, _active, resolved_site_packages, failure_kind
     last_error = message
     resolved_site_packages = ""
     _active = False
+    failure_kind = kind
     return False
 
 
@@ -428,10 +436,11 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                     return _activate(already_at, inject=False)
                 except _RivalInstallError as error:
                     logger.warning("%s", error)
-                    return _fail(str(error))
+                    return _fail(str(error), kind="rival")
                 except Exception as error:
                     notes.append(f"already-loaded cuda_link: {type(error).__name__}: {error}")
 
+    saw_mismatch = False
     for label, root, inject, forgive in _layers(basefolder):
         if not str(root).strip():
             notes.append(f"{label}: not set")  # quiet deferral, not a warning
@@ -443,6 +452,7 @@ def _bootstrap(basefolder: str | None = None) -> bool:
         for site_packages in candidates:
             found = _read_version(site_packages)
             if found != MIRROR_VERSION:
+                saw_mismatch = True
                 notes.append(
                     f"{label}: cuda_link {found or '?'} under {site_packages} "
                     f"does not match the component's {MIRROR_VERSION}"
@@ -452,7 +462,7 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                 return _activate(site_packages, inject=inject)
             except _RivalInstallError as error:
                 logger.warning("%s", error)
-                return _fail(str(error))  # hard stop: no later layer can unload a module
+                return _fail(str(error), kind="rival")  # hard stop: no later layer can unload a module
             except Exception as error:
                 # Anything the candidate raised while importing (ImportError, but also a
                 # SyntaxError in a half-copied install or an AttributeError from a
@@ -461,7 +471,10 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                 # ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
                 notes.append(f"{label}: {type(error).__name__}: {error}")
 
-    return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes))
+    return _fail(
+        "CUDA-Link could not be resolved -- " + "; ".join(notes),
+        kind="mismatch" if saw_mismatch else "missing",
+    )
 
 
 # Run at Text DAT load time. This runs at import time inside TD, so an escaping exception
@@ -474,4 +487,6 @@ except Exception as _bootstrap_error:  # noqa: BLE001 -- last resort, see commen
 if _active:
     print(f"[CUDALinkBootstrap] Library mode active — cuda_link {MIRROR_VERSION} from {resolved_site_packages}")
 else:
-    print(f"[CUDALinkBootstrap] Library mode unavailable — {last_error}")
+    print(
+        "[CUDALinkBootstrap] Library mode off — COMP uses its mirror Text DATs if present (reason in CUDALinkBootstrap.last_error)"
+    )
