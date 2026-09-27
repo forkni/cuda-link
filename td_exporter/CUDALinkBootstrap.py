@@ -57,6 +57,7 @@ import os
 import re
 import sys
 from collections.abc import Iterator
+from typing import Any
 
 # Stamped by scripts/sync_td_wrapper.py from src/cuda_link/__init__.py::__version__.
 # The bootstrap only activates an install whose __version__ equals this value, so the
@@ -137,7 +138,7 @@ def _within(child: object, parent: object) -> bool:
     return child_n == parent_n or child_n.startswith(parent_n + os.sep)
 
 
-def _td_name(name: str) -> object | None:
+def _td_name(name: str) -> Any:
     """Look up a TD-injected name (``me``, ``project``, ``tdu``, ...) that this DAT module
     may not have in its own globals.
 
@@ -148,6 +149,12 @@ def _td_name(name: str) -> object | None:
     variables through ``__builtins__`` as a last step). Check globals() first so a test
     fixture that does ``monkeypatch.setattr(bootstrap, name, ...)`` (i.e. writes straight
     into module globals) still works unchanged.
+
+    Returns ``Any``, not ``object | None``: these are TD's own COMP/DAT/project objects
+    (or None), the same "no stub, treat as Any" idiom this repo already applies to ``td.*``
+    itself (see the ``replace-imports-with-any`` note in pyproject.toml) -- a precise
+    ``object | None`` return would make every ``.expandPath``/``.parent()`` call site a
+    pyrefly ``missing-attribute`` error for an attribute that demonstrably exists at runtime.
     """
     value = globals().get(name)
     if value is not None:
