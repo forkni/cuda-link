@@ -122,17 +122,31 @@ def _wheel_tag_for_version(version: tuple[int, int] | None) -> str:
     return _FALLBACK_WHEEL_TAG
 
 
-def _find_wheel(tag: str) -> Path | None:
-    """Return the newest cuda_link-*.whl in dist/ whose filename contains `tag`, or None."""
-    dist = REPO_ROOT / "dist"
-    if not dist.is_dir():
+def _find_wheel(tag: str, version: str, _root: Path = REPO_ROOT) -> Path | None:
+    """Return dist/cuda_link-<version>-<tag>.whl if it exists there, else None.
+
+    Matching the exact expected filename (not just `tag in name`) is what stops
+    a leftover older-version wheel in dist/ from being silently reinstalled —
+    under ADR-0014's exact-version match that leaves every COMP inert while the
+    installer's own verify line still reports the source checkout's version.
+
+    `_root` overrides the repo root; only tests should pass it.
+    """
+    wheel = _root / "dist" / f"cuda_link-{version}-{tag}.whl"
+    return wheel if wheel.is_file() else None
+
+
+def _wheel_version(path: Path) -> str | None:
+    """Parse the version out of a cuda_link-<version>-<tag>.whl filename, or None."""
+    name = path.name
+    if not (name.startswith("cuda_link-") and name.endswith(".whl")):
         return None
-    wheels = sorted(
-        (p for p in dist.glob("cuda_link-*.whl") if tag in p.name),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return wheels[0] if wheels else None
+    middle = name[len("cuda_link-") : -len(".whl")]
+    for tag in (_NATIVE_WHEEL_TAG, _FALLBACK_WHEEL_TAG):
+        suffix = f"-{tag}"
+        if middle.endswith(suffix):
+            return middle[: -len(suffix)]
+    return None
 
 
 # Repo-relative source roots whose changes should invalidate the wheel.
@@ -230,7 +244,7 @@ def _download_release_wheel(version: str, tag: str, dry_run: bool) -> Path | Non
     return dest
 
 
-def _build_wheel(tag: str, dry_run: bool) -> Path | None:
+def _build_wheel(tag: str, version: str, dry_run: bool) -> Path | None:
     """Run build_wheel.cmd to produce a wheel locally; return its path.
 
     Dev-only: only reached from resolve_wheel() when the caller passed --build.
@@ -255,9 +269,9 @@ def _build_wheel(tag: str, dry_run: bool) -> Path | None:
     result = subprocess.run(cmd_args, cwd=REPO_ROOT, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         sys.exit(_red("[error] build_wheel.cmd failed — see output above."))
-    wheel = _find_wheel(tag)
+    wheel = _find_wheel(tag, version)
     if not wheel:
-        sys.exit(_red(f"[error] Build succeeded but no matching wheel (tag={tag}) found in dist/"))
+        sys.exit(_red(f"[error] Build succeeded but no dist/cuda_link-{version}-{tag}.whl found"))
     return wheel
 
 
@@ -297,18 +311,30 @@ def resolve_wheel(
     override: str | None,
     dry_run: bool,
     allow_build: bool,
+    _root: Path = REPO_ROOT,
 ) -> Path:
     """Resolve the wheel to install for a target interpreter version.
 
-    Source order: --wheel override -> a tag-matched prebuilt wheel already in
-    dist/ -> auto-download the matching GitHub Release asset -> (only with
-    --build) compile locally. End-user machines are expected to stop at the
-    download step; see docs/adr/0013-prebuilt-wheel-distribution.md.
+    Source order: --wheel override -> a tag- and version-matched prebuilt wheel
+    already in dist/ -> auto-download the matching GitHub Release asset ->
+    (only with --build) compile locally. End-user machines are expected to stop
+    at the download step; see docs/adr/0013-prebuilt-wheel-distribution.md.
+
+    `_root` overrides the repo root; only tests should pass it.
     """
+    needed = _installed_version()
     if override:
         p = Path(override)
         if not p.exists():
             sys.exit(_red(f"[error] --wheel path does not exist: {p}"))
+        found = _wheel_version(p)
+        if found is not None and found != needed:
+            print(
+                _yellow(
+                    f"  [warn] --wheel {p.name} is version {found}, but this checkout "
+                    f"needs {needed}; library mode will stay off."
+                )
+            )
         return p
 
     tag = _wheel_tag_for_version(target_version)
@@ -322,21 +348,21 @@ def resolve_wheel(
             )
         )
 
-    w = _find_wheel(tag)
+    w = _find_wheel(tag, needed, _root=_root)
     # Staleness (mtime predates local src/cuda_link changes) is a dev-workflow
     # signal only: a downloaded release wheel's mtime is its download time, not
     # its content's age, so this check is meaningless — and could false-positive
     # — for an end-user install. Only consult it when --build makes a rebuild
     # possible in the first place.
-    if w and allow_build and _wheel_is_stale(w, _CORE_SOURCE_ROOTS):
+    if w and allow_build and _wheel_is_stale(w, _CORE_SOURCE_ROOTS, _root=_root):
         print(_yellow(f"  [stale] {w.name} predates src/cuda_link changes — re-resolving..."))
         w = None
 
     if not w:
-        w = _download_release_wheel(_installed_version(), tag, dry_run)
+        w = _download_release_wheel(needed, tag, dry_run)
 
     if not w and allow_build:
-        w = _build_wheel(tag, dry_run)
+        w = _build_wheel(tag, needed, dry_run)
 
     if not w:
         sys.exit(
@@ -524,12 +550,18 @@ _SITE_PKGS_QUERY = (
 def _print_activation(
     site_packages: Path | None,
     label: str,
+    wheel_version: str,
     td_preferences_only: bool = False,
 ) -> None:
     """Print installation confirmation and path-activation instructions.
 
     td_preferences_only=True (modes 2/3/4): show only the TD Preferences path instruction.
     td_preferences_only=False (mode 1 default): show CUDALINK_LIB_PATH + TD Preferences.
+
+    `wheel_version` is the actually-resolved wheel's version, not the source
+    checkout's — they can differ (e.g. --wheel override, or a stale dist/
+    wheel before the version-matching fix), and this line is what a user
+    checks against the Textport to confirm the install took.
     """
     print()
     print(_bold("─" * 60))
@@ -558,7 +590,7 @@ def _print_activation(
             print(f"       Add:  {site_packages}")
         print()
         print(_bold("  Then verify in the TD Textport after loading your .toe:"))
-        print(f"    [CUDALinkBootstrap] Library mode active — cuda_link {_installed_version()} from {site_packages}")
+        print(f"    [CUDALinkBootstrap] Library mode active — cuda_link {wheel_version} from {site_packages}")
     print()
 
 
@@ -600,7 +632,7 @@ def mode_1_external_folder(
         "--no-deps",
     ]
     _run_pip(pip, dry_run)
-    _print_activation(dest, "Install folder")
+    _print_activation(dest, "Install folder", _wheel_version(wheel) or _installed_version())
 
 
 def mode_2_venv(
@@ -634,7 +666,9 @@ def mode_2_venv(
     pip = [str(pip_exe), "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
     _run_pip(pip, dry_run)
     site_pkgs = _find_site_packages_in(venv)
-    _print_activation(site_pkgs, "venv site-packages", td_preferences_only=True)
+    _print_activation(
+        site_pkgs, "venv site-packages", _wheel_version(wheel) or _installed_version(), td_preferences_only=True
+    )
 
     if set_env and python_exe.exists():
         # Same rationale as mode 4: this venv's python.exe is the interpreter
@@ -690,7 +724,12 @@ def mode_3_conda(
         except FileNotFoundError:
             pass
 
-    _print_activation(site_pkgs, "conda env site-packages", td_preferences_only=True)
+    _print_activation(
+        site_pkgs,
+        "conda env site-packages",
+        _wheel_version(wheel) or _installed_version(),
+        td_preferences_only=True,
+    )
     if site_pkgs is None:
         print(_yellow("  Could not auto-detect conda site-packages path."))
         print('  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"')
@@ -760,7 +799,9 @@ def mode_4_system_python(
         except (FileNotFoundError, OSError):
             pass
 
-    _print_activation(site_pkgs, "Python site-packages", td_preferences_only=True)
+    _print_activation(
+        site_pkgs, "Python site-packages", _wheel_version(wheel) or _installed_version(), td_preferences_only=True
+    )
 
     if set_env:
         # CUDALINK_RECEIVER_PYTHON_EXE: the interpreter example_receiver_launcher.py's

@@ -24,21 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Bootstrap resolver couldn't see TD's `project`/`tdu`**: TouchDesigner binds
-  `me`/`op`/`parent` into a DAT module's `globals()`, but binds `project`/`tdu`/`td`
-  only into that module's private `__builtins__` dict — `globals().get("project")`
-  always returned `None` in real TD, silently disabling the project-folder layer and
-  relative `CUDALINK_LIB_PATH` expansion. `_td_name()` now checks `globals()` first,
-  then falls back to `__builtins__`.
-- **Misleading, product-specific degraded-mode status**: the Status text was a
-  hard-coded StreamDiffusionTD-specific string that never surfaced the actual
-  resolver diagnostic. It now names the required `cuda_link` version and how to
-  install it, with the full per-layer reason (`last_error`) printed to the Textport
-  ahead of the downstream import symptom.
-- **The one-time Textport diagnostic never printed again after the first session**:
-  the dedup flag was a bare `True` pickled into COMP storage, permanently suppressing
-  it across every future load of that `.toe`. It now stores the process id, so a
-  stale flag from an earlier process self-heals on the next load.
+- **Installer reused a wrong-version `dist/` wheel**: `_find_wheel()` matched any
+  `cuda_link-*.whl` sharing the target's ABI tag, picking the newest by mtime with no
+  regard for version — a leftover wheel from an earlier release could be silently
+  reinstalled, and the "verify" line printed the source checkout's version rather than
+  the wheel actually installed. `_find_wheel()` now matches the exact
+  `cuda_link-<version>-<tag>.whl` filename for the source checkout's version, and the
+  verify line prints the resolved wheel's own version.
 - Relative-import mirrors for `cuda_graphs`/`cuda_ipc_wrapper`/`nvml_observer`,
   fixing a mixed-version ctypes handle class-identity bug.
 - SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.

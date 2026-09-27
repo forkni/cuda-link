@@ -63,3 +63,35 @@ def test_newest_source_mtime_ignores_artifact_dirs(tmp_path: Path) -> None:
 
 def test_newest_source_mtime_missing_root_returns_zero(tmp_path: Path) -> None:
     assert itl._newest_source_mtime(("does/not/exist",), _root=tmp_path) == 0.0
+
+
+def test_find_wheel_ignores_same_tag_wheel_with_wrong_version(tmp_path: Path) -> None:
+    old = tmp_path / "dist" / "cuda_link-1.12.2-py3-none-any.whl"
+    _touch(old, time.time() + 1000)  # newer than any 1.13.0 wheel would be
+
+    assert itl._find_wheel("py3-none-any", "1.13.0", _root=tmp_path) is None
+
+
+def test_find_wheel_returns_the_matching_version(tmp_path: Path) -> None:
+    stale = tmp_path / "dist" / "cuda_link-1.12.2-py3-none-any.whl"
+    wanted = tmp_path / "dist" / "cuda_link-1.13.0-py3-none-any.whl"
+    _touch(stale, time.time())
+    _touch(wanted, time.time())
+
+    assert itl._find_wheel("py3-none-any", "1.13.0", _root=tmp_path) == wanted
+
+
+def test_resolve_wheel_does_not_reuse_an_old_dist_wheel(monkeypatch: object, tmp_path: Path) -> None:
+    """Only a wrong-version wheel sits in dist/; resolve_wheel must fall through
+    to the download step rather than silently reusing it (the installer bug that
+    let a mode-4 run install 1.12.2 while printing a 1.13.0 verify line)."""
+    old = tmp_path / "dist" / "cuda_link-1.12.2-py3-none-any.whl"
+    _touch(old, time.time())
+
+    downloaded = tmp_path / "dist" / "cuda_link-1.13.0-py3-none-any.whl"
+    monkeypatch.setattr(itl, "_installed_version", lambda: "1.13.0")
+    monkeypatch.setattr(itl, "_download_release_wheel", lambda version, tag, dry_run: downloaded)
+
+    result = itl.resolve_wheel(target_version=None, override=None, dry_run=True, allow_build=False, _root=tmp_path)
+
+    assert result == downloaded
