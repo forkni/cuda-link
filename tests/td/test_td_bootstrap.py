@@ -10,6 +10,7 @@ Tests:
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import importlib
 import importlib.machinery
@@ -720,6 +721,55 @@ def test_version_mismatch_is_rejected_before_import(isolated_resolver, tmp_path)
     assert bootstrap.MIRROR_VERSION in bootstrap.last_error
     assert "cuda_link" not in sys.modules, "a mismatching install must be rejected without importing it"
     assert site not in sys.path
+
+
+def test_project_folder_layer_resolves_when_project_lives_only_in_builtins(isolated_resolver, tmp_path, monkeypatch):
+    """TD binds ``project`` only into the DAT module's private ``__builtins__`` dict, never
+    into module globals -- unlike the fixture above, which writes ``bootstrap.project``
+    straight into globals and so cannot catch a resolver that only checks globals().get().
+    This must go red on a bootstrap that reads ``globals().get("project")``."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    here = _make_fake_install(proj, bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    fake_builtins = {**vars(builtins), "project": _FakeProject(str(proj))}
+    monkeypatch.setitem(vars(bootstrap), "__builtins__", fake_builtins)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == here
+
+
+def test_relative_libpath_is_expanded_via_tdu_from_builtins(isolated_resolver, tmp_path, monkeypatch):
+    """``tdu`` is TD-only and, like ``project``, lives only in ``__builtins__`` -- a relative
+    ``Libpath`` value must still be expanded against the project folder through it."""
+    bootstrap = isolated_resolver
+    proj = tmp_path / "proj"
+    site = _make_fake_install(proj / "src", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+
+    class _FakeTdu:
+        def expandPath(self, text: str) -> str:
+            return text if Path(text).is_absolute() else str(proj / text)
+
+    monkeypatch.setattr(bootstrap, "me", _FakeDat(_FakeComp(libpath="src")), raising=False)
+    fake_builtins = {**vars(builtins), "tdu": _FakeTdu()}
+    monkeypatch.setitem(vars(bootstrap), "__builtins__", fake_builtins)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == site
+
+
+def test_libpath_parameter_empty_on_comp_does_not_shadow_ancestor(isolated_resolver, tmp_path, monkeypatch):
+    """The shipped default is an empty ``Libpath`` par on the COMP itself; that must not stop
+    the ancestor walk before it reaches a project-level ``Libpath`` set higher up."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    me = _FakeDat(_FakeComp(parent=_FakeComp(libpath=site), libpath=""))
+    monkeypatch.setattr(bootstrap, "me", me, raising=False)
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap.resolved_site_packages == site
 
 
 def test_libpath_parameter_is_found_on_an_ancestor_comp(isolated_resolver, tmp_path, monkeypatch):

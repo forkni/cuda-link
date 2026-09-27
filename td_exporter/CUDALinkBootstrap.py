@@ -36,9 +36,10 @@ Library mode (this module's purpose):
     SHMProtocol, Exporter, …) can then be removed from the COMP.
 
 Fallback / classic mode:
-    If no layer resolves, this module no-ops, records why in ``last_error`` (the
-    extension surfaces it as a yellow status), and all 15 mirror Text DATs must be
-    present in the COMP as before (the original "paste all DATs" deployment story).
+    If no layer resolves, this module no-ops and records why in ``last_error``. The
+    extension shows a short, actionable line as the COMP's status and prints the full
+    ``last_error`` to the Textport; the COMP then falls back to its mirror Text DATs,
+    which must all be present as before (the original "paste all DATs" deployment story).
 
 Drift guards:
     tests/td/test_td_bootstrap.py verifies that _ALIAS_MAP keys and values stay in sync
@@ -136,11 +137,32 @@ def _within(child: object, parent: object) -> bool:
     return child_n == parent_n or child_n.startswith(parent_n + os.sep)
 
 
+def _td_name(name: str) -> object | None:
+    """Look up a TD-injected name (``me``, ``project``, ``tdu``, ...) that this DAT module
+    may not have in its own globals.
+
+    TD binds ``me``/``op``/``parent`` directly into a DAT module's ``globals()``, but binds
+    ``project``/``tdu``/``td`` **only** into that module's private ``__builtins__`` dict --
+    ``globals().get("project")`` always returns None in real TD, even though the name is
+    reachable and working from ordinary code in the same module (Python resolves free
+    variables through ``__builtins__`` as a last step). Check globals() first so a test
+    fixture that does ``monkeypatch.setattr(bootstrap, name, ...)`` (i.e. writes straight
+    into module globals) still works unchanged.
+    """
+    value = globals().get(name)
+    if value is not None:
+        return value
+    scope = globals().get("__builtins__")
+    if isinstance(scope, dict):
+        return scope.get(name)
+    return getattr(scope, name, None)
+
+
 def _expand(path: object) -> str:
     text = str(path or "").strip()
     if not text:
         return ""
-    expander = globals().get("tdu")  # TD-only: expands $VAR and project-relative paths
+    expander = _td_name("tdu")  # TD-only: expands $VAR and project-relative paths
     if expander is not None:
         with contextlib.suppress(AttributeError, TypeError, ValueError):
             text = expander.expandPath(text)
@@ -168,20 +190,27 @@ def _read_version(site_packages: str) -> str:
 
 
 def _libpath_parameter() -> str:
-    """``Libpath`` custom parameter on the owning COMP or any ancestor (TD only)."""
-    dat = globals().get("me")
+    """``Libpath`` custom parameter on the owning COMP or any ancestor (TD only).
+
+    An ancestor's ``Libpath`` (a project-level default, say) must still be reachable when
+    a nearer COMP has the parameter but leaves it at its empty default -- an empty value
+    is "not set here", not "stop looking".
+    """
+    dat = _td_name("me")
     component = dat.parent() if dat is not None else None
     while component is not None:
         parameter = getattr(component.par, "Libpath", None)
         if parameter is not None:
-            return str(parameter.eval()).strip()
+            value = str(parameter.eval()).strip()
+            if value:
+                return value
         component = component.parent()
     return ""
 
 
 def _project_roots() -> Iterator[str]:
     """Folders next to the .toe that conventionally hold a per-project install."""
-    proj = globals().get("project")
+    proj = _td_name("project")
     folder = str(getattr(proj, "folder", "") or "") if proj is not None else ""
     if not folder:
         return
@@ -351,7 +380,7 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     """Resolve, version-check, import and alias cuda_link.  Returns True on success.
 
     On failure ``last_error`` names every layer that was tried and why it was skipped;
-    the extension shows it as a yellow status and the COMP falls back to its mirrors.
+    the extension prints it to the Textport and the COMP falls back to its mirrors.
     """
     notes: list[str] = []
 
@@ -393,4 +422,4 @@ _bootstrap()
 if _active:
     print(f"[CUDALinkBootstrap] Library mode active — cuda_link {MIRROR_VERSION} from {resolved_site_packages}")
 else:
-    print(f"[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors. {last_error}")
+    print(f"[CUDALinkBootstrap] Library mode unavailable — {last_error}")
