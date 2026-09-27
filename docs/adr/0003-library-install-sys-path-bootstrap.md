@@ -1,7 +1,7 @@
 # ADR-0003: Library-install sys.path bootstrap (adopt alternative 1C)
 
 **Status**: Accepted (implemented 2026-05-29); amended by ADR-0014 (2026-09-23) — the
-bootstrap now resolves the install through a layered lookup (`Libpath` parameter, project
+bootstrap now resolves the install through a layered lookup (an explicit folder, the project
 folder, `CUDALINK_LIB_PATH`, `sys.path`), rejects installs whose `__version__` differs from
 the mirrors' stamp, and refuses a rival copy that is already loaded.
 **Date**: 2026-05-29

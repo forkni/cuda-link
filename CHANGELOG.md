@@ -10,13 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **ADR-0014 project-anchored install resolution**: `td_exporter/CUDALinkBootstrap.py`
-  now probes, in order, a `folder` argument → the `Libpath` custom parameter (walking
-  ancestor COMPs) → the project folder (`<project.folder>/cuda_link`,
-  `/StreamDiffusion`, the project folder itself) → `CUDALINK_LIB_PATH` → `sys.path`,
-  activating only an install whose on-disk `__version__` strictly matches the
-  component's `MIRROR_VERSION` stamp. A rival already-loaded install or a shadowing
-  import hook hard-stops resolution instead of silently mixing versions. See
-  `docs/adr/0014-project-anchored-install-resolution.md`.
+  now probes, in order, an explicit `folder` argument → the project folder
+  (`<project.folder>/cuda_link`, `/StreamDiffusion`, `/src` for a repo checkout, the
+  project folder itself) → `CUDALINK_LIB_PATH` → `sys.path`, activating only an
+  install whose on-disk `__version__` strictly matches the component's
+  `MIRROR_VERSION` stamp. There is no per-COMP parameter to set. A rival
+  already-loaded install or a shadowing import hook hard-stops resolution instead of
+  silently mixing versions. See `docs/adr/0014-project-anchored-install-resolution.md`.
 - **Degraded mode always compiles**: `CUDAIPCExtension` now constructs and every
   public method stays callable even when `cuda_link` fails to import or resolve —
   Execute DAT callbacks never raise `td.tdAttributeError`, they just report `False`/
@@ -28,16 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `me`/`op`/`parent` into a DAT module's `globals()`, but binds `project`/`tdu`/`td`
   only into that module's private `__builtins__` dict — `globals().get("project")`
   always returned `None` in real TD, silently disabling the project-folder layer and
-  relative `Libpath` expansion. `_td_name()` now checks `globals()` first, then falls
-  back to `__builtins__`.
-- **An empty `Libpath` on the nearest COMP shadowed a non-empty ancestor value**: the
-  ancestor walk now keeps going past an empty value instead of stopping on the first
-  COMP that merely has the parameter, so a project-level default is still reachable.
+  relative `CUDALINK_LIB_PATH` expansion. `_td_name()` now checks `globals()` first,
+  then falls back to `__builtins__`.
 - **Misleading, product-specific degraded-mode status**: the Status text was a
   hard-coded StreamDiffusionTD-specific string that never surfaced the actual
-  resolver diagnostic. It now names the required `cuda_link` version and the
-  `Libpath` parameter to fix, with the full per-layer reason (`last_error`) printed
-  to the Textport ahead of the downstream import symptom.
+  resolver diagnostic. It now names the required `cuda_link` version and how to
+  install it, with the full per-layer reason (`last_error`) printed to the Textport
+  ahead of the downstream import symptom.
 - **The one-time Textport diagnostic never printed again after the first session**:
   the dedup flag was a bare `True` pickled into COMP storage, permanently suppressing
   it across every future load of that `.toe`. It now stores the process id, so a

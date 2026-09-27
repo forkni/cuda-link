@@ -102,7 +102,6 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
-| `Libpath` | Library Path | Folder | (empty) | Optional. Folder holding the installed `cuda_link` for library mode: a project folder holding `venv/` or `.venv/`, the venv itself (probed as `Lib/site-packages`), a `pip install --target` folder, or a site-packages dir. Empty = try `<project.folder>`, then `CUDALINK_LIB_PATH`, then TD's own module path (ADR-0014). |
 
 **For `Numslots` menu parameter**:
 
@@ -137,25 +136,27 @@ them resolve automatically because all Text DATs in the same COMP share a module
 2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
-appear in the COMP editor). It looks for an installed `cuda_link` in this order — the COMP's
-`Libpath` parameter (Step 2), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, or the
-folder itself), `CUDALINK_LIB_PATH`, then the paths already visible to TouchDesigner — and
-imports the first candidate whose `__version__` matches the `MIRROR_VERSION` stamp at the top
-of the DAT (written by `scripts/sync_td_wrapper.py`; never edit it by hand). A mismatching
-install is skipped without being imported; a different `cuda_link` already loaded in the
-process stops resolution with a "Restart TouchDesigner" message. If nothing resolves, it
-no-ops (printing the reason to the Textport — see below) and fallback mode takes effect
-automatically. See ADR-0014.
+appear in the COMP editor). It looks for an installed `cuda_link` in this order — an explicit
+folder argument (host integrations only), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`,
+`/src`, or the folder itself), `CUDALINK_LIB_PATH`, then the paths already visible to
+TouchDesigner — and imports the first candidate whose `__version__` matches the
+`MIRROR_VERSION` stamp at the top of the DAT (written by `scripts/sync_td_wrapper.py`; never
+edit it by hand). There is no per-COMP parameter to set: install `cuda_link` next to the
+`.toe` (a venv, or a `pip install --target` folder — see Step 3 Library mode above) and the
+project-folder layer finds it on its own. A mismatching install is skipped without being
+imported; a different `cuda_link` already loaded in the process stops resolution with a
+"Restart TouchDesigner" message. If nothing resolves, it no-ops (printing the reason to the
+Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
 > `[CUDALinkBootstrap] Library mode active — cuda_link 1.13.0 from <folder>`
 > **Library mode unavailable**: `[CUDALinkBootstrap] Library mode unavailable — <reason>`,
-> where `<reason>` lists one clause per layer that was tried (e.g. `Libpath parameter: not
-> set; CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
-> the component's 1.13.0`). The COMP's Status stays short — it names the required version
-> and the `Libpath` parameter to fix (e.g. `cuda_link 1.13.0 not found - set Libpath to a
-> folder with a matching install (see Textport)`) — while the full per-layer reason above
-> is Textport-only.
+> where `<reason>` lists one clause per layer that was tried (e.g. `project folder: not set;
+> CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
+> the component's 1.13.0`). The COMP's Status stays short — it names the required version and
+> where to install it (e.g. `cuda_link 1.13.0 not found - install it next to this .toe or into
+> TD's Python, then restart TD (see Textport)`) — while the full per-layer reason above is
+> Textport-only.
 
 #### 3b. TDHost Text DAT
 
@@ -435,16 +436,16 @@ This error means the extension registration itself is missing. A missing or unre
 ### cuda_link not ready
 
 **Symptom**: The extension accessor exists, but no frames are transferred. The COMP's Status
-reports something like `cuda_link 1.13.0 not found - set Libpath to a folder with a matching
-install (see Textport)`.
+reports something like `cuda_link 1.13.0 not found - install it next to this .toe or into TD's
+Python, then restart TD (see Textport)`.
 
 `CUDAIPCExtension` is designed to compile even when its `cuda_link` imports cannot be resolved.
 In that degraded state, `library_ready` is `False`, `initialize()`, `export_frame()`, and
 `import_frame()` return `False`, and the callback templates return without raising. This keeps
 an unavailable library from failing once per frame while TouchDesigner is starting up.
 
-The Status line is deliberately short — it only names the version required and the `Libpath`
-parameter to fix. The full reason goes to the Textport instead, in two places:
+The Status line is deliberately short — it only names the version required and where to
+install it. The full reason goes to the Textport instead, in two places:
 
 - The `[CUDALinkBootstrap]` line printed when the COMP loaded: `Library mode active` on
   success, or `Library mode unavailable — <reason>` on failure, where `<reason>` lists every
@@ -464,14 +465,12 @@ print(ext.library_ready)
 If it prints `False`:
 
 1. In **Library mode**, verify that an installed `cuda_link` whose `__version__` matches the
-   component sits in one of the places the resolver probes, in order: the COMP's `Libpath`
-   parameter (walking up through ancestor COMPs — an empty value on the nearest COMP defers to
-   an ancestor's), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, or the folder itself),
-   `CUDALINK_LIB_PATH`, then TouchDesigner's Python Module Path (see 3a under
-   [Step 3](#step-3-create-text-dats) and ADR-0014).
-2. Set the `Libpath` parameter to that folder — either directly on the COMP, or once on an
-   ancestor (e.g. `/project1`) to cover every cuda-link COMP in the project.
-3. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
+   component sits in one of the places the resolver probes, in order: `<project.folder>`
+   (`/cuda_link`, `/StreamDiffusion`, `/src`, or the folder itself), `CUDALINK_LIB_PATH`, then
+   TouchDesigner's Python Module Path (see 3a under [Step 3](#step-3-create-text-dats) and
+   ADR-0014). There is no per-COMP parameter to set — put the install next to the `.toe` (a
+   venv, or a `pip install --target` folder), or point `CUDALINK_LIB_PATH` at it.
+2. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
    the mirror DAT sections under [Step 3](#step-3-create-text-dats).
 
 After the component compiles with the library available, `ext.library_ready` should be `True`.

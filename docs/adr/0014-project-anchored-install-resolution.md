@@ -34,14 +34,18 @@ more than once:
 
 `CUDALinkBootstrap` becomes a **project-anchored resolver** with three rules.
 
-1. **Layered lookup, first match wins.** The layers are tried lazily, in this order, and a
-   later layer is never evaluated once an earlier one has resolved:
+1. **Layered lookup, first match wins.** ~~The layers are tried lazily, in this order, and a
+   later layer is never evaluated once an earlier one has resolved:~~ **Withdrawn before
+   release — see "Amendment (1.13.0)".** Item 2 (the `Libpath` custom parameter) never
+   shipped: a value naming the `cuda_link` package folder itself, rather than its parent,
+   was rejected with no indication of the mistake, and there was no way to make a correct
+   value discoverable from the parameter alone. The layers actually shipped are:
    1. an explicit folder passed to `_bootstrap(basefolder=...)` (host integrations);
-   2. the `Libpath` custom parameter on the COMP or any ancestor COMP;
-   3. `<project.folder>/cuda_link`, `<project.folder>/StreamDiffusion`, then
+   2. `<project.folder>/cuda_link`, `<project.folder>/StreamDiffusion`,
+      `<project.folder>/src` (a repo checkout's src-layout package), then
       `<project.folder>` itself;
-   4. `CUDALINK_LIB_PATH` (ADR-0003 compatibility, now a fallback rather than the source);
-   5. whatever `sys.path` already provides (TD Preferences module path, pip).
+   3. `CUDALINK_LIB_PATH` (ADR-0003 compatibility, now a fallback rather than the source);
+   4. whatever `sys.path` already provides (TD Preferences module path, pip).
 
    Every root is probed as `<root>/venv/Lib/site-packages`, `<root>/.venv/Lib/site-packages`,
    `<root>/Lib/site-packages` and `<root>` itself, so a project folder holding a venv, the
@@ -72,11 +76,11 @@ more than once:
    then names the hook, and the modules that import pulled in are dropped again.
 
 When every layer fails, the module records why in `last_error` (one clause per layer, e.g.
-`Libpath parameter: not set; CUDALINK_LIB_PATH: cuda_link 1.12.1 under C:\... does not match
+`project folder: not set; CUDALINK_LIB_PATH: cuda_link 1.12.1 under C:\... does not match
 the component's 1.12.2`), stays inactive, and the COMP falls back to its mirror DATs exactly as
 before. `CUDAIPCExtension` already surfaces `last_error` as the yellow status text.
-(See "Amendment (1.13.0)" below — the first real deployment found three bugs in this design
-before it ever shipped.)
+(See "Amendment (1.13.0)" below — the first real deployment found three bugs in this design,
+and the `Libpath` parameter itself was withdrawn, before it ever shipped.)
 
 The module keeps the unconditional run at Text DAT load time and exports `_active`,
 `last_error`, `resolved_site_packages` and `MIRROR_VERSION`. The shape matches the
@@ -117,7 +121,8 @@ Base Folder as `basefolder`.
   the pre-commit hook and the `test_mirror_version_stamp_matches_package_version` guard.
 - Library mode is stricter: an install that used to activate at 1.12.1 against 1.12.2 mirrors
   now falls back to classic mode until it is upgraded. That is the intended behaviour.
-- The `Libpath` parameter has to be added to the COMP (see `docs/TOX_BUILD_GUIDE.md` Step 2).
+- ~~The `Libpath` parameter has to be added to the COMP (see `docs/TOX_BUILD_GUIDE.md` Step 2).~~
+  Withdrawn before release; see "Amendment (1.13.0)" — there is no per-COMP parameter to add.
 - Residual gap, out of scope here: the mirror `Importer.py` still probes
   `cuda_link._native_loader` / `cuda_link._wait_backend` with a guarded absolute import (they
   are `CANONICAL_ONLY`, pip-only per ADR-0012). In classic mode that probe still resolves
@@ -127,7 +132,9 @@ Base Folder as `basefolder`.
 ## Amendment (1.13.0)
 
 This design shipped with three bugs, all found the first time it hit real TouchDesigner
-processes rather than the mocked test doubles above, before any release ever went out with it.
+processes rather than the mocked test doubles above, before any release ever went out with it
+— and, on top of the three bugs, the `Libpath` parameter itself was withdrawn before release
+(fourth bullet below).
 
 - **TD does not put `project`/`tdu` where rule 1's project-folder layer looked for them.**
   TouchDesigner binds `me`, `op` and `parent` into a DAT module's `globals()`, but binds
@@ -138,26 +145,43 @@ processes rather than the mocked test doubles above, before any release ever wen
   returned `None` in a live process, so the project-folder layer (rule 1.3) was dead code and
   `tdu.expandPath` never ran. Fixed with a `_td_name(name)` helper that checks `globals()` first
   and falls back to `globals()["__builtins__"]` (a dict or a module, so both lookup forms are
-  tried), and routed `_expand`, `_libpath_parameter` and `_project_roots` through it.
+  tried), and routed `_expand` and `_project_roots` through it (also `_libpath_parameter` at the
+  time; that function no longer exists — see the withdrawal bullet below).
 - **An empty `Libpath` on the nearest COMP shadowed a non-empty ancestor's.** `_libpath_parameter`
   returned `str(parameter.eval()).strip()` unconditionally, so a COMP with the par present but
   blank stopped the ancestor walk instead of deferring to `/project1`'s value — the opposite of
   what Decision item 2 (`Libpath` on `/project1`, COMP-level pars left empty) requires. Fixed by
-  walking past an empty value to the next ancestor.
+  walking past an empty value to the next ancestor. **Superseded** — the `Libpath` parameter this
+  bug was about was itself withdrawn before release; see below.
 - **The status text was product-specific and never showed `last_error`.** Contrary to what this
   ADR's Decision section and the Consequences bullet above claimed, `CUDAIPCExtension` did not
   surface `last_error` as the Status text; the Status par carried a hard-coded StreamDiffusionTD
   string ("...set the StreamDiffusionTD Base Folder...") regardless of the actual failure. Fixed
   by splitting the two: the Status par now gets a short, product-neutral line naming the required
-  version and the `Libpath` parameter to fix; the full `last_error` (cause) ahead of the
-  extension's own `LIBRARY_ERROR` (downstream symptom) goes to the Textport instead, since the
-  Status par is a single short line and the real detail can be long and multi-clause.
+  version and where to install it; the full `last_error` (cause) ahead of the extension's own
+  `LIBRARY_ERROR` (downstream symptom) goes to the Textport instead, since the Status par is a
+  single short line and the real detail can be long and multi-clause. (The wording naming the
+  `Libpath` parameter specifically was replaced again by the withdrawal below, before release.)
   A related bug hid this split from view: `_claim_notice_once` persisted a bare `True` via
   `holder.store(...)`, which pickles into the saved `.toe`, so the one-time Textport diagnostic
   printed once ever per file rather than once per TD process — a `.toe` saved before this fix
   would never show it again. Fixed by storing `os.getpid()` instead of `True`: a stale `True` or
   a PID from an earlier process no longer matches `os.getpid()`, so the notice self-heals on the
   next load with no manual `unstore` needed.
+- **`Libpath` withdrawn before release.** The first live cold load (this amendment's own test
+  bed) showed the actual failure mode: a value naming the `cuda_link` package folder itself
+  (e.g. `src/cuda_link`) rather than its parent was rejected outright, and nothing about a
+  `Libpath` parameter labeled "Library Path" made the required parent-folder convention
+  discoverable. Rather than add validation or better help text for a parameter whose correct
+  value users kept getting wrong, the parameter was removed: every documented install mode
+  (`scripts/install_td_library.py` modes 1-5, StreamDiffusionTD's own venv) already resolves
+  automatically through the surviving layers, and the one gap — this repo's own `src`-layout
+  checkout — is closed by adding `<project.folder>/src` to the project-folder layer. Decision
+  item 2 above is struck accordingly; the layers that shipped are the renumbered list at the top
+  of this section. `CUDALINK_LIB_PATH` remains as the manual override for an install that lives
+  somewhere the project-folder layer does not probe, and `_site_package_candidates` forgives
+  that variable pointing one level too deep (at the package folder instead of its parent) —
+  the same mistake, closed for the one input a human can still mistype.
 
 ## Reopen condition
 
