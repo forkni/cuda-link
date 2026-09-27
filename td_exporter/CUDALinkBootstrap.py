@@ -111,8 +111,8 @@ _active = False
 # Specific reason the last _bootstrap() call gave up, so the extension can show a
 # cause-specific Status line instead of always saying "not found": "missing" (no
 # candidate anywhere), "mismatch" (a candidate exists but its version doesn't match),
-# "rival" (a different cuda_link is already loaded), or "" (active, or an unexpected
-# exception this module doesn't specifically classify).
+# "rival" (a different cuda_link is already loaded), "broken" (a matching-version
+# candidate was found but raised while importing/activating), or "" (active).
 failure_kind = ""
 
 _VERSION_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE)
@@ -392,7 +392,8 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
         # the injected root no longer needs sys.path[0] for the rest of the process --
         # leaving it there would shadow every other same-named top-level module TD has.
         # Put it back where it was (or at the tail, if it is new) instead.
-        sys.path.remove(site_packages)
+        if site_packages in sys.path:
+            sys.path.remove(site_packages)
         if previous_index is not None:
             sys.path.insert(previous_index, site_packages)
         else:
@@ -415,6 +416,37 @@ def _fail(message: str, *, kind: str = "") -> bool:
     return False
 
 
+def _native_note() -> str:
+    """ "" unless *resolved_site_packages* is a bare ``src`` checkout with no compiled
+    native wait backend -- see ADR-0014 and ``cuda_link._native_loader.load_native_backend``.
+
+    A ``src``-layout repo checkout never has a built ``_native_waiter*.pyd`` (it is
+    gitignored), so cuda_link silently falls back to the pure-Python wait path. That is a
+    legitimate, working configuration -- not an error, and ``_project_roots()`` deliberately
+    keeps preferring ``src`` over a bare project-folder install (see the layer-order test
+    pinning it) -- but the latency difference is real, so it gets one visible note instead
+    of a fully silent fallback. A built install in ``<project>/.venv`` would provide the
+    native backend instead.
+    """
+    if not resolved_site_packages:
+        return ""
+    normalized = os.path.normpath(resolved_site_packages)
+    if os.path.normcase(os.path.basename(normalized)) != "src":
+        return ""
+    package_dir = os.path.join(normalized, "cuda_link")
+    try:
+        entries = os.listdir(package_dir)
+    except OSError:
+        return ""
+    if any(name.startswith("_native_waiter") and name.endswith(".pyd") for name in entries):
+        return ""
+    return (
+        "[CUDALinkBootstrap] note: this is a source checkout (src/) with no compiled "
+        "_native_waiter -- using the pure-Python wait path. A built install in "
+        "<project>/.venv would provide the native backend."
+    )
+
+
 def _bootstrap(basefolder: str | None = None) -> bool:
     """Resolve, version-check, import and alias cuda_link.  Returns True on success.
 
@@ -430,12 +462,17 @@ def _bootstrap(basefolder: str | None = None) -> bool:
     # copy again on the next load. A version mismatch still falls through to the layer walk,
     # which raises the ordinary rival hard stop -- reusing a *wrong*-version copy would let
     # two different-version copies of the ctypes/protocol code coexist in one process.
+    saw_broken = False
     loaded = sys.modules.get("cuda_link")
     if loaded is not None:
         origin_dir = _package_dir(loaded)
         if origin_dir:
             already_at = os.path.dirname(origin_dir)
-            if _read_version(already_at) == MIRROR_VERSION:
+            # Compare the loaded module's own __version__, not a fresh disk read of
+            # already_at's __init__.py: the two can differ (the file on disk was edited
+            # or replaced after this process imported it), and it is the loaded copy --
+            # the one every alias actually points at -- whose version matters here.
+            if getattr(loaded, "__version__", "") == MIRROR_VERSION:
                 try:
                     return _activate(already_at, inject=False)
                 except _RivalInstallError as error:
@@ -443,6 +480,7 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                     return _fail(str(error), kind="rival")
                 except Exception as error:
                     notes.append(f"already-loaded cuda_link: {type(error).__name__}: {error}")
+                    saw_broken = True
 
     saw_mismatch = False
     for label, root, inject, forgive in _layers(basefolder):
@@ -470,15 +508,15 @@ def _bootstrap(basefolder: str | None = None) -> bool:
             except Exception as error:
                 # Anything the candidate raised while importing (ImportError, but also a
                 # SyntaxError in a half-copied install or an AttributeError from a
-                # dependency) means "not this one"; _activate has already rolled back.
-                # This runs at Text DAT load time, so an escaping exception would leave
-                # ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
+                # dependency) means a matching-version install was found but is broken,
+                # not merely absent; _activate has already rolled back. This runs at Text
+                # DAT load time, so an escaping exception would leave ext.CUDAIPCExtension
+                # undefined instead of falling back to the mirrors.
                 notes.append(f"{label}: {type(error).__name__}: {error}")
+                saw_broken = True
 
-    return _fail(
-        "CUDA-Link could not be resolved -- " + "; ".join(notes),
-        kind="mismatch" if saw_mismatch else "missing",
-    )
+    kind = "broken" if saw_broken else "mismatch" if saw_mismatch else "missing"
+    return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes), kind=kind)
 
 
 # Run at Text DAT load time. This runs at import time inside TD, so an escaping exception
@@ -486,10 +524,17 @@ def _bootstrap(basefolder: str | None = None) -> bool:
 try:
     _bootstrap()
 except Exception as _bootstrap_error:  # noqa: BLE001 -- last resort, see comment above
-    _fail(f"{type(_bootstrap_error).__name__}: {_bootstrap_error}")
+    # _bootstrap() itself only escapes here on a bug in the resolver, not a candidate's
+    # own import failure (those are caught inside the layer walk) -- but from the caller's
+    # perspective this is still "something was found/attempted and it broke", so it gets
+    # the same "broken" kind rather than the misleading "missing".
+    _fail(f"{type(_bootstrap_error).__name__}: {_bootstrap_error}", kind="broken")
 
 if _active:
     print(f"[CUDALinkBootstrap] Library mode active — cuda_link {MIRROR_VERSION} from {resolved_site_packages}")
+    _note = _native_note()
+    if _note:
+        print(_note)
 else:
     print(
         "[CUDALinkBootstrap] Library mode off — COMP uses its mirror Text DATs if present (reason in CUDALinkBootstrap.last_error)"

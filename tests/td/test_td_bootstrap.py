@@ -576,6 +576,31 @@ def test_failed_activation_restores_a_pre_existing_sys_path_entry(isolated_resol
     assert sys.path == snapshot
 
 
+def test_activate_success_path_tolerates_sys_path_already_stripped(isolated_resolver, tmp_path):
+    """If something during import already removed *site_packages* from sys.path (the
+    package's own __init__ mutating sys.path, here -- simulating another thread or a
+    dependency doing the same), the post-import cleanup must not raise ValueError trying
+    to remove it a second time (fix 10)."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    init_file = Path(site) / "cuda_link" / "__init__.py"
+    init_file.write_text(
+        f'__version__ = "{bootstrap.MIRROR_VERSION}"\n'
+        "import os as _os\n"
+        "import sys as _sys\n"
+        "_here = _os.path.normpath(_os.path.dirname(_os.path.dirname(__file__)))\n"
+        "_sys.path[:] = [p for p in _sys.path if _os.path.normpath(p) != _here]\n",
+        encoding="utf-8",
+    )
+    _forget_loaded_cuda_link(bootstrap)
+
+    # The point of this test is that _activate does not raise (ValueError from
+    # sys.path.remove on an already-missing entry) -- it must still succeed and put
+    # site_packages back at the tail exactly as it would for any other fresh injection.
+    assert bootstrap._bootstrap(basefolder=site) is True, bootstrap.last_error
+    assert sys.path.count(site) == 1
+
+
 def test_any_exception_from_a_candidate_is_recorded_instead_of_escaping(isolated_resolver, tmp_path):
     """A candidate that raises something other than ImportError (a SyntaxError in a
     half-copied install, an AttributeError from a dependency) is skipped like any other
@@ -591,6 +616,20 @@ def test_any_exception_from_a_candidate_is_recorded_instead_of_escaping(isolated
     assert "SyntaxError" in bootstrap.last_error
     assert "cuda_link" not in sys.modules
     assert site not in sys.path
+
+
+def test_broken_candidate_reports_failure_kind_broken_not_missing(isolated_resolver, tmp_path):
+    """A matching-version candidate that raises while importing (a syntax error in a
+    half-copied install, here) was FOUND, not missing -- failure_kind must say "broken"
+    so the Status line never claims cuda_link was never found when it actually was, just
+    unusable (fix 3)."""
+    bootstrap = isolated_resolver
+    site = _make_fake_install(tmp_path / "lib", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(site) / "cuda_link" / "shm_protocol.py").write_text("def broken(:\n", encoding="utf-8")
+    _forget_loaded_cuda_link(bootstrap)
+
+    assert bootstrap._bootstrap(basefolder=site) is False
+    assert bootstrap.failure_kind == "broken"
 
 
 def test_mirror_dat_imported_ahead_of_the_bootstrap_refuses_library_mode(isolated_resolver, tmp_path, monkeypatch):
@@ -697,6 +736,21 @@ def test_same_version_already_loaded_install_is_reused_without_rival_error(isola
     assert other_site not in sys.path
 
 
+def test_already_loaded_reuse_ignores_a_stale_disk_read(isolated_resolver, monkeypatch):
+    """The reuse shortcut must key off the loaded module's own ``__version__`` attribute
+    -- what every alias in this process actually points at -- not a fresh disk read of
+    its ``__init__.py``. Proven by making ``_read_version`` lie and confirming reuse
+    still succeeds (fix 2)."""
+    bootstrap = isolated_resolver
+    loaded = sys.modules["cuda_link"]  # src/cuda_link, imported by the module-scope run
+    assert loaded.__version__ == bootstrap.MIRROR_VERSION  # sanity: real repo is in sync
+    monkeypatch.setattr(bootstrap, "_read_version", lambda _site: "0.0.1-does-not-match")
+
+    assert bootstrap._bootstrap() is True, bootstrap.last_error
+    assert bootstrap._active is True
+    assert sys.modules["cuda_link"] is loaded, "must reuse the in-memory module regardless of _read_version's result"
+
+
 def test_rival_install_is_refused_when_the_loaded_version_does_not_match(isolated_resolver, tmp_path, monkeypatch):
     """Only a matching-version already-loaded install is reused (see the test above); a
     mismatched version must still hard-stop as a rival -- reusing it would let two
@@ -771,6 +825,41 @@ def test_project_folder_layer_prefers_src_over_the_folder_itself(isolated_resolv
 
     assert bootstrap._bootstrap() is True, bootstrap.last_error
     assert bootstrap.resolved_site_packages == src
+
+
+def test_native_note_flags_a_src_checkout_with_no_compiled_backend(isolated_resolver, tmp_path, monkeypatch):
+    """A ``src``-layout checkout never ships a built ``_native_waiter*.pyd`` (gitignored),
+    so the native wait backend silently falls back to pure Python -- ``_native_note()``
+    must say so instead of staying completely silent (fix 4). Resolution order itself is
+    unchanged: see test_project_folder_layer_prefers_src_over_the_folder_itself above."""
+    bootstrap = isolated_resolver
+    src = _make_fake_install(tmp_path / "proj" / "src", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "resolved_site_packages", src)
+
+    note = bootstrap._native_note()
+    assert "_native_waiter" in note
+    assert ".venv" in note
+
+
+def test_native_note_is_empty_once_a_native_waiter_pyd_exists(isolated_resolver, tmp_path, monkeypatch):
+    """Once a compiled ``_native_waiter*.pyd`` sits next to the ``src`` install (a locally
+    built extension, still under a ``src`` root), the note must not fire."""
+    bootstrap = isolated_resolver
+    src = _make_fake_install(tmp_path / "proj" / "src", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    (Path(src) / "cuda_link" / "_native_waiter.cp311-win_amd64.pyd").write_bytes(b"")
+    monkeypatch.setattr(bootstrap, "resolved_site_packages", src)
+
+    assert bootstrap._native_note() == ""
+
+
+def test_native_note_is_empty_when_the_root_is_not_named_src(isolated_resolver, tmp_path, monkeypatch):
+    """A built venv install (or any root not literally named ``src``) never gets the note,
+    even with no ``.pyd`` present -- it is not the source-checkout case this note targets."""
+    bootstrap = isolated_resolver
+    here = _make_fake_install(tmp_path / "proj", bootstrap.MIRROR_VERSION, bootstrap._ALIAS_MAP)
+    monkeypatch.setattr(bootstrap, "resolved_site_packages", here)
+
+    assert bootstrap._native_note() == ""
 
 
 def test_relative_env_var_is_expanded_via_tdu_from_builtins(isolated_resolver, tmp_path, monkeypatch):

@@ -92,6 +92,39 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
         pass
 
 
+def _foreign_alias_error(shm_module: object) -> str:
+    """ "" unless ``shm_module`` (the ``SHMProtocol`` bare-name alias) is a real cuda_link
+    submodule -- i.e. it has a ``__file__`` under a ``cuda_link`` package directory.
+
+    The bare names (SHMProtocol, TDConfig, ...) are process-wide sys.modules aliases (see
+    CUDALinkBootstrap._activate).  Mirror-DAT modules (classic mode) have no ``__file__``,
+    so this is always "" for them.  Callers only need this check when THIS COMP's own
+    bootstrap did NOT activate -- rival, mismatch, missing, or broken -- because that is
+    the only situation where a non-empty result means the alias belongs to a DIFFERENT
+    COMP's cuda_link install rather than this COMP's own successful resolution.
+    """
+    shm_file = getattr(shm_module, "__file__", "") or ""
+    if not shm_file:
+        return ""
+    if "cuda_link" not in os.path.normcase(shm_file).replace("\\", "/").split("/"):
+        return ""
+    return (
+        f"SHMProtocol resolved to {shm_file}, a cuda_link install aliased by a "
+        "different COMP in this TD process; this COMP's own bootstrap did not "
+        "activate. Restart TouchDesigner to re-resolve consistently."
+    )
+
+
+# If THIS COMP's own bootstrap did not activate but a DIFFERENT COMP already aliased some
+# other cuda_link install in this process, the import above still "succeeds": it silently
+# binds to that other install's protocol code instead of failing.  A real engine built on
+# it would then run wrong-version SHM framing.  Detect that case and force degraded mode.
+if LIBRARY_READY and not bool(getattr(CUDALinkBootstrap, "_active", False)):
+    _rival_error = _foreign_alias_error(sys.modules.get("SHMProtocol"))
+    if _rival_error:
+        LIBRARY_READY = False
+        LIBRARY_ERROR = _rival_error
+
 # TDHost is stdlib-only (no bare-name cuda_link imports) -- always importable, so
 # RealTDHost.set_warning_status() is available even in degraded mode.
 from TDHost import RealTDHost, TDHost  # noqa: E402
@@ -133,8 +166,9 @@ def _mirror_version() -> str:
 
 
 def _bootstrap_failure_kind() -> str:
-    """The specific reason CUDALinkBootstrap gave up: "missing", "mismatch", "rival", or ""
-    (active, or an older/absent bootstrap that does not track this).  Never raises."""
+    """The specific reason CUDALinkBootstrap gave up: "missing", "mismatch", "rival",
+    "broken" (a matching-version install was found but raised on import), or "" (active,
+    or an older/absent bootstrap that does not track this).  Never raises."""
     return str(getattr(CUDALinkBootstrap, "failure_kind", "") or "")
 
 
@@ -291,8 +325,8 @@ class CUDAIPCExtension:
                     return True
         return False
 
-    def _claim_notice_once(self) -> bool:
-        """True only for the first caller across all four sibling COMPs, once per TD process.
+    def _claim_notice_once(self, reason: tuple[str, str]) -> bool:
+        """True only for the first caller reporting this exact reason, once per TD process.
 
         Module globals cannot dedup: TD compiles a separate module object per Text DAT, so
         each shmem COMP has its own copy of this file's globals.  ``sys`` is the same
@@ -300,11 +334,18 @@ class CUDAIPCExtension:
         import it, so a plain attribute on it is real shared state -- with no need for COMP
         storage, which pickles into the saved .toe and would suppress the notice forever
         for a later TD process (a fresh launch of the same .toe) that never printed it.
+
+        Deduped on ``reason`` (the ``(short, detail)`` message pair) rather than the
+        process id: a PID-keyed sentinel suppresses every later call in this process even
+        when a *second* sibling COMP has a genuinely different failure reason to report.
         """
-        token = os.getpid()
-        if getattr(sys, "_cudalink_notice_pid", None) == token:
+        seen = getattr(sys, "_cudalink_notices", None)
+        if seen is None:
+            seen = set()
+            sys._cudalink_notices = seen
+        if reason in seen:
             return False
-        sys._cudalink_notice_pid = token
+        seen.add(reason)
         return True
 
     def _notify_library_unavailable(self) -> None:
@@ -325,6 +366,8 @@ class CUDAIPCExtension:
         kind = _bootstrap_failure_kind()
         if _bootstrap_active() and not LIBRARY_READY:
             short = f"{version_clause} loaded but the component failed to import it (see Textport)"
+        elif kind == "broken":
+            short = f"{version_clause} found but failed to import (see Textport)"
         elif kind == "mismatch":
             short = (
                 f"found but not version {ver or '?'} - install a matching cuda_link next to this .toe, then restart TD"
@@ -343,7 +386,7 @@ class CUDAIPCExtension:
         with contextlib.suppress(AttributeError, RuntimeError):
             self._host.set_warning_status(short)
 
-        if not self._claim_notice_once():
+        if not self._claim_notice_once((short, detail)):
             return
         print(f"[CUDAIPCExtension] {short}")
         print(detail)

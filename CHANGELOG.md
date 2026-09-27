@@ -44,6 +44,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.
 - Receiver-launcher Python fallback, an activation-barrier flake, and the `quality`
   extra / crap4py pin.
+- **Rival cuda_link aliases could serve a real engine**: if this COMP's own
+  `CUDALinkBootstrap` did not activate (rival, mismatch, missing or broken) but a
+  *different* COMP had already aliased another cuda_link install in this TD process,
+  `CUDAIPCExtension`'s bare-name imports still resolved to that other install and built a
+  real engine on possibly wrong-version protocol code. It now detects a foreign,
+  file-backed `SHMProtocol` alias and forces degraded mode instead.
+- **Reuse shortcut re-read a stale disk version**: `CUDALinkBootstrap._bootstrap()`'s
+  already-loaded-elsewhere shortcut compared a fresh disk read of `__init__.py` against
+  `MIRROR_VERSION`, instead of the loaded module's own `__version__` — the two can
+  diverge (the file on disk edited or replaced after import). It now compares the loaded
+  module's `__version__` directly.
+- **A broken matching-version install was reported as "not found"**: a candidate whose
+  version matched but that raised while importing was previously folded into the generic
+  "missing" status. `failure_kind` now has a distinct `"broken"` value, and the Status
+  line says the install was found but failed to import (see Textport).
+- **No visibility into the native-wait-backend fallback**: a `src`-layout checkout has no
+  compiled `_native_waiter*.pyd` (gitignored), so the CUDA wait path silently fell back to
+  pure Python with no indication. `CUDALinkBootstrap` now prints a one-line note when a
+  `src`-resolved install has no native backend; the `src`-over-project-folder resolution
+  order itself is unchanged.
+- **Process-wide install-notice dedup swallowed a second, different reason**: the
+  Textport/Status-bar notice was deduped by process id, so once any COMP printed a
+  notice, no sibling COMP could ever print a *different* failure reason in the same TD
+  session. It is now deduped on the message content itself.
 
 ### Changed
 
