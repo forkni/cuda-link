@@ -173,15 +173,19 @@ processes rather than the mocked test doubles above, before any release ever wen
   (e.g. `src/cuda_link`) rather than its parent was rejected outright, and nothing about a
   `Libpath` parameter labeled "Library Path" made the required parent-folder convention
   discoverable. Rather than add validation or better help text for a parameter whose correct
-  value users kept getting wrong, the parameter was removed: every documented install mode
-  (`scripts/install_td_library.py` modes 1-5, StreamDiffusionTD's own venv) already resolves
-  automatically through the surviving layers, and the one gap — this repo's own `src`-layout
-  checkout — is closed by adding `<project.folder>/src` to the project-folder layer. Decision
-  item 2 above is struck accordingly; the layers that shipped are the renumbered list at the top
-  of this section. `CUDALINK_LIB_PATH` remains as the manual override for an install that lives
-  somewhere the project-folder layer does not probe, and `_site_package_candidates` forgives
-  that variable pointing one level too deep (at the package folder instead of its parent) —
-  the same mistake, closed for the one input a human can still mistype.
+  value users kept getting wrong, the parameter was removed: an install placed directly under
+  the project folder — this repo's own `src`-layout checkout, or StreamDiffusionTD's own venv —
+  already resolves automatically through the project-folder layer, now that
+  `<project.folder>/src` has been added to it (that addition closed the layer's one gap; without
+  it, this repo's own checkout had no probed path). Decision item 2 above is struck accordingly;
+  the layers that shipped are the renumbered list at the top of this section. An install that
+  lives *elsewhere* still needs the layer the installer itself prints for that mode: modes 1-3
+  (`scripts/install_td_library.py` — external folder, venv, conda env) need `CUDALINK_LIB_PATH`
+  set to the install's `site-packages`, and mode 4 (system or parallel Python) needs that
+  `site-packages` added to TD's Preferences module path (the `sys.path` layer) — neither is
+  automatic. `_site_package_candidates` forgives `CUDALINK_LIB_PATH` pointing one level too deep
+  (at the package folder instead of its parent) — the same mistake `Libpath` had, closed for the
+  one input a human can still mistype.
 
 ## Reopen condition
 

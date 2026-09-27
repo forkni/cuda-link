@@ -40,8 +40,9 @@ CUDAIPCExporter (Base COMP)
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
 All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap
-no-ops (printing a fallback-mode notice to the Textport) — sibling import resolution works
-as before.
+no-ops — sibling import resolution works as before, silently: with all 15 mirrors present,
+the extension does not print a Textport notice or set the yellow status, since classic mode
+is working as intended.
 
 ```text
 CUDAIPCExporter (Base COMP)
@@ -150,13 +151,18 @@ Textport — see below) and fallback mode takes effect automatically. See ADR-00
 
 > **Library mode verify**: After loading, you should see in the Textport:
 > `[CUDALinkBootstrap] Library mode active — cuda_link 1.13.0 from <folder>`
-> **Library mode unavailable**: `[CUDALinkBootstrap] Library mode unavailable — <reason>`,
-> where `<reason>` lists one clause per layer that was tried (e.g. `project folder: not set;
+>
+> **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
+> siblings does the extension additionally print a cause-specific line, e.g.
+> `[CUDAIPCExtension] cuda_link 1.13.0 not found - install it next to this .toe or set
+> CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
+> layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
 > CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
-> the component's 1.13.0`). The COMP's Status stays short — it names the required version and
-> where to install it (e.g. `cuda_link 1.13.0 not found - install it next to this .toe or into
-> TD's Python, then restart TD (see Textport)`) — while the full per-layer reason above is
-> Textport-only.
+> the component's 1.13.0`). The short line names the specific cause — not found, wrong
+> version, a rival install already loaded, or this extension's own glue import failing — and
+> the COMP's Status par mirrors that same short line; the full per-layer reason is
+> Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
+> back silently.
 
 #### 3b. TDHost Text DAT
 
@@ -435,25 +441,33 @@ This error means the extension registration itself is missing. A missing or unre
 
 ### cuda_link not ready
 
-**Symptom**: The extension accessor exists, but no frames are transferred. The COMP's Status
-reports something like `cuda_link 1.13.0 not found - install it next to this .toe or into TD's
-Python, then restart TD (see Textport)`.
+**Symptom**: The extension accessor exists, but no frames are transferred, and — only when
+none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
+cause-specific line, e.g. `cuda_link 1.13.0 not found - install it next to this .toe or set
+CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
+mismatch, a rival install already loaded, or this extension's own glue import failing after
+a successful bootstrap.
 
 `CUDAIPCExtension` is designed to compile even when its `cuda_link` imports cannot be resolved.
 In that degraded state, `library_ready` is `False`, `initialize()`, `export_frame()`, and
 `import_frame()` return `False`, and the callback templates return without raising. This keeps
 an unavailable library from failing once per frame while TouchDesigner is starting up.
 
-The Status line is deliberately short — it only names the version required and where to
-install it. The full reason goes to the Textport instead, in two places:
+The Status line is deliberately short — it only names the specific cause and, where relevant,
+where to install a fix. The full reason goes to the Textport instead, in two places, both
+printed on every COMP load regardless of whether the mirrors are present:
 
-- The `[CUDALinkBootstrap]` line printed when the COMP loaded: `Library mode active` on
-  success, or `Library mode unavailable — <reason>` on failure, where `<reason>` lists every
-  layer the resolver tried and why each was rejected — a version that does not match the
-  component's `MIRROR_VERSION`, a folder with no `cuda_link` in it, a different `cuda_link`
-  already loaded (see 3a under [Step 3](#step-3-create-text-dats)).
-- A one-time `[CUDAIPCExtension]` line with the same reason, printed once per TD process
+- The `[CUDALinkBootstrap]` line: `Library mode active — cuda_link <ver> from <folder>` on
+  success, or `Library mode off — COMP uses its mirror Text DATs if present (reason in
+  CUDALinkBootstrap.last_error)` on failure. Check `CUDALinkBootstrap.last_error` in the
+  Textport for the full per-layer reason — a version that does not match the component's
+  `MIRROR_VERSION`, a folder with no `cuda_link` in it, a different `cuda_link` already loaded
+  (see 3a under [Step 3](#step-3-create-text-dats)).
+- Only when none of the 15 mirrors are present: a one-time `[CUDAIPCExtension]` line with the
+  same cause-specific short text followed by the full detail, printed once per TD process
   across all sibling COMPs (not once per COMP, and not suppressed across a later relaunch).
+  When the mirrors ARE present, this second line never prints — classic mode falls back
+  silently.
 
 Then check the state of the registered extension in the Textport:
 

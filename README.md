@@ -539,8 +539,9 @@ found automatically. A mismatching install is skipped without being imported, an
 `cuda_link` that is already loaded in the process is refused rather than mixed in, so several
 installs can coexist on one machine (a project venv next to a system copy) and each `.toe`
 still gets its own. If nothing resolves, the bootstrap falls back to the classic mirror DATs;
-the COMP's yellow status names the required version and where to install it, and the Textport
-prints which layer failed and why. See
+only when none of the 15 mirrors are present does the COMP's Status additionally name the
+specific cause and where to install a fix, with the full per-layer reason in the Textport. When
+the mirrors are present, the fallback is silent — classic mode is working as intended. See
 [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions and
 [ADR-0014](docs/adr/0014-project-anchored-install-resolution.md) for the rationale.
 

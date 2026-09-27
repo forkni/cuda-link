@@ -897,8 +897,9 @@ def test_forgiven_package_dir_check_is_case_insensitive(isolated_resolver, tmp_p
 
 
 def test_leftover_libpath_par_on_a_comp_is_ignored(isolated_resolver, tmp_path, monkeypatch):
-    """Pre-1.13.0 .toe files may still carry a ``Libpath`` custom par (it shipped, briefly,
-    before being withdrawn). The resolver must not read it: a par present on ``me``'s
+    """Example `.toe` files saved during 1.13.0 development may still carry a ``Libpath``
+    custom par (it was withdrawn before ever shipping -- see ADR-0014). The resolver must
+    not read it: a par present on ``me``'s
     parent COMP, even one pointing at a matching install, must not activate library mode,
     and must never be mentioned in last_error."""
     bootstrap = isolated_resolver

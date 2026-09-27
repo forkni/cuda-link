@@ -265,8 +265,9 @@ inside the component will then load the package automatically — no per-COMP pa
 and no `CUDALINK_LIB_PATH` setup required when using TD Preferences mode (mode 4) or a venv
 kept next to the `.toe` (mode 2). With more than one cuda-link install on the machine, set
 `CUDALINK_LIB_PATH` to the venv or folder this project should use; only an install whose
-version matches the component is loaded, and the status turns yellow with a short line (full
-reason in the Textport) when none does. Run `python scripts/install_td_library.py --help`
+version matches the component is loaded. If none does, the COMP falls back to its mirror Text
+DATs; only when none of those mirrors are present does the status turn yellow with a
+cause-specific short line (full reason in the Textport). Run `python scripts/install_td_library.py --help`
 to see all five install modes. **Mode 5 (TD's own Python) is deprecated** — prefer mode 2
 (dedicated venv) or mode 4 (system/parallel Python).
 

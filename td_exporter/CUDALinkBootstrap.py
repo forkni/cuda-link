@@ -26,7 +26,8 @@ Each root is probed as <root>/venv/Lib/site-packages, <root>/.venv/Lib/site-pack
 a root whose basename is itself ``cuda_link`` is also probed one level up, so pointing
 CUDALINK_LIB_PATH at the package folder (rather than its parent) still resolves; the
 synthetic (b) roots are exempt; forgiving ``<project.folder>/cuda_link`` the same way
-would make it swallow <project.folder> itself, the fallback root tried right after it.
+would make it swallow <project.folder> itself, the fallback root tried after
+/StreamDiffusion and /src.
 
 Two deployment modes
 ---------------------
@@ -40,10 +41,13 @@ Library mode (this module's purpose):
     SHMProtocol, Exporter, …) can then be removed from the COMP.
 
 Fallback / classic mode:
-    If no layer resolves, this module no-ops and records why in ``last_error``. The
-    extension shows a short, actionable line as the COMP's status and prints the full
-    ``last_error`` to the Textport; the COMP then falls back to its mirror Text DATs,
-    which must all be present as before (the original "paste all DATs" deployment story).
+    If no layer resolves, this module no-ops and records why in ``last_error``. The COMP
+    then falls back to its mirror Text DATs. When none of those mirrors are present as COMP
+    siblings, the extension additionally shows a short, actionable line as the COMP's status
+    and prints the full ``last_error`` to the Textport, since that shape means library mode
+    failed AND classic mode has nothing to fall back to. When the mirrors ARE present (the
+    original "paste all DATs" deployment story), the fallback is silent -- no yellow tint,
+    no Status line -- because classic mode is working as intended.
 
 Drift guards:
     tests/td/test_td_bootstrap.py verifies that _ALIAS_MAP keys and values stay in sync
@@ -311,8 +315,8 @@ def _check_origin(module: object, package_dir: str, *, fresh: bool = False) -> o
         raise _RivalInstallError(
             f"importing cuda_link resolved to {origin} instead of the selected installation "
             f"{package_dir}; an import hook ahead of sys.path (for example an editable "
-            f"'pip install -e' of cuda-link) is redirecting it. Remove that install or point "
-            f"the component at it."
+            f"'pip install -e' of cuda-link) is redirecting it. Remove that install "
+            f"(`pip uninstall cuda-link` in that environment) and restart TouchDesigner."
         )
     raise _RivalInstallError(
         f"CUDA-Link is already loaded from {origin}; the selected installation is "
