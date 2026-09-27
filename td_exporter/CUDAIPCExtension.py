@@ -17,6 +17,7 @@ TDReceiverEngine.  Mode switches create a fresh engine instance — zero state l
 from __future__ import annotations
 
 import contextlib
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -124,6 +125,12 @@ def _bootstrap_active() -> bool:
 
 def _bootstrap_error() -> str:
     return str(getattr(CUDALinkBootstrap, "last_error", "") or "")
+
+
+def _mirror_version() -> str:
+    """The version CUDALinkBootstrap requires an install to match.  Never raises (the
+    sibling DAT may be absent)."""
+    return str(getattr(CUDALinkBootstrap, "MIRROR_VERSION", "") or "")
 
 
 class _NullEngine:
@@ -280,12 +287,19 @@ class CUDAIPCExtension:
         return False
 
     def _claim_notice_once(self) -> bool:
-        """True only for the first caller across all four sibling COMPs.
+        """True only for the first caller across all four sibling COMPs, once per TD process.
 
         Module globals cannot dedup: TD compiles a separate module object per Text DAT,
         so each shmem COMP has its own copy of this file's globals.  COMP storage is
         real shared state in the TD process, so the flag lives on the owning tox
         (parent of the shmem COMP), falling back to op.TDResources.
+
+        Stores this process's id rather than a bare flag.  TD pickles COMP storage into
+        the saved .toe, so a bare ``True`` would suppress the notice forever -- even for
+        a later TD process (a fresh launch of the same .toe) that never printed it.  A
+        PID recorded by an earlier process never equals this process's os.getpid(), so a
+        stale flag left over from a previous session heals itself on the very next check,
+        with no manual op.unstore() needed.
         """
         global _notice_printed
         holder = None
@@ -299,10 +313,11 @@ class CUDAIPCExtension:
                 return False
             _notice_printed = True
             return True
+        token = os.getpid()
         try:
-            if holder.fetch(_NOTICE_STORE_KEY, False, storeDefault=False):
+            if holder.fetch(_NOTICE_STORE_KEY, None, storeDefault=False) == token:
                 return False
-            holder.store(_NOTICE_STORE_KEY, True)
+            holder.store(_NOTICE_STORE_KEY, token)
         except (AttributeError, RuntimeError, TypeError):
             return True
         return True
@@ -310,20 +325,26 @@ class CUDAIPCExtension:
     def _notify_library_unavailable(self) -> None:
         """Non-modal 'cuda_link not ready' notice.
 
-        Under the Base Folder contract this state is NORMAL on every cold project load
-        until Startstream, so it must never stall the main thread.  Per-COMP feedback is
-        the yellow tint + Status par + warning_emitter badge; the textport line and the
-        status bar fire once per tox.
+        This state is NORMAL on every cold project load until a matching install is
+        resolved, so it must never stall the main thread.  The short Status line names
+        the one parameter to fix (``Libpath``) and the version that must match; the full
+        reason CUDALinkBootstrap gives up -- every layer it tried and why -- goes to the
+        Textport only, where it fits.  Per-COMP feedback is the yellow tint + Status par
+        + warning_emitter badge; the textport line and the status bar fire once per
+        process across all sibling COMPs.
         """
-        detail = LIBRARY_ERROR or _bootstrap_error() or "Base Folder not set"
-        short = "cuda_link not ready - set the StreamDiffusionTD Base Folder, then start the stream."
+        ver = _mirror_version()
+        version_clause = f"cuda_link {ver}" if ver else "cuda_link"
+        short = f"{version_clause} not found - set Libpath to a folder with a matching install (see Textport)"
+        detail = _bootstrap_error() or LIBRARY_ERROR or "cuda_link unavailable"
 
         with contextlib.suppress(AttributeError, RuntimeError):
             self._host.set_warning_status(short)
 
         if not self._claim_notice_once():
             return
-        print(f"[CUDAIPCExtension] {short} ({detail})")
+        print(f"[CUDAIPCExtension] {short}")
+        print(detail)
         with contextlib.suppress(NameError, AttributeError, RuntimeError):
             ui.status = short  # noqa: F821  -- non-blocking status bar
 
