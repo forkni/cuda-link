@@ -68,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Textport/Status-bar notice was deduped by process id, so once any COMP printed a
   notice, no sibling COMP could ever print a *different* failure reason in the same TD
   session. It is now deduped on the message content itself.
+- **`install_td_library.py --build` re-downloaded instead of rebuilding a stale wheel**:
+  when a local `dist/` wheel predated `src/cuda_link` changes, `resolve_wheel()` cleared
+  it and fell through to `_download_release_wheel()`, silently reinstalling whatever the
+  last GitHub Release published. With `--build`, a stale wheel now goes straight to a
+  local rebuild.
+- **`_wheel_version()` only recognized two hardcoded tags**: any other wheel tag (e.g. a
+  future `cp312` build) parsed as `None`. It now parses the version as the PEP 427
+  filename's second `-`-delimited field, matching any tag.
+- **"No wheel available" error named a glob nothing resolves by anymore**: the error text
+  said `dist\cuda_link-*-{tag}.whl`, but resolution matches an exact filename. It now
+  names the exact `dist\cuda_link-<version>-<tag>.whl` it looked for.
 
 ### Changed
 

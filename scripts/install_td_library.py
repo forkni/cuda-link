@@ -137,16 +137,20 @@ def _find_wheel(tag: str, version: str, _root: Path = REPO_ROOT) -> Path | None:
 
 
 def _wheel_version(path: Path) -> str | None:
-    """Parse the version out of a cuda_link-<version>-<tag>.whl filename, or None."""
+    """Parse the version out of a cuda_link-<version>-<tag(s)>.whl filename, or None.
+
+    PEP 427: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform
+    tag}.whl — the version is always the second '-'-delimited field, so this parses any
+    tag combination (e.g. a cp312-cp312-win_amd64 wheel from a future Python), not just
+    the two tags this project currently ships (_NATIVE_WHEEL_TAG, _FALLBACK_WHEEL_TAG).
+    """
     name = path.name
     if not (name.startswith("cuda_link-") and name.endswith(".whl")):
         return None
-    middle = name[len("cuda_link-") : -len(".whl")]
-    for tag in (_NATIVE_WHEEL_TAG, _FALLBACK_WHEEL_TAG):
-        suffix = f"-{tag}"
-        if middle.endswith(suffix):
-            return middle[: -len(suffix)]
-    return None
+    parts = name[: -len(".whl")].split("-")
+    if len(parts) < 2:
+        return None
+    return parts[1]
 
 
 # Repo-relative source roots whose changes should invalidate the wheel.
@@ -354,11 +358,16 @@ def resolve_wheel(
     # its content's age, so this check is meaningless — and could false-positive
     # — for an end-user install. Only consult it when --build makes a rebuild
     # possible in the first place.
+    stale = False
     if w and allow_build and _wheel_is_stale(w, _CORE_SOURCE_ROOTS, _root=_root):
         print(_yellow(f"  [stale] {w.name} predates src/cuda_link changes — re-resolving..."))
         w = None
+        stale = True
 
-    if not w:
+    # A stale local wheel means --build wants a fresh local rebuild, not a re-download of
+    # whatever the last Release published — that would silently reinstall the exact same
+    # (possibly still-stale-relative-to-src) bits --build was meant to refresh.
+    if not w and not stale:
         w = _download_release_wheel(needed, tag, dry_run)
 
     if not w and allow_build:
@@ -368,7 +377,7 @@ def resolve_wheel(
         sys.exit(
             _red(
                 "[error] No wheel available for this target.\n"
-                f"        Looked for a prebuilt dist\\cuda_link-*-{tag}.whl, then tried to auto-download\n"
+                f"        Looked for dist\\cuda_link-{needed}-{tag}.whl, then tried to auto-download\n"
                 "        the matching asset from https://github.com/forkni/cuda-link/releases.\n"
                 "        Fixes:\n"
                 "          - Download the wheel manually from Releases and pass --wheel <path>\n"
