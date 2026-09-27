@@ -5,7 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.13.0] - 2026-09-26
+
+### Added
+
+- **ADR-0014 project-anchored install resolution**: `td_exporter/CUDALinkBootstrap.py`
+  now probes, in order, a `folder` argument → the `Libpath` custom parameter (walking
+  ancestor COMPs) → the project folder (`<project.folder>/cuda_link`,
+  `/StreamDiffusion`, the project folder itself) → `CUDALINK_LIB_PATH` → `sys.path`,
+  activating only an install whose on-disk `__version__` strictly matches the
+  component's `MIRROR_VERSION` stamp. A rival already-loaded install or a shadowing
+  import hook hard-stops resolution instead of silently mixing versions. See
+  `docs/adr/0014-project-anchored-install-resolution.md`.
+- **Degraded mode always compiles**: `CUDAIPCExtension` now constructs and every
+  public method stays callable even when `cuda_link` fails to import or resolve —
+  Execute DAT callbacks never raise `td.tdAttributeError`, they just report `False`/
+  no-ops until a matching install is found.
+
+### Fixed
+
+- **Bootstrap resolver couldn't see TD's `project`/`tdu`**: TouchDesigner binds
+  `me`/`op`/`parent` into a DAT module's `globals()`, but binds `project`/`tdu`/`td`
+  only into that module's private `__builtins__` dict — `globals().get("project")`
+  always returned `None` in real TD, silently disabling the project-folder layer and
+  relative `Libpath` expansion. `_td_name()` now checks `globals()` first, then falls
+  back to `__builtins__`.
+- **An empty `Libpath` on the nearest COMP shadowed a non-empty ancestor value**: the
+  ancestor walk now keeps going past an empty value instead of stopping on the first
+  COMP that merely has the parameter, so a project-level default is still reachable.
+- **Misleading, product-specific degraded-mode status**: the Status text was a
+  hard-coded StreamDiffusionTD-specific string that never surfaced the actual
+  resolver diagnostic. It now names the required `cuda_link` version and the
+  `Libpath` parameter to fix, with the full per-layer reason (`last_error`) printed
+  to the Textport ahead of the downstream import symptom.
+- **The one-time Textport diagnostic never printed again after the first session**:
+  the dedup flag was a bare `True` pickled into COMP storage, permanently suppressing
+  it across every future load of that `.toe`. It now stores the process id, so a
+  stale flag from an earlier process self-heals on the next load.
+- Relative-import mirrors for `cuda_graphs`/`cuda_ipc_wrapper`/`nvml_observer`,
+  fixing a mixed-version ctypes handle class-identity bug.
+- SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.
+- Receiver-launcher Python fallback, an activation-barrier flake, and the `quality`
+  extra / crap4py pin.
 
 ### Changed
 
@@ -25,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflow was renamed `merge-development-to-main.yml` →
   `merge-development-to-master.yml` and no longer registers the now-unreferenced
   `merge.ours.driver`. See `docs/BRANCHING.md` for how promotion actually runs.
+
+### Docs
+
+- Swept the stale `1.12.2` version reference across `README.md`,
+  `docs/TOX_BUILD_GUIDE.md`, `docs/INTEGRATION_EXAMPLES.md`,
+  `docs/ARCHITECTURE.md` and `td_exporter/HELP_DOC.md`, and amended
+  `docs/adr/0014-project-anchored-install-resolution.md` with the TD
+  `__builtins__` binding and the status-vs-Textport split.
 
 ## [1.12.2] - 2026-08-11
 

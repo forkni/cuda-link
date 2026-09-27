@@ -75,6 +75,8 @@ When every layer fails, the module records why in `last_error` (one clause per l
 `Libpath parameter: not set; CUDALINK_LIB_PATH: cuda_link 1.12.1 under C:\... does not match
 the component's 1.12.2`), stays inactive, and the COMP falls back to its mirror DATs exactly as
 before. `CUDAIPCExtension` already surfaces `last_error` as the yellow status text.
+(See "Amendment (1.13.0)" below — the first real deployment found three bugs in this design
+before it ever shipped.)
 
 The module keeps the unconditional run at Text DAT load time and exports `_active`,
 `last_error`, `resolved_site_packages` and `MIRROR_VERSION`. The shape matches the
@@ -103,8 +105,9 @@ Base Folder as `basefolder`.
 
 - Each project resolves its own install; a second copy elsewhere on the machine is either
   ignored (wrong version) or refused loudly (already loaded), never mixed in.
-- `last_error` finally exists in the repo bootstrap, so the extension's yellow status text
-  says which layer failed and why, instead of "Base Folder not set" for every cause.
+- `last_error` finally exists in the repo bootstrap, exposing which layer failed and why
+  (as amended below, the *Textport* — not the Status par — is where the full detail actually
+  landed once this shipped; see "Amendment (1.13.0)").
 - ADR-0003's open risk (stale install activates with wrong submodule versions) is closed.
 - `CUDALINK_LIB_PATH` keeps working unchanged for existing setups.
 
@@ -120,6 +123,41 @@ Base Folder as `basefolder`.
   are `CANONICAL_ONLY`, pip-only per ADR-0012). In classic mode that probe still resolves
   against whichever `cuda_link` happens to be importable. A follow-up should route it through
   the same version check.
+
+## Amendment (1.13.0)
+
+This design shipped with three bugs, all found the first time it hit real TouchDesigner
+processes rather than the mocked test doubles above, before any release ever went out with it.
+
+- **TD does not put `project`/`tdu` where rule 1's project-folder layer looked for them.**
+  TouchDesigner binds `me`, `op` and `parent` into a DAT module's `globals()`, but binds
+  `project`, `tdu` and `td` only into that module's private `__builtins__` dict — a distinction
+  every existing test missed because they injected fakes via
+  `monkeypatch.setattr(bootstrap, "project", …)`, i.e. into module globals, which is the one
+  place TD never puts it. `globals().get("project")` and `globals().get("tdu")` therefore always
+  returned `None` in a live process, so the project-folder layer (rule 1.3) was dead code and
+  `tdu.expandPath` never ran. Fixed with a `_td_name(name)` helper that checks `globals()` first
+  and falls back to `globals()["__builtins__"]` (a dict or a module, so both lookup forms are
+  tried), and routed `_expand`, `_libpath_parameter` and `_project_roots` through it.
+- **An empty `Libpath` on the nearest COMP shadowed a non-empty ancestor's.** `_libpath_parameter`
+  returned `str(parameter.eval()).strip()` unconditionally, so a COMP with the par present but
+  blank stopped the ancestor walk instead of deferring to `/project1`'s value — the opposite of
+  what Decision item 2 (`Libpath` on `/project1`, COMP-level pars left empty) requires. Fixed by
+  walking past an empty value to the next ancestor.
+- **The status text was product-specific and never showed `last_error`.** Contrary to what this
+  ADR's Decision section and the Consequences bullet above claimed, `CUDAIPCExtension` did not
+  surface `last_error` as the Status text; the Status par carried a hard-coded StreamDiffusionTD
+  string ("...set the StreamDiffusionTD Base Folder...") regardless of the actual failure. Fixed
+  by splitting the two: the Status par now gets a short, product-neutral line naming the required
+  version and the `Libpath` parameter to fix; the full `last_error` (cause) ahead of the
+  extension's own `LIBRARY_ERROR` (downstream symptom) goes to the Textport instead, since the
+  Status par is a single short line and the real detail can be long and multi-clause.
+  A related bug hid this split from view: `_claim_notice_once` persisted a bare `True` via
+  `holder.store(...)`, which pickles into the saved `.toe`, so the one-time Textport diagnostic
+  printed once ever per file rather than once per TD process — a `.toe` saved before this fix
+  would never show it again. Fixed by storing `os.getpid()` instead of `True`: a stale `True` or
+  a PID from an earlier process no longer matches `os.getpid()`, so the notice self-heals on the
+  next load with no manual `unstore` needed.
 
 ## Reopen condition
 
