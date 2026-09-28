@@ -5,9 +5,11 @@ on:
     branches: [development, main, master]
     paths:
       - '**/*.md'
+      - '.github/workflows/docs-validation.yml'
   pull_request:
     paths:
       - '**/*.md'
+      - '.github/workflows/docs-validation.yml'
 
 permissions:
   contents: read
@@ -55,7 +57,6 @@ jobs:
             --exclude-path Backup
             --exclude-path TOXES
             --exclude-path .venv
-            --exclude-mail
             '**/*.md'
         continue-on-error: true
 
