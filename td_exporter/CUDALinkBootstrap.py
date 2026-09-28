@@ -279,7 +279,9 @@ def _site_package_candidates(root: str, *, forgive_package_dir: bool = False) ->
         expanded,
     ]
     normalized = os.path.normpath(expanded)
-    if forgive_package_dir and os.path.normcase(os.path.basename(normalized)) == "cuda_link":
+    # .lower(), not normcase(): the basename check is case-insensitive by design (Windows
+    # paths), and normcase() folds case only on Windows -- CI runs this on Linux.
+    if forgive_package_dir and os.path.basename(normalized).lower() == "cuda_link":
         parent = os.path.dirname(normalized)
         # Skip a bare relative name's empty parent ("cuda_link" -> "") and a drive root
         # ("C:\cuda_link" -> "C:\", whose own dirname is itself) -- neither is a real
