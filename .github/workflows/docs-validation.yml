@@ -55,7 +55,6 @@ jobs:
             --exclude-path Backup
             --exclude-path TOXES
             --exclude-path .venv
-            --exclude-mail
             '**/*.md'
         continue-on-error: true
 
