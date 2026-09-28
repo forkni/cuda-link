@@ -1,4 +1,4 @@
-name: Merge Development to Main
+name: Merge Development to Master
 
 on:
   workflow_dispatch:
@@ -32,11 +32,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Configure merge driver
-        run: |
-          git config --global merge.ours.driver true
-          git config --global merge.ours.name "Keep ours merge driver"
 
       - name: Verify .gitattributes exists
         run: |
@@ -88,7 +83,6 @@ jobs:
           git merge --no-ff development -m "$(cat <<'EOF'
           chore: Merge development to master
 
-          - Applied .gitattributes merge strategies
           - Automated merge via GitHub Actions
           EOF
           )"
@@ -140,7 +134,7 @@ jobs:
         run: |
           echo "=== MERGE SUMMARY ==="
           echo "✅ Development → Master merge successful"
-          echo "✅ Method: Git merge with .gitattributes"
+          echo "✅ Method: git merge --no-ff (CHANGELOG.md merge=union honored)"
 
           if [ -n "$BACKUP_TAG" ]; then
             echo "✅ Backup tag: $BACKUP_TAG"

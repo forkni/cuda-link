@@ -71,8 +71,9 @@ a single platform:
   latent tag-blind bug where `_find_wheel()` picked the newest-mtime wheel in `dist/`
   with no regard for ABI tag, so a stray fallback wheel could silently mask the native
   path in a 3.11 environment. Resolution order: `--wheel <path>` override → a
-  tag-matched wheel already in `dist/` → auto-download the matching GitHub Release asset
-  for the installed `__version__` → (only with the new `--build` flag) compile locally
+  tag- **and version-**matched wheel already in `dist/` → auto-download the matching
+  GitHub Release asset for the installed `__version__` → (only with the new `--build`
+  flag) compile locally
   via `utils\build_wheel.cmd`. Without `--build`, a target with no available wheel exits
   with an actionable message instead of silently invoking a build.
 - **Two supported install scenarios**: a system Python 3.11 install (mode 4), and a

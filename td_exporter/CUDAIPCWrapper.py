@@ -20,10 +20,32 @@ import logging
 import os
 from ctypes import POINTER, byref, c_char_p, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
-try:
-    from cuda_link._env import env_bool
-except (ImportError, ModuleNotFoundError):
-    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+# Relative imports only (ADR-0002): scripts/sync_td_wrapper.py rewrites them to the bare
+# TD names (Env, CUDARuntimeTypes, CUDAGraphs) in td_exporter/CUDAIPCWrapper.py, so each
+# deployment resolves every dependency against ONE installation -- never a mix of this
+# package and whichever cuda_link happens to be importable.  ctypes argtypes compare the
+# handle classes by identity, so two copies of cuda_runtime_types break every IPC call.
+from Env import env_bool
+from CUDAGraphs import CUDAGraphsMixin
+from CUDARuntimeTypes import (
+    CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+    CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
+    HOST_ALLOC_PORTABLE,
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+    CUDAError,
+    CUDAEvent_t,
+    CUDAGraph_t,
+    CUDAGraphExec_t,
+    CUDAGraphNode_t,
+    CudaIpcError,
+    CudaLinkError,
+    CUDAStream_t,
+    StreamFlags,
+    cudaIpcEventHandle_t,
+    cudaIpcMemHandle_t,
+    cudaMemcpy3DParms,
+    cudaPointerAttributes,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -44,60 +66,6 @@ if os.name == "nt":
     _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
 else:
     _kernel32 = None
-
-try:
-    # Prefer the bare name so all callers (CUDAIPCWrapper Text DAT and TDReceiver) share
-    # the same cudaIpcMemHandle_t / cudaIpcEventHandle_t class objects — critical for ctypes
-    # argtypes checking which uses class identity, not structural equivalence.
-    # In library mode the bootstrap pre-sets sys.modules["CUDARuntimeTypes"] to
-    # cuda_link.cuda_runtime_types before this module is imported, so this succeeds.
-    # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
-    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
-        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
-        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
-        HOST_ALLOC_PORTABLE,
-        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
-        CUDAError,
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CudaIpcError,
-        CudaLinkError,
-        CUDAStream_t,
-        StreamFlags,
-        cudaIpcEventHandle_t,
-        cudaIpcMemHandle_t,
-        cudaMemcpy3DParms,
-        cudaPointerAttributes,
-    )
-except (ImportError, ModuleNotFoundError):
-    # Fallback: pure package context where CUDARuntimeTypes is not yet in sys.modules
-    # (e.g. imported before the bootstrap runs, or in a standalone test environment).
-    from cuda_link.cuda_runtime_types import (  # noqa: E402
-        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
-        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
-        HOST_ALLOC_PORTABLE,
-        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
-        CUDAError,
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CudaIpcError,
-        CudaLinkError,
-        CUDAStream_t,
-        StreamFlags,
-        cudaIpcEventHandle_t,
-        cudaIpcMemHandle_t,
-        cudaMemcpy3DParms,
-        cudaPointerAttributes,
-    )
-
-try:
-    from cuda_link.cuda_graphs import CUDAGraphsMixin  # noqa: E402
-except ImportError:
-    from CUDAGraphs import CUDAGraphsMixin  # type: ignore[no-redef]  # noqa: E402
 
 
 class CUDARuntimeAPI(CUDAGraphsMixin):

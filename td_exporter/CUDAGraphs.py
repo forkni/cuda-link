@@ -14,30 +14,17 @@ from __future__ import annotations
 from ctypes import byref, c_int, c_size_t, c_uint64, c_void_p
 from typing import Any
 
-try:
-    from cuda_link.cuda_runtime_types import (  # noqa: E402
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CUDAStream_t,
-        cudaExtent,
-        cudaMemcpy3DParms,
-        cudaPitchedPtr,
-        cudaPos,
-    )
-except ImportError:
-    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CUDAStream_t,
-        cudaExtent,
-        cudaMemcpy3DParms,
-        cudaPitchedPtr,
-        cudaPos,
-    )
+from CUDARuntimeTypes import (
+    CUDAEvent_t,
+    CUDAGraph_t,
+    CUDAGraphExec_t,
+    CUDAGraphNode_t,
+    CUDAStream_t,
+    cudaExtent,
+    cudaMemcpy3DParms,
+    cudaPitchedPtr,
+    cudaPos,
+)
 
 
 class CUDAGraphsMixin:

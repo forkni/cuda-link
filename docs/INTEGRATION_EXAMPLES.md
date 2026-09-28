@@ -7,7 +7,7 @@ Complete workflows for common CUDA IPC use cases.
 > before reading `result.frame`.  Producer side — `from cuda_link import Exporter, FrameSpec, GpuFrame`;
 > call `Exporter.open(FrameSpec(...))` and `exporter.export(GpuFrame(...))`.
 > The TouchDesigner COMP facade is `CUDAIPCExtension` (Sender or Receiver mode).
-
+>
 > **▶ Runnable versions:** every workflow below has a standalone, heavily-commented script in
 > [`examples/`](../examples/README.md) that spawns its own demo producer — no TouchDesigner
 > needed to run them. Each example heading links to its script.
@@ -26,12 +26,12 @@ Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner
 
 1. **Network Layout**:
 
-```
+```text
 Movie File In TOP → CUDAIPCExtension (Mode=Sender)
                     (Ipcmemname="ai_input")
 ```
 
-2. **Parameters**:
+1. **Parameters**:
    - `Mode`: `Sender`
    - `Ipcmemname`: `"ai_input"`
    - `Active`: ON
@@ -109,7 +109,7 @@ Traditional computer vision (edge detection, feature tracking, etc.) on TouchDes
 
 Same as Example 1, but use a different `Ipcmemname`:
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender)
              (Ipcmemname="cv_input")
 ```
@@ -164,7 +164,7 @@ AI pipeline with two inputs: main image + control signal (depth map, edges, etc.
 
 ### TouchDesigner Setup
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="main_input")
 
 Edge Detection TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="controlnet_input")
@@ -244,7 +244,7 @@ Source TOP resolution changes at runtime (user resizes window, switches camera, 
 
 ### TouchDesigner Setup
 
-```
+```text
 Select TOP → CUDAIPCExtension (Mode=Sender)
 (Resolution changes dynamically based on Select TOP input)
 ```
@@ -349,10 +349,11 @@ print("Clean shutdown complete")
 
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99,
-> CSV + JSON export), run `python benchmarks/bench_sweep.py` (full 16-cell, ~12 min) or
-> `python benchmarks/bench_sweep.py --quick` (1 cell, ~1 min). See
-> [docs/BENCHMARKS.md](BENCHMARKS.md) for pre-measured results.
+> **Availability**: The historical `benchmarks/bench_sweep.py` script is not included in this
+> repository, so the full IPC roundtrip sweep commands from older versions are not runnable from
+> a fresh checkout. Use the linked producer-side benchmark for a tracked runnable example, or
+> follow the manual consumer-side profiling script below. See [docs/BENCHMARKS.md](BENCHMARKS.md)
+> for pre-measured results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a
 live TD sender.
@@ -468,7 +469,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.12.2.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.13.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -483,7 +484,7 @@ def onCook(scriptOp):
 
 **TouchDesigner Network**:
 
-```
+```text
 Script TOP (receives AI frames via IPC)
     → Composite TOP
     → Out TOP
@@ -681,5 +682,5 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 ---
 
-**Last Updated**: 2026-08-11
-**Version**: 1.12.2
+**Last Updated**: 2026-09-26
+**Version**: 1.13.0

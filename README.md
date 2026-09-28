@@ -1,3 +1,4 @@
+<!-- markdownlint-disable-next-line MD041 -->
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="logo_w.png">
@@ -73,7 +74,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -84,11 +85,11 @@ faults, and `"Idle"` when inactive. A `warning_emitter` Script TOP inside the CO
 shows a local warning badge when the component is open. See [`td_exporter/HELP_DOC.md`](td_exporter/HELP_DOC.md)
 for per-parameter documentation.
 
-**Option B: Build from source**
+#### Option B: Build from source
 
 See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assembly.
 
-**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+#### Option C: Library mode (cleaner .tox — fewer Text DATs)
 
 For a leaner `.tox` (package installed once into a Python environment TD can see, instead
 of 15 mirror Text DATs), see [Distribution → For TouchDesigner Integration](#for-touchdesigner-integration).
@@ -194,7 +195,7 @@ On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipc
 
 ## Architecture
 
-```
+```text
 Direction A: TD (Producer) → Python (Consumer)
 ──────────────────────────────────────────────
 CUDAIPCExtension facade
@@ -228,7 +229,7 @@ This prevents blocking - producer never waits for consumer, consumer is always 1
 
 ### SharedMemory Protocol (433 bytes for 3 slots)
 
-```
+```text
 [0-3]     magic "CIPD" (4B)       - Protocol validation (0x43495044)
 [4-11]    version (8B)             - Increments on TD re-initialization
 [12-15]   num_slots (4B)           - Number of ring buffer slots (3)
@@ -251,12 +252,13 @@ For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
 - **[Architecture](docs/ARCHITECTURE.md)** - Protocol spec, ring buffer design, GPU sync
 - **[Integration Examples](docs/INTEGRATION_EXAMPLES.md)** - TD→PyTorch, TD→OpenCV, multi-stream
 - **[Runnable Examples](examples/README.md)** - 8 standalone, heavily-commented scripts (`examples/`) — each spawns its own demo producer, so they run without TouchDesigner
+- **[Branching & Promotion](docs/BRANCHING.md)** - development-first PR rule, how the master promotion workflow runs
 
 ## Testing
 
 The suite lives in `tests/` split into five purpose-named packages:
 
-```
+```text
 tests/
   core/         protocol layer — SHM layout, format negotiation, ports, activation barriers
   cuda/         CUDA runtime seam — IPC wrapper, errcheck, handle guards, NVML, probe scripts
@@ -430,13 +432,13 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```bash
 # Download the wheel matching your interpreter from
 # https://github.com/forkni/cuda-link/releases, then:
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[all]"     # All output modes
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"
+pip install --force-reinstall "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"
 ```
 
 #### Method 3: Editable install from source (for development)
@@ -483,17 +485,17 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
 > matching the TouchDesigner build you target.
 
-**Option B: Build from source**
+#### Option B: Build from source
 
 Follow the manual build guide at [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) to assemble the `.tox` from `td_exporter/` source files.
 
-**Option C: Library mode (cleaner .tox — fewer Text DATs)**
+#### Option C: Library mode (cleaner .tox — fewer Text DATs)
 
 Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
 DAT then loads the package automatically — the 15 mirror Text DATs (Env, SHMProtocol,
@@ -509,7 +511,7 @@ install_td_library.cmd             REM interactive menu — auto-downloads the m
 
 | Mode | Flag | Description |
 |------|------|-------------|
-| 1 | `--target DIR` | Install into a custom folder; set `CUDALINK_LIB_PATH=DIR` before launching TD |
+| 1 | `--target DIR` | Install into a custom folder; put it in the `.toe`'s project folder (`cuda_link/` or the folder itself), or set `CUDALINK_LIB_PATH=DIR` before launching TD |
 | 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
 | 3 | `--conda ENV` | Install into a conda environment |
 | 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
@@ -528,11 +530,20 @@ install_td_library.cmd --mode 4 --dry-run
 ```
 
 The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
-The bootstrap activates whenever `cuda_link` is importable from TouchDesigner's active Python
-paths, including TD Preferences; `CUDALINK_LIB_PATH` is only needed when that path is not
-already configured. If `cuda_link` cannot be imported or its aliases cannot be registered, the
-bootstrap falls back to the classic mirror DATs. See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md)
-for full instructions.
+The bootstrap looks for the install in a fixed order — the `.toe`'s project folder
+(`cuda_link/`, `StreamDiffusion/`, `src/`, or the folder itself, each probed as a venv or a
+`pip --target` folder), `CUDALINK_LIB_PATH`, then TouchDesigner's own Python paths including
+TD Preferences — and imports the first candidate whose version matches the mirrors shipped in
+the `.tox`. There is no per-COMP parameter to set: an install placed next to the `.toe` is
+found automatically. A mismatching install is skipped without being imported, and a second
+`cuda_link` that is already loaded in the process is refused rather than mixed in, so several
+installs can coexist on one machine (a project venv next to a system copy) and each `.toe`
+still gets its own. If nothing resolves, the bootstrap falls back to the classic mirror DATs;
+only when none of the 15 mirrors are present does the COMP's Status additionally name the
+specific cause and where to install a fix, with the full per-layer reason in the Textport. When
+the mirrors are present, the fallback is silent — classic mode is working as intended. See
+[`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions and
+[ADR-0014](docs/adr/0014-project-anchored-install-resolution.md) for the rationale.
 
 The TouchDesigner extension (`td_exporter/`) is **not included in the pip package** because it uses TD-specific APIs (`parent()`, `op()`, `me`, COMP-scoped imports) that cannot run outside TouchDesigner.
 
@@ -557,7 +568,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 ## Contributing
 
 1. Fork the repo and branch off **`development`** (`master` is release-only, promoted via
-   [`.github/workflows/merge-development-to-main.yml`](.github/workflows/merge-development-to-main.yml)).
+   [`.github/workflows/merge-development-to-master.yml`](.github/workflows/merge-development-to-master.yml)).
 2. `pip install -e ".[all]"` for an editable install with every output backend.
 3. Run the checks CI enforces before opening a PR: `pytest tests/ -v` (see
    [Testing](#testing) for the coverage gate) and `pyrefly` for static typing.

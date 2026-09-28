@@ -5,6 +5,108 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-09-26
+
+### Added
+
+- **ADR-0014 project-anchored install resolution**: `td_exporter/CUDALinkBootstrap.py`
+  now probes, in order, an explicit `folder` argument → the project folder
+  (`<project.folder>/cuda_link`, `/StreamDiffusion`, `/src` for a repo checkout, the
+  project folder itself) → `CUDALINK_LIB_PATH` → `sys.path`, activating only an
+  install whose on-disk `__version__` strictly matches the component's
+  `MIRROR_VERSION` stamp. There is no per-COMP parameter to set. A rival
+  already-loaded install or a shadowing import hook hard-stops resolution instead of
+  silently mixing versions. See `docs/adr/0014-project-anchored-install-resolution.md`.
+- **Degraded mode always compiles**: `CUDAIPCExtension` now constructs and every
+  public method stays callable even when `cuda_link` fails to import or resolve —
+  Execute DAT callbacks never raise `td.tdAttributeError`, they just report `False`/
+  no-ops until a matching install is found.
+
+### Fixed
+
+- **Installer reused a wrong-version `dist/` wheel**: `_find_wheel()` matched any
+  `cuda_link-*.whl` sharing the target's ABI tag, picking the newest by mtime with no
+  regard for version — a leftover wheel from an earlier release could be silently
+  reinstalled, and the "verify" line printed the source checkout's version rather than
+  the wheel actually installed. `_find_wheel()` now matches the exact
+  `cuda_link-<version>-<tag>.whl` filename for the source checkout's version, and the
+  verify line prints the resolved wheel's own version.
+- **Stale warning/error tint never cleared in real TD**: `RealTDHost._reset_stale_tint()` /
+  `_capture_default_color()` compared `comp.color` against `_WARNING_COLOR`/`_ERROR_COLOR`
+  with exact tuple equality, but TD stores `comp.color` internally as float32 — a value
+  set from a float64 literal (e.g. `0.7`) reads back as `0.699999988...`, so the
+  comparison never matched on a live TD instance (only the unit tests' float64 fakes
+  passed). COMPs saved mid-warning during 1.13.0 resolver testing stayed permanently
+  yellow even after `cuda_link` loaded cleanly. Both comparisons now use
+  `math.isclose(..., abs_tol=1e-3)`.
+- Relative-import mirrors for `cuda_graphs`/`cuda_ipc_wrapper`/`nvml_observer`,
+  fixing a mixed-version ctypes handle class-identity bug.
+- SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.
+- Receiver-launcher Python fallback, an activation-barrier flake, and the `quality`
+  extra / crap4py pin.
+- **Rival cuda_link aliases could serve a real engine**: if this COMP's own
+  `CUDALinkBootstrap` did not activate (rival, mismatch, missing or broken) but a
+  *different* COMP had already aliased another cuda_link install in this TD process,
+  `CUDAIPCExtension`'s bare-name imports still resolved to that other install and built a
+  real engine on possibly wrong-version protocol code. It now detects a foreign,
+  file-backed `SHMProtocol` alias and forces degraded mode instead.
+- **Reuse shortcut re-read a stale disk version**: `CUDALinkBootstrap._bootstrap()`'s
+  already-loaded-elsewhere shortcut compared a fresh disk read of `__init__.py` against
+  `MIRROR_VERSION`, instead of the loaded module's own `__version__` — the two can
+  diverge (the file on disk edited or replaced after import). It now compares the loaded
+  module's `__version__` directly.
+- **A broken matching-version install was reported as "not found"**: a candidate whose
+  version matched but that raised while importing was previously folded into the generic
+  "missing" status. `failure_kind` now has a distinct `"broken"` value, and the Status
+  line says the install was found but failed to import (see Textport).
+- **No visibility into the native-wait-backend fallback**: a `src`-layout checkout has no
+  compiled `_native_waiter*.pyd` (gitignored), so the CUDA wait path silently fell back to
+  pure Python with no indication. `CUDALinkBootstrap` now prints a one-line note when a
+  `src`-resolved install has no native backend; the `src`-over-project-folder resolution
+  order itself is unchanged.
+- **Process-wide install-notice dedup swallowed a second, different reason**: the
+  Textport/Status-bar notice was deduped by process id, so once any COMP printed a
+  notice, no sibling COMP could ever print a *different* failure reason in the same TD
+  session. It is now deduped on the message content itself.
+- **`install_td_library.py --build` re-downloaded instead of rebuilding a stale wheel**:
+  when a local `dist/` wheel predated `src/cuda_link` changes, `resolve_wheel()` cleared
+  it and fell through to `_download_release_wheel()`, silently reinstalling whatever the
+  last GitHub Release published. With `--build`, a stale wheel now goes straight to a
+  local rebuild.
+- **`_wheel_version()` only recognized two hardcoded tags**: any other wheel tag (e.g. a
+  future `cp312` build) parsed as `None`. It now parses the version as the PEP 427
+  filename's second `-`-delimited field, matching any tag.
+- **"No wheel available" error named a glob nothing resolves by anymore**: the error text
+  said `dist\cuda_link-*-{tag}.whl`, but resolution matches an exact filename. It now
+  names the exact `dist\cuda_link-<version>-<tag>.whl` it looked for.
+
+### Changed
+
+- **Markdown lint is now enforced**: `.markdownlint.json` synced to the CGW baseline,
+  the local and CI engines both pinned to `markdownlint-cli2` 0.23.2, and the
+  `markdown-lint` CI job in `docs-validation.yml` no longer carries
+  `continue-on-error`. The `paths:` filter widened from `docs/** + README.md` to
+  `**/*.md`, matching the action's `globs:`.
+
+### Removed
+
+- **Vestigial merge-driver configuration**: ten `docs/*.md merge=ours` rules in
+  `.gitattributes` whose target paths never existed in this repository's history,
+  plus an inert `merge=diff3` block (`diff3` is a conflict *display style*, set via
+  `merge.conflictStyle` in `scripts/git/merge_with_validation.sh`, not a registered
+  merge driver). Only `CHANGELOG.md merge=union` remains active. The promotion
+  workflow was renamed `merge-development-to-main.yml` →
+  `merge-development-to-master.yml` and no longer registers the now-unreferenced
+  `merge.ours.driver`. See `docs/BRANCHING.md` for how promotion actually runs.
+
+### Docs
+
+- Swept the stale `1.12.2` version reference across `README.md`,
+  `docs/TOX_BUILD_GUIDE.md`, `docs/INTEGRATION_EXAMPLES.md`,
+  `docs/ARCHITECTURE.md` and `td_exporter/HELP_DOC.md`, and amended
+  `docs/adr/0014-project-anchored-install-resolution.md` with the TD
+  `__builtins__` binding and the status-vs-Textport split.
+
 ## [1.12.2] - 2026-08-11
 
 ### Fixed
@@ -539,7 +641,7 @@ already handled — no code change needed.
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
 
-  ```
+  ```text
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
 
@@ -1661,13 +1763,9 @@ already handled — no code change needed.
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2
-[1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
-[1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
+[1.4.1]: https://github.com/forkni/cuda-link/releases/tag/v1.4.1
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
-[1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
+[1.0.1]: https://github.com/forkni/cuda-link/releases/tag/v1.0.1
 
 ## [1.0.0] — 2026-05-02
 
@@ -1789,5 +1887,3 @@ already handled — no code change needed.
 - Explanatory comment at `src/cuda_link/cuda_ipc_importer.py` documenting the `getattr`
   fallback pattern in `cleanup()` for `__del__`-time partial-init safety.
 - `docs/OPT_1_implementation_PLAN.md` moved to local-only (untracked).
-
-[0.8.0]: https://github.com/forkni/cuda-link/compare/v0.7.3...v0.8.0

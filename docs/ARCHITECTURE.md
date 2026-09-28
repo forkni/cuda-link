@@ -10,7 +10,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction A: TouchDesigner → Python (TD is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   TouchDesigner Process (Producer)     │
 │                                         │
@@ -55,7 +55,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction B: Python → TouchDesigner (Python is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   Python Process (Producer)            │
 │                                         │
@@ -99,7 +99,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
 
-```
+```text
 CUDAIPCExtension  (~300 LOC facade)
 ├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
 ├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
@@ -117,8 +117,8 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
-- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`. Ensure TouchDesigner can import it either by setting `CUDALINK_LIB_PATH` to that folder before launching TD or by adding the folder to TD Preferences → Python 32/64 bit Module Path. The bootstrap injects the environment-variable path when set, imports the installed package, and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
-- **Fallback / classic mode**: if `cuda_link` cannot be imported or alias registration fails, the bootstrap falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+- **Library mode** (recommended): install `cuda_link` once with `install_td_library.cmd`. The bootstrap resolves the install through a layered lookup — an explicit `basefolder` argument, then `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, `/src`, or the folder itself), then `CUDALINK_LIB_PATH`, then whatever `sys.path` already provides (TD Preferences → Python 64-bit Module Path). Each root is probed as a venv (`venv/`, `.venv/`) or a `pip --target` folder; there is no per-COMP parameter to set. Only a candidate whose `__version__` equals the `MIRROR_VERSION` stamp written by `sync_td_wrapper.py` is imported; a mismatching install is skipped without being imported, and a different `cuda_link` that is already loaded in the process aborts resolution with a "restart TouchDesigner" message. On success all 15 mirror module names are registered as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if no layer resolves, the bootstrap records why in `last_error` and falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged); when they are, the fallback is silent. Only when none of the 15 mirrors are present as COMP siblings does the extension additionally print a cause-specific line to the Textport and tint the COMP's Status yellow. See ADR-0003 and ADR-0014 for rationale.
 
 ---
 
@@ -126,7 +126,7 @@ CUDAIPCExtension  (~300 LOC facade)
 
 ### Binary Layout (433 bytes for 3 slots)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │ HEADER (20 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
@@ -192,7 +192,7 @@ Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
 
 For `N` slots:
 
-```
+```text
 Total Size = 20 + (N × 128) + 1 + 20 + 8 bytes
 
 shutdown_offset = 20 + (N × 128)
@@ -216,7 +216,7 @@ A single-buffer approach would require producer and consumer to synchronize on e
 
 ### 3-Slot Pipeline Flow
 
-```
+```text
 Time →
 
 Frame 0:
@@ -312,7 +312,7 @@ relationship with any other stream, including the producer's default or compute 
 
 #### The Race — What Happens Without Ordering
 
-```
+```text
 Producer stream:   [kernel writes to src_buffer] ...
 IPC stream:                                        [D2D memcpy src→ring_slot]  ← reads before write!
 ```
@@ -449,7 +449,7 @@ When `CUDALINK_TORCH_GPU_WAIT=1`, the torch consumer path replaces the host-side
 `cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
 batches into a multi-hundred-microsecond stall.
 
-```
+```text
 Default (CUDALINK_TORCH_GPU_WAIT=0):
   cudaEventSynchronize(ipc_event[slot])              <- CPU blocks until GPU signal, ~50-200 us WDDM-batched
 
@@ -478,7 +478,7 @@ call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between 
 
 **Flow**:
 
-```
+```text
 Producer (after advancing write_idx):
   SetEvent(doorbell_handle)                      <- ~0.02-0.10 ms, cook-thread safe, no FPS dip
 
@@ -549,7 +549,7 @@ The frame is skipped, and `clear_status()` is called as soon as the upstream for
 
 **Producer** (~2-5µs IPC overhead, plus GPU D2D copy):
 
-```
+```text
 get TOP's cudaMemory() → src_ptr
 slot = write_idx % NUM_SLOTS
 cudaMemcpy D2D (src_ptr → gpu_buffer[slot])  ← GPU work, scales with frame size
@@ -560,7 +560,7 @@ shm.buf[12:16] = struct.pack("<I", write_idx) ← ~0.5µs
 
 **Consumer** (~1-3µs overhead):
 
-```
+```text
 write_idx = struct.unpack("<I", shm.buf[12:16])  ← ~0.5µs
 read_slot = (write_idx - 1) % NUM_SLOTS
 cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
@@ -689,7 +689,7 @@ RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. Full tables and per-resolu
 
 **Theoretical max FPS** (ignoring application logic; isolated export, EXPORT_SYNC=1):
 
-```
+```text
 FPS_max = 1 / export_frame_p50
         = 1 / 106 us   (1080p f32)  ~= 9,400 FPS
         = 1 / 357 us   (4K f32)     ~= 2,800 FPS
@@ -697,7 +697,7 @@ FPS_max = 1 / export_frame_p50
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
 
-```
+```text
 FPS_actual = min(TD_FPS, 1 / inference_time)
            = min(60, 1 / 0.016)
            = 60 FPS
@@ -705,7 +705,7 @@ FPS_actual = min(TD_FPS, 1 / inference_time)
 
 **Latency** (producer write -> consumer read, bench_sweep + bench_d2h_streams, 1080p f32):
 
-```
+```text
 Latency ~= IPC_notify + D2H_copy
         ~= 136 us + 1,320 us
         ~= 1.5 ms
@@ -860,6 +860,7 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
 - **ADR-0012** — Fold the native extension into the core wheel (supersedes ADR-0006's packaging conclusion)
 - **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
+- **ADR-0014** — Project-anchored install resolution: layered lookup (explicit folder → project folder → `CUDALINK_LIB_PATH` → `sys.path`), `MIRROR_VERSION` stamp checked before import, rival install refused (amends ADR-0003)
 
 ---
 
@@ -871,5 +872,5 @@ See `docs/adr/` for the full Architecture Decision Record index:
 
 ---
 
-**Last Updated**: 2026-08-11
-**Version**: 1.12.2
+**Last Updated**: 2026-09-26
+**Version**: 1.13.0

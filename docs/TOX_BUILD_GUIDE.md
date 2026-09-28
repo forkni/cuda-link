@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.12.2.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.13.0.tox` component in TouchDesigner.
 
-> **Historical release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.12.2`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each shipped build.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -40,8 +40,9 @@ CUDAIPCExporter (Base COMP)
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
 All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap
-no-ops (printing a fallback-mode notice to the Textport) — sibling import resolution works
-as before.
+no-ops — sibling import resolution works as before, silently: with all 15 mirrors present,
+the extension does not print a Textport notice or set the yellow status, since classic mode
+is working as intended.
 
 ```text
 CUDAIPCExporter (Base COMP)
@@ -136,14 +137,32 @@ them resolve automatically because all Text DATs in the same COMP share a module
 2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
-appear in the COMP editor). When set, it injects `CUDALINK_LIB_PATH` onto `sys.path`, then
-imports `cuda_link` from the paths already visible to TouchDesigner and registers `sys.modules`
-aliases. If `cuda_link` cannot be imported, it no-ops (printing a fallback-mode notice to the
-Textport — see below) and fallback mode takes effect automatically.
+appear in the COMP editor). It looks for an installed `cuda_link` in this order — an explicit
+folder argument (host integrations only), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`,
+`/src`, or the folder itself), `CUDALINK_LIB_PATH`, then the paths already visible to
+TouchDesigner — and imports the first candidate whose `__version__` matches the
+`MIRROR_VERSION` stamp at the top of the DAT (written by `scripts/sync_td_wrapper.py`; never
+edit it by hand). There is no per-COMP parameter to set: install `cuda_link` next to the
+`.toe` (a venv, or a `pip install --target` folder — see Step 3 Library mode above) and the
+project-folder layer finds it on its own. A mismatching install is skipped without being
+imported; a different `cuda_link` already loaded in the process stops resolution with a
+"Restart TouchDesigner" message. If nothing resolves, it no-ops (printing the reason to the
+Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
-> **Fallback mode**: `[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors.`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 1.13.0 from <folder>`
+>
+> **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
+> siblings does the extension additionally print a cause-specific line, e.g.
+> `[CUDAIPCExtension] cuda_link 1.13.0 not found - install it next to this .toe or set
+> CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
+> layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
+> CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
+> the component's 1.13.0`). The short line names the specific cause — not found, wrong
+> version, a rival install already loaded, or this extension's own glue import failing — and
+> the COMP's Status par mirrors that same short line; the full per-layer reason is
+> Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
+> back silently.
 
 #### 3b. TDHost Text DAT
 
@@ -180,12 +199,13 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 3. Confirm the import block reads:
 
    ```python
-   with contextlib.suppress(ImportError):
+   with contextlib.suppress(Exception):
        import CUDALinkBootstrap  # noqa: F401
    ```
 
-   The `contextlib.suppress` guard ensures the extension loads cleanly in classic mode
-   (no bootstrap DAT present).
+   The broad `contextlib.suppress` guard ensures the extension still loads when the
+   bootstrap DAT is absent or cannot resolve a library candidate; inspect the bootstrap's
+   Textport message and yellow status for the resolution reason.
 
 ---
 
@@ -306,7 +326,7 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```text
-CUDA IPC Exporter v1.12.2
+CUDA IPC Exporter v1.13.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
@@ -320,9 +340,17 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.12.2.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.13.0.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.12.2.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.13.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+
+**Release manifest**: `TOXES/RELEASES.tsv` records every shipped build — one row per `.tox`
+with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+saved from. To verify a download matches the manifest:
+
+```bash
+sha256sum TOXES/CUDAIPCLink_v1.13.0.tox   # compare with the sha256 column
+```
 
 ---
 
@@ -330,7 +358,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.12.2.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.13.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -416,6 +444,59 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 **Error**: `AttributeError: 'NoneType' object has no attribute 'ext'`
 
 **Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the extension class in the Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExtension`
+
+This error means the extension registration itself is missing. A missing or unresolved
+`cuda_link` library is handled differently:
+
+### cuda_link not ready
+
+**Symptom**: The extension accessor exists, but no frames are transferred, and — only when
+none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
+cause-specific line, e.g. `cuda_link 1.13.0 not found - install it next to this .toe or set
+CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
+mismatch, a rival install already loaded, or this extension's own glue import failing after
+a successful bootstrap.
+
+`CUDAIPCExtension` is designed to compile even when its `cuda_link` imports cannot be resolved.
+In that degraded state, `library_ready` is `False`, `initialize()`, `export_frame()`, and
+`import_frame()` return `False`, and the callback templates return without raising. This keeps
+an unavailable library from failing once per frame while TouchDesigner is starting up.
+
+The Status line is deliberately short — it only names the specific cause and, where relevant,
+where to install a fix. The full reason goes to the Textport instead, in two places, both
+printed on every COMP load regardless of whether the mirrors are present:
+
+- The `[CUDALinkBootstrap]` line: `Library mode active — cuda_link <ver> from <folder>` on
+  success, or `Library mode off — COMP uses its mirror Text DATs if present (reason in
+  CUDALinkBootstrap.last_error)` on failure. Check `CUDALinkBootstrap.last_error` in the
+  Textport for the full per-layer reason — a version that does not match the component's
+  `MIRROR_VERSION`, a folder with no `cuda_link` in it, a different `cuda_link` already loaded
+  (see 3a under [Step 3](#step-3-create-text-dats)).
+- Only when none of the 15 mirrors are present: a one-time `[CUDAIPCExtension]` line with the
+  same cause-specific short text followed by the full detail, printed once per TD process
+  across all sibling COMPs (not once per COMP, and not suppressed across a later relaunch).
+  When the mirrors ARE present, this second line never prints — classic mode falls back
+  silently.
+
+Then check the state of the registered extension in the Textport:
+
+```python
+ext = op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
+print(ext.library_ready)
+```
+
+If it prints `False`:
+
+1. In **Library mode**, verify that an installed `cuda_link` whose `__version__` matches the
+   component sits in one of the places the resolver probes, in order: `<project.folder>`
+   (`/cuda_link`, `/StreamDiffusion`, `/src`, or the folder itself), `CUDALINK_LIB_PATH`, then
+   TouchDesigner's Python Module Path (see 3a under [Step 3](#step-3-create-text-dats) and
+   ADR-0014). There is no per-COMP parameter to set — put the install next to the `.toe` (a
+   venv, or a `pip install --target` folder), or point `CUDALINK_LIB_PATH` at it.
+2. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
+   the mirror DAT sections under [Step 3](#step-3-create-text-dats).
+
+After the component compiles with the library available, `ext.library_ready` should be `True`.
 
 ### CUDA runtime DLL not found
 
@@ -522,7 +603,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.12.2.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.13.0.tox` | `TOXES/` | Final built .tox component |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for each shipped `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -537,5 +619,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.12.2
+**Component Version**: 1.13.0
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)

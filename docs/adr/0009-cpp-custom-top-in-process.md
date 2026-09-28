@@ -9,8 +9,8 @@ Custom Operator DLLs; see PLAN-001).
 
 ## Context
 
-[ADR-0007](0007-spout-as-launcher-not-transport.md) rejected loading a native
-`.pyd` inside TD's embedded Python for the Spout bridge on **GPU-state blast-radius**
+ADR-0007 (Spout as launcher, not transport; lives on the `feat/spout-bridge` branch)
+rejected loading a native `.pyd` inside TD's embedded Python for the Spout bridge on **GPU-state blast-radius**
 grounds: a native module owning a D3D11 device + CUDA contexts inside TD has no
 recovery path short of restarting TD, while a sidecar contains failure to one console
 window.

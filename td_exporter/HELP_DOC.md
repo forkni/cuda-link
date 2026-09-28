@@ -38,7 +38,7 @@ Per-frame *coordination* overhead (GPU event record + `write_idx` update) is typ
 
 The component maintains **N independent GPU buffer slots** (N = `Numslots`, default 3). The producer writes into the current slot while the consumer simultaneously reads from the previous slot. This pipeline prevents either side from ever waiting on the other:
 
-```
+```text
 Frame 0:  Producer → Slot 0   Consumer idle
 Frame 1:  Producer → Slot 1   Consumer ← Slot 0
 Frame 2:  Producer → Slot 2   Consumer ← Slot 1
@@ -174,7 +174,7 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
 
   **Per-frame `EXPORT_PROFILE` breakdown** (every 97 frames, only when `CUDALINK_EXPORT_PROFILE=1` is also set):
 
-  ```
+  ```text
   Frame 97 [PROFILE] memcpy=52.3us record=3.1us sync=41.8us sticky=1.2us flush_probe=0.0us shm=2.4us unacc=4.6us total=105.4us
   ```
 
@@ -189,7 +189,7 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
 
   **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
 
-  ```
+  ```text
   [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
   ```
 
@@ -201,7 +201,7 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
 - **On:** every 150 frames (configurable via `CUDALINK_RECEIVER_REPORT_EVERY` env var), prints a
   per-frame summary line:
 
-  ```
+  ```text
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
 
@@ -240,7 +240,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -261,8 +261,13 @@ local `dist/` wheel if you built one). The native wheel ships a compiled extensi
 
 **Library mode (fewer Text DATs in the .tox):** run `install_td_library.cmd` once to install
 `cuda_link` into a Python environment that TouchDesigner can see. The `CUDALinkBootstrap` DAT
-inside the component will then load the package automatically — no `CUDALINK_LIB_PATH` setup
-required when using TD Preferences mode (mode 4). Run `python scripts/install_td_library.py --help`
+inside the component will then load the package automatically — no per-COMP parameter to set,
+and no `CUDALINK_LIB_PATH` setup required when using TD Preferences mode (mode 4) or a venv
+kept next to the `.toe` (mode 2). With more than one cuda-link install on the machine, set
+`CUDALINK_LIB_PATH` to the venv or folder this project should use; only an install whose
+version matches the component is loaded. If none does, the COMP falls back to its mirror Text
+DATs; only when none of those mirrors are present does the status turn yellow with a
+cause-specific short line (full reason in the Textport). Run `python scripts/install_td_library.py --help`
 to see all five install modes. **Mode 5 (TD's own Python) is deprecated** — prefer mode 2
 (dedicated venv) or mode 4 (system/parallel Python).
 
@@ -332,21 +337,21 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 ## Troubleshooting
 
-**Receiver stays in "waiting for sender" state**
+### Receiver stays in "waiting for sender" state
 
 - Confirm the sender is running and `Active` is On before starting the receiver.
 - Verify `Ipcmemname` is identical on both sides (case-sensitive).
 - Check the Textport for retry messages — the receiver uses exponential backoff up to ~2 seconds between attempts.
 
-**"Stale SharedMemory" or version mismatch logged**
+### "Stale SharedMemory" or version mismatch logged
 
 - The sender was restarted while the receiver is still holding old IPC handles. Toggle the receiver's `Active` Off → On to force reconnection.
 
-**"Protocol magic mismatch" error**
+### "Protocol magic mismatch" error
 
 - Another process is using the same `Ipcmemname` for a different purpose. Change `Ipcmemname` to a unique value.
 
-**GPU memory not freed after deactivation**
+### GPU memory not freed after deactivation
 
 - `cudaFree` of ring buffer slots is deferred briefly after cleanup (a 100 ms grace period) to allow the consumer to finish its current frame. This is normal behavior.
 
@@ -367,7 +372,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
   set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v1.12.2.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v1.13.0.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 

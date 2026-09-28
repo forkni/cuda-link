@@ -17,6 +17,8 @@ TDReceiverEngine.  Mode switches create a fresh engine instance — zero state l
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,7 +27,9 @@ if TYPE_CHECKING:
     from _td_builtins import CUDAMemoryShape, op, run, ui  # noqa: F401
 
 CUDALinkBootstrap = None  # type: ignore[assignment]  -- fallback if the sibling DAT is absent
-with contextlib.suppress(ImportError):
+# Any failure inside the bootstrap (absent DAT, or a bug it did not catch itself) must
+# degrade to mirror mode, never stop this module from compiling -- see the note below.
+with contextlib.suppress(Exception):
     import CUDALinkBootstrap  # noqa: F401  -- registers sys.modules aliases when present
 
 try:
@@ -88,6 +92,46 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
         pass
 
 
+def _bootstrap_active() -> bool:
+    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
+    return bool(getattr(CUDALinkBootstrap, "_active", False))
+
+
+def _foreign_alias_error(shm_module: object) -> str:
+    """ "" unless ``shm_module`` (the ``SHMProtocol`` bare-name alias) is a real cuda_link
+    submodule -- i.e. it has a ``__file__`` under a ``cuda_link`` package directory.
+
+    The bare names (SHMProtocol, TDConfig, ...) are process-wide sys.modules aliases (see
+    CUDALinkBootstrap._activate).  Mirror-DAT modules (classic mode) have no ``__file__``,
+    so this is always "" for them.  Callers only need this check when THIS COMP's own
+    bootstrap did NOT activate -- rival, mismatch, missing, or broken -- because that is
+    the only situation where a non-empty result means the alias belongs to a DIFFERENT
+    COMP's cuda_link install rather than this COMP's own successful resolution.
+    """
+    shm_file = getattr(shm_module, "__file__", "") or ""
+    if not shm_file:
+        return ""
+    # Split on both separators: a Windows install path must be recognised even when
+    # this code runs under a POSIX interpreter (CI), where "\\" is not a separator.
+    if "cuda_link" not in os.path.normcase(shm_file).replace("\\", "/").split("/"):
+        return ""
+    return (
+        f"SHMProtocol resolved to {shm_file}, a cuda_link install aliased by a "
+        "different COMP in this TD process; this COMP's own bootstrap did not "
+        "activate. Restart TouchDesigner to re-resolve consistently."
+    )
+
+
+# If THIS COMP's own bootstrap did not activate but a DIFFERENT COMP already aliased some
+# other cuda_link install in this process, the import above still "succeeds": it silently
+# binds to that other install's protocol code instead of failing.  A real engine built on
+# it would then run wrong-version SHM framing.  Detect that case and force degraded mode.
+if LIBRARY_READY and not _bootstrap_active():
+    _rival_error = _foreign_alias_error(sys.modules.get("SHMProtocol"))
+    if _rival_error:
+        LIBRARY_READY = False
+        LIBRARY_ERROR = _rival_error
+
 # TDHost is stdlib-only (no bare-name cuda_link imports) -- always importable, so
 # RealTDHost.set_warning_status() is available even in degraded mode.
 from TDHost import RealTDHost, TDHost  # noqa: E402
@@ -111,17 +155,23 @@ cp = None
 # Session-level dedup guard: track which COMP paths have already shown the install banner.
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
 _banner_shown_for_comps: set[str] = set()
-_notice_printed: bool = False  # fallback dedup when COMP storage is unavailable
-_NOTICE_STORE_KEY = "cuda_link_notice_shown"
-
-
-def _bootstrap_active() -> bool:
-    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
-    return bool(getattr(CUDALinkBootstrap, "_active", False))
 
 
 def _bootstrap_error() -> str:
     return str(getattr(CUDALinkBootstrap, "last_error", "") or "")
+
+
+def _mirror_version() -> str:
+    """The version CUDALinkBootstrap requires an install to match.  Never raises (the
+    sibling DAT may be absent)."""
+    return str(getattr(CUDALinkBootstrap, "MIRROR_VERSION", "") or "")
+
+
+def _bootstrap_failure_kind() -> str:
+    """The specific reason CUDALinkBootstrap gave up: "missing", "mismatch", "rival",
+    "broken" (a matching-version install was found but raised on import), or "" (active,
+    or an older/absent bootstrap that does not track this).  Never raises."""
+    return str(getattr(CUDALinkBootstrap, "failure_kind", "") or "")
 
 
 class _NullEngine:
@@ -277,51 +327,73 @@ class CUDAIPCExtension:
                     return True
         return False
 
-    def _claim_notice_once(self) -> bool:
-        """True only for the first caller across all four sibling COMPs.
+    def _claim_notice_once(self, reason: tuple[str, str]) -> bool:
+        """True only for the first caller reporting this exact reason, once per TD process.
 
-        Module globals cannot dedup: TD compiles a separate module object per Text DAT,
-        so each shmem COMP has its own copy of this file's globals.  COMP storage is
-        real shared state in the TD process, so the flag lives on the owning tox
-        (parent of the shmem COMP), falling back to op.TDResources.
+        Module globals cannot dedup: TD compiles a separate module object per Text DAT, so
+        each shmem COMP has its own copy of this file's globals.  ``sys`` is the same
+        singleton object across the whole process regardless of how many module objects
+        import it, so a plain attribute on it is real shared state -- with no need for COMP
+        storage, which pickles into the saved .toe and would suppress the notice forever
+        for a later TD process (a fresh launch of the same .toe) that never printed it.
+
+        Deduped on ``reason`` (the ``(short, detail)`` message pair) rather than the
+        process id: a PID-keyed sentinel suppresses every later call in this process even
+        when a *second* sibling COMP has a genuinely different failure reason to report.
         """
-        global _notice_printed
-        holder = None
-        with contextlib.suppress(AttributeError, RuntimeError, NameError):
-            holder = self.ownerComp.parent()
-        if holder is None:
-            with contextlib.suppress(AttributeError, RuntimeError, NameError):
-                holder = op.TDResources  # noqa: F821
-        if holder is None:  # non-TD context (tests)
-            if _notice_printed:
-                return False
-            _notice_printed = True
-            return True
-        try:
-            if holder.fetch(_NOTICE_STORE_KEY, False, storeDefault=False):
-                return False
-            holder.store(_NOTICE_STORE_KEY, True)
-        except (AttributeError, RuntimeError, TypeError):
-            return True
+        seen = getattr(sys, "_cudalink_notices", None)
+        if seen is None:
+            seen = set()
+            sys._cudalink_notices = seen
+        if reason in seen:
+            return False
+        seen.add(reason)
         return True
 
     def _notify_library_unavailable(self) -> None:
         """Non-modal 'cuda_link not ready' notice.
 
-        Under the Base Folder contract this state is NORMAL on every cold project load
-        until Startstream, so it must never stall the main thread.  Per-COMP feedback is
-        the yellow tint + Status par + warning_emitter badge; the textport line and the
-        status bar fire once per tox.
+        This state is NORMAL on every cold project load until a matching install is
+        resolved, so it must never stall the main thread.  The short Status line names
+        the specific reason CUDALinkBootstrap gave up (not found, wrong version, a rival
+        already loaded, or -- when bootstrap succeeded but this extension's own glue
+        import still failed -- an import bug) so it is never just "not found" when
+        something else actually went wrong; the full reason -- every layer it tried and
+        why -- goes to the Textport only, where it fits.  Per-COMP feedback is the yellow
+        tint + Status par + warning_emitter badge; the textport line and the status bar
+        fire once per process across all sibling COMPs.
         """
-        detail = LIBRARY_ERROR or _bootstrap_error() or "Base Folder not set"
-        short = "cuda_link not ready - set the StreamDiffusionTD Base Folder, then start the stream."
+        ver = _mirror_version()
+        version_clause = f"cuda_link {ver}" if ver else "cuda_link"
+        kind = _bootstrap_failure_kind()
+        if _bootstrap_active() and not LIBRARY_READY:
+            short = f"{version_clause} loaded but the component failed to import it (see Textport)"
+        elif kind == "broken":
+            short = f"{version_clause} found but failed to import (see Textport)"
+        elif kind == "mismatch":
+            short = (
+                f"found but not version {ver or '?'} - install a matching cuda_link next to this .toe, then restart TD"
+            )
+        elif kind == "rival":
+            short = "another cuda_link is already loaded - restart TD"
+        else:
+            short = (
+                f"{version_clause} not found - install it next to this .toe or set CUDALINK_LIB_PATH, then restart TD"
+            )
+
+        bootstrap_detail = _bootstrap_error()
+        extension_detail = LIBRARY_ERROR
+        detail = bootstrap_detail or extension_detail or "cuda_link unavailable"
 
         with contextlib.suppress(AttributeError, RuntimeError):
             self._host.set_warning_status(short)
 
-        if not self._claim_notice_once():
+        if not self._claim_notice_once((short, detail)):
             return
-        print(f"[CUDAIPCExtension] {short} ({detail})")
+        print(f"[CUDAIPCExtension] {short}")
+        print(detail)
+        if extension_detail and extension_detail != detail:
+            print(extension_detail)
         with contextlib.suppress(NameError, AttributeError, RuntimeError):
             ui.status = short  # noqa: F821  -- non-blocking status bar
 

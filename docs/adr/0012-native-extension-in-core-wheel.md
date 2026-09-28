@@ -29,7 +29,8 @@ Two things changed since:
 
 2. **The roadmap now requires more native code, deliberately.** Future development
    includes C++ native TouchDesigner operators and a Spout bridge (see
-   [ADR-0007](0007-spout-as-launcher-not-transport.md) and
+   ADR-0007 (Spout as launcher, not transport; lives on the `feat/spout-bridge` branch)
+   and
    [ADR-0009](0009-cpp-custom-top-in-process.md) for the in-process-native precedent this
    already set on the producer side) — the project can no longer stay pure Python without
    sacrificing that work. This is a conscious decision to supersede ADR-0006's framing:
