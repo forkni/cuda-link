@@ -72,7 +72,7 @@ earlier revisions of `.gitattributes` carried a `merge=ours` rule for each of te
 paths, but none of those ten paths ever existed anywhere in this repository's history,
 plus an inert `merge=diff3` block (`diff3` is a *conflict display style*, not a merge
 driver — it's registered per-invocation via `-c merge.conflictStyle=...` in
-[`scripts/git/merge_with_validation.sh`](../scripts/git/merge_with_validation.sh), not
+`scripts/git/merge_with_validation.sh` (local-only, gitignored), not
 through `.gitattributes`). Both were removed as dead weight; see the `[Unreleased]`
 section of [`CHANGELOG.md`](../CHANGELOG.md) for this cleanup.
 

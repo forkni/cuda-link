@@ -1763,13 +1763,9 @@ already handled — no code change needed.
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2
-[1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
-[1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
+[1.4.1]: https://github.com/forkni/cuda-link/releases/tag/v1.4.1
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
-[1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
+[1.0.1]: https://github.com/forkni/cuda-link/releases/tag/v1.0.1
 
 ## [1.0.0] — 2026-05-02
 
@@ -1891,5 +1887,3 @@ already handled — no code change needed.
 - Explanatory comment at `src/cuda_link/cuda_ipc_importer.py` documenting the `getattr`
   fallback pattern in `cleanup()` for `__del__`-time partial-init safety.
 - `docs/OPT_1_implementation_PLAN.md` moved to local-only (untracked).
-
-[0.8.0]: https://github.com/forkni/cuda-link/compare/v0.7.3...v0.8.0
