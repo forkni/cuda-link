@@ -19,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -112,7 +111,9 @@ def _foreign_alias_error(shm_module: object) -> str:
     shm_file = getattr(shm_module, "__file__", "") or ""
     if not shm_file:
         return ""
-    if "cuda_link" not in Path(os.path.normcase(shm_file)).parts:
+    # Split on both separators: a Windows install path must be recognised even when
+    # this code runs under a POSIX interpreter (CI), where "\\" is not a separator.
+    if "cuda_link" not in os.path.normcase(shm_file).replace("\\", "/").split("/"):
         return ""
     return (
         f"SHMProtocol resolved to {shm_file}, a cuda_link install aliased by a "
