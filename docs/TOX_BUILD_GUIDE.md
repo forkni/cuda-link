@@ -2,7 +2,7 @@
 
 Step-by-step instructions for building the `CUDAIPCLink_v1.13.0.tox` component in TouchDesigner.
 
-> **Historical release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.12.2`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each shipped build.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
