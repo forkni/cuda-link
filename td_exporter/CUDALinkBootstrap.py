@@ -17,28 +17,37 @@ being imported.  A cuda_link that is already loaded from somewhere else, an impo
 that redirects the name elsewhere, or a sibling mirror Text DAT imported ahead of this
 module all abort resolution outright instead of silently mixing two copies:
   (a) an explicitly supplied folder             _bootstrap(basefolder=...)
-  (b) the ``Libpath`` custom parameter           on this COMP or any ancestor
-  (c) <project.folder>/cuda_link, /StreamDiffusion, then <project.folder> itself
-  (d) CUDALINK_LIB_PATH                          (ADR-0003 compatibility)
-  (e) whatever sys.path already provides         (TD Preferences module path, pip)
+  (b) <project.folder>/cuda_link, /StreamDiffusion, /src, then <project.folder> itself
+  (c) CUDALINK_LIB_PATH                          (ADR-0003 compatibility)
+  (d) whatever sys.path already provides         (TD Preferences module path, pip)
 Each root is probed as <root>/venv/Lib/site-packages, <root>/.venv/Lib/site-packages,
 <root>/Lib/site-packages (the root is itself a venv) and <root> itself (a
-``pip install --target`` folder).
+``pip install --target`` folder). For the two manually supplied roots -- (a) and (c) --
+a root whose basename is itself ``cuda_link`` is also probed one level up, so pointing
+CUDALINK_LIB_PATH at the package folder (rather than its parent) still resolves; the
+synthetic (b) roots are exempt; forgiving ``<project.folder>/cuda_link`` the same way
+would make it swallow <project.folder> itself, the fallback root tried after
+/StreamDiffusion and /src.
 
 Two deployment modes
 ---------------------
 Library mode (this module's purpose):
     Install cuda_link once (install_td_library.cmd, or
-    ``pip install --target <folder> dist/cuda_link-<ver>-py3-none-any.whl``) and point
-    the COMP's ``Libpath`` parameter -- or CUDALINK_LIB_PATH -- at that folder.  The
+    ``pip install --target <folder> dist/cuda_link-<ver>-py3-none-any.whl``) next to the
+    .toe, into a venv the project layer probes, or into a Python already on TD's
+    sys.path -- see the layer list above; there is no per-COMP parameter to set.  The
     resolved package is imported and all 15 mirror module names are registered in
     sys.modules as aliases to its submodules.  The 15 mirror Text DATs (Env,
     SHMProtocol, Exporter, …) can then be removed from the COMP.
 
 Fallback / classic mode:
-    If no layer resolves, this module no-ops, records why in ``last_error`` (the
-    extension surfaces it as a yellow status), and all 15 mirror Text DATs must be
-    present in the COMP as before (the original "paste all DATs" deployment story).
+    If no layer resolves, this module no-ops and records why in ``last_error``. The COMP
+    then falls back to its mirror Text DATs. When none of those mirrors are present as COMP
+    siblings, the extension additionally shows a short, actionable line as the COMP's status
+    and prints the full ``last_error`` to the Textport, since that shape means library mode
+    failed AND classic mode has nothing to fall back to. When the mirrors ARE present (the
+    original "paste all DATs" deployment story), the fallback is silent -- no yellow tint,
+    no Status line -- because classic mode is working as intended.
 
 Drift guards:
     tests/td/test_td_bootstrap.py verifies that _ALIAS_MAP keys and values stay in sync
@@ -56,11 +65,12 @@ import os
 import re
 import sys
 from collections.abc import Iterator
+from typing import Any
 
 # Stamped by scripts/sync_td_wrapper.py from src/cuda_link/__init__.py::__version__.
 # The bootstrap only activates an install whose __version__ equals this value, so the
 # mirrors shipped inside the .tox and the package they alias can never drift apart.
-MIRROR_VERSION = "1.12.2"
+MIRROR_VERSION = "1.13.0"
 
 logger = logging.getLogger("cuda_link.td.bootstrap")
 
@@ -98,6 +108,12 @@ _ALIAS_MAP: dict[str, str] = {
 last_error = ""
 resolved_site_packages = ""  # diagnostics: which folder won
 _active = False
+# Specific reason the last _bootstrap() call gave up, so the extension can show a
+# cause-specific Status line instead of always saying "not found": "missing" (no
+# candidate anywhere), "mismatch" (a candidate exists but its version doesn't match),
+# "rival" (a different cuda_link is already loaded), "broken" (a matching-version
+# candidate was found but raised while importing/activating), or "" (active).
+failure_kind = ""
 
 _VERSION_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE)
 
@@ -136,13 +152,40 @@ def _within(child: object, parent: object) -> bool:
     return child_n == parent_n or child_n.startswith(parent_n + os.sep)
 
 
+def _td_name(name: str) -> Any:
+    """Look up a TD-injected name (``me``, ``project``, ``tdu``, ...) that this DAT module
+    may not have in its own globals.
+
+    TD binds ``me``/``op``/``parent`` directly into a DAT module's ``globals()``, but binds
+    ``project``/``tdu``/``td`` **only** into that module's private ``__builtins__`` dict --
+    ``globals().get("project")`` always returns None in real TD, even though the name is
+    reachable and working from ordinary code in the same module (Python resolves free
+    variables through ``__builtins__`` as a last step). Check globals() first so a test
+    fixture that does ``monkeypatch.setattr(bootstrap, name, ...)`` (i.e. writes straight
+    into module globals) still works unchanged.
+
+    Returns ``Any``, not ``object | None``: these are TD's own COMP/DAT/project objects
+    (or None), the same "no stub, treat as Any" idiom this repo already applies to ``td.*``
+    itself (see the ``replace-imports-with-any`` note in pyproject.toml) -- a precise
+    ``object | None`` return would make every ``.expandPath``/``.parent()`` call site a
+    pyrefly ``missing-attribute`` error for an attribute that demonstrably exists at runtime.
+    """
+    value = globals().get(name)
+    if value is not None:
+        return value
+    scope = globals().get("__builtins__")
+    if isinstance(scope, dict):
+        return scope.get(name)
+    return getattr(scope, name, None)
+
+
 def _expand(path: object) -> str:
     text = str(path or "").strip()
     if not text:
         return ""
-    expander = globals().get("tdu")  # TD-only: expands $VAR and project-relative paths
+    expander = _td_name("tdu")  # TD-only: expands $VAR and project-relative paths
     if expander is not None:
-        with contextlib.suppress(AttributeError, TypeError, ValueError):
+        with contextlib.suppress(Exception):  # a broken tdu must not crash the bootstrap
             text = expander.expandPath(text)
     return os.path.expandvars(text)
 
@@ -167,26 +210,15 @@ def _read_version(site_packages: str) -> str:
 # --------------------------------------------------------------------------- layers
 
 
-def _libpath_parameter() -> str:
-    """``Libpath`` custom parameter on the owning COMP or any ancestor (TD only)."""
-    dat = globals().get("me")
-    component = dat.parent() if dat is not None else None
-    while component is not None:
-        parameter = getattr(component.par, "Libpath", None)
-        if parameter is not None:
-            return str(parameter.eval()).strip()
-        component = component.parent()
-    return ""
-
-
 def _project_roots() -> Iterator[str]:
     """Folders next to the .toe that conventionally hold a per-project install."""
-    proj = globals().get("project")
+    proj = _td_name("project")
     folder = str(getattr(proj, "folder", "") or "") if proj is not None else ""
     if not folder:
         return
     yield os.path.join(folder, "cuda_link")
     yield os.path.join(folder, "StreamDiffusion")  # StreamDiffusionTD's venv lives here
+    yield os.path.join(folder, "src")  # a repo checkout's src-layout package
     yield folder
 
 
@@ -206,33 +238,56 @@ def _sys_path_root() -> str:
     return os.path.dirname(os.path.dirname(origin))
 
 
-def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool]]:
-    """(label, root, inject-on-sys.path) -- lazy, so later layers (operator walk,
-    find_spec) never run once an earlier layer has already resolved."""
-    yield "folder argument", basefolder or "", True
-    yield "Libpath parameter", _libpath_parameter(), True
+def _layers(basefolder: str | None) -> Iterator[tuple[str, str, bool, bool]]:
+    """(label, root, inject-on-sys.path, forgive-package-dir) -- lazy, so later layers
+    (project-root walk, find_spec) never run once an earlier layer has already resolved.
+
+    ``forgive-package-dir`` is only set for the two layers a human can mistype: the
+    ``basefolder`` argument and ``CUDALINK_LIB_PATH``. The synthetic project-folder roots
+    already include a root named literally ``cuda_link`` (``<project>/cuda_link``); forgiving
+    that one too would make it swallow its parent -- ``<project>`` itself, the fallback root
+    tried after it -- whenever a project keeps its install directly in the project folder,
+    which defeats the roots' own preference order.
+    """
+    yield "folder argument", basefolder or "", True, True
     for root in _project_roots():
-        yield "project folder", root, True
-    yield "CUDALINK_LIB_PATH", _env_libpath(), True
-    yield "sys.path", _sys_path_root(), False
+        yield "project folder", root, True, False
+    yield "CUDALINK_LIB_PATH", _env_libpath(), True, True
+    yield "sys.path", _sys_path_root(), False, False
 
 
-def _site_package_candidates(root: str) -> list[str]:
+def _site_package_candidates(root: str, *, forgive_package_dir: bool = False) -> list[str]:
     """A project holding a venv, a venv root, and a pre-resolved site-packages / --target dir.
 
     Only the Windows venv layout (``Lib/site-packages``) is probed: cuda-link's CUDA IPC
     transport targets TouchDesigner on Windows, so the POSIX ``lib/pythonX.Y/site-packages``
     layout never holds an install for this COMP.
+
+    When *forgive_package_dir* is set and *root* itself is named ``cuda_link`` -- the package
+    folder, not its parent -- the parent is probed too. There is no per-COMP parameter to catch
+    this mistake anymore, so a manually supplied root (``CUDALINK_LIB_PATH`` or the
+    ``basefolder`` argument) pointing one level too deep still resolves rather than silently
+    failing.
     """
     expanded = _expand(root)
     if not expanded:
         return []
-    return [
+    candidates = [
         os.path.join(expanded, "venv", "Lib", "site-packages"),
         os.path.join(expanded, ".venv", "Lib", "site-packages"),
         os.path.join(expanded, "Lib", "site-packages"),
         expanded,
     ]
+    normalized = os.path.normpath(expanded)
+    if forgive_package_dir and os.path.normcase(os.path.basename(normalized)) == "cuda_link":
+        parent = os.path.dirname(normalized)
+        # Skip a bare relative name's empty parent ("cuda_link" -> "") and a drive root
+        # ("C:\cuda_link" -> "C:\", whose own dirname is itself) -- neither is a real
+        # parent folder to probe, and the drive root would otherwise get injected onto
+        # sys.path wholesale.
+        if parent and parent != os.path.dirname(parent):
+            candidates.append(parent)
+    return candidates
 
 
 def _has_package(site_packages: str) -> bool:
@@ -260,8 +315,8 @@ def _check_origin(module: object, package_dir: str, *, fresh: bool = False) -> o
         raise _RivalInstallError(
             f"importing cuda_link resolved to {origin} instead of the selected installation "
             f"{package_dir}; an import hook ahead of sys.path (for example an editable "
-            f"'pip install -e' of cuda-link) is redirecting it. Remove that install or point "
-            f"the component at it."
+            f"'pip install -e' of cuda-link) is redirecting it. Remove that install "
+            f"(`pip uninstall cuda-link` in that environment) and restart TouchDesigner."
         )
     raise _RivalInstallError(
         f"CUDA-Link is already loaded from {origin}; the selected installation is "
@@ -297,7 +352,7 @@ def _check_alias_owner(name: str, module: object, package_dir: str) -> None:
 
 def _activate(site_packages: str, *, inject: bool = True) -> bool:
     """Import cuda_link from *site_packages* and register the bare-name aliases."""
-    global last_error, _active, resolved_site_packages
+    global last_error, _active, resolved_site_packages, failure_kind
     package_dir = os.path.join(site_packages, "cuda_link")
     before = set(sys.modules)
 
@@ -332,40 +387,114 @@ def _activate(site_packages: str, *, inject: bool = True) -> bool:
                 del sys.modules[key]
         raise
 
+    if inject:
+        # Submodules already resolve through cuda_link.__path__, set at import time, so
+        # the injected root no longer needs sys.path[0] for the rest of the process --
+        # leaving it there would shadow every other same-named top-level module TD has.
+        # Put it back where it was (or at the tail, if it is new) instead.
+        if site_packages in sys.path:
+            sys.path.remove(site_packages)
+        if previous_index is not None:
+            sys.path.insert(previous_index, site_packages)
+        else:
+            sys.path.append(site_packages)
+
     last_error = ""
     resolved_site_packages = site_packages
     _active = True
+    failure_kind = ""
     return True
 
 
-def _fail(message: str) -> bool:
+def _fail(message: str, *, kind: str = "") -> bool:
     """Record why library mode is off; the COMP then stays on its mirror Text DATs."""
-    global last_error, _active, resolved_site_packages
+    global last_error, _active, resolved_site_packages, failure_kind
     last_error = message
     resolved_site_packages = ""
     _active = False
+    failure_kind = kind
     return False
+
+
+def _native_note() -> str:
+    """ "" unless *resolved_site_packages* is a bare ``src`` checkout with no compiled
+    native wait backend -- see ADR-0014 and ``cuda_link._native_loader.load_native_backend``.
+
+    A ``src``-layout repo checkout never has a built ``_native_waiter*.pyd`` (it is
+    gitignored), so cuda_link silently falls back to the pure-Python wait path. That is a
+    legitimate, working configuration -- not an error, and ``_project_roots()`` deliberately
+    keeps preferring ``src`` over a bare project-folder install (see the layer-order test
+    pinning it) -- but the latency difference is real, so it gets one visible note instead
+    of a fully silent fallback. A built install in ``<project>/.venv`` would provide the
+    native backend instead.
+    """
+    if not resolved_site_packages:
+        return ""
+    normalized = os.path.normpath(resolved_site_packages)
+    if os.path.normcase(os.path.basename(normalized)) != "src":
+        return ""
+    package_dir = os.path.join(normalized, "cuda_link")
+    try:
+        entries = os.listdir(package_dir)
+    except OSError:
+        return ""
+    if any(name.startswith("_native_waiter") and name.endswith(".pyd") for name in entries):
+        return ""
+    return (
+        "[CUDALinkBootstrap] note: this is a source checkout (src/) with no compiled "
+        "_native_waiter -- using the pure-Python wait path. A built install in "
+        "<project>/.venv would provide the native backend."
+    )
 
 
 def _bootstrap(basefolder: str | None = None) -> bool:
     """Resolve, version-check, import and alias cuda_link.  Returns True on success.
 
     On failure ``last_error`` names every layer that was tried and why it was skipped;
-    the extension shows it as a yellow status and the COMP falls back to its mirrors.
+    the extension prints it to the Textport and the COMP falls back to its mirrors.
     """
     notes: list[str] = []
 
-    for label, root, inject in _layers(basefolder):
+    # A matching-version cuda_link already loaded from elsewhere in this process (another
+    # COMP's bootstrap run, or a second open project) is reused outright, before any layer
+    # is walked. Restarting TouchDesigner could never "fix" the rival error the layer walk
+    # would otherwise raise here: both COMPs would just resolve to the same already-loaded
+    # copy again on the next load. A version mismatch still falls through to the layer walk,
+    # which raises the ordinary rival hard stop -- reusing a *wrong*-version copy would let
+    # two different-version copies of the ctypes/protocol code coexist in one process.
+    saw_broken = False
+    loaded = sys.modules.get("cuda_link")
+    if loaded is not None:
+        origin_dir = _package_dir(loaded)
+        if origin_dir:
+            already_at = os.path.dirname(origin_dir)
+            # Compare the loaded module's own __version__, not a fresh disk read of
+            # already_at's __init__.py: the two can differ (the file on disk was edited
+            # or replaced after this process imported it), and it is the loaded copy --
+            # the one every alias actually points at -- whose version matters here.
+            if getattr(loaded, "__version__", "") == MIRROR_VERSION:
+                try:
+                    return _activate(already_at, inject=False)
+                except _RivalInstallError as error:
+                    logger.warning("%s", error)
+                    return _fail(str(error), kind="rival")
+                except Exception as error:
+                    notes.append(f"already-loaded cuda_link: {type(error).__name__}: {error}")
+                    saw_broken = True
+
+    saw_mismatch = False
+    for label, root, inject, forgive in _layers(basefolder):
         if not str(root).strip():
             notes.append(f"{label}: not set")  # quiet deferral, not a warning
             continue
-        candidates = [p for p in _site_package_candidates(root) if _has_package(p)]
+        candidates = [p for p in _site_package_candidates(root, forgive_package_dir=forgive) if _has_package(p)]
         if not candidates:
             notes.append(f"{label}: no cuda_link under {_expand(root)}")
             continue
         for site_packages in candidates:
             found = _read_version(site_packages)
             if found != MIRROR_VERSION:
+                saw_mismatch = True
                 notes.append(
                     f"{label}: cuda_link {found or '?'} under {site_packages} "
                     f"does not match the component's {MIRROR_VERSION}"
@@ -375,22 +504,45 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                 return _activate(site_packages, inject=inject)
             except _RivalInstallError as error:
                 logger.warning("%s", error)
-                return _fail(str(error))  # hard stop: no later layer can unload a module
+                return _fail(str(error), kind="rival")  # hard stop: no later layer can unload a module
             except Exception as error:
                 # Anything the candidate raised while importing (ImportError, but also a
                 # SyntaxError in a half-copied install or an AttributeError from a
-                # dependency) means "not this one"; _activate has already rolled back.
-                # This runs at Text DAT load time, so an escaping exception would leave
-                # ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
+                # dependency) means a matching-version install was found but is broken,
+                # not merely absent; _activate has already rolled back. This runs at Text
+                # DAT load time, so an escaping exception would leave ext.CUDAIPCExtension
+                # undefined instead of falling back to the mirrors.
                 notes.append(f"{label}: {type(error).__name__}: {error}")
+                saw_broken = True
 
-    return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes))
+    # Precedence: a broken matching-version install outranks a version mismatch, which
+    # outranks "nothing found" -- the most actionable diagnosis wins.
+    if saw_broken:
+        kind = "broken"
+    elif saw_mismatch:
+        kind = "mismatch"
+    else:
+        kind = "missing"
+    return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes), kind=kind)
 
 
-# Run at Text DAT load time.
-_bootstrap()
+# Run at Text DAT load time. This runs at import time inside TD, so an escaping exception
+# would leave ext.CUDAIPCExtension undefined instead of falling back to the mirrors.
+try:
+    _bootstrap()
+except Exception as _bootstrap_error:  # noqa: BLE001 -- last resort, see comment above
+    # _bootstrap() itself only escapes here on a bug in the resolver, not a candidate's
+    # own import failure (those are caught inside the layer walk) -- but from the caller's
+    # perspective this is still "something was found/attempted and it broke", so it gets
+    # the same "broken" kind rather than the misleading "missing".
+    _fail(f"{type(_bootstrap_error).__name__}: {_bootstrap_error}", kind="broken")
 
 if _active:
     print(f"[CUDALinkBootstrap] Library mode active — cuda_link {MIRROR_VERSION} from {resolved_site_packages}")
+    _note = _native_note()
+    if _note:
+        print(_note)
 else:
-    print(f"[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors. {last_error}")
+    print(
+        "[CUDALinkBootstrap] Library mode off — COMP uses its mirror Text DATs if present (reason in CUDALinkBootstrap.last_error)"
+    )

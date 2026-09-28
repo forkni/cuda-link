@@ -74,7 +74,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -432,13 +432,13 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```bash
 # Download the wheel matching your interpreter from
 # https://github.com/forkni/cuda-link/releases, then:
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[all]"     # All output modes
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "cuda_link-1.12.2-cp311-cp311-win_amd64.whl[torch]"
+pip install --force-reinstall "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"
 ```
 
 #### Method 3: Editable install from source (for development)
@@ -485,7 +485,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.12.2.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -511,7 +511,7 @@ install_td_library.cmd             REM interactive menu — auto-downloads the m
 
 | Mode | Flag | Description |
 |------|------|-------------|
-| 1 | `--target DIR` | Install into a custom folder; point the COMP's `Libpath` parameter at DIR (or set `CUDALINK_LIB_PATH=DIR` before launching TD) |
+| 1 | `--target DIR` | Install into a custom folder; put it in the `.toe`'s project folder (`cuda_link/` or the folder itself), or set `CUDALINK_LIB_PATH=DIR` before launching TD |
 | 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
 | 3 | `--conda ENV` | Install into a conda environment |
 | 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
@@ -530,15 +530,18 @@ install_td_library.cmd --mode 4 --dry-run
 ```
 
 The `TDHost`/`TDConfig`/`TDSender`/`TDReceiver` glue DATs remain in the COMP unchanged.
-The bootstrap looks for the install in a fixed order — the COMP's `Libpath` parameter, the
-`.toe`'s project folder (`cuda_link/`, `StreamDiffusion/`, or the folder itself, each probed as
-a venv or a `pip --target` folder), `CUDALINK_LIB_PATH`, then TouchDesigner's own Python paths
-including TD Preferences — and imports the first candidate whose version matches the mirrors
-shipped in the `.tox`. A mismatching install is skipped without being imported, and a second
+The bootstrap looks for the install in a fixed order — the `.toe`'s project folder
+(`cuda_link/`, `StreamDiffusion/`, `src/`, or the folder itself, each probed as a venv or a
+`pip --target` folder), `CUDALINK_LIB_PATH`, then TouchDesigner's own Python paths including
+TD Preferences — and imports the first candidate whose version matches the mirrors shipped in
+the `.tox`. There is no per-COMP parameter to set: an install placed next to the `.toe` is
+found automatically. A mismatching install is skipped without being imported, and a second
 `cuda_link` that is already loaded in the process is refused rather than mixed in, so several
 installs can coexist on one machine (a project venv next to a system copy) and each `.toe`
-still gets its own. If nothing resolves, the bootstrap falls back to the classic mirror DATs and
-the COMP's yellow status says which layer failed and why. See
+still gets its own. If nothing resolves, the bootstrap falls back to the classic mirror DATs;
+only when none of the 15 mirrors are present does the COMP's Status additionally name the
+specific cause and where to install a fix, with the full per-layer reason in the Textport. When
+the mirrors are present, the fallback is silent — classic mode is working as intended. See
 [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for full instructions and
 [ADR-0014](docs/adr/0014-project-anchored-install-resolution.md) for the rationale.
 

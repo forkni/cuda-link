@@ -240,7 +240,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.12.2.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -261,11 +261,13 @@ local `dist/` wheel if you built one). The native wheel ships a compiled extensi
 
 **Library mode (fewer Text DATs in the .tox):** run `install_td_library.cmd` once to install
 `cuda_link` into a Python environment that TouchDesigner can see. The `CUDALinkBootstrap` DAT
-inside the component will then load the package automatically — no `CUDALINK_LIB_PATH` setup
-required when using TD Preferences mode (mode 4). With more than one cuda-link install on the
-machine, point the component's **Library Path** (`Libpath`) parameter at the venv or folder
-this project should use; only an install whose version matches the component is loaded, and
-the status turns yellow with the reason when none does. Run `python scripts/install_td_library.py --help`
+inside the component will then load the package automatically — no per-COMP parameter to set,
+and no `CUDALINK_LIB_PATH` setup required when using TD Preferences mode (mode 4) or a venv
+kept next to the `.toe` (mode 2). With more than one cuda-link install on the machine, set
+`CUDALINK_LIB_PATH` to the venv or folder this project should use; only an install whose
+version matches the component is loaded. If none does, the COMP falls back to its mirror Text
+DATs; only when none of those mirrors are present does the status turn yellow with a
+cause-specific short line (full reason in the Textport). Run `python scripts/install_td_library.py --help`
 to see all five install modes. **Mode 5 (TD's own Python) is deprecated** — prefer mode 2
 (dedicated venv) or mode 4 (system/parallel Python).
 
@@ -370,7 +372,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
   set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v1.12.2.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v1.13.0.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 
