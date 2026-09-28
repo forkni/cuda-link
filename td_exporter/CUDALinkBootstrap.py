@@ -515,7 +515,14 @@ def _bootstrap(basefolder: str | None = None) -> bool:
                 notes.append(f"{label}: {type(error).__name__}: {error}")
                 saw_broken = True
 
-    kind = "broken" if saw_broken else "mismatch" if saw_mismatch else "missing"
+    # Precedence: a broken matching-version install outranks a version mismatch, which
+    # outranks "nothing found" -- the most actionable diagnosis wins.
+    if saw_broken:
+        kind = "broken"
+    elif saw_mismatch:
+        kind = "mismatch"
+    else:
+        kind = "missing"
     return _fail("CUDA-Link could not be resolved -- " + "; ".join(notes), kind=kind)
 
 

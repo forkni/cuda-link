@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -92,6 +93,11 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
         pass
 
 
+def _bootstrap_active() -> bool:
+    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
+    return bool(getattr(CUDALinkBootstrap, "_active", False))
+
+
 def _foreign_alias_error(shm_module: object) -> str:
     """ "" unless ``shm_module`` (the ``SHMProtocol`` bare-name alias) is a real cuda_link
     submodule -- i.e. it has a ``__file__`` under a ``cuda_link`` package directory.
@@ -106,7 +112,7 @@ def _foreign_alias_error(shm_module: object) -> str:
     shm_file = getattr(shm_module, "__file__", "") or ""
     if not shm_file:
         return ""
-    if "cuda_link" not in os.path.normcase(shm_file).replace("\\", "/").split("/"):
+    if "cuda_link" not in Path(os.path.normcase(shm_file)).parts:
         return ""
     return (
         f"SHMProtocol resolved to {shm_file}, a cuda_link install aliased by a "
@@ -119,7 +125,7 @@ def _foreign_alias_error(shm_module: object) -> str:
 # other cuda_link install in this process, the import above still "succeeds": it silently
 # binds to that other install's protocol code instead of failing.  A real engine built on
 # it would then run wrong-version SHM framing.  Detect that case and force degraded mode.
-if LIBRARY_READY and not bool(getattr(CUDALinkBootstrap, "_active", False)):
+if LIBRARY_READY and not _bootstrap_active():
     _rival_error = _foreign_alias_error(sys.modules.get("SHMProtocol"))
     if _rival_error:
         LIBRARY_READY = False
@@ -148,11 +154,6 @@ cp = None
 # Session-level dedup guard: track which COMP paths have already shown the install banner.
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
 _banner_shown_for_comps: set[str] = set()
-
-
-def _bootstrap_active() -> bool:
-    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
-    return bool(getattr(CUDALinkBootstrap, "_active", False))
 
 
 def _bootstrap_error() -> str:

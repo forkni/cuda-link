@@ -143,6 +143,7 @@ def _wheel_version(path: Path) -> str | None:
     tag}.whl — the version is always the second '-'-delimited field, so this parses any
     tag combination (e.g. a cp312-cp312-win_amd64 wheel from a future Python), not just
     the two tags this project currently ships (_NATIVE_WHEEL_TAG, _FALLBACK_WHEEL_TAG).
+    Returns None when the version field is empty (``cuda_link-.whl``).
     """
     name = path.name
     if not (name.startswith("cuda_link-") and name.endswith(".whl")):
@@ -150,7 +151,7 @@ def _wheel_version(path: Path) -> str | None:
     parts = name[: -len(".whl")].split("-")
     if len(parts) < 2:
         return None
-    return parts[1]
+    return parts[1] or None
 
 
 # Repo-relative source roots whose changes should invalidate the wheel.

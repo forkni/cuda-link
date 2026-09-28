@@ -124,6 +124,9 @@ def test_foreign_alias_error_flags_a_file_backed_shm_module() -> None:
     msg = ext_module._foreign_alias_error(foreign)
     assert "cuda_link" in msg
     assert "different COMP" in msg
+    # Forward-slash spelling of the same location must match too.
+    forward = SimpleNamespace(__file__="C:/proj_other/cuda_link/shm_protocol.py")
+    assert "different COMP" in ext_module._foreign_alias_error(forward)
 
 
 def test_foreign_alias_error_ignores_mirror_dats_and_missing_modules() -> None:

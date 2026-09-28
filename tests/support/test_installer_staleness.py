@@ -99,6 +99,12 @@ def test_wheel_version_returns_none_for_a_non_wheel_filename(tmp_path: Path) -> 
     assert itl._wheel_version(tmp_path / "cuda_link-1.13.0.tar.gz") is None
 
 
+def test_wheel_version_returns_none_for_an_empty_version_field(tmp_path: Path) -> None:
+    """A version-less name splits to ["cuda_link", ""] -- must be None, not "", so the
+    `is not None` check in resolve_wheel does not treat it as a known version."""
+    assert itl._wheel_version(tmp_path / "cuda_link-.whl") is None
+
+
 def test_resolve_wheel_stale_with_build_skips_download_and_rebuilds(monkeypatch: object, tmp_path: Path) -> None:
     """--build against a stale local wheel must go straight to a local rebuild, not
     re-download whatever the last GitHub Release published -- that would silently
