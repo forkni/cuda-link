@@ -343,6 +343,14 @@ License: MIT
 
 **Naming convention**: Use `CUDAIPCLink_v1.13.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
+**Release manifest**: `TOXES/RELEASES.tsv` records every shipped build — one row per `.tox`
+with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+saved from. To verify a download matches the manifest:
+
+```bash
+sha256sum TOXES/CUDAIPCLink_v1.13.0.tox   # compare with the sha256 column
+```
+
 ---
 
 ## Usage in Projects
@@ -595,6 +603,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | File | Location | Purpose |
 |------|----------|---------|
 | `CUDAIPCLink_v1.13.0.tox` | `TOXES/` | Final built .tox component |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for each shipped `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
