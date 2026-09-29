@@ -14,11 +14,12 @@ There are two assembly modes. Choose one:
 
 ### Library mode (recommended — fewer DATs)
 
-Requires `cuda_link` installed externally (for example, via `install_td_library.cmd`) in a
-location TouchDesigner can import. Activate that location either by setting
-`CUDALINK_LIB_PATH` before launching TouchDesigner or by adding it to TouchDesigner Preferences
-→ Python 32/64 bit Module Path. The bootstrap module loads the package and registers the 15 mirror
-names in `sys.modules` — so those mirror Text DATs are not needed.
+Requires `cuda_link` installed externally (for example, via `install_td_library.cmd`) where the
+bootstrap can discover it. It first checks project-relative locations next to the `.toe` (including
+a venv, a `pip install --target` folder, or a repository `src` layout), then
+`CUDALINK_LIB_PATH`, and finally TouchDesigner Preferences → Python 32/64 bit Module Path. No
+per-COMP path is required. The bootstrap module loads the package and registers the 15 mirror names
+in `sys.modules` — so those mirror Text DATs are not needed.
 
 ```text
 CUDAIPCExporter (Base COMP)
