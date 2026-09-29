@@ -49,7 +49,7 @@ numbered script on purpose.
 
 ## Install
 
-From the repo root (a plain `pip install cuda-link` works the same way):
+From a checkout of this repository (the examples use an editable source install):
 
 ```bash
 pip install -e .                  # core (numpy comes in via the demo producers' needs)
@@ -57,6 +57,10 @@ pip install -e ".[torch]"         # + PyTorch: zero-copy consumption in 03/05/06
 pip install -e ".[all]"           # + torch, numpy, cupy, nvml
 pip install opencv-python         # for 04's display window — deliberately NOT a cuda-link extra
 ```
+
+`cuda-link` is not currently published on PyPI, so do not replace the editable
+commands above with `pip install cuda-link`. For a prebuilt release wheel, use
+`scripts/install_td_library.py`, which resolves matching assets from GitHub Releases.
 
 The torch wheel must be **CUDA-enabled** (`torch.cuda.is_available()` → `True`).
 A CPU-only wheel cannot run the zero-copy path — 05/06/08 detect that and fall
