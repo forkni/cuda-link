@@ -249,9 +249,10 @@ Use this when distributing the component to end-users who should not need to int
 
    ```python
    from cuda_link import Importer, ImportSpec, ImportOutcome
+
    importer = Importer.open(ImportSpec(shm_name="my_pipeline"))
-   result = importer.get_frame()          # ImportResult; .frame is torch.Tensor (zero-copy)
-   result_np = importer.get_frame_numpy() # ImportResult; .frame is numpy array (CPU copy)
+   result = importer.get_frame()  # ImportResult; .frame is torch.Tensor (zero-copy)
+   result_np = importer.get_frame_numpy()  # ImportResult; .frame is numpy array (CPU copy)
    ```
 
 **Installing `cuda_link`:** the package is **not published on PyPI** — install the prebuilt
@@ -278,14 +279,17 @@ to see all five install modes. **Mode 5 (TD's own Python) is deprecated** — pr
    ```python
    from cuda_link import Exporter, FrameSpec, GpuFrame
    import torch
+
    exporter = Exporter.open(FrameSpec(shm_name="ai_output", width=1920, height=1080))
    # Pass producer_stream so the D2D copy is ordered after your kernel writes.
    # PyTorch: torch.cuda.current_stream().cuda_stream
-   exporter.export(GpuFrame(
-       ptr=gpu_tensor.data_ptr(),
-       size=gpu_tensor.nbytes,
-       producer_stream=torch.cuda.current_stream().cuda_stream,
-   ))
+   exporter.export(
+       GpuFrame(
+           ptr=gpu_tensor.data_ptr(),
+           size=gpu_tensor.nbytes,
+           producer_stream=torch.cuda.current_stream().cuda_stream,
+       )
+   )
    ```
 
 2. Drop the component into TD and set **Mode** = `Receiver`.

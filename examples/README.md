@@ -102,7 +102,8 @@ Fix: flip the importer module's availability flags **before** `open()`, in
 
 ```python
 import cuda_link.importer as importer_module
-importer_module.TORCH_AVAILABLE = False   # and/or CUPY_AVAILABLE
+
+importer_module.TORCH_AVAILABLE = False  # and/or CUPY_AVAILABLE
 ```
 
 The examples do this automatically via `_common.make_importer_open_safe()` and

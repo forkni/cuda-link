@@ -87,7 +87,21 @@ markers = [
     "requires_cuda: marks tests as requiring CUDA GPU (deselect with '-m \"not requires_cuda\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "requires_native: test requires a real native _native_waiter build + GPU (deselect with -m 'not requires_native')",
+    "smoke: fast fail-fast check executed against the installed wheel (see references/build-once-promotion.md)",
+    "integration: touches multi-process or external resources; runs in integration stage (see references/commit-vs-acceptance-stage.md)",
+    "quarantine: known-flaky test tracked with reason, issue, and expiry date (see references/test-suite-drift.md)",
 ]
+filterwarnings = [
+    "error",
+    # Upstream deprecation in torch.cuda's pynvml import
+    "ignore:The pynvml package is deprecated.*:FutureWarning:torch.cuda.*",
+    # Deprecated CUDAIPCImporter shim retained for backward-compatibility until v1.8
+    "ignore:CUDAIPCImporter is deprecated and will be removed in v1.8.*:DeprecationWarning",
+]
+xfail_strict = true
+
+[tool.check_skipped_tests]
+max_ratio = 0.02
 
 [tool.ruff]
 line-length = 120

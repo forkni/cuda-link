@@ -156,10 +156,16 @@ def test_close_pageable_keeps_buffer() -> None:
 
 def test_close_is_idempotent() -> None:
     """close() is safe to call multiple times (all branches are None-guarded)."""
-    nb = _make_nb(pinned_ptr=MagicMock())
+    mock_ptr = MagicMock()
+    nb = _make_nb(pinned_ptr=mock_ptr)
 
     nb.close()  # first call — frees everything
     nb.close()  # second call — all fields are None / lists are empty; must not raise
+
+    assert nb.pinned_ptr is None
+    assert nb.buffer is None
+    assert nb.buffer_ptr is None
+    nb.cuda.free_host.assert_called_once_with(mock_ptr)
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +236,19 @@ def test_close_unregisters_back_host_array() -> None:
 
 def test_close_idempotent_with_pipelined_back_buffer() -> None:
     """close() is idempotent even when a pipelined back_pinned_ptr was set."""
-    nb = _make_nb(pinned_ptr=MagicMock())
-    nb.back_pinned_ptr = MagicMock()
+    mock_pinned = MagicMock()
+    mock_back_pinned = MagicMock()
+    nb = _make_nb(pinned_ptr=mock_pinned)
+    nb.back_pinned_ptr = mock_back_pinned
     nb.back_buffer = np.zeros((4, 4, 4), dtype=np.uint8)
     nb.back_buffer_ptr = ctypes.c_void_p(nb.back_buffer.ctypes.data)
     nb.pipelined = True
 
     nb.close()
     nb.close()  # second call must not raise
+
+    assert nb.pinned_ptr is None
+    assert nb.back_pinned_ptr is None
+    assert nb.back_buffer is None
+    assert nb.back_buffer_ptr is None
+    assert nb.cuda.free_host.call_count == 2

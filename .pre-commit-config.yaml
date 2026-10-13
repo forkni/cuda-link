@@ -45,13 +45,24 @@ repos:
         pass_filenames: false
         always_run: true
 
-  # Pyrefly - Type checking (project mode: checks src/cuda_link/ + td_exporter/ per pyproject.toml)
+  # Pyrefly - Type checking with committed baseline
   - repo: local
     hooks:
       - id: pyrefly
         name: pyrefly (type checking)
         language: system
-        entry: pyrefly check
+        entry: pyrefly check --baseline pyrefly-baseline.json
         pass_filenames: false
         always_run: false
         files: ^(src/cuda_link|td_exporter)/.*\.py$
+
+  # Skipped/xfail-test drift ratchet
+  - repo: local
+    hooks:
+      - id: check-skipped-tests
+        name: check skipped and xfail test drift
+        language: python
+        entry: python scripts/check_skipped_tests.py tests/
+        pass_filenames: false
+        always_run: false
+        files: ^tests/.*\.py$

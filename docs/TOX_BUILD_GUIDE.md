@@ -255,7 +255,7 @@ For each, create a **Text DAT** with the name shown and paste the matching file:
 **Verification**: Open the **Textport** (Alt+T) and type:
 
 ```python
-op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
+op("/project1/CUDAIPCExporter").ext.CUDAIPCExtension
 ```
 
 You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
@@ -423,8 +423,8 @@ from cuda_link import Importer, ImportSpec, ImportOutcome
 importer = Importer.open(
     ImportSpec(
         shm_name="my_project_ipc",  # ← MUST MATCH TD parameter
-        shape=(1080, 1920, 4),       # height, width, channels (match your source TOP resolution)
-        dtype="float32",             # or "float16", "uint8"
+        shape=(1080, 1920, 4),  # height, width, channels (match your source TOP resolution)
+        dtype="float32",  # or "float16", "uint8"
         timeout_ms=5000.0,
     )
 )
@@ -482,7 +482,7 @@ printed on every COMP load regardless of whether the mirrors are present:
 Then check the state of the registered extension in the Textport:
 
 ```python
-ext = op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
+ext = op("/project1/CUDAIPCExporter").ext.CUDAIPCExtension
 print(ext.library_ready)
 ```
 

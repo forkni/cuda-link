@@ -327,7 +327,7 @@ not before it.
 **Option A — GpuFrame.producer_stream (per-frame):**
 
 ```python
-stream_handle = torch.cuda.current_stream().cuda_stream   # PyTorch
+stream_handle = torch.cuda.current_stream().cuda_stream  # PyTorch
 # stream_handle = cupy.cuda.get_current_stream().ptr       # CuPy
 exporter.export(GpuFrame(ptr=..., size=..., producer_stream=stream_handle))
 ```

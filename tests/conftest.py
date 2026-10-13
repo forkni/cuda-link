@@ -5,11 +5,16 @@ pytest configuration and shared fixtures for CUDA IPC tests.
 from __future__ import annotations
 
 import contextlib
+import os
+import tempfile
 import uuid
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import pytest
+
+# Ensure CuPy disk kernel cache uses system temp dir to prevent sandbox permission errors on ~/.cupy
+os.environ.setdefault("CUPY_CACHE_DIR", os.path.join(tempfile.gettempdir(), "cupy_cache"))
 
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
@@ -108,3 +113,26 @@ def isolated_barrier_shm(monkeypatch: pytest.MonkeyPatch) -> Generator[str, None
         shm = SharedMemory(name=name)
         shm.close()
         shm.unlink()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Enforce quarantine marker discipline at collection time.
+
+    A test marked @pytest.mark.quarantine must specify reason=..., issue=...,
+    and expires="YYYY-MM-DD". If expires has passed, collection fails.
+    """
+    import datetime as dt
+
+    today = dt.date.today()
+    bad: list[str] = []
+    for item in items:
+        m = item.get_closest_marker("quarantine")
+        if m is None:
+            continue
+        kw = m.kwargs
+        if not kw.get("reason") or not kw.get("issue") or "expires" not in kw:
+            bad.append(f"{item.nodeid}: quarantine marker requires reason=, issue=, and expires=")
+        elif dt.date.fromisoformat(str(kw["expires"])) < today:
+            bad.append(f"{item.nodeid}: quarantine expired on {kw['expires']} ({kw['issue']})")
+    if bad:
+        raise pytest.UsageError("\n".join(bad))

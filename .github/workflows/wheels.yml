@@ -1,0 +1,98 @@
+name: Wheels
+
+on:
+  push:
+    branches: [development, main, master]
+    paths:
+      - 'src/cuda_link/_cpp/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/wheels.yml'
+  pull_request:
+    paths:
+      - 'src/cuda_link/_cpp/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/wheels.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: Build native wheel (Windows, once per target)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1.13.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade pip build
+
+      - name: Sync td_exporter/CUDAIPCWrapper.py from canonical source
+        run: python scripts/sync_td_wrapper.py
+
+      - name: Build native wheel (compiles _native_waiter)
+        run: python -m build --wheel
+
+      - name: Record build provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\provenance | Out-Null
+          $sha = "${{ github.sha }}"
+          "commit_sha=$sha" | Out-File -FilePath dist\BUILD_INFO.txt -Encoding utf8
+          Get-ChildItem dist\*.whl | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -FilePath dist\BUILD_INFO.txt -Append -Encoding utf8
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheels
+          path: dist/
+          retention-days: 14
+
+  test-wheel:
+    name: Test native wheel (Windows)
+    needs: build-wheels
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: wheels
+          path: dist/
+
+      - name: Install wheel and run native state-machine tests
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "Promoted native wheel not found in downloaded artifact"
+            exit 1
+          }
+          python -m pip install "$($wheel.FullName)"
+          python -c "import cuda_link._native_waiter; print('native extension imported OK from wheel')"
+          python -m pip install pytest pytest-randomly
+          pytest tests/core/test_native_state_machine.py -m requires_native -v

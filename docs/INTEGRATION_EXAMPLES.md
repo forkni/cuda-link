@@ -45,19 +45,21 @@ import torch
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # Initialize importer — waits up to 5 s for the TD sender to appear
-with Importer.open(ImportSpec(
-    shm_name="ai_input",
-    shape=(512, 512, 4),   # RGBA; None to auto-detect
-    dtype="float32",
-    timeout_ms=5000.0,
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="ai_input",
+        shape=(512, 512, 4),  # RGBA; None to auto-detect
+        dtype="float32",
+        timeout_ms=5000.0,
+    )
+) as importer:
     # Load your AI model
     model = torch.jit.load("style_transfer_model.pt").cuda()
     model.eval()
 
     fps_counter = 0
     import time
+
     start_time = time.time()
 
     while True:
@@ -73,8 +75,8 @@ with Importer.open(ImportSpec(
         input_tensor = result.frame  # torch.Tensor on GPU, shape (512, 512, 4)
 
         # Preprocess (convert RGBA → RGB, normalize)
-        rgb = input_tensor[:, :, :3]           # Drop alpha
-        normalized = (rgb - 0.5) / 0.5        # [-1, 1] range
+        rgb = input_tensor[:, :, :3]  # Drop alpha
+        normalized = (rgb - 0.5) / 0.5  # [-1, 1] range
 
         # Run inference
         with torch.no_grad():
@@ -120,12 +122,13 @@ Camera TOP → CUDAIPCExtension (Mode=Sender)
 import cv2
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="cv_input",
-    shape=(720, 1280, 4),  # 720p RGBA
-    dtype="uint8",         # OpenCV expects uint8
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="cv_input",
+        shape=(720, 1280, 4),  # 720p RGBA
+        dtype="uint8",  # OpenCV expects uint8
+    )
+) as importer:
     while True:
         result = importer.get_frame_numpy()
 
@@ -144,7 +147,7 @@ with Importer.open(ImportSpec(
 
         # Display
         cv2.imshow("Edges", edges)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
 cv2.destroyAllWindows()
@@ -177,19 +180,24 @@ import torch
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # Initialize both importers
-main_importer = Importer.open(ImportSpec(
-    shm_name="main_input",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
-cn_importer = Importer.open(ImportSpec(
-    shm_name="controlnet_input",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
+main_importer = Importer.open(
+    ImportSpec(
+        shm_name="main_input",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
+cn_importer = Importer.open(
+    ImportSpec(
+        shm_name="controlnet_input",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
 
 # Load ControlNet model
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+
 controlnet = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_canny").to("cuda")
 pipe = StableDiffusionControlNetPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
@@ -201,11 +209,9 @@ try:
         main_result = main_importer.get_frame()
         cn_result = cn_importer.get_frame()
 
-        if (main_result.outcome is ImportOutcome.SHUTDOWN
-                or cn_result.outcome is ImportOutcome.SHUTDOWN):
+        if main_result.outcome is ImportOutcome.SHUTDOWN or cn_result.outcome is ImportOutcome.SHUTDOWN:
             break
-        if (main_result.outcome is not ImportOutcome.NEW_FRAME
-                or cn_result.outcome is not ImportOutcome.NEW_FRAME):
+        if main_result.outcome is not ImportOutcome.NEW_FRAME or cn_result.outcome is not ImportOutcome.NEW_FRAME:
             continue  # one stream idle or reconnecting
 
         main_frame = main_result.frame  # torch.Tensor on GPU
@@ -256,7 +262,6 @@ from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # shape=None lets the importer auto-detect resolution from the sender's SHM
 with Importer.open(ImportSpec(shm_name="dynamic_input")) as importer:
-
     frame_count = 0
 
     while True:
@@ -302,17 +307,21 @@ import signal
 import sys
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-importer = Importer.open(ImportSpec(
-    shm_name="clean_shutdown",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
+importer = Importer.open(
+    ImportSpec(
+        shm_name="clean_shutdown",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
+
 
 # Register Ctrl+C handler
 def signal_handler(sig, frame):
     print("Ctrl+C detected, cleaning up...")
     importer.close()
     sys.exit(0)
+
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -365,12 +374,13 @@ import time
 import statistics
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="benchmark",
-    shape=(1080, 1920, 4),
-    dtype="float32",
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="benchmark",
+        shape=(1080, 1920, 4),
+        dtype="float32",
+    )
+) as importer:
     # Warmup
     for _ in range(30):
         importer.get_frame()
@@ -388,8 +398,8 @@ with Importer.open(ImportSpec(
     print(f"IPC get_frame() overhead ({len(frame_times)} frames):")
     print(f"  Mean:   {statistics.mean(frame_times):.1f} µs")
     print(f"  Median: {statistics.median(frame_times):.1f} µs")
-    print(f"  P95:    {sorted(frame_times)[int(len(frame_times)*0.95)]:.1f} µs")
-    print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} µs")
+    print(f"  P95:    {sorted(frame_times)[int(len(frame_times) * 0.95)]:.1f} µs")
+    print(f"  P99:    {sorted(frame_times)[int(len(frame_times) * 0.99)]:.1f} µs")
 ```
 
 **Expected output** (PyTorch zero-copy mode, `get_frame()`, 1080p):
@@ -426,9 +436,9 @@ exporter = Exporter.open(
         shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
         height=HEIGHT,
         width=WIDTH,
-        channels=4,                # BGRA/RGBA
-        dtype="uint8",             # uint8 is typical for display
-        num_slots=2,               # Double-buffer (default)
+        channels=4,  # BGRA/RGBA
+        dtype="uint8",  # uint8 is typical for display
+        num_slots=2,  # Double-buffer (default)
     )
 )
 
@@ -441,11 +451,13 @@ while running:
     # Export to TD.
     # producer_stream arms ordering on the non-blocking IPC stream —
     # omitting it risks torn/gray frames when kernels run on a different stream.
-    exporter.export(GpuFrame(
-        ptr=output_tensor.data_ptr(),
-        size=output_tensor.nelement() * output_tensor.element_size(),
-        producer_stream=torch.cuda.current_stream().cuda_stream,
-    ))
+    exporter.export(
+        GpuFrame(
+            ptr=output_tensor.data_ptr(),
+            size=output_tensor.nelement() * output_tensor.element_size(),
+            producer_stream=torch.cuda.current_stream().cuda_stream,
+        )
+    )
 
 exporter.close()
 ```
@@ -455,11 +467,13 @@ Or use it as a context manager for automatic cleanup:
 ```python
 with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) as exporter:
     while running:
-        exporter.export(GpuFrame(
-            ptr=tensor.data_ptr(),
-            size=tensor.nbytes,
-            producer_stream=torch.cuda.current_stream().cuda_stream,
-        ))
+        exporter.export(
+            GpuFrame(
+                ptr=tensor.data_ptr(),
+                size=tensor.nbytes,
+                producer_stream=torch.cuda.current_stream().cuda_stream,
+            )
+        )
 ```
 
 > **Python `Exporter` export-sync default:** The Python `Exporter` API defaults to **async** export
@@ -535,16 +549,18 @@ or add it to TD's own `CUDALINK_*` env block so it propagates to child processes
 
 ```python
 import os
+
 os.environ["CUDALINK_DOORBELL"] = "1"  # must be set before importing cuda_link
 
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="td_input",
-    shape=(1080, 1920, 4),
-    dtype="uint8",
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="td_input",
+        shape=(1080, 1920, 4),
+        dtype="uint8",
+    )
+) as importer:
     while True:
         result = importer.get_frame()
 
@@ -584,8 +600,10 @@ with Importer.open(ImportSpec(
 import time
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
+
 def make_importer():
     return Importer.open(ImportSpec(shm_name="my_channel", timeout_ms=5000.0))
+
 
 importer = make_importer()
 

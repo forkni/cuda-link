@@ -267,6 +267,7 @@ CONTEXT.md
 .claude/commands/
 .claude/skills/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
+.agents/
 
 # Implementation plan docs (local-only; plan files live in .claude/plans/)
 docs/plans/

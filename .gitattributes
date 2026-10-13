@@ -10,12 +10,38 @@
 # Shell scripts must use LF line endings (fix for bash shebang interpretation)
 *.sh text eol=lf
 
+# Python, Markdown, YAML, TOML, and JSON files must use LF
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.lock text eol=lf
+
+# PowerShell scripts must use CRLF on Windows
+*.ps1 text eol=crlf
+
 # CGW config file: LF required so _config.sh quote-stripping regex works on Windows
 .cgw.conf text eol=lf
 
 # Windows batch scripts must use CRLF — cmd.exe silently no-ops with LF line endings
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# ============================================================================
+# BINARY ARTIFACTS — never modify line endings
+# ============================================================================
+*.whl binary
+*.dll binary
+*.pyd binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.toe binary
+*.tox binary
+*.sqlite binary
 
 # ============================================================================
 # MERGE STRATEGIES

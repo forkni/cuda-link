@@ -123,8 +123,8 @@ importer = Importer.open(
     ImportSpec(
         shm_name="my_texture_ipc",
         shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
-        dtype="float32",         # "float32", "float16", "uint8" — or None for auto-detect
-        timeout_ms=5000.0,       # Wait up to 5s for producer to appear (default)
+        dtype="float32",  # "float32", "float16", "uint8" — or None for auto-detect
+        timeout_ms=5000.0,  # Wait up to 5s for producer to appear (default)
     )
 )
 
@@ -171,9 +171,11 @@ from cuda_link import Exporter, FrameSpec, GpuFrame
 with Exporter.open(
     FrameSpec(
         shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
-        height=512, width=512,
-        channels=4, dtype="uint8",
-        num_slots=2,               # Ring buffer slots (double-buffering)
+        height=512,
+        width=512,
+        channels=4,
+        dtype="uint8",
+        num_slots=2,  # Ring buffer slots (double-buffering)
     )
 ) as exporter:
     # Export each AI-generated frame (~10-20μs overhead at 512x512).
@@ -182,11 +184,13 @@ with Exporter.open(
     # PyTorch: torch.cuda.current_stream().cuda_stream
     # CuPy:    cupy.cuda.get_current_stream().ptr
     stream_handle = torch.cuda.current_stream().cuda_stream
-    exporter.export(GpuFrame(
-        ptr=output_tensor.data_ptr(),
-        size=output_tensor.nbytes,
-        producer_stream=stream_handle,
-    ))
+    exporter.export(
+        GpuFrame(
+            ptr=output_tensor.data_ptr(),
+            size=output_tensor.nbytes,
+            producer_stream=stream_handle,
+        )
+    )
 ```
 
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
@@ -360,6 +364,7 @@ For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer)
 
 ```python
 from cuda_link import Importer, ImportSpec
+
 importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.0))  # Wait up to 10s
 ```
 
@@ -383,6 +388,7 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 
 ```python
 from cuda_link import Importer, ImportSpec, ImportOutcome
+
 with Importer.open(ImportSpec(shm_name="my_project_ipc")) as importer:
     # importer.close() is called automatically on exit
     result = importer.get_frame()

@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ def _subprocess_env() -> dict[str, str]:
     env = dict(os.environ)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = _SRC_DIR if not existing else f"{_SRC_DIR}{os.pathsep}{existing}"
+    env.setdefault("CUPY_CACHE_DIR", os.path.join(tempfile.gettempdir(), "cupy_cache"))
     return env
 
 

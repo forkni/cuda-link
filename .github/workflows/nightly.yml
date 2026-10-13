@@ -1,0 +1,71 @@
+name: Nightly (scheduled deep CI)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays 06:00 UTC — weekly cadence
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  full-matrix:
+    name: Full matrix (${{ matrix.os }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          enable-cache: auto
+          python-version: "${{ matrix.python }}"
+      - name: Install dependencies (from committed lock)
+        run: uv sync --locked --extra dev
+      - name: Run tests
+        run: uv run pytest tests/ -m "not requires_cuda and not requires_native and not quarantine" -q
+
+  quarantine-watch:
+    name: Quarantined tests (capped reruns, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          enable-cache: auto
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+      - name: Run quarantined tests with capped reruns
+        run: |
+          uv run pytest tests/ -m "quarantine and not requires_cuda and not requires_native" --reruns 2 -q || true
+
+  lock-refresh-canary:
+    name: Lock-refresh canary (uv lock --upgrade)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          enable-cache: auto
+          python-version: "3.11"
+      - name: Re-resolve the full dependency graph
+        run: uv lock --upgrade
+      - name: Install refreshed graph and run tests
+        run: |
+          uv sync --extra dev
+          uv run pytest tests/ -m "not requires_cuda and not requires_native and not quarantine" -q
