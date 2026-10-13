@@ -200,7 +200,7 @@ jobs:
       - name: Install locked dependency graph (without project source)
         run: uv sync --locked --extra dev --no-install-project
       - name: Install the promoted wheel
-        run: uv pip install --no-deps dist/*.whl
+        run: uv pip install --no-deps --no-index --find-links dist cuda-link
       - name: Smoke test (fail-fast, verify import from installed wheel)
         run: |
           uv run --no-sync python -P -c "import pathlib, cuda_link as m; p = pathlib.Path(m.__file__).resolve(); print(p, getattr(m, '__version__', '?')); assert 'site-packages' in p.parts, f'imported from checkout instead of wheel: {p}'"
