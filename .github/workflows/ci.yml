@@ -25,22 +25,24 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           enable-cache: auto
+      - name: Install lint dependencies
+        run: uv sync --extra dev --no-install-project
       - name: ruff check
         id: ruff-check
         continue-on-error: true
-        run: uv run ruff check --output-format=github .
+        run: uv run --no-sync ruff check --output-format=github .
       - name: ruff format check
         id: ruff-format
         continue-on-error: true
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
       - name: pyrefly check
         id: pyrefly-check
         continue-on-error: true
-        run: uv run pyrefly check --baseline pyrefly-baseline.json --output-format=github
+        run: uv run --no-sync pyrefly check --baseline pyrefly-baseline.json --output-format=github
       - name: Skipped/xfail-test drift check
         id: skip-drift
         continue-on-error: true
-        run: python scripts/check_skipped_tests.py tests/ --max-ratio 0.02
+        run: uv run --no-sync python scripts/check_skipped_tests.py tests/ --max-ratio 0.02
       - name: Aggregate lint results
         if: always()
         run: |
@@ -190,7 +192,7 @@ jobs:
             $filePath = $parts[1]
             $actualHash = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToLower()
             if ($actualHash -ne $expectedHash) {
-              Write-Error "Hash mismatch for $filePath: expected $expectedHash, got $actualHash"
+              Write-Error "Hash mismatch for $($filePath): expected $($expectedHash), got $($actualHash)"
               exit 1
             }
           }
