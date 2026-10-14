@@ -6,9 +6,8 @@ from `development`.
 
 ## The development-first rule
 
-**Open pull requests against `development`, never `master`.** `[R7]` in
-[`.charlie/instructions/code-style.md`](../.charlie/instructions/code-style.md) states
-this explicitly, and [`.github/dependabot.yml`](../.github/dependabot.yml) enforces it
+**Open pull requests against `development`, never `master`.**
+[`.github/dependabot.yml`](../.github/dependabot.yml) enforces it
 mechanically — every Dependabot version-update PR sets `target-branch: development`, so
 even automated dependency bumps reach `master` through the normal promotion, not a
 side door.
