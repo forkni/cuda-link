@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sender rejecting the frame. Lossless. At 1280x720 the call takes a median 0.89 ms vs
   0.86 ms for a native float32 source (a CPU readback takes 3.4 ms); the shared frame is
   2x the bytes of the float16 source.
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  Sender does not use this conversion yet. The dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order, which the Sender does not flag. `cm.size` can report a stale
+  larger allocation after a dtype shrink, so it is not the payload size.
 
 ## [1.13.0] - 2026-09-26
 

@@ -529,15 +529,29 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
 
-**Note on pixel format compatibility** (empirically probed, TD 2025.32820 — see `verification/results/cuda_memory_probe_20260510_090919.json`):
+**Note on pixel format compatibility.** These results come from a full matrix probe on TD 2025.33230 (2026-10-19). Each of the 22 Noise TOP `format` menu entries was a source, at 1280×720 with values roughly −0.24 to 1.24. Each source was tried with default `cudaMemory()` and with `cudaMemory(pixelFormat=<each of the 22 names>)`, 506 calls in all. Every buffer that came back was copied D2H and compared with `numpyArray()`.
 
 | Category | Formats | `cudaMemory()` behaviour |
 |---|---|---|
-| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in R/RG/RGBA/A variants | Returns correct `uint8` / `uint16` / `float32` buffer |
-| **Rejected outright** | All 4 float16 variants (R/RG/RGBA/A); 10-bit RGB / 2-bit Alpha fixed | Raises exception; Sender skips frame + tints component **yellow** via `parent().color`; resumes when upstream format is corrected |
-| **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
+| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in RGBA/RG/Mono/A/Mono+Alpha variants (14 formats) | Returns a `uint8` / `uint16` / `float32` buffer that matches `numpyArray()` exactly. Row order is the same, with no vertical flip. 8-bit RGBA is the exception: it comes back **BGRA** (see below). |
+| **Rejected: float16** | All 5 float16 variants (RGBA/RG/Mono/A/Mono+Alpha) | `tdError: Texture is invalid pixel format to be shared with CUDA.` The Sender skips the frame and tints the component **yellow** via `parent().color`. It resumes when the upstream format is corrected. |
+| **Rejected: packed** | 10-bit RGB / 2-bit Alpha fixed; 11-bit float (RGB) | `Source TOP has unsupported pixel format.` They are also refused as `pixelFormat=` targets ("no native dtype"). Same skip + yellow-tint policy. |
 
-The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
+On TD 2025.32820 (2026-05-10 probe), the 11-bit float format did not raise an error. It returned `dataType=uint8, numComps=4`, which is the raw bytes of the packed 32-bit word, not the 11:11:10 floats. The Sender still treats it as unsupported.
+
+**The `pixelFormat` kwarg (format conversion).** `cudaMemory(pixelFormat=<menu name>)` takes the same string `.pixelFormatName` returns. The live docstring documents it, but the bundled offline docs do not. TD converts on the GPU before sharing. In the matrix it behaved as follows:
+
+- **Every supported source converts to every one of the 14 supported targets.** Each converted channel matched `numpyArray()` within the target's quantization: exact for `float32`, ≤ 2e-5 for 16-bit fixed, ≤ 4e-3 for 8-bit fixed. Fixed targets clamp to [0, 1], and float targets keep out-of-range values.
+- Narrowing follows the layout. Mono widens to RGB = R and A = 1. A widens to RGB = 0 and A = A. Mono+Alpha maps to R and A.
+- **Float16 sources convert too, and it is the only way to share them.** `pixelFormat='rgba32float'` (or `mono32float`, `rg32float`, `a32float`, `monoalpha32float`) returns `float32` that matches `numpyArray()` bit-exactly and keeps the full range, so it is lossless. `pixelFormat='rgba16fixed'` keeps 8 bytes per pixel but clamps to [0, 1]. Requesting a float16 target, including the source's own format, raises the same "invalid pixel format" error.
+
+**`cm.size` can be the allocation, not the payload.** Every buffer in the matrix reported `size = 14,745,600`, i.e. W×H×16, whatever the source or target format. The probe's TOP started as `rgba32float` (16 B/px), and TD keeps the larger CUDA allocation after a dtype shrink. So this shows that `cm.size` lags on a shrink. It does not show that `cm.size` is always W×H×16. The bytes past `shape` (H×W×numComps×itemsize) hold stale data, 11 MB of non-zero bytes in the 8-bit RGBA case. Size host buffers by `cm.size`, or copy only the `shape` byte count. Copying `cm.size` bytes into a buffer sized from `shape` overruns it. A first version of this probe did exactly that and crashed TouchDesigner. The Sender already handles this in `export_frame`. It resolves the dtype from `pixelFormatName` before it trusts `cm.size`. It also copies only `Exporter.data_size` bytes, the front region of a stale allocation.
+
+**8-bit RGBA is BGRA.** For an `rgba8fixed` source with default `cudaMemory()`, and for any source converted with `pixelFormat='rgba8fixed'`, the four channels come back in **B, G, R, A** order. 16-bit and 32-bit RGBA come back in R, G, B, A order. `FLAGS_BGRA` (bit 2) exists in the SHM protocol, but the Sender never sets it (see the 2026-10-19 block review). 8-bit RGBA frames therefore reach Python consumers as BGRA bytes with no flag saying so. A TD→TD round trip is unaffected.
+
+`RealTOPHandle.cuda_memory(stream, pixel_format)` already forwards `pixelFormat`. TDSender does not use it yet, so float16 sources still take the skip + yellow-tint path below. Converting to `float32` would cost one GPU pass and double the bytes per frame compared with float16.
+
+The Sender extension (`_is_unsupported_format`) detects all seven problematic formats (five float16, 10-bit, 11-bit) by substring match on the pixel-format string. On detection each bad frame:
 
 1. Calls `set_warning_status(msg)` (sets `parent().color` to amber-yellow — visible on the COMP node body, idempotent).
 
