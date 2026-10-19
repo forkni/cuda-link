@@ -11,6 +11,8 @@ SharedMemory segment — no GPU required.
 from __future__ import annotations
 
 import logging
+import struct
+import types
 
 import pytest
 from fakes import FakeShmAdapter
@@ -24,6 +26,7 @@ from cuda_link.activation_barrier import (
     CheckerOutcome,
     HolderBarrier,
     RealShmAdapter,
+    bump_skip,
     decrement,
     increment,
     open_or_create,
@@ -338,6 +341,56 @@ def test_decrement_writes_pid_to_last_writer_pid_field_kills_index_mutant():
         assert fields[5] == 0  # barrier_skips must be untouched
     finally:
         shm.close()
+
+
+_STRUCT_U32 = struct.Struct("<I")
+
+
+class _RacyBuf(bytearray):
+    """Barrier buffer whose slice reads are followed by a concurrent Sender increment.
+
+    Models the race where a whole-struct snapshot (`buf[:SHM_SIZE]`) is taken, then
+    another process bumps active_count before the snapshot is written back.
+    """
+
+    def __init__(self, size: int) -> None:
+        super().__init__(size)
+        self.expected_active_count = 0
+
+    def __getitem__(self, key):
+        snapshot = super().__getitem__(key)
+        if isinstance(key, slice):
+            self.expected_active_count += 1
+            _STRUCT_U32.pack_into(self, 8, self.expected_active_count)
+        return snapshot
+
+
+def test_bump_skip_never_clobbers_concurrent_active_count():
+    buf = _RacyBuf(SHM_SIZE)
+    _STRUCT.pack_into(buf, 0, MAGIC, VERSION, 3, 0, 0, 0, 0, b"\x00" * 32)
+    buf.expected_active_count = 3
+    shm = types.SimpleNamespace(buf=buf)
+
+    bump_skip(shm)
+    bump_skip(shm)
+
+    fields = _STRUCT.unpack(bytes(buf))
+    assert fields[2] == buf.expected_active_count  # the Sender's write survives
+    assert fields[5] == 2  # barrier_skips
+
+
+def test_increment_and_decrement_leave_barrier_skips_alone():
+    buf = bytearray(SHM_SIZE)
+    _STRUCT.pack_into(buf, 0, MAGIC, VERSION, 0, 0, 0, 17, 0, b"\x00" * 32)
+    shm = types.SimpleNamespace(buf=buf)
+
+    assert increment(shm, pid=5) == 1
+    assert decrement(shm, pid=6) == 0
+
+    fields = _STRUCT.unpack(bytes(buf))
+    assert fields[5] == 17
+    assert fields[6] == 6
+    assert fields[4] > 0  # last_change_ns refreshed
 
 
 def test_decrement_returns_active_count_not_pad_kills_index_mutant():
