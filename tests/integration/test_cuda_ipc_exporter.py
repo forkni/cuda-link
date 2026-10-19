@@ -247,22 +247,23 @@ def test_is_ready_false_before_init() -> None:
     assert not exporter.is_ready()
 
 
-def test_log_helper() -> None:
-    """Test _log() helper method with verbosity control."""
+def test_log_helper(capsys: pytest.CaptureFixture[str]) -> None:
+    """_log() prints only when forced or when verbosity is on."""
     from CUDAIPCExtension import CUDAIPCExtension
 
     host = FakeTDHost(params={"Debug": False})
     exporter = CUDAIPCExtension(None, host=host)
+    capsys.readouterr()  # discard construction output
 
-    # Should not crash with verbosity off
     exporter._log("Test message")
+    assert capsys.readouterr().out == ""
 
-    # Force logging
     exporter._log("Force message", force=True)
+    assert "Force message" in capsys.readouterr().out
 
-    # Enable verbosity
     exporter.verbose_performance = True
     exporter._log("Verbose message")
+    assert "Verbose message" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

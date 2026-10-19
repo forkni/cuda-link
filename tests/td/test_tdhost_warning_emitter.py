@@ -144,17 +144,24 @@ def test_double_clear_does_not_cook_twice() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_emitter_op_does_not_raise_on_warning() -> None:
-    host, _ = _make_host(emitter=None)
-    host.set_warning_status("bad format")  # must not raise
-
-
-def test_no_emitter_op_does_not_raise_on_clear() -> None:
-    host, _ = _make_host(emitter=None)
+def test_no_emitter_op_still_applies_warning_status() -> None:
+    host, comp = _make_host(emitter=None)
     host.set_warning_status("bad format")
-    host.clear_status()  # must not raise
+    assert comp.color == _WARNING_COLOR
+    assert comp._store["cuda_link_status_msg"] == "WARNING: bad format"
 
 
-def test_no_emitter_op_does_not_raise_on_error() -> None:
-    host, _ = _make_host(emitter=None)
-    host.set_error_status("init failed")  # must not raise
+def test_no_emitter_op_still_clears_status() -> None:
+    host, comp = _make_host(emitter=None)
+    original_color = comp.color
+    host.set_warning_status("bad format")
+    host.clear_status()
+    assert comp.color == original_color
+    assert "cuda_link_status_msg" not in comp._store
+
+
+def test_no_emitter_op_still_applies_error_status() -> None:
+    host, comp = _make_host(emitter=None)
+    host.set_error_status("init failed")
+    assert comp.color == _ERROR_COLOR
+    assert comp._store["cuda_link_status_msg"] == "ERROR: init failed"

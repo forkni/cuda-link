@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 from cuda_link import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from cuda_link._cuda_adapters import FakeCUDAAdapter
+from cuda_link.cuda_runtime_types import StreamCaptureMode
 from cuda_link.exporter import Exporter
 
 _H = _W = _C = 4
@@ -115,6 +116,27 @@ def test_build_export_graphs_success_path_builds_and_destroys_cleanly() -> None:
 
     assert exp._graph_execs == [None, None]
     assert exp._graph_templates == [None, None]
+
+
+def test_build_export_graphs_captures_every_slot_in_relaxed_mode() -> None:
+    """C2 regression: each slot's capture uses cudaStreamCaptureModeRelaxed.
+
+    Global mode (0) makes a concurrent capture elsewhere in the process (TensorRT,
+    CuPy, PyTorch) fail EndCapture with error 901. The GPU-side coexistence check
+    lives in tests/cuda/test_graph_coexistence_capture.py; this pins the mode the
+    exporter actually passes.
+    """
+    fake = FakeCUDAAdapter(device=0)
+    with (
+        patch.object(fake, "create_ipc_event", return_value=None),
+        patch.object(fake, "stream_begin_capture", wraps=fake.stream_begin_capture) as begin,
+    ):
+        exp = Exporter.open(_spec(num_slots=2), policy=_graphs_policy(), cuda=fake)
+    try:
+        assert exp._graphs_disabled is False
+        assert [c.kwargs.get("mode") for c in begin.call_args_list] == [StreamCaptureMode.RELAXED] * 2
+    finally:
+        exp.close()
 
 
 # ---------------------------------------------------------------------------

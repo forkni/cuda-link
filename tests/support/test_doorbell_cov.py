@@ -96,10 +96,13 @@ def test_signal_is_noop_when_handle_none(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_signal_logs_warning_on_setevent_failure(monkeypatch):
+def test_signal_logs_warning_on_setevent_failure(monkeypatch, caplog: pytest.LogCaptureFixture):
     monkeypatch.setattr(db._k32, "SetEvent", lambda *a: 0)
     monkeypatch.setattr(db.ctypes, "get_last_error", lambda: 6)  # ERROR_INVALID_HANDLE
-    db.signal(object())  # must not raise even though SetEvent "fails"
+    with caplog.at_level(logging.WARNING, logger="cuda_link._doorbell"):
+        db.signal(object())  # best-effort: logs, never raises
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.getMessage() for r in warning_records] == ["SetEvent failed: error 6"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")

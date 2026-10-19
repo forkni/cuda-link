@@ -308,18 +308,6 @@ def test_fake_adapter_graph_get_nodes_returns_one() -> None:
     assert len(nodes) == 1
 
 
-def test_fake_adapter_graph_exec_memcpy_node_noop() -> None:
-    from ctypes import c_void_p
-
-    fake = FakeCUDAAdapter()
-    stream = fake.create_stream()
-    fake.stream_begin_capture(stream)
-    graph = fake.stream_end_capture(stream)
-    nodes = fake.graph_get_nodes(graph)
-    exec_ = fake.graph_instantiate(graph)
-    fake.graph_exec_memcpy_node_set_params_1d(exec_, nodes[0], c_void_p(0x1000), c_void_p(0x2000), 256, 3)
-
-
 def test_fake_adapter_runtime_version() -> None:
     fake = FakeCUDAAdapter()
     assert fake.get_runtime_version() >= 11_040
@@ -388,6 +376,7 @@ def test_ctypes_adapter_event_lifecycle() -> None:
     event = adapter.create_sync_event()
     adapter.record_event(event, stream)
     adapter.stream_synchronize(stream)
+    assert adapter.query_event(event) is True, "recorded event must be complete after stream sync"
     adapter.destroy_event(event)
     adapter.destroy_stream(stream)
 
@@ -444,13 +433,6 @@ def test_fake_adapter_set_device_returns_token() -> None:
     fake = FakeCUDAAdapter(device=0)
     token = fake.set_device(0)
     assert token is not None
-
-
-def test_fake_adapter_restore_context_is_callable() -> None:
-    """restore_context() on FakeCUDAAdapter accepts a token and does not raise."""
-    fake = FakeCUDAAdapter(device=0)
-    token = fake.set_device(0)
-    fake.restore_context(token)  # must not raise
 
 
 # ---------------------------------------------------------------------------

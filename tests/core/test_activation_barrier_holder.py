@@ -278,9 +278,14 @@ class TestClose:
         assert closed == [True]
 
     def test_close_before_acquire_is_idempotent(self):
+        """close() with nothing held must not open or touch the segment, even twice."""
         fake = FakeShmAdapter()
         hb = _make_holder(port=fake)
-        hb.close()  # must not raise
+        hb.close()
+        hb.close()
+        assert not hb.held
+        assert fake.attached is False
+        assert fake.active_count == 0
 
 
 # ---------------------------------------------------------------------------

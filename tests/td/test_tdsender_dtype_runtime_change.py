@@ -69,6 +69,7 @@ _W, _H, _C = 1920, 1080, 4  # 1080p RGBA
         (1920 * 1080 * 4 * 2, "uint16"),  # 16588800 — uint16 (was "float16" before fix)
         (1920 * 1080 * 4 * 4, "float32"),  # 33177600 — float32
     ],
+    ids=["uint8", "uint16", "float32"],
 )
 def test_guess_dtype_from_buffer_size(buf_size, expected):
     result = _guess_dtype_from_buffer_size(_W, _H, _C, buf_size)
@@ -255,6 +256,16 @@ def test_pixel_fmt_name_map_covers_probe_results():
         ("mono8fixed", "uint8", 1),
         ("a8fixed", "uint8", 1),
         ("monoalpha32float", "float32", 2),
+    ],
+    ids=[
+        "rgba32float",
+        "rgba16fixed",
+        "rgba8fixed",
+        "rg32float",
+        "mono32float",
+        "mono8fixed",
+        "a8fixed",
+        "monoalpha32float",
     ],
 )
 def test_pixel_fmt_name_to_dtype_values(fmt_name, expected_dtype, expected_ch):

@@ -18,6 +18,7 @@ Two failure modes are exercised for every callback, matching the reported bug:
 from __future__ import annotations
 
 import types
+from collections.abc import Callable
 
 import callbacks_template
 import pytest
@@ -51,6 +52,13 @@ def _patch_parent_raising(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: types.SimpleNamespace(ext=_RaisingExt()),
         raising=False,
     )
+
+
+# The two ways `parent().ext.CUDAIPCExtension` can be unavailable -- see module docstring.
+_MISSING_EXTENSION_PATCHES = [
+    pytest.param(lambda mp: _patch_parent(mp, None), id="ext-absent"),
+    pytest.param(_patch_parent_raising, id="ext-raises"),
+]
 
 
 class _StubExt:
@@ -91,15 +99,48 @@ class _StubImportBuffer:
 # ---------------------------------------------------------------------------
 
 
+def _patch_op_recorder(monkeypatch: pytest.MonkeyPatch, result: object = None) -> list[str]:
+    """Patch the TD global `op()` with a recorder; returns the list of looked-up names."""
+    lookups: list[str] = []
+
+    def _op(name: str) -> object:
+        lookups.append(name)
+        return result
+
+    monkeypatch.setattr(callbacks_template, "op", _op, raising=False)
+    return lookups
+
+
+def test_extension_returns_none_when_ext_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_parent(monkeypatch, None)
+    assert callbacks_template._extension() is None
+
+
+def test_extension_swallows_td_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported bug: `.CUDAIPCExtension` raised td.tdAttributeError every frame."""
+    _patch_parent_raising(monkeypatch)
+    assert callbacks_template._extension() is None
+
+
+def test_extension_returns_present_ext(monkeypatch: pytest.MonkeyPatch) -> None:
+    ext = _StubExt()
+    _patch_parent(monkeypatch, ext)
+    assert callbacks_template._extension() is ext
+
+
 def test_onframestart_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_parent(monkeypatch, None)
-    callbacks_template.onFrameStart(1)  # must not raise
+    lookups = _patch_op_recorder(monkeypatch)
+    callbacks_template.onFrameStart(1)
+    assert lookups == [], "must return before resolving ImportBuffer"
 
 
 def test_onframestart_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reproduces the reported bug: this fired every frame in production."""
     _patch_parent_raising(monkeypatch)
-    callbacks_template.onFrameStart(1)  # must not raise
+    lookups = _patch_op_recorder(monkeypatch)
+    callbacks_template.onFrameStart(1)
+    assert lookups == [], "must return before resolving ImportBuffer"
 
 
 def test_onframestart_sender_runs_deferred_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,8 +153,11 @@ def test_onframestart_sender_runs_deferred_cleanup(monkeypatch: pytest.MonkeyPat
 def test_onframestart_receiver_no_import_buffer_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     ext = _StubExt(mode="Receiver")
     _patch_parent(monkeypatch, ext)
-    monkeypatch.setattr(callbacks_template, "op", lambda name: None, raising=False)
-    callbacks_template.onFrameStart(1)  # must not raise
+    lookups = _patch_op_recorder(monkeypatch, result=None)
+    callbacks_template.onFrameStart(1)
+    assert lookups == ["ImportBuffer"]
+    assert ext.update_receiver_format_calls == []
+    assert ext.deferred_cleanup_calls == 0
 
 
 def test_onframestart_receiver_skips_cook_without_new_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,15 +189,14 @@ def test_onframestart_receiver_force_cooks_import_buffer(monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-def test_onframeend_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_parent(monkeypatch, None)
-    callbacks_template.onFrameEnd(1)  # must not raise
-
-
-def test_onframeend_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reproduces the reported bug for the Frame End toggle."""
-    _patch_parent_raising(monkeypatch)
-    callbacks_template.onFrameEnd(1)  # must not raise
+@pytest.mark.parametrize("patch_parent", _MISSING_EXTENSION_PATCHES)
+def test_onframeend_without_extension_returns_normally(
+    monkeypatch: pytest.MonkeyPatch, patch_parent: Callable[[pytest.MonkeyPatch], None]
+) -> None:
+    """ext-raises reproduces the reported bug for the Frame End toggle. Without the
+    `ext is None` guard, `ext.mode` raises AttributeError here."""
+    patch_parent(monkeypatch)
+    assert callbacks_template.onFrameEnd(1) is None
 
 
 def test_onframeend_sender_exports_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,15 +218,14 @@ def test_onframeend_receiver_does_not_export(monkeypatch: pytest.MonkeyPatch) ->
 # ---------------------------------------------------------------------------
 
 
-def test_onexit_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_parent(monkeypatch, None)
-    callbacks_template.onExit()  # must not raise
-
-
-def test_onexit_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reproduces the reported bug on TD shutdown / DAT destruction."""
-    _patch_parent_raising(monkeypatch)
-    callbacks_template.onExit()  # must not raise
+@pytest.mark.parametrize("patch_parent", _MISSING_EXTENSION_PATCHES)
+def test_onexit_without_extension_returns_normally(
+    monkeypatch: pytest.MonkeyPatch, patch_parent: Callable[[pytest.MonkeyPatch], None]
+) -> None:
+    """ext-raises reproduces the reported bug on TD shutdown / DAT destruction.
+    Without the `ext is not None` guard, `ext.cleanup()` raises AttributeError here."""
+    patch_parent(monkeypatch)
+    assert callbacks_template.onExit() is None
 
 
 def test_onexit_calls_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +240,9 @@ def test_onexit_calls_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_onstart_and_oncreate_are_noops() -> None:
-    callbacks_template.onStart()
-    callbacks_template.onCreate()
+@pytest.mark.parametrize("name", ["onStart", "onCreate"], ids=["onStart", "onCreate"])
+def test_required_td_callback_stub_exists_and_returns_none(name: str) -> None:
+    """TD looks these callbacks up by name; renaming or deleting one breaks the Execute DAT."""
+    callback = getattr(callbacks_template, name)
+    assert callable(callback)
+    assert callback() is None

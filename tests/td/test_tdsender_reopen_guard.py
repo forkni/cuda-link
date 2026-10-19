@@ -142,6 +142,7 @@ def test_flags_only_change_triggers_reopen(fake_exporter_open: None) -> None:
         ("monoalpha8fixed", 2, "uint8", FLAGS_MONO_ALPHA),
         ("mono8fixed", 1, "uint8", 0),
     ],
+    ids=["rgba8-bgra", "rgba16", "rgba32f", "rg8", "monoalpha8", "mono8"],
 )
 def test_channel_flags(pixel_format_name: str, channels: int, dtype: str, expected: int) -> None:
     # TD cudaMemory() returns 8-bit RGBA as B,G,R,A; 16/32-bit RGBA stay R,G,B,A.
