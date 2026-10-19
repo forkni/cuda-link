@@ -18,11 +18,14 @@ jobs:
   merge:
     name: Merge development → master
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
 
     steps:
       - name: Checkout repository
+        # Credentials stay persisted on purpose: later steps `git push` the tag and master.
+        # zizmor: ignore[artipacked]
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
@@ -60,7 +63,7 @@ jobs:
           git push origin "$BACKUP_TAG"
 
           echo "✅ Backup tag created: $BACKUP_TAG"
-          echo "BACKUP_TAG=$BACKUP_TAG" >> $GITHUB_ENV
+          echo "BACKUP_TAG=$BACKUP_TAG" >> "$GITHUB_ENV"
 
       - name: Preview merge (Dry Run)
         if: ${{ inputs.dry_run == true }}
@@ -80,14 +83,14 @@ jobs:
           git checkout master
 
           echo "Merging development into master..."
-          git merge --no-ff development -m "$(cat <<'EOF'
+          # Test the merge directly: under the runner's `bash -e`, a failing merge exits before
+          # a later `$?` check could run, so the abort never happened.
+          if ! git merge --no-ff development -m "$(cat <<'EOF'
           chore: Merge development to master
 
           - Automated merge via GitHub Actions
           EOF
-          )"
-
-          if [ $? -ne 0 ]; then
+          )"; then
             echo "❌ Merge failed - conflicts detected"
             git merge --abort
             exit 1

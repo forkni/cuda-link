@@ -107,7 +107,14 @@ enum WaitStatusCode : int {
     kReadyLate = 2,  // retired 2026-07-04 (torn-frame fix) — never emitted anymore, kept for ABI.
     kTimeout = 3,
     kReadyPoll = 4,  // block phase caught it with no doorbell in play (bare-Sleep polling).
+    kCudaError = 5,  // cudaEventQuery returned a hard error; method slot carries the cudaError_t code.
 };
+
+// cudaEventQuery results the state machine distinguishes. Any other code is a
+// hard error (e.g. a sticky context fault) and must surface as kCudaError, never
+// be folded into "not ready" and reported as a timeout.
+constexpr int kCudaSuccess = 0;
+constexpr int kCudaErrorNotReady = 600;
 
 double qpc_now_us(double freq_inv_us) {
     LARGE_INTEGER now;
@@ -146,7 +153,7 @@ constexpr int kMethodTimerNap = 4;
 
 template <typename EventQueryFn, typename ReadWriteIdxFn, typename NapFn, typename NowUsFn>
 std::tuple<int, double, int> wait_slot_impl(
-    EventQueryFn event_query,          // (event_ptr) -> bool ready
+    EventQueryFn event_query,          // (event_ptr) -> int cudaError_t: 0 ready, 600 pending, else error
     ReadWriteIdxFn read_write_idx,     // (write_idx_addr) -> uint32_t
     NapFn nap,                         // (nap_us) -> void; bounded pacing nap, never exact
     NowUsFn now_us,                    // () -> double microseconds, monotonic
@@ -172,8 +179,14 @@ std::tuple<int, double, int> wait_slot_impl(
     if (spin_us > 0) {
         double t;
         while ((t = now_us()) < spin_deadline && t < deadline) {
-            if (event_ptr != 0 && event_query(event_ptr)) {
-                return {kReadySpin, t - start, 0};
+            if (event_ptr != 0) {
+                const int code = event_query(event_ptr);
+                if (code == kCudaSuccess) {
+                    return {kReadySpin, t - start, 0};
+                }
+                if (code != kCudaErrorNotReady) {
+                    return {kCudaError, now_us() - start, code};
+                }
             }
         }
     }
@@ -187,29 +200,35 @@ std::tuple<int, double, int> wait_slot_impl(
     // header): during this wait it could only ever announce the NEXT frame's
     // publish, and consuming its signal here violated _doorbell.py's
     // single-consumer contract.
+    //
+    // The event is queried BEFORE the deadline check, so every call polls at
+    // least once: a timeout_ms == 0 call is a genuine non-blocking poll rather
+    // than an unconditional TIMEOUT.
     while (true) {
-        const double t = now_us();
-        if (t >= deadline) {
-            return {kTimeout, t - start, 0};
-        }
-
-        if (event_ptr != 0 && event_query(event_ptr)) {
-            // doorbell_handle != 0 means a doorbell was genuinely in play for
-            // this channel — kReadyDoorbell, so telemetry keeps its historical
-            // shape (cuda_link's adaptive-wait bookkeeping keys on that name).
-            // doorbell_handle == 0 means there was never a doorbell at all —
-            // kReadyPoll. Neither implies the doorbell was waited on; both mean
-            // "the block phase, not the spin phase, caught it."
-            const bool had_doorbell = doorbell_handle != 0;
-            return {had_doorbell ? kReadyDoorbell : kReadyPoll, now_us() - start, kMethodTimerNap};
+        if (event_ptr != 0) {
+            const int code = event_query(event_ptr);
+            if (code == kCudaSuccess) {
+                // doorbell_handle != 0 means a doorbell was genuinely in play for
+                // this channel — kReadyDoorbell, so telemetry keeps its historical
+                // shape (cuda_link's adaptive-wait bookkeeping keys on that name).
+                // doorbell_handle == 0 means there was never a doorbell at all —
+                // kReadyPoll. Neither implies the doorbell was waited on; both mean
+                // "the block phase, not the spin phase, caught it."
+                const bool had_doorbell = doorbell_handle != 0;
+                return {had_doorbell ? kReadyDoorbell : kReadyPoll, now_us() - start, kMethodTimerNap};
+            }
+            if (code != kCudaErrorNotReady) {
+                return {kCudaError, now_us() - start, code};
+            }
         }
 
         // Clamp the nap to the remaining deadline budget (re-read the clock:
         // event_query above may itself have consumed time), rounding up so the
         // nap is never zero and forward progress is guaranteed.
-        const double remaining_us = deadline - now_us();
+        const double t = now_us();
+        const double remaining_us = deadline - t;
         if (remaining_us <= 0.0) {
-            continue;  // the deadline check at the loop top reports the timeout
+            return {kTimeout, t - start, 0};
         }
         const int nap_us = remaining_us < static_cast<double>(kBlockNapUs)
                                ? static_cast<int>(remaining_us) + 1
@@ -224,11 +243,13 @@ std::tuple<int, double, int> wait_slot_impl(
 
 namespace {
 
-bool real_event_query(std::uintptr_t event_ptr) {
+int real_event_query(std::uintptr_t event_ptr) {
     if (g_cudaEventQuery == nullptr) {
-        return false;
+        return kCudaErrorNotReady;  // unresolved cudart: never ready, never a hard error
     }
-    return g_cudaEventQuery(reinterpret_cast<void*>(event_ptr)) == 0;  // cudaSuccess == 0
+    // Raw cudaError_t: wait_slot_impl tells ready (0), pending (600) and hard
+    // errors apart instead of collapsing every non-zero code to "not ready".
+    return g_cudaEventQuery(reinterpret_cast<void*>(event_ptr));
 }
 
 std::uint32_t real_read_write_idx(std::uintptr_t addr) {
@@ -324,7 +345,7 @@ std::tuple<int, double, int> wait_slot(
 // ---------------------------------------------------------------------------
 
 std::tuple<int, double, int> wait_slot_test(
-    py::function event_query,       // (event_ptr: int) -> bool
+    py::function event_query,       // (event_ptr: int) -> bool (True=ready) or int cudaError_t code
     py::function read_write_idx,    // (write_idx_addr: int) -> int
     py::function nap,               // (nap_us: int) -> None; fakes should advance the test clock
     py::function now_us,            // () -> float, microseconds, caller-controlled clock
@@ -334,7 +355,15 @@ std::tuple<int, double, int> wait_slot_test(
     std::uint32_t last_write_idx,
     int spin_us,
     int timeout_ms) {
-    auto event_query_wrap = [&](std::uintptr_t ptr) -> bool { return event_query(ptr).cast<bool>(); };
+    // A bool fake maps to the two non-error codes (True -> cudaSuccess, False ->
+    // cudaErrorNotReady); an int fake is passed through so tests can inject hard errors.
+    auto event_query_wrap = [&](std::uintptr_t ptr) -> int {
+        py::object r = event_query(ptr);
+        if (py::isinstance<py::bool_>(r)) {
+            return r.cast<bool>() ? kCudaSuccess : kCudaErrorNotReady;
+        }
+        return r.cast<int>();
+    };
     auto read_write_idx_wrap = [&](std::uintptr_t addr) -> std::uint32_t {
         return read_write_idx(addr).cast<std::uint32_t>();
     };
@@ -388,7 +417,8 @@ PYBIND11_MODULE(_native_waiter, m) {
           "then re-check it between bounded high-resolution timer naps until "
           "timeout_ms. Returns (status_int, waited_us, method) where status_int is "
           "0=READY_SPIN 1=READY_DOORBELL 2=READY_LATE(retired, never emitted) "
-          "3=TIMEOUT 4=READY_POLL.");
+          "3=TIMEOUT 4=READY_POLL 5=CUDA_ERROR (method then carries the cudaError_t "
+          "code). The event is always queried at least once, so timeout_ms=0 polls.");
 
     // Test-only entry point (see the docstring on wait_slot_test's definition
     // above). GIL held throughout -- not used by the production wait_slot() path.

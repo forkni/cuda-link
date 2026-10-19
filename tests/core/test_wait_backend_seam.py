@@ -151,6 +151,23 @@ def test_timeout_status_raises_timeout_error_same_as_python_path(managed_importe
     assert result.frame is None
 
 
+def test_cuda_error_raises_runtime_error_not_timeout(managed_importer) -> None:
+    """A hard cudaEventQuery error must surface as RuntimeError (like the python
+    path's query_event), never be reported as a TIMEOUT outcome."""
+    from cuda_link._wait_backend import FakeWaitBackend, WaitStatus  # noqa: PLC0415
+
+    backend = FakeWaitBackend()
+    backend.force_status = WaitStatus.CUDA_ERROR
+    backend.force_method = 700
+    imp = managed_importer(write_idx=1)
+    _engage_native_seam(imp, backend)
+
+    with pytest.raises(RuntimeError, match="cudaEventQuery failed: 700"):
+        imp.get_frame_numpy()
+    assert imp.wait_sleep_hits == 0
+    assert imp.wait_spin_hits == 0
+
+
 def test_backend_not_engaged_without_doorbell_handle(managed_importer) -> None:
     """Even with a resolved backend, no doorbell handle means the python path runs."""
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=1.0)

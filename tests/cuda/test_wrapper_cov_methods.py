@@ -103,6 +103,15 @@ def test_peek_last_error_returns_int() -> None:
     api.cudart.cudaPeekAtLastError.assert_called_once_with()
 
 
+def test_clear_last_error_calls_get_last_error() -> None:
+    api = make_bare_runtime_api()
+    api.cudart.cudaGetLastError.return_value = CUDAError.INVALID_VALUE
+
+    assert api.clear_last_error() == CUDAError.INVALID_VALUE
+    api.cudart.cudaGetLastError.assert_called_once_with()
+    api.cudart.cudaPeekAtLastError.assert_not_called()
+
+
 def test_check_sticky_error_noop_when_disabled() -> None:
     api = make_bare_runtime_api()
     api._sticky_check_enabled = False

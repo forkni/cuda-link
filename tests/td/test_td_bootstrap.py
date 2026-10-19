@@ -448,8 +448,8 @@ def isolated_resolver(monkeypatch):
     is cleared and (d) sys.path is silenced by a ``_SysPathLayer`` stand-in, until a test
     enables one explicitly.
 
-    An editable install of this repo (``pip install -e .``, as branch-protection.yml
-    does) adds a finder ahead of sys.path that would hijack every activation below;
+    An editable install of this repo (``pip install -e .``, as a local dev
+    checkout has) adds a finder ahead of sys.path that would hijack every activation below;
     it is hidden here and covered on its own by
     test_import_hook_ahead_of_sys_path_is_refused.
     """

@@ -188,6 +188,10 @@ class FakeCUDAAdapter:
     def peek_last_error(self) -> int:
         return self._sticky_error
 
+    def clear_last_error(self) -> int:
+        code, self._sticky_error = self._sticky_error, 0
+        return code
+
     # --- Memory (device) ---------------------------------------------------
 
     def malloc(self, size: int) -> c_void_p:

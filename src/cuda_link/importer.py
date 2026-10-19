@@ -412,6 +412,22 @@ class CupyBuffers:
         return cls(arrays=arrays)
 
 
+def _build_cupy_views(conn: IPCConnection, fmt: Format) -> CupyBuffers | None:
+    """CuPy views for fmt, or None when CuPy is absent or has no dtype for it (bfloat16).
+
+    A dtype CuPy cannot represent must not block torch/numpy consumers, so its
+    ValueError only drops the views; get_frame_cupy() then raises a clear RuntimeError.
+    Any other build failure propagates.
+    """
+    if not CUPY_AVAILABLE:
+        return None
+    try:
+        return CupyBuffers.build(conn, fmt)
+    except ValueError as e:
+        logger.warning("CuPy views dropped: %s", e)
+        return None
+
+
 @dataclass
 class NumpyBuffers:
     """Pinned host buffer + D2H streams for numpy frame consumption (built lazily).
@@ -883,8 +899,13 @@ class _CupyBackend:
         self._imp = importer
         self._stream = stream
 
-    def prepare(self, importer: Importer) -> None:  # noqa: ARG002
-        pass
+    def prepare(self, importer: Importer) -> None:
+        if importer._cupy is None:
+            # Views are dropped when the current format has no CuPy dtype (bfloat16).
+            raise RuntimeError(
+                f"CuPy views are unavailable for {importer._format.dtype_str} frames. "
+                "Use get_frame() to retrieve a torch.Tensor instead."
+            )
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
         evt = conn.ipc_events[read_slot]
@@ -1134,19 +1155,26 @@ class Importer:
         the expected state for a few frames and must not be logged as an error.
         """
         shm, num_slots, ipc_version = self._open_and_validate_shm(quiet=quiet)
+        conn = None
         try:
             fmt, provisional = self._resolve_format(shm, num_slots)
             conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
+            torch_bufs = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
+            cupy_bufs = _build_cupy_views(conn, fmt)
         except BaseException:
             # shm is still ours here — _open_ipc_slots only rolls back the
             # per-slot resources it opened, not the SharedMemory it was handed.
+            # A buffer-build failure after a successful open must also release
+            # the slots, or every reconnect retry leaks a full IPCConnection.
+            if conn is not None:
+                conn.close_ipc_handles()
             shm.close()
             raise
         self._adopt_connection(
             conn,
             fmt,
-            torch=TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None,
-            cupy=CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None,
+            torch=torch_bufs,
+            cupy=cupy_bufs,
             format_provisional=provisional,
         )
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
@@ -1828,6 +1856,11 @@ class Importer:
         self._format = new_fmt
         if self._torch is not None:
             self._torch = TorchBuffers.build(self._conn, new_fmt)
+        # The old arrays wrap the previous dev_ptrs (unmapped after a reinitialize)
+        # and the previous geometry — rebuild them like the torch views above. Gated
+        # on CuPy, not on self._cupy, so views dropped for an unsupported dtype come
+        # back once the producer switches to a supported one.
+        self._cupy = _build_cupy_views(self._conn, new_fmt)
 
     def _reinitialize(self) -> None:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
@@ -1852,20 +1885,24 @@ class Importer:
             new_ipc_version = read_version(shm.buf)
             new_num_slots = read_num_slots(shm.buf)
 
-            # Route through Format.from_shm — same decoder used at connect time.
-            # Falls back to current format if SHM metadata is absent or all-zeros.
-            resolved_fmt = Format.from_shm(shm.buf, new_num_slots)
-            new_fmt = resolved_fmt or self._format
+            # Route through _resolve_format — same resolution used at connect time, so
+            # ImportSpec shape/dtype overrides survive a producer restart. A provisional
+            # result (SHM metadata absent or all-zeros) keeps the current format rather
+            # than the hard-coded fallback.
+            resolved_fmt, provisional = self._resolve_format(shm, new_num_slots)
+            new_fmt = self._format if provisional else resolved_fmt
 
             new_conn = self._open_ipc_slots(shm, new_num_slots, new_ipc_version, new_fmt)
             self._conn = new_conn
+            # The restarted producer counts write_idx from scratch; a stale index from
+            # the old session would make its first frame read as already consumed.
+            self._last_write_idx = 0
 
             self._apply_format_change(new_fmt)
-            if resolved_fmt is not None:
-                # A1: a genuine SHM read (not the "still absent, kept old format" fallback
-                # above) means geometry is now authoritative — clear any stale provisional
-                # flag from the original connect so _try_acquire() doesn't re-resolve again.
-                self._format_provisional = False
+            # A1: a genuine SHM read makes geometry authoritative, so _try_acquire() stops
+            # re-resolving; a provisional one (metadata not yet written by the restarted
+            # producer) must re-arm it, or the kept old format is never corrected.
+            self._format_provisional = provisional
 
             logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:

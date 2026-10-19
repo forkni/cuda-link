@@ -506,6 +506,12 @@ class TDSenderEngine:
             self._host.set_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
             return False
+        finally:
+            # A failed init never arms the settle countdown, so drop the hold now —
+            # otherwise the producer stays paused until the 5 s stale timeout. In a
+            # finally so an unexpected exception type releases it too.
+            if not self._initialized:
+                self._barrier.force_release(os.getpid(), log_fn=self._log)
 
     def export_frame(self, top_op: object = None) -> bool:
         """Export the ExportBuffer TOP texture via CUDA IPC.
@@ -718,10 +724,12 @@ class TDSenderEngine:
                 self._last_cm_channels = cm_channels
                 self._last_pub_status = ""  # force status string rebuild after any change
 
+            _extra_flags = FLAGS_MONO_ALPHA if _pf_name.startswith("monoalpha") else 0
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
                 or cm_channels != self._current_spec.channels
                 or resolved_dtype != self._current_spec.dtype
+                or _extra_flags != self._current_spec.extra_flags  # rg <-> monoalpha: same shape+dtype, different flags
             ):
                 self._log(
                     f"Geometry/dtype change: "
@@ -740,9 +748,21 @@ class TDSenderEngine:
                     dtype=resolved_dtype,
                     num_slots=self.num_slots,
                     device=self.device,
-                    extra_flags=FLAGS_MONO_ALPHA if _pf_name.startswith("monoalpha") else 0,
+                    extra_flags=_extra_flags,
                 )
-                self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
+                try:
+                    self._exporter = Exporter.open(new_spec, policy=self._policy, cuda=None)
+                except (OSError, RuntimeError, ValueError) as open_err:
+                    # The old Exporter is already closed: drop it so the next cook takes
+                    # the lazy-init path instead of exporting through a dead handle.
+                    self._exporter = None
+                    self._initialized = False
+                    # initialize() doesn't reset the window, and the next Exporter restarts
+                    # frame_count at 0 — reset here, as the successful reopen below does.
+                    self._reset_report_window()
+                    self._log(f"Exporter reopen after geometry change failed: {open_err}", force=True)
+                    self._host.set_error_status(f"Reopen failed: {open_err}")
+                    return False
                 self._current_spec = new_spec
                 self._reset_report_window()  # new Exporter restarts frame_count at 0; stale window → negative FPS
 

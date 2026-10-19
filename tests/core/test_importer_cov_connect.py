@@ -498,6 +498,72 @@ def test_connect_closes_shm_and_reraises_when_open_ipc_slots_fails(
         writer.close()
 
 
+def test_connect_closes_ipc_handles_and_shm_when_buffer_build_fails(
+    temp_shm_name: str, shared_memory_cleanup: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Torch/CuPy view build failing after _open_ipc_slots() succeeded must
+    release the opened IPC slots and the SharedMemory before re-raising --
+    otherwise every reconnect retry leaks a full IPCConnection."""
+    import cuda_link.importer as _imp_mod
+
+    monkeypatch.setattr(_imp_mod, "TORCH_AVAILABLE", False)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
+    monkeypatch.setattr(
+        _imp_mod.CupyBuffers, "build", classmethod(MagicMock(side_effect=RuntimeError("simulated cupy build failure")))
+    )
+
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=2)
+    try:
+        imp = _make_importer(temp_shm_name, shape=(4, 4, 4), dtype="uint8", wait_backend="python")
+        opened: list = []
+        real_open_shm = imp._open_and_validate_shm
+
+        def _capture_open_shm(**kwargs):
+            result = real_open_shm(**kwargs)
+            opened.append(result[0])
+            return result
+
+        monkeypatch.setattr(imp, "_open_and_validate_shm", _capture_open_shm)
+
+        with pytest.raises(RuntimeError, match="simulated cupy build failure"):
+            imp._connect()
+
+        assert imp._initialized is False
+        assert imp._cuda.opened_mem_handles == {}, "IPC mem handles must be closed on build failure"
+        assert opened and opened[0].buf is None, "the reader's SharedMemory handle must be closed"
+    finally:
+        writer.close()
+
+
+def test_connect_bfloat16_with_cupy_installed_drops_only_cupy_views(
+    temp_shm_name: str,
+    shared_memory_cleanup: list,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CuPy has no bfloat16 dtype, so CupyBuffers.build raises ValueError. With
+    CuPy installed that must not block the connect: torch/numpy consumers still
+    get frames, only the CuPy views are dropped."""
+    import cuda_link.importer as _imp_mod
+
+    monkeypatch.setattr(_imp_mod, "TORCH_AVAILABLE", False)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
+
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=2)
+    try:
+        imp = _make_importer(temp_shm_name, shape=(4, 4, 4), dtype="bfloat16", wait_backend="python")
+        with caplog.at_level("WARNING", logger="cuda_link.importer"):
+            imp._connect()
+
+        assert imp._initialized is True
+        assert imp._cupy is None
+        assert imp._format.dtype_str == "bfloat16"
+        assert "CuPy views dropped" in caplog.text
+        imp.close()
+    finally:
+        writer.close()
+
+
 # ---------------------------------------------------------------------------
 # Importer.open()
 # ---------------------------------------------------------------------------

@@ -50,8 +50,8 @@ dev = [
 ]
 quality = [
     # Manual, local-only analysis tools -- never installed by CI. Kept out of `dev` so a
-    # resolver failure here can't break the Python 3.9 gate in branch-protection.yml, which
-    # installs `.[dev]` (tests.yml installs an explicit package list and never sees this).
+    # resolver failure here can't break the Python 3.9 leg of ci.yml, which installs the
+    # locked `dev` extra (`uv sync --locked --extra dev`) and never sees this one.
     "cosmic-ray>=8.4",
     "radon>=6.0",
     # crap4py's ONLY PyPI release is 0.1.1 and it requires Python >=3.10, while this project
@@ -137,6 +137,7 @@ max-complexity = 43
 "tests/td/test_tdsender_h2_channel_inference.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 "tests/td/test_tdsender_pixelformat_override.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 "tests/td/test_td_status_emission.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_tdsender_reopen_guard.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 
 [tool.ruff.format]
 quote-style = "double"

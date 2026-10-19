@@ -469,8 +469,20 @@ class Exporter:
                 )
                 self._graphs_disabled = True
                 self._destroy_export_graphs()
+                self._clear_graph_error("build")
                 return
         logger.info("CUDA export graphs built for %d slots (use_graphs=True)", self._spec.num_slots)
+
+    def _clear_graph_error(self, phase: str) -> None:
+        """Consume the CUDA error a failed graph build or launch latched.
+
+        Without this, export()'s check_sticky_error() would raise on this and every
+        later frame despite the legacy fallback. A truly sticky error re-latches on
+        the legacy path and is still caught there.
+        """
+        cleared = self._cuda.clear_last_error()
+        if cleared:
+            logger.warning("Cleared latched CUDA error %d after graph-%s failure", cleared, phase)
 
     def _destroy_export_graphs(self) -> None:
         for slot, graph_exec in enumerate(self._graph_execs):
@@ -660,6 +672,7 @@ class Exporter:
                 except (RuntimeError, OSError) as _graph_err:
                     logger.warning("Graph launch failed (%s) — disabling graphs, retrying via legacy path", _graph_err)
                     self._graphs_disabled = True
+                    self._clear_graph_error("launch")
                     goto_legacy = True
                 else:
                     goto_legacy = False
