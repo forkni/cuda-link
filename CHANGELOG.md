@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  Sender does not use this conversion yet. The dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order, which the Sender does not flag. `cm.size` can report a stale
+  larger allocation after a dtype shrink, so it is not the payload size.
+
 ## [1.13.0] - 2026-09-26
 
 ### Added
