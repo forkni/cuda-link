@@ -358,8 +358,8 @@ categories weren't in the original estimate, which never scanned `.claude/hooks/
 
 Tooling for this pass (`cosmic-ray`, `radon`, `crap4py`) installs via `pip install -e ".[quality]"`
 — a separate extra from `dev`, kept out of it deliberately so a resolver failure in these
-manual, local-only analysis tools can never break CI's Python 3.9 gate (`branch-protection.yml`
-installs `.[dev]`; `tests.yml` never installs an extra at all). crap4py's only PyPI release is
+manual, local-only analysis tools can never break CI's Python 3.9 leg (`ci.yml` installs the
+locked `dev` extra only). crap4py's only PyPI release is
 0.1.1 and it requires Python ≥3.10, so it's marker-gated (`python_version >= '3.10'`) and simply
 skipped on 3.9 rather than failing the install — the CRAP table below can only be regenerated on
 3.10+.

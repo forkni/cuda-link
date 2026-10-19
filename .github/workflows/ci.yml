@@ -9,7 +9,8 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs only: a cancelled push run leaves a mainline commit with no verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -18,6 +19,7 @@ jobs:
   lint:
     name: Lint + type-check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -26,7 +28,7 @@ jobs:
         with:
           enable-cache: auto
       - name: Install lint dependencies
-        run: uv sync --extra dev --no-install-project
+        run: uv sync --locked --extra dev --no-install-project
       - name: ruff check
         id: ruff-check
         continue-on-error: true
@@ -43,6 +45,17 @@ jobs:
         id: skip-drift
         continue-on-error: true
         run: uv run --no-sync python scripts/check_skipped_tests.py tests/ --max-ratio 0.02
+      # Workflow lint. actionlint reads .github/actionlint.yaml and runs shellcheck on every
+      # `run:` (preinstalled on ubuntu-latest). zizmor --offline keeps the gate deterministic:
+      # its online audits query live advisories, so an unchanged tree could turn red.
+      - name: actionlint
+        id: actionlint
+        continue-on-error: true
+        run: uvx --from actionlint-py==1.7.12.25 actionlint
+      - name: zizmor
+        id: zizmor
+        continue-on-error: true
+        run: uvx zizmor@1.30.1 --offline --format=github .github/workflows/
       - name: Aggregate lint results
         if: always()
         run: |
@@ -59,11 +72,18 @@ jobs:
           if [ "${{ steps.skip-drift.outcome }}" = "failure" ]; then
             echo "::error::skipped/xfail-test drift check failed"; status=1
           fi
+          if [ "${{ steps.actionlint.outcome }}" = "failure" ]; then
+            echo "::error::actionlint failed"; status=1
+          fi
+          if [ "${{ steps.zizmor.outcome }}" = "failure" ]; then
+            echo "::error::zizmor failed"; status=1
+          fi
           exit $status
 
   hygiene:
     name: Validate Branch State & Hygiene
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -126,6 +146,7 @@ jobs:
   build:
     name: Build wheel + sdist (once)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -162,7 +183,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-2025]
         python: ["3.11", "3.12"]
+        include:
+          # requires-python floor (>=3.9) and 3.10, Linux only: the code is version-sensitive,
+          # not OS-sensitive, below 3.11. These legs replace the old tests.yml and
+          # branch-protection.yml test jobs.
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.10"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     env:
       UV_NO_SYNC: "1"
     steps:
@@ -203,7 +233,7 @@ jobs:
         run: uv pip install --no-deps --no-index --find-links dist cuda-link
       - name: Smoke test (fail-fast, verify import from installed wheel)
         run: |
-          uv run --no-sync python -P -c "import pathlib, cuda_link as m; p = pathlib.Path(m.__file__).resolve(); print(p, getattr(m, '__version__', '?')); assert 'site-packages' in p.parts, f'imported from checkout instead of wheel: {p}'"
+          uv run --no-sync python -I -c "import pathlib, cuda_link as m; p = pathlib.Path(m.__file__).resolve(); print(p, getattr(m, '__version__', '?')); assert 'site-packages' in p.parts, f'imported from checkout instead of wheel: {p}'"
       - name: Run test suite
         run: >
           uv run --no-sync pytest tests/
@@ -231,6 +261,7 @@ jobs:
     if: always()
     needs: [lint, hygiene, build, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check all required jobs succeeded
         run: |
@@ -248,6 +279,7 @@ jobs:
     if: ${{ always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push' && contains(needs.*.result, 'failure') }}
     needs: [lint, hygiene, build, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       SHA: ${{ github.sha }}
       ACTOR: ${{ github.actor }}

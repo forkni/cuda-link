@@ -15,8 +15,8 @@ here and the fakes never touch real CUDA state. This is a lighter bar than
 real cudart), so this file can run on any Windows box with `pip install .`
 done, GPU or not.
 
-CAVEAT: CI (.github/workflows/tests.yml) runs on ubuntu-latest and never builds
-the Windows-only extension, so this file only actually exercises anything when
+CAVEAT: CI (.github/workflows/ci.yml) installs a universal wheel built with
+BUILD_NATIVE_WAITER=OFF, so this file only actually exercises anything when
 run manually on a Windows box with the extension compiled -- the
 `requires_native` marker keeps it deselected there.
 
