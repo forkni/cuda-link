@@ -8,6 +8,7 @@ full open→get_frame→close lifecycle without a real CUDA device.
 from __future__ import annotations
 
 import struct
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -920,18 +921,24 @@ def test_adaptive_stays_latched_after_trigger() -> None:
     assert imp._gpu_wait_latched_frame == latched_at
 
 
-def test_adaptive_torch_backend_uses_gpu_wait_when_latched() -> None:
+def test_adaptive_torch_backend_uses_gpu_wait_when_latched(monkeypatch: pytest.MonkeyPatch) -> None:
     """_TorchBackend.wait() takes the stream_wait_event branch when _gpu_wait_active=True.
 
     Confirms that policy.torch_gpu_wait=False but _gpu_wait_active=True still
     routes through the GPU-side wait — drives a real _TorchBackend.wait() call
     and asserts conn.cuda.stream_wait_event is actually invoked, rather than
     just re-evaluating the same boolean expression the SUT itself checks.
-    """
-    from cuda_link.importer import TORCH_AVAILABLE, _TorchBackend
 
-    if not TORCH_AVAILABLE:
-        pytest.skip("torch not installed")
+    wait() imports torch lazily and only touches torch.cuda.is_available() and
+    current_stream(), so a stand-in module in sys.modules covers that boundary and
+    the test runs on hosts without torch instead of skipping there.
+    """
+    from cuda_link.importer import _TorchBackend
+
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = True
+    fake_torch.cuda.current_stream.return_value = MagicMock(cuda_stream=123)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     # Build importer with gpu_wait disabled in policy but latch already set.
     # with_events=True is required: _TorchBackend.wait() only takes the
@@ -941,14 +948,14 @@ def test_adaptive_torch_backend_uses_gpu_wait_when_latched() -> None:
     imp._gpu_wait_active = True  # simulate a latched state
 
     backend = _TorchBackend(imp, stream=None)  # no explicit stream -> latch path
-    mock_stream = MagicMock(cuda_stream=123)
-    with (
-        patch("torch.cuda.is_available", return_value=True),
-        patch("torch.cuda.current_stream", return_value=mock_stream),
-    ):
-        backend.wait(imp._conn, read_slot=0)
+    assert backend.wait(imp._conn, read_slot=0) == 0.0
+    # The stream handle is cached after the first call, so a later current_stream()
+    # change must not reach the second wait.
+    fake_torch.cuda.current_stream.return_value = MagicMock(cuda_stream=456)
+    backend.wait(imp._conn, read_slot=0)
 
-    imp._conn.cuda.stream_wait_event.assert_called_once_with(123, imp._conn.ipc_events[0], 0)
+    evt = imp._conn.ipc_events[0]
+    assert [c.args for c in imp._conn.cuda.stream_wait_event.call_args_list] == [(123, evt, 0), (123, evt, 0)]
 
 
 def test_torch_backend_uses_cpu_wait_when_not_latched() -> None:

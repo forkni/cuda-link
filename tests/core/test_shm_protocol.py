@@ -133,6 +133,7 @@ def test_read_write_idx_initial_zero() -> None:
         (256, 256, 4, "uint8"),
         (1280, 720, 4, "uint16"),
     ],
+    ids=["1080p-float32", "512sq-float16", "256sq-uint8", "720p-uint16"],
 )
 def test_metadata_roundtrip(width: int, height: int, num_comps: int, dtype: str) -> None:
     layout = SHMLayout(num_slots=3)
@@ -188,7 +189,9 @@ def test_metadata_roundtrip_bgra_flag() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16"])
+@pytest.mark.parametrize(
+    "dtype", ["float32", "float16", "uint8", "uint16"], ids=["float32", "float16", "uint8", "uint16"]
+)
 def test_dtype_codec_roundtrip(dtype: str) -> None:
     kind, bits, flags = DtypeCodec.encode(dtype)
     decoded = DtypeCodec.decode(kind, bits, flags)
@@ -342,6 +345,7 @@ def test_slot_offset_now_consumed_by_protocol() -> None:
 @pytest.mark.parametrize(
     "dtype",
     ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+    ids=["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
 )
 def test_dtype_codec_roundtrip_all_dtypes(dtype: str) -> None:
     """encode then decode is identity for all 7 registered dtypes."""
@@ -383,6 +387,7 @@ def test_dtype_codec_int_vs_uint_distinct() -> None:
         ("int8", 1),
         ("int16", 2),
     ],
+    ids=["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
 )
 def test_dtype_codec_itemsize(dtype: str, expected_itemsize: int) -> None:
     assert DtypeCodec.itemsize(dtype) == expected_itemsize
@@ -422,7 +427,11 @@ def test_dtype_codec_typestr_unknown_raises() -> None:
         DtypeCodec.typestr("float64")
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "uint8", "uint16", "int8", "int16"],
+    ids=["float32", "float16", "uint8", "uint16", "int8", "int16"],
+)
 def test_dtype_codec_numpy_name_standard_dtypes(dtype: str) -> None:
     """numpy_name() returns the dtype string itself for all standard dtypes (np.dtype(name) works)."""
     assert DtypeCodec.numpy_name(dtype) == dtype
@@ -433,7 +442,11 @@ def test_dtype_codec_numpy_name_bfloat16_is_none() -> None:
     assert DtypeCodec.numpy_name("bfloat16") is None
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16", "uint8", "uint16", "int8", "int16"])
+@pytest.mark.parametrize(
+    "dtype",
+    ["float32", "float16", "uint8", "uint16", "int8", "int16"],
+    ids=["float32", "float16", "uint8", "uint16", "int8", "int16"],
+)
 def test_dtype_codec_cupy_name_standard_dtypes(dtype: str) -> None:
     """cupy_name() returns the dtype string itself for all standard dtypes (cp.dtype(name) works)."""
     assert DtypeCodec.cupy_name(dtype) == dtype
@@ -467,6 +480,7 @@ def test_read_version_read_num_slots_helpers() -> None:
 @pytest.mark.parametrize(
     "dtype",
     ["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
+    ids=["float32", "float16", "bfloat16", "uint8", "uint16", "int8", "int16"],
 )
 def test_metadata_roundtrip_all_dtypes(dtype: str) -> None:
     """Metadata.read_from correctly recovers every registered dtype."""
@@ -607,6 +621,21 @@ def test_set_version_fixes_version_collision() -> None:
         # the dtype or itemsize (fix for the R/B channel-swap bug)
         (FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, "uint8"),
     ],
+    ids=[
+        "float32",
+        "float16",
+        "bfloat16",
+        "uint8",
+        "uint16",
+        "int8",
+        "int16",
+        "float32-mono-alpha",
+        "float16-mono-alpha",
+        "uint8-mono-alpha",
+        "uint16-mono-alpha",
+        "bfloat16-mono-alpha",
+        "uint8-bgra",
+    ],
 )
 def test_dtype_codec_decode_mono_alpha_masked(kind: int, bits: int, flags: int, expected_dtype: str) -> None:
     """FLAGS_MONO_ALPHA (bit1) and FLAGS_BGRA (bit2) are channel-semantic; decode
@@ -674,9 +703,9 @@ def test_metadata_expected_size_basic() -> None:
         (4, 4, 2, 8, 4 * 4 * 2 * 1),  # monoalpha8fixed / rg8fixed
         (4, 4, 2, 16, 4 * 4 * 2 * 2),  # monoalpha16fixed
         (4, 4, 1, 8, 4 * 4 * 1 * 1),  # mono8fixed
-        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # rgba16fixed
-        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # float16 (same byte count)
+        (4, 4, 4, 16, 4 * 4 * 4 * 2),  # rgba16fixed / float16 (same byte count)
     ],
+    ids=["rgba32float", "rgba8fixed", "2ch-8bit", "monoalpha16fixed", "mono8fixed", "rgba16fixed"],
 )
 def test_metadata_expected_size_parametrized(
     width: int, height: int, num_comps: int, bits_per_comp: int, expected: int
@@ -874,7 +903,7 @@ def test_expected_size_floor_division_by_8() -> None:
     assert isinstance(md.expected_size, int)
 
 
-@pytest.mark.parametrize("exc_type", [ValueError, IndexError])
+@pytest.mark.parametrize("exc_type", [ValueError, IndexError], ids=["ValueError", "IndexError"])
 def test_bump_version_catches_value_and_index_error(exc_type: type[Exception]) -> None:
     """read_version() in practice only ever raises struct.error/TypeError, so
     ValueError and IndexError in bump_version's except tuple are unreachable

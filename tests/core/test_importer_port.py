@@ -200,11 +200,6 @@ def test_fake_adapter_query_event_always_true() -> None:
     assert fake.query_event(evt) is True
 
 
-def test_fake_adapter_synchronize_noop() -> None:
-    fake = FakeCUDAAdapter()
-    fake.synchronize()  # must not raise
-
-
 # ---------------------------------------------------------------------------
 # FakeCUDAAdapter — importer-side host memory
 # ---------------------------------------------------------------------------

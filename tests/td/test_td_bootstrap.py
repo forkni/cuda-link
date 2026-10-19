@@ -161,8 +161,7 @@ def test_bootstrap_activates_when_package_importable():
 def test_bootstrap_registers_all_aliases_in_sys_modules():
     """After activation, every _ALIAS_MAP key is present in sys.modules."""
     bootstrap = _load_bootstrap()
-    if not bootstrap._active:
-        pytest.skip("cuda_link not importable — bootstrap inactive; see test_bootstrap_activates_*")
+    assert bootstrap._active, "precondition: bootstrap must activate (see test_bootstrap_activates_*)"
 
     for bare_name in bootstrap._ALIAS_MAP:
         assert bare_name in sys.modules, f"sys.modules[{bare_name!r}] not registered after bootstrap activation"
@@ -171,8 +170,7 @@ def test_bootstrap_registers_all_aliases_in_sys_modules():
 def test_bootstrap_aliases_point_to_correct_submodules():
     """Registered aliases must point to the same object as importlib.import_module(submodule)."""
     bootstrap = _load_bootstrap()
-    if not bootstrap._active:
-        pytest.skip("cuda_link not importable — bootstrap inactive")
+    assert bootstrap._active, "precondition: bootstrap must activate (see test_bootstrap_activates_*)"
 
     for bare_name, submodule_path in bootstrap._ALIAS_MAP.items():
         registered = sys.modules.get(bare_name)
@@ -186,8 +184,7 @@ def test_bootstrap_aliases_point_to_correct_submodules():
 def test_bootstrap_bare_name_import_resolves_to_package_module():
     """After bootstrap, 'from Exporter import Exporter' resolves to cuda_link.exporter.Exporter."""
     bootstrap = _load_bootstrap()
-    if not bootstrap._active:
-        pytest.skip("cuda_link not importable — bootstrap inactive")
+    assert bootstrap._active, "precondition: bootstrap must activate (see test_bootstrap_activates_*)"
 
     # Simulate TD-style bare-name import by reading directly from sys.modules
     exporter_module = sys.modules.get("Exporter")
@@ -201,8 +198,7 @@ def test_bootstrap_bare_name_import_resolves_to_package_module():
 def test_bootstrap_shm_protocol_exposes_private_symbols():
     """SHMProtocol alias must expose private symbols used by TDReceiver (e.g. _ST_BBH)."""
     bootstrap = _load_bootstrap()
-    if not bootstrap._active:
-        pytest.skip("cuda_link not importable — bootstrap inactive")
+    assert bootstrap._active, "precondition: bootstrap must activate (see test_bootstrap_activates_*)"
 
     shm_module = sys.modules.get("SHMProtocol")
     assert shm_module is not None

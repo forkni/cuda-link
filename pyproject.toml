@@ -103,6 +103,9 @@ xfail_strict = true
 [tool.check_skipped_tests]
 max_ratio = 0.02
 
+[tool.scan_test_smells]
+baseline = ".smell-baseline.json"
+
 [tool.ruff]
 line-length = 120
 target-version = "py39"

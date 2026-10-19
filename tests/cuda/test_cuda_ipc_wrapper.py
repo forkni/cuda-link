@@ -4,6 +4,8 @@ Tests for CUDARuntimeAPI CUDA wrapper.
 These tests require a CUDA-capable GPU.
 """
 
+import ctypes
+
 import pytest
 
 
@@ -35,27 +37,35 @@ def test_malloc_free(cuda_runtime: object) -> None:
 
 @pytest.mark.requires_cuda
 def test_malloc_zero_size(cuda_runtime: object) -> None:
-    """Test edge case: allocating 0 bytes."""
+    """Edge case: a 0-byte allocation succeeds and its result is safe to free.
+
+    Some CUDA versions return NULL for a 0-byte allocation and others a valid pointer;
+    cudaFree accepts either (cudaFree(NULL) is a documented no-op), so no branching.
+    """
     ptr = cuda_runtime.malloc(0)
-    # Some CUDA versions return NULL for 0-byte allocation, others return valid pointer
-    # Just verify it doesn't crash
-    if ptr and ptr.value != 0:
-        cuda_runtime.free(ptr)
+    assert isinstance(ptr, ctypes.c_void_p)
+    cuda_runtime.free(ptr)
+    assert cuda_runtime.peek_last_error() == 0
 
 
 @pytest.mark.requires_cuda
 def test_memcpy_d2d(cuda_runtime: object) -> None:
-    """Test device-to-device memory copy."""
+    """A device-to-device copy carries the source bytes to the destination."""
     size = 1024  # 1 KB
+    pattern = bytes(i % 251 for i in range(size))
+    host_src = ctypes.create_string_buffer(pattern, size)
+    host_dst = ctypes.create_string_buffer(size)
 
-    # Allocate two buffers
     src_ptr = cuda_runtime.malloc(size)
     dst_ptr = cuda_runtime.malloc(size)
 
     try:
-        # Copy D2D
+        cuda_runtime.memcpy(dst=src_ptr, src=ctypes.cast(host_src, ctypes.c_void_p), count=size, kind=1)
         cuda_runtime.memcpy(dst=dst_ptr, src=src_ptr, count=size, kind=3)  # cudaMemcpyDeviceToDevice
         cuda_runtime.synchronize()
+        cuda_runtime.memcpy(dst=ctypes.cast(host_dst, ctypes.c_void_p), src=dst_ptr, count=size, kind=2)
+
+        assert host_dst.raw == pattern
 
     finally:
         cuda_runtime.free(src_ptr)
@@ -113,9 +123,14 @@ def test_event_record_query(cuda_runtime: object) -> None:
 
 @pytest.mark.requires_cuda
 def test_synchronize(cuda_runtime: object) -> None:
-    """Test CUDA device synchronization."""
-    # Should not crash
-    cuda_runtime.synchronize()
+    """synchronize() blocks until all previously recorded device work has completed."""
+    event = cuda_runtime.create_ipc_event()
+    try:
+        cuda_runtime.record_event(event)
+        cuda_runtime.synchronize()
+        assert cuda_runtime.query_event(event) is True
+    finally:
+        cuda_runtime.destroy_event(event)
 
 
 @pytest.mark.requires_cuda

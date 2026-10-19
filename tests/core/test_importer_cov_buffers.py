@@ -458,9 +458,15 @@ def test_numpy_buffers_rotate_swaps_front_and_back() -> None:
 
 
 def test_numpy_buffers_drain_swallows_stream_synchronize_error() -> None:
+    """A failed sync (context gone) must not stop close() from freeing the pinned buffer."""
     cuda = FakeCUDAAdapter()
     nb = _built_numpy_buffers(cuda)
+    primary_stream = nb.primary_stream
     cuda.stream_synchronize = MagicMock(side_effect=RuntimeError("sync failed"))
 
-    nb.drain()  # must not raise
+    nb.drain()
+    cuda.stream_synchronize.assert_called_once_with(primary_stream)
+
     nb.close()
+    assert nb.pinned_ptr is None
+    assert nb.buffer is None

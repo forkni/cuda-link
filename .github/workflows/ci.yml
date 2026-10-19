@@ -43,6 +43,10 @@ jobs:
         id: skip-drift
         continue-on-error: true
         run: uv run --no-sync python scripts/check_skipped_tests.py tests/ --max-ratio 0.02
+      - name: Test-smell ratchet
+        id: smell-ratchet
+        continue-on-error: true
+        run: uv run --no-sync python scripts/scan_test_smells.py tests/ --baseline .smell-baseline.json
       - name: Aggregate lint results
         if: always()
         run: |
@@ -58,6 +62,9 @@ jobs:
           fi
           if [ "${{ steps.skip-drift.outcome }}" = "failure" ]; then
             echo "::error::skipped/xfail-test drift check failed"; status=1
+          fi
+          if [ "${{ steps.smell-ratchet.outcome }}" = "failure" ]; then
+            echo "::error::test-smell ratchet failed (new smells vs .smell-baseline.json)"; status=1
           fi
           exit $status
 

@@ -11,6 +11,7 @@ Three groups:
 from __future__ import annotations
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -169,8 +170,12 @@ def test_doorbell_auto_reset_single_wake() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_doorbell_close_is_idempotent_none() -> None:
-    """close(None) must not raise — it is the non-Windows / disabled no-op path."""
-    from cuda_link._doorbell import close
+def test_doorbell_close_none_never_touches_closehandle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """close(None) is the non-Windows / disabled no-op path: it must short-circuit
+    before CloseHandle, which would otherwise be handed a NULL handle."""
+    import cuda_link._doorbell as db
 
-    close(None)  # should not raise
+    mock_close_handle = MagicMock()
+    monkeypatch.setattr(db._k32, "CloseHandle", mock_close_handle)
+    db.close(None)
+    mock_close_handle.assert_not_called()

@@ -66,3 +66,15 @@ repos:
         pass_filenames: false
         always_run: false
         files: ^tests/.*\.py$
+
+  # Test-smell ratchet. --baseline is explicit because the [tool.scan_test_smells]
+  # fallback needs tomllib (Python 3.11+); without it the scan would be report-only.
+  - repo: local
+    hooks:
+      - id: scan-test-smells
+        name: test-smell count must not grow
+        language: python
+        entry: python scripts/scan_test_smells.py tests/ --baseline .smell-baseline.json
+        pass_filenames: false
+        always_run: false
+        files: ^(tests/.*\.py|\.smell-baseline\.json)$

@@ -103,82 +103,98 @@ def _make_importer_stub():
     return imp
 
 
-def test_numpy_backend_cached() -> None:
-    """_numpy_backend must be created once and reused on subsequent calls.
+def _record_consumed(monkeypatch: pytest.MonkeyPatch, imp) -> list:
+    """Stub the frame-consumption tail so get_frame*() exercises only backend selection.
 
-    Drives only the caching logic; never enters _consume_frame (not initialized).
+    Returns the list of backends _consume_frame() was handed, in call order.
     """
-    from cuda_link.importer import _NumpyBackend
+    from cuda_link._importer_port import ImportOutcome, ImportResult
 
+    seen: list = []
+
+    def _consume(backend):
+        seen.append(backend)
+        return ImportResult(outcome=ImportOutcome.NO_FRAME)
+
+    monkeypatch.setattr(imp, "_consume_frame", _consume)
+    return seen
+
+
+def test_numpy_backend_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_frame_numpy() builds one _NumpyBackend lazily and hands the same one to every call."""
+    import cuda_link.importer as importer_mod
+
+    monkeypatch.setattr(importer_mod, "NUMPY_AVAILABLE", True)
     imp = _make_importer_stub()
-    assert imp._numpy_backend is None
+    seen = _record_consumed(monkeypatch, imp)
 
-    # Simulate the lazy-init + reuse guard from get_frame_numpy:
-    if imp._numpy_backend is None:
-        imp._numpy_backend = _NumpyBackend(imp)
-    first = imp._numpy_backend
+    imp.get_frame_numpy()
+    imp.get_frame_numpy()
 
-    # Second pass — same instance
-    if imp._numpy_backend is None:
-        imp._numpy_backend = _NumpyBackend(imp)
-    assert imp._numpy_backend is first, "second call must reuse the same _NumpyBackend instance"
+    assert len(seen) == 2
+    assert isinstance(seen[0], importer_mod._NumpyBackend)
+    assert seen[1] is seen[0], "second call must reuse the same _NumpyBackend instance"
+    assert imp._numpy_backend is seen[0]
 
 
-def test_torch_backend_cached_and_stream_refreshed() -> None:
-    """_TorchBackend must be created once; _stream updated in-place on subsequent calls."""
-    from cuda_link.importer import TORCH_AVAILABLE, _TorchBackend
+@pytest.mark.parametrize(
+    ("method", "flag", "backend_cls", "field"),
+    [
+        ("get_frame", "TORCH_AVAILABLE", "_TorchBackend", "_torch_backend"),
+        ("get_frame_cupy", "CUPY_AVAILABLE", "_CupyBackend", "_cupy_backend"),
+    ],
+    ids=["torch", "cupy"],
+)
+def test_stream_backend_cached_and_stream_refreshed(
+    monkeypatch: pytest.MonkeyPatch, method: str, flag: str, backend_cls: str, field: str
+) -> None:
+    """get_frame()/get_frame_cupy() build the backend once and refresh its _stream in place.
 
-    if not TORCH_AVAILABLE:
-        pytest.skip("torch not installed")
+    The backend constructors only store references, so the availability flag is patched on
+    instead of requiring torch/cupy: the caching contract is pinned on every host.
+    """
+    import cuda_link.importer as importer_mod
 
+    monkeypatch.setattr(importer_mod, flag, True)
     imp = _make_importer_stub()
-    assert imp._torch_backend is None
-
+    seen = _record_consumed(monkeypatch, imp)
     stream_a = object()
     stream_b = object()
 
-    # Simulate the caching logic from get_frame():
-    if imp._torch_backend is None:
-        imp._torch_backend = _TorchBackend(imp, stream_a)
-    else:
-        imp._torch_backend._stream = stream_a
-    first = imp._torch_backend
+    getattr(imp, method)(stream_a)
+    first = seen[0]
+    assert isinstance(first, getattr(importer_mod, backend_cls))
     assert first._stream is stream_a
 
-    if imp._torch_backend is None:
-        imp._torch_backend = _TorchBackend(imp, stream_b)
-    else:
-        imp._torch_backend._stream = stream_b
-    assert imp._torch_backend is first, "must reuse the same _TorchBackend instance"
-    assert imp._torch_backend._stream is stream_b, "_stream must be updated in-place"
+    getattr(imp, method)(stream_b)
+    assert seen[1] is first, f"must reuse the same {backend_cls} instance"
+    assert first._stream is stream_b, "_stream must be updated in place"
+    assert getattr(imp, field) is first
 
 
-def test_cupy_backend_cached_and_stream_refreshed() -> None:
-    """_CupyBackend must be created once; _stream updated in-place on subsequent calls."""
-    from cuda_link.importer import CUPY_AVAILABLE, _CupyBackend
+@pytest.mark.parametrize(
+    ("method", "flag", "message"),
+    [
+        ("get_frame", "TORCH_AVAILABLE", "torch is required"),
+        ("get_frame_numpy", "NUMPY_AVAILABLE", "numpy is required"),
+        ("get_frame_cupy", "CUPY_AVAILABLE", "cupy is required"),
+    ],
+    ids=["torch", "numpy", "cupy"],
+)
+def test_missing_backend_library_raises_before_caching(
+    monkeypatch: pytest.MonkeyPatch, method: str, flag: str, message: str
+) -> None:
+    """Without the backend library the call raises and caches no backend."""
+    import cuda_link.importer as importer_mod
 
-    if not CUPY_AVAILABLE:
-        pytest.skip("cupy not installed")
-
+    monkeypatch.setattr(importer_mod, flag, False)
     imp = _make_importer_stub()
-    assert imp._cupy_backend is None
+    seen = _record_consumed(monkeypatch, imp)
 
-    stream_a = object()
-    stream_b = object()
-
-    if imp._cupy_backend is None:
-        imp._cupy_backend = _CupyBackend(imp, stream_a)
-    else:
-        imp._cupy_backend._stream = stream_a
-    first = imp._cupy_backend
-    assert first._stream is stream_a
-
-    if imp._cupy_backend is None:
-        imp._cupy_backend = _CupyBackend(imp, stream_b)
-    else:
-        imp._cupy_backend._stream = stream_b
-    assert imp._cupy_backend is first
-    assert imp._cupy_backend._stream is stream_b
+    with pytest.raises(RuntimeError, match=message):
+        getattr(imp, method)()
+    assert seen == []
+    assert (imp._numpy_backend, imp._torch_backend, imp._cupy_backend) == (None, None, None)
 
 
 def test_numpy_backend_none_initially() -> None:

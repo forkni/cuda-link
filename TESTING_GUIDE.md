@@ -28,21 +28,21 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-10-19, post Phase H1)
+## Current baseline (2026-10-19, post Phase H2)
 
 **Supersedes the 2026-10-12, 2026-08-20 and 2026-07-12 tables below.**
 
 | Metric | Value |
 |--------|-------|
-| Tests (no-GPU selection) | 1323 passed + 2 skipped (Windows; 64 deselected) · ubuntu CI runs same selection |
-| No-GPU selection wall clock | ~18 s |
-| Full suite incl. GPU/native (local) | 1386 passed + 3 skipped, ~29 s (was ~76 s before H1) |
+| Tests (no-GPU selection) | 1327 passed + 2 skipped (Windows; 63 deselected) · ubuntu CI runs same selection |
+| No-GPU selection wall clock | ~18 s (H1, without coverage) · ~22 s with `--cov=cuda_link --cov-branch` (H2) |
+| Full suite incl. GPU/native (local) | 1386 passed + 3 skipped, ~29 s (was ~76 s before H1; H1 figure, full suite not re-run in H2) |
 | Branch coverage, clean run | 99.35 % (`--cov=cuda_link`, no-GPU selection) · 88.21 % combined incl. `td_exporter` (full suite) |
 | Coverage gate (`fail_under`) | 85 (unchanged; one-way ratchet. See F4.) |
-| Order independence / flakiness | 10/10 no-GPU + 3/3 full-suite randomized runs green (audit), 3/3 full + 1 no-GPU green after H1 |
+| Order independence / flakiness | 10/10 no-GPU + 3/3 full-suite randomized runs green (audit), 3/3 full + 1 no-GPU green after H1, 3/3 no-GPU seeds green after H2 |
 | Slowest test | 2.9 s (the two subprocess `-O` import tests; by design — see Phase B). GPU roundtrips ~2.1 s each, were 22.5 s |
-| Test smells (AST scanner) | 77 total (unchanged; no committed `.smell-baseline.json` yet) |
-| Skipped/xfail ratio | 1.1 % (14/1227) — gated under 2.0 % threshold |
+| Test smells (AST scanner) | 19 total (was 77 at the H0 audit, 73 on the H2 base); ratcheted by committed `.smell-baseline.json` (see H2) |
+| Skipped/xfail ratio | 1.1 % (13/1224) — gated under 2.0 % threshold |
 | Complexity ceiling (`C901 max-complexity`) | 43 (unchanged). See F3 and Phase H audit for CRAP. |
 
 ## Baseline metrics (2026-10-12, post Phase G)
@@ -554,6 +554,81 @@ integration files: they no longer touch the production barrier segment. Other fi
 files) were not audited for this in H1, so the general "no pytest beside a live TD session" rule
 still stands. The roundtrip tests still use real CUDA IPC, so they stay `requires_cuda` and
 local-only.
+
+### H2 — Smell triage and baseline
+
+`scripts/scan_test_smells.py` (AST scanner) over `tests/`. The H2 base (H1 branch) had 73 smells.
+The 77 from the audit included four early-exit tests H1 had already fixed. Each no-assert and
+early-exit test was rewritten to assert an observable effect, or deleted when it had no
+regression protection. No test was skipped or xfailed to drop the count.
+
+| Smell | H2 base | After |
+|-------|---------|-------|
+| no-assert | 30 | 0 |
+| early-exit (`pytest.skip`/`return` mid-test) | 9 | 0 |
+| parametrize-no-ids | 15 | 0 |
+| multi-mock-assert | 2 | 2 |
+| overprotective | 11 | 11 |
+| platform-check | 4 | 4 |
+| bitwise-assert | 2 | 2 |
+| **Total** | **73** | **19** |
+| Test functions scanned | 1227 | 1224 |
+| Skipped/xfail ratio | 1.1 % (14/1227) | 1.1 % (13/1224) |
+
+**Deleted.** Each of these had no regression protection.
+
+- `test_fake_adapter_graph_exec_memcpy_node_noop`
+- `test_fake_adapter_restore_context_is_callable`
+- `test_fake_adapter_synchronize_noop`
+
+  These three only called a no-op on the fake adapter.
+- `test_abi_guard_passes_for_correct_size` duplicated every other import of the module. The
+  mismatch test is now parametrized over `too-small`/`too-large`.
+- `test_mode0_invalidates_concurrent_capture` was a strict xfail behind a skip, so it could never
+  fail. The mode-2 half stays, and the contract is pinned GPU-free by the new
+  `test_build_export_graphs_captures_every_slot_in_relaxed_mode`. That test asserts every slot is
+  captured with `StreamCaptureMode.RELAXED`.
+
+**Rewritten.**
+
+- **No-assert tests** now assert the effect they exercised: log output via `capsys`/`caplog`,
+  freed slots counted on double close, D2D memcpy pattern round-tripped, event query after
+  synchronize, and barrier state.
+- **Backend caching** (`test_backend_reuse.py`):
+  - The old tests re-implemented the caching inline. The new ones drive `get_frame*` twice and
+    assert the same backend instance is reused with `_stream` refreshed.
+  - A missing library raises before anything is cached.
+- **`test_adaptive_torch_backend_uses_gpu_wait_when_latched`** no longer skips without torch. A
+  fake `torch` module is injected, and the test asserts the outgoing `stream_wait_event` args to
+  prove the stream handle is cached, rather than stub interactions.
+- **`test_get_frame_numpy_without_numpy`** always skipped where numpy is installed, and would have
+  failed where it isn't (an unconnected facade returns `None`). It now patches `NUMPY_AVAILABLE`
+  on a connected facade.
+- **`test_td_bootstrap.py`**: four `if not bootstrap._active: pytest.skip(...)` became
+  precondition asserts.
+- **Parametrize ids** were added to all 15 parametrizations. A duplicate row in
+  `test_shm_protocol.py` (float16 was identical to rgba16fixed) was merged into one row.
+
+**Hand mutants.** Five source mutants were each killed by the rewritten test aimed at them:
+
+- the `_stream` refresh dropped
+- the cupy backend rebuilt every call
+- the capture mode changed to 0
+- the torch wait stream re-read every call
+- the facade swallowing the numpy `RuntimeError`
+
+**Gate.** `.smell-baseline.json` is committed, and the scanner exits 1 when any category grows.
+
+- **Pre-commit:** the `scan-test-smells` local hook runs on `tests/**.py` and baseline changes.
+- **CI:** the `smell-ratchet` step in the lint job, aggregated like the skip-drift check.
+
+`--baseline` is passed explicitly in both places. The `[tool.scan_test_smells]` fallback in
+`pyproject.toml` needs `tomllib` (Python 3.11+). An injected no-assert test failed the gate with
+`no-assert increased 0 -> 1`.
+
+**Verification.** No-GPU selection on seeds 1729, 424242 and 90210: 1327 passed, 2 skipped,
+63 deselected each, ~22.4 s with coverage. `--cov=cuda_link` branch coverage is 99.35 %
+(3154 stmts, 22 miss), equal to the H1 baseline. `fail_under` stays at 85.
 
 ## Deferral table — tooling we deliberately did NOT add
 

@@ -580,6 +580,7 @@ def test_receiver_refresh_invalid_invariant_returns_false(shm_cleanup: SharedMem
         (1, 16, 2, "rg16fixed"),  # uint16 RG
         (2, 32, 2, "rg32float"),  # float32 RG
     ],
+    ids=["rgba32float", "r32float", "rgba16fixed", "r16fixed", "rgba8fixed", "r8fixed", "rg16fixed", "rg32float"],
 )
 def test_to_td_pixel_format(format_kind, bits, num_comps, expected):
     """td_format_string must produce the correct par.format string for every dtype/channel combo."""
