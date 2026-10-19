@@ -161,6 +161,13 @@ importer.close()
 
 > ▶ Runnable version: [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py) — spawns its own demo producer, so no TouchDesigner is needed to try it.
 
+**What a TD source arrives as.** 8-bit RGBA TOPs arrive in **B, G, R, A** channel order
+(that is how TD's `cudaMemory()` returns them; the Sender sets `FLAGS_BGRA` in the SHM
+header). 16-bit and 32-bit RGBA arrive as R, G, B, A. **Float16 TOPs arrive as `float32`**:
+TD converts them on the GPU, losslessly. 10-bit and 11-bit packed formats can't be shared,
+and the COMP tints yellow until you change the source TOP's pixel format. Full matrix:
+[ARCHITECTURE.md → pixel format compatibility](docs/ARCHITECTURE.md).
+
 ### 3. Python → TouchDesigner (AI Output)
 
 Send AI-generated frames **back to TD** for display:
@@ -218,7 +225,7 @@ Exporter                           CUDAIPCExtension facade
 Both directions share the same v0.5.0 binary protocol.
 ```
 
-The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter (~415 LOC) over the canonical `Exporter` — it owns pixel-format bridging, the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
+The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter over the canonical `Exporter` — it owns pixel-format bridging (including the float16 → float32 request), the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
 
 ### Ring Buffer (3 Slots)
 
@@ -308,10 +315,21 @@ Disable for a single run: add `-p no:randomly`.
 pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 85`, set against the combined bare-`--cov` run (87.10% measured
-2026-08-20, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
+The gate is `fail_under = 85`, set against the combined bare-`--cov` run (88.21% measured
+2026-10-19, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
 See `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
+
+### Suite rules
+
+- Warnings are errors (`filterwarnings = ["error"]`) and `xfail` is strict.
+- `scripts/check_skipped_tests.py` caps the skipped/xfail ratio at 2%, not counting
+  deliberate `requires_cuda` / `requires_native` deselection.
+- `scripts/scan_test_smells.py tests/ --baseline .smell-baseline.json` fails when any
+  test-smell category grows. It runs in pre-commit and CI.
+
+The current baseline and the history of the hardening phases are in
+[TESTING_GUIDE.md](TESTING_GUIDE.md).
 
 ### Test doubles
 
@@ -379,6 +397,13 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 **Cause**: TD re-exported IPC handles (network reset, resolution change).
 
 **Solution**: The importer automatically detects version changes and re-opens handles. No action needed.
+
+### Red and blue swapped
+
+**Cause**: the source TOP is 8-bit RGBA, which TD shares in B, G, R, A order.
+
+**Solution**: swap channels on the consumer (`tensor[..., [2, 1, 0, 3]]`), or set the source
+TOP to 16-bit fixed or 32-bit float, which arrive as R, G, B, A.
 
 ### GPU memory leak
 
@@ -577,11 +602,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
    [`.github/workflows/merge-development-to-master.yml`](.github/workflows/merge-development-to-master.yml)).
 2. `pip install -e ".[all]"` for an editable install with every output backend.
 3. Run the checks CI enforces before opening a PR: `pytest tests/ -v` (see
-   [Testing](#testing) for the coverage gate) and `pyrefly` for static typing.
+   [Testing](#testing) for the coverage gate and suite rules), `ruff check`,
+   `ruff format --check` and `pyrefly check`. `pre-commit install` runs the same lint and
+   smell checks on every commit.
 4. Use [conventional-commit](https://www.conventionalcommits.org/) messages
    (`feat:`, `fix:`, `docs:`, …).
-5. Open the PR against `development`. CI runs tests, typecheck, and docs validation, and
-   Claude's automated reviewer leaves feedback.
+5. Open the PR against `development`. The `ci.yml` gates run lint, type-check, workflow
+   lint and the smell ratchet, build the wheel once, and test that wheel on Ubuntu and
+   Windows (Python 3.11 and 3.12, plus 3.9 and 3.10 on Ubuntu). Docs validation and the native wheel build run alongside.
+   Claude and CodeRabbit leave automated review comments.
 
 Use plain `git`/`gh` for your fork — the `scripts/git/*` wrappers in this repo are the
 maintainer's local automation, not a contributor requirement.

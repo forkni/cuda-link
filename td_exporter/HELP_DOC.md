@@ -349,7 +349,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 ### "Stale SharedMemory" or version mismatch logged
 
-- The sender was restarted while the receiver is still holding old IPC handles. Toggle the receiver's `Active` Off → On to force reconnection.
+- The sender was restarted while the receiver is still holding old IPC handles. The receiver reopens the new handles in place on the next frame; if the message keeps repeating, toggle the receiver's `Active` Off → On to force a full reconnection.
 
 ### "Protocol magic mismatch" error
 
