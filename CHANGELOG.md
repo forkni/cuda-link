@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
   returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
   Sender does not use this conversion yet. The dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order, which the Sender does not flag. `cm.size` is the W×H×16
+  allocation, not the payload size.
 
 ## [1.13.0] - 2026-09-26
 
