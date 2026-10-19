@@ -20,9 +20,9 @@ import uuid
 import pytest
 from Exporter import Exporter, FrameOutcome
 from fakes import FakeTDHost, FakeTOPHandle, fake_exporter_open  # noqa: F401
-from SHMProtocol import FLAGS_MONO_ALPHA
+from SHMProtocol import FLAGS_BGRA, FLAGS_MONO_ALPHA
 from TDConfig import TDSenderConfig
-from TDSender import TDSenderEngine
+from TDSender import TDSenderEngine, _channel_flags
 
 
 class _FakeExporter:
@@ -130,3 +130,43 @@ def test_flags_only_change_triggers_reopen(fake_exporter_open: None) -> None:
     assert first.closed is True
     assert engine._current_spec.extra_flags == FLAGS_MONO_ALPHA
     assert engine._current_spec.channels == 2
+
+
+@pytest.mark.parametrize(
+    ("pixel_format_name", "channels", "dtype", "expected"),
+    [
+        ("rgba8fixed", 4, "uint8", FLAGS_BGRA),
+        ("rgba16fixed", 4, "uint16", 0),
+        ("rgba32float", 4, "float32", 0),
+        ("rg8fixed", 2, "uint8", 0),
+        ("monoalpha8fixed", 2, "uint8", FLAGS_MONO_ALPHA),
+        ("mono8fixed", 1, "uint8", 0),
+    ],
+)
+def test_channel_flags(pixel_format_name: str, channels: int, dtype: str, expected: int) -> None:
+    # TD cudaMemory() returns 8-bit RGBA as B,G,R,A; 16/32-bit RGBA stay R,G,B,A.
+    assert _channel_flags(pixel_format_name, channels, dtype) == expected
+
+
+def test_rgba8_source_publishes_bgra_flag(fake_exporter_open: None) -> None:
+    top = _top("rgba8fixed", 4)
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(host)
+
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine.export_frame() is True
+    assert engine._current_spec.extra_flags == FLAGS_BGRA
+
+
+def test_unmapped_rgba8_source_inits_with_bgra_flag(fake_exporter_open: None) -> None:
+    # "useinput" skips the pixelFormatName init path; the flag must still be set at init,
+    # or the first export frame reopens the Exporter over the flag mismatch.
+    top = _top("useinput", 4)
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(host)
+
+    assert engine.export_frame() is False  # lazy-init probe
+    first = engine._exporter
+    assert engine._current_spec.extra_flags == FLAGS_BGRA
+    assert engine.export_frame() is True
+    assert engine._exporter is first, "first export frame must not reopen the Exporter"
