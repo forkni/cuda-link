@@ -251,3 +251,28 @@ def test_export_graph_launch_failure_clears_latched_error() -> None:
         assert any("Cleared latched CUDA error" in m for m in messages)
     finally:
         exp.close()
+
+
+def test_build_export_graphs_failure_clears_latched_error() -> None:
+    """A CUDA call failing inside _build_export_graphs() latches an error too; the
+    build-time fallback must consume it, or every export() after open() raises."""
+    fake = FakeCUDAAdapter(device=0)
+
+    def _failing_memcpy(*_args, **_kwargs) -> None:
+        fake._sticky_error = 1  # cudaErrorInvalidValue latched during capture
+        raise RuntimeError("simulated capture failure")
+
+    with (
+        patch.object(fake, "create_ipc_event", return_value=None),
+        patch.object(fake, "memcpy_async", side_effect=_failing_memcpy),
+        patch("cuda_link.exporter.logger") as mock_logger,
+    ):
+        exp = Exporter.open(_spec(), policy=_graphs_policy(), cuda=fake)
+    try:
+        assert exp._graphs_disabled is True
+        assert fake.peek_last_error() == 0
+        messages = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
+        assert any("Cleared latched CUDA error" in m for m in messages)
+        assert exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE)) == FrameOutcome.PUBLISHED
+    finally:
+        exp.close()

@@ -58,8 +58,9 @@ def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
             "and README for build instructions). (The pure-Python API and tests work "
             "without it via FakeWaitBackend.)"
         ) from e
-    _native_waiter.set_cuda_event_query(cuda_event_query_fn_ptr)
-    if not _native_waiter.cudart_resolved():
+    # Validate before set_cuda_event_query(): the pointer is module-global, shared by
+    # every live _NativeWaitBackend in the process, so a refused load must not touch it.
+    if not cuda_event_query_fn_ptr:
         raise RuntimeError(
             "cuda-link's native module (_native_waiter) is built but "
             "cuda_event_query_fn_ptr was 0 — the caller has no cudart runtime "
@@ -76,6 +77,7 @@ def load_native_backend(cuda_event_query_fn_ptr: int) -> WaitBackend:
             "wait path (which the Importer falls back to automatically) is "
             "strictly better on this host."
         )
+    _native_waiter.set_cuda_event_query(cuda_event_query_fn_ptr)
     return _NativeWaitBackend(_native_waiter)
 
 

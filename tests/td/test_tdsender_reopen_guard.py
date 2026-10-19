@@ -87,6 +87,7 @@ def test_reopen_failure_drops_exporter_and_reinitializes(
 
     assert engine.export_frame() is False  # lazy-init probe
     assert engine.export_frame() is True  # steady state
+    assert engine._tx_window.started is True
     old_exporter = engine._exporter
 
     # Resolution change; the reopen's Exporter.open fails (e.g. SHM create refused).
@@ -101,6 +102,7 @@ def test_reopen_failure_drops_exporter_and_reinitializes(
     assert old_exporter.closed is True
     assert engine._exporter is None
     assert engine._initialized is False
+    assert engine._tx_window.started is False  # stale window would yield negative FPS on the new Exporter
     assert any(kind == "error" and "Reopen failed" in msg for kind, msg in host.status_calls)
 
     # Open works again: the next cook re-initializes via lazy init, then exports.

@@ -751,6 +751,9 @@ class TDSenderEngine:
                     # the lazy-init path instead of exporting through a dead handle.
                     self._exporter = None
                     self._initialized = False
+                    # initialize() doesn't reset the window, and the next Exporter restarts
+                    # frame_count at 0 — reset here, as the successful reopen below does.
+                    self._reset_report_window()
                     self._log(f"Exporter reopen after geometry change failed: {open_err}", force=True)
                     self._host.set_error_status(f"Reopen failed: {open_err}")
                     return False
