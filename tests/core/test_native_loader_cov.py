@@ -52,6 +52,23 @@ def test_load_native_backend_raises_when_hr_nap_unsupported(monkeypatch: pytest.
         load_native_backend(0xDEAD)
 
 
+@pytest.mark.parametrize(
+    ("fn_ptr", "hr_nap_supported"),
+    [(0, True), (0xDEAD, False)],
+    ids=["zero_fn_ptr", "hr_nap_unsupported"],
+)
+def test_refused_load_leaves_global_event_query_untouched(
+    monkeypatch: pytest.MonkeyPatch, fn_ptr: int, hr_nap_supported: bool
+):
+    """g_cudaEventQuery is shared by every live _NativeWaitBackend; a refused load must not overwrite it."""
+    fake = _install_fake_native_waiter(monkeypatch, cudart_resolved=True, hr_nap_supported=hr_nap_supported)
+    set_calls: list[int] = []
+    fake.set_cuda_event_query = set_calls.append
+    with pytest.raises(RuntimeError):
+        load_native_backend(fn_ptr)
+    assert set_calls == []
+
+
 def test_load_native_backend_success_returns_native_wait_backend(monkeypatch: pytest.MonkeyPatch):
     _install_fake_native_waiter(monkeypatch, cudart_resolved=True, hr_nap_supported=True)
     backend = load_native_backend(0xDEAD)
@@ -87,3 +104,18 @@ def test_native_wait_backend_wait_slot_delegates_and_maps_status():
     assert result.status is WaitStatus.READY_DOORBELL
     assert result.waited_us == 123
     assert result.method == "doorbell"
+
+
+def test_native_wait_backend_cuda_error_raises_runtime_error():
+    """Status 5 (CUDA_ERROR) must raise with the cudaError_t code, never pass as a result."""
+    fake_mod = types.SimpleNamespace(wait_slot=lambda *a: (5, 10.0, 700))
+    backend = _NativeWaitBackend(fake_mod)
+    with pytest.raises(RuntimeError, match="cudaEventQuery failed: 700"):
+        backend.wait_slot(0x1000, 0x2000, 0x3000, 5, 200, 1000)
+
+
+def test_native_wait_backend_unknown_status_raises_runtime_error():
+    fake_mod = types.SimpleNamespace(wait_slot=lambda *a: (99, 0.0, 0))
+    backend = _NativeWaitBackend(fake_mod)
+    with pytest.raises(RuntimeError, match="unknown status 99"):
+        backend.wait_slot(0x1000, 0x2000, 0x3000, 5, 200, 1000)

@@ -414,10 +414,14 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceSynchronize.restype = c_int
 
         # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
-        # cudaGetLastError() is intentionally NOT bound: it destructively clears the sticky
-        # error, making it unsafe to call in poll paths. Use cudaPeekAtLastError exclusively.
         self.cudart.cudaPeekAtLastError.argtypes = []
         self.cudart.cudaPeekAtLastError.restype = c_int
+
+        # cudaGetLastError() — destructive read: returns AND clears the latched error.
+        # Only for one-shot recovery after a caught failure (clear_last_error); never call it
+        # in poll paths, where it would swallow errors meant for check_sticky_error.
+        self.cudart.cudaGetLastError.argtypes = []
+        self.cudart.cudaGetLastError.restype = c_int
 
         # cudaHostRegister(void* ptr, size_t size, unsigned int flags) — page-lock existing host memory
         self.cudart.cudaHostRegister.argtypes = [c_void_p, c_size_t, c_uint]
@@ -677,6 +681,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Unlike cudaGetLastError this does NOT clear the latched error state.
         """
         return int(self.cudart.cudaPeekAtLastError())
+
+    def clear_last_error(self) -> int:
+        """Consume the thread-local latched CUDA error via cudaGetLastError.
+
+        Returns the code that was cleared (0 if none). Call only after a caught,
+        recovered failure so a non-sticky error does not trip check_sticky_error()
+        on every later call; a truly sticky error (poisoned context) re-latches on
+        the next CUDA call and is still reported there.
+        """
+        return int(self.cudart.cudaGetLastError())
 
     def check_sticky_error(self, context: str) -> None:
         """Warn and raise if a sticky CUDA error is latched from a prior async op.
