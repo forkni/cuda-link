@@ -178,7 +178,9 @@ CUDAIPCExtension  (~300 LOC facade)
 │             [418]       bits_per_comp (uint8) — 8/16/32/64  │
 │             [419-420]   flags (uint16 LE)                   │
 │                         bit 0: bfloat16 (kind=Float,bits=16)│
-│                         bits 1-15: reserved=0               │
+│                         bit 1: mono+alpha (2ch, not RG)     │
+│                         bit 2: BGRA order (4ch uint8)       │
+│                         bits 3-15: reserved=0               │
 │             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
 │ [425-432]   timestamp (float64)                             │
@@ -642,6 +644,10 @@ those paths intentionally do not report `TIMEOUT`, so a hung producer can
 stall the consumer stream. Exception: if a ring slot carries no IPC event at
 all, both GPU-side paths fall back to the CPU wait so the read stays ordered —
 in that case `TIMEOUT` is still reachable.
+
+`TIMEOUT` means the event stayed "not ready". A hard `cudaEventQuery` error (for
+example a sticky fault in the consumer's context) raises `RuntimeError` instead,
+on both the native waiter (status `CUDA_ERROR`, 5) and the pure-Python wait path.
 
 ### Consumer Crashes
 
