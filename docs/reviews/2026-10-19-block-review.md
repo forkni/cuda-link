@@ -146,7 +146,7 @@ Claude's B1 note that TDSender `set_version(_ipc_version)` could regress the ver
 | `init_pace`, `persist_stream`, `nvml` parsed but never consumed (`TDConfig.py:40-44`) | #4 | #1 | CONFIRMED (nvml verified unconsumed in `td_exporter/`) |
 | Status setters write COMP storage / `addScriptError` every call (`TDHost.py:377/389`) | #1 | – | CONFIRMED, efficiency |
 | `set_warning_status` never clears prior script errors (`TDHost.py:377`) | – | #4 | CONFIRMED |
-| `switch_mode` / `reconfigure_and_reinit` leak status tint: only `TDSenderEngine.cleanup` calls `clear_status` (`CUDAIPCExtension.py:526`) | – | #3 | CONFIRMED |
+| `switch_mode` / `reconfigure_and_reinit` leak status tint: `clear_status` is called only from the Sender engine and `parexecute_callbacks.handle_active_change`, never from the Receiver path (`CUDAIPCExtension.py:526`) | – | #3 | CONFIRMED |
 | Sibling mirrors suppress the unavailable notice even when `LIBRARY_READY` is False (:299) | – | #2 | PLAUSIBLE — silent fallback with mirrors present is documented intent (CUDALinkBootstrap docstring); only the "mirrors present but broken" edge is a gap |
 | Dead `CUPY_AVAILABLE` / `cp` globals (:152) | – | #5 | CONFIRMED (no test patches them) |
 | New `RealTOPHandle` per receive frame (:468/477/488) | #2 | – | CONFIRMED, efficiency |
@@ -202,3 +202,27 @@ Claude's B1 note that TDSender `set_version(_ipc_version)` could regress the ver
 | B1-B8 | reported via `ReportFindings`, notes in session scratchpad `claude-reviews/block-B<N>.md` | `SUCCESS` on first run, 1-9 min each | no reruns needed |
 
 Raw agy output (`block-<N>.agy.json`, `.md`, prompt and context) and the Claude notes live in the session scratchpad and are not committed.
+
+## 6. Index verification (code-search MCP, 2026-10-19)
+
+Project `cuda-link`, 3358 chunks, index refreshed on the first query (only the report file itself was pending). Each top-20 item was re-checked with `search_code` / `find_connections` for the call graph and a direct read of the cited lines for the claim. The graph does not carry call edges out of `split_block` chunks (`Exporter.export`, `TDSender.export_frame`, `TDReceiver._refresh_on_version_change`), so those links were read directly.
+
+| # | Graph evidence | Line evidence | Result |
+|---|---|---|---|
+| 1 | `check_sticky_error` callers: `Exporter.export` (535-558 split, call at :704) and `_NumpyBackend.materialize` (importer.py:814-872); `peek_last_error` only used by `_is_cuda_context_valid` | :689 raises on any non-zero peek; graph fallback at exporter.py:659 catches and never clears | holds |
+| 2 | `wait_slot_impl` (native_waiter.cpp:147-219) ← `_NativeWaitBackend.wait_slot` ← `Importer._wait_for_slot` (1519-1609) | `real_event_query` (:227-232) returns false for any status != 0, so a hard CUDA error loops to `kTimeout` at :192-194; importer.py:1551 passes `timeout_ms` | holds |
+| 3 | `Exporter.open` call sits in the `TDSender.export_frame` split block (591-818) | :745 open outside any try; the `contextlib.suppress` at :757 covers only `set_version` | holds |
+| 4 | `Importer._reinitialize` (1832-1873) ← `_try_acquire` only; callees `close_ipc_handles`, `drain`, `_open_ipc_slots`, `_apply_format_change`, `read_version`, `read_num_slots` | no callee resets `_last_write_idx`; the only `= 0` write is `__init__` :980 | holds |
+| 5, 6, 12 | `_refresh_on_version_change` split blocks 1096-1220, sole caller `TDReceiver.import_frame` (387-403 split) | 1148-1189 closes before reopening; no f16 rebuild, no flags compare, no `last_write_idx` reset in 1180-1215 | holds |
+| 7 | `_apply_format_change` (1802-1830) ← `_try_acquire`, `_reinitialize`; callee `TorchBuffers.build` only | :1829 rebuilds torch only; the existing test (`test_importer_cov_lifecycle.py:275`) covers torch alone | holds |
+| 8 | `_connect` (1130-1152) builds buffers after the rollback block | :1145-1150 outside the try | holds |
+| 9 | `HolderBarrier.acquire` (333-342) → `open_and_increment`; caller `TDSenderEngine.initialize` (411-508) | `bump_skip` :128-131 unpacks and repacks all 64 bytes; `acquire` :335-340 has no `held` guard | holds |
+| 10, 16 | `_consume_frame` (1653) → `backend.wait` | :1669-1676 catches `TimeoutError` only, returns `TIMEOUT` with the slot unreleased | holds |
+| 13 | `Exporter._initialize` :326-334 | open-first attach, no size/layout check before `_write_handles_to_shm` | holds |
+| 14 | `Exporter.export` :612-635 | non-strict path logs and still exports; cache capped at 64 entries | holds |
+| 15 | `load_native_backend` (27-78) ← `Importer._resolve_wait_backend` (1344-1381); tests confirm `None` on `RuntimeError` | :60 / :112 raise `RuntimeError`, silently downgraded to the Python backend | holds |
+| 17 | `open_doorbell` ← `_open_ipc_slots`; `wait_for_doorbell` (1615-1647) has no production caller in the graph (only `tests/support/test_doorbell.py`) | :1293 opens only when `want_native` | PLAUSIBLE unchanged; the API is effectively test-only |
+| 18 | `acquire_slot` :480-486, `publish_frame` :406-410, `DtypeCodec.decode` :284 | `last_version != 0` guard, `u32 pack_into` for `write_idx`, `.get(..., "float32")` default | holds |
+| 20 | `clear_status` callers: `TDSender.export_frame`, `TDSender.cleanup`, `parexecute_callbacks.handle_active_change`; none in `TDReceiver` or `CUDAIPCExtension` | `TDHost.py:377-399` setters store unconditionally | holds; report wording corrected (the handler in `parexecute_callbacks.py` is a third caller) |
+
+Items 11 and 19 were verified by direct read in the original pass and have no graph component. No finding was overturned.
