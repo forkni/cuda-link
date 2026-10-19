@@ -441,6 +441,28 @@ def test_receiver_import_frame_shutdown_byte_calls_cleanup() -> None:
         shm.unlink()
 
 
+def test_receiver_cleanup_resets_retry_backoff() -> None:
+    """cleanup() must drop the backoff left by the previous connect loop.
+
+    Otherwise the first reconnect attempt after a sender drop waits up to the last
+    backoff interval (120 frames) instead of retrying on the next frame.
+    """
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_receiver_host("nonexistent_shm_retry_reset_xyz", num_slots=3)
+    engine = CUDAIPCExtension(None, host=host)._engine
+    engine._retry.connect_attempts = 9
+    engine._retry.retry_interval_frames = 120
+    engine._initialized = True
+
+    engine.cleanup()
+
+    assert engine._retry.retry_interval_frames == 1
+    assert engine._retry.connect_attempts == 0
+    assert engine.import_frame(None) is False  # type: ignore[arg-type]
+    assert engine._retry.connect_attempts == 1, "first frame after cleanup must attempt a reconnect"
+
+
 # ---------------------------------------------------------------------------
 # Public API shape — no CUDA required
 # ---------------------------------------------------------------------------

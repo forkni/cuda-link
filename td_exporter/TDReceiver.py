@@ -1116,6 +1116,8 @@ class TDReceiverEngine:
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+        # Drop the backoff from the last connect loop so the first retry after a drop is immediate
+        self._retry.retry_interval_frames = 1
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_window.reset()
 
