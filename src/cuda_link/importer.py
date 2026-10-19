@@ -412,6 +412,22 @@ class CupyBuffers:
         return cls(arrays=arrays)
 
 
+def _build_cupy_views(conn: IPCConnection, fmt: Format) -> CupyBuffers | None:
+    """CuPy views for fmt, or None when CuPy is absent or has no dtype for it (bfloat16).
+
+    A dtype CuPy cannot represent must not block torch/numpy consumers, so its
+    ValueError only drops the views; get_frame_cupy() then raises a clear RuntimeError.
+    Any other build failure propagates.
+    """
+    if not CUPY_AVAILABLE:
+        return None
+    try:
+        return CupyBuffers.build(conn, fmt)
+    except ValueError as e:
+        logger.warning("CuPy views dropped: %s", e)
+        return None
+
+
 @dataclass
 class NumpyBuffers:
     """Pinned host buffer + D2H streams for numpy frame consumption (built lazily).
@@ -1144,7 +1160,7 @@ class Importer:
             fmt, provisional = self._resolve_format(shm, num_slots)
             conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
             torch_bufs = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
-            cupy_bufs = CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None
+            cupy_bufs = _build_cupy_views(conn, fmt)
         except BaseException:
             # shm is still ours here — _open_ipc_slots only rolls back the
             # per-slot resources it opened, not the SharedMemory it was handed.
@@ -1840,16 +1856,11 @@ class Importer:
         self._format = new_fmt
         if self._torch is not None:
             self._torch = TorchBuffers.build(self._conn, new_fmt)
-        if CUPY_AVAILABLE:
-            # The old arrays wrap the previous dev_ptrs (unmapped after a reinitialize)
-            # and the previous geometry — rebuild them like the torch views above. Gated
-            # on CuPy, not on self._cupy, so views dropped for an unsupported dtype come
-            # back once the producer switches to a supported one.
-            try:
-                self._cupy = CupyBuffers.build(self._conn, new_fmt)
-            except ValueError as e:
-                logger.warning("CuPy views dropped after format change: %s", e)
-                self._cupy = None
+        # The old arrays wrap the previous dev_ptrs (unmapped after a reinitialize)
+        # and the previous geometry — rebuild them like the torch views above. Gated
+        # on CuPy, not on self._cupy, so views dropped for an unsupported dtype come
+        # back once the producer switches to a supported one.
+        self._cupy = _build_cupy_views(self._conn, new_fmt)
 
     def _reinitialize(self) -> None:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
