@@ -18,7 +18,8 @@ on:
 
 concurrency:
   group: wheels-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs only: a cancelled push run leaves a mainline commit with no verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -27,6 +28,7 @@ jobs:
   build-wheels:
     name: Build native wheel (Windows, once per target)
     runs-on: windows-2025
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -70,6 +72,7 @@ jobs:
     name: Test native wheel (Windows)
     needs: build-wheels
     runs-on: windows-2025
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
