@@ -39,6 +39,8 @@ from TDHost import TDHost  # noqa: E402
 
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
     # Rejected outright by cudaMemory(): "Texture is invalid pixel format to be shared with CUDA."
+    # Sources whose pixelFormatName is in _F16_CONVERT_TARGET bypass this check and are
+    # converted instead; these entries still catch float16 when the name is unmapped.
     "16-bit float",
     "16float",
     # Packed formats: rejected outright with "Source TOP has unsupported pixel format."
@@ -55,7 +57,8 @@ _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
 # (larger) CUDA allocation unchanged, so neither cm.size nor cm.data_type reflects the change.
 # pixelFormatName updates immediately on any format change (grow or shrink).
 # Built from the TD Script TOP par.format menu names (Section 1 of pixel_format_probe.py).
-# Float16 variants are included for completeness but are caught first by _is_unsupported_format.
+# Float16 variants are included for completeness; export_frame swaps them for their
+# _F16_CONVERT_TARGET name before the lookup, so they never resolve to float16.
 _PIXEL_FMT_NAME_TO_DTYPE: dict[str, tuple[str, int]] = {
     # RGBA
     "rgba32float": ("float32", 4),
@@ -77,13 +80,25 @@ _PIXEL_FMT_NAME_TO_DTYPE: dict[str, tuple[str, int]] = {
     "monoalpha32float": ("float32", 2),
     "monoalpha16fixed": ("uint16", 2),
     "monoalpha8fixed": ("uint8", 2),
-    # Float16 variants (unsupported by cudaMemory; present so the map is complete)
+    # Float16 variants (cudaMemory cannot share them; converted via _F16_CONVERT_TARGET)
     "rgba16float": ("float16", 4),
     "rg16float": ("float16", 2),
     "mono16float": ("float16", 1),
     "a16float": ("float16", 1),
     "monoalpha16float": ("float16", 2),
     # "useinput", "rgb10a2fixed", "rgba11float" → NOT mapped (no reliable dtype/channel count)
+}
+
+# Float16 source → 32-bit float target requested via cudaMemory(pixelFormat=...).
+# cudaMemory() cannot share float16 textures, but TD converts on the GPU before sharing,
+# and the float32 result matches numpyArray() bit-exactly with the full range kept
+# (pixel-format matrix probe, TD 2025.33230). Costs one GPU pass and 2x the bytes.
+_F16_CONVERT_TARGET: dict[str, str] = {
+    "rgba16float": "rgba32float",
+    "rg16float": "rg32float",
+    "mono16float": "mono32float",
+    "a16float": "a32float",
+    "monoalpha16float": "monoalpha32float",
 }
 
 _EXPORT_BUFFER_NAME = "ExportBuffer"
@@ -231,6 +246,7 @@ class TDSenderEngine:
 
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
+        self._f16_convert_to: str | None = None  # float32 target while the source is float16
         self._warned_dtype_size: bool = False  # one-shot: unresolvable bytes-per-pixel
         self._export_buffer: object = None
         self._last_pixel_fmt: str = ""
@@ -406,7 +422,9 @@ class TDSenderEngine:
         Pixel-format matrix probe (TD 2025.33230, see docs/ARCHITECTURE.md): cudaMemory()
         rejects all 5 float16 variants and both packed formats (10:10:10:2 fixed,
         11:11:10 float). On TD 2025.32820 the 11-bit format "succeeded" with raw uint8x4
-        bytes instead, so it stays on the list either way. On True: sender skips the
+        bytes instead, so it stays on the list either way. Float16 sources whose
+        pixelFormatName maps in _F16_CONVERT_TARGET never reach this check: they are
+        converted to float32 instead. On True: sender skips the
         frame and emits a component warning; on False: warning is cleared.
 
         top_op may be a RealTOPHandle, FakeTOPHandle, or raw TD TOP (backward compat).
@@ -550,8 +568,20 @@ class TDSenderEngine:
         if not self._host.is_active():
             return False
 
+        # Float16 sources are shared as float32 via cudaMemory(pixelFormat=...). From here on
+        # _pf_name is the converted format, so dtype mapping, flags and status all see float32.
+        _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
+        _convert_to = _F16_CONVERT_TARGET.get(_pf_name)
+        if _convert_to != self._f16_convert_to:
+            if _convert_to is not None:
+                self._log(f"Float16 source {_pf_name!r} — sharing as {_convert_to!r} via cudaMemory()", force=True)
+            self._f16_convert_to = _convert_to
+        _cm_kwargs = {"pixel_format": _convert_to} if _convert_to is not None else {}
+        if _convert_to is not None:
+            _pf_name = _convert_to
+
         # Pixel-format rejection (TD 2025 CUDA interop quirks — see _is_unsupported_format).
-        if self._is_unsupported_format(top_op):
+        if _convert_to is None and self._is_unsupported_format(top_op):
             src_fmt = top_op.pixel_format if hasattr(top_op, "pixel_format") else getattr(top_op, "pixelFormat", "?")
             self._host.set_warning_status(f"unsupported pixel format {src_fmt!r}")
             if not self._warned_format:
@@ -571,7 +601,7 @@ class TDSenderEngine:
             # Lazy init: probe geometry from the first available frame, then skip this
             # cook.  The Exporter opens here; the actual export starts on the next cook.
             try:
-                cm_probe = top_op.cuda_memory()  # stream=None → default stream, safe for probe
+                cm_probe = top_op.cuda_memory(**_cm_kwargs)  # stream=None → default stream, safe for probe
             except Exception as e:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"Auto-init: cuda_memory() failed: {e}", force=True)
                 return False
@@ -580,7 +610,7 @@ class TDSenderEngine:
             # (TD holds the old CUDA memory until ExportBuffer is explicitly re-cooked).
             # pixelFormatName updates immediately when the source format changes, so it
             # gives the correct dtype even before cm.size has caught up.
-            _pf_init = str(getattr(top_op, "pixel_format_name", "") or "")
+            _pf_init = _pf_name  # already the float32 target for a converted float16 source
             _pf_init_mapped = (
                 _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_init) if _pf_init and _pf_init not in ("useinput",) else None
             )
@@ -612,9 +642,8 @@ class TDSenderEngine:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
-            _pf_name = str(getattr(top_op, "pixel_format_name", "") or "")
             try:
-                cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
+                cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
             except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
                 return False
@@ -805,7 +834,7 @@ class TDSenderEngine:
 
                 # Re-fetch texture memory on the new Exporter's stream.
                 try:
-                    cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value))
+                    cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
                 except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                     self._log(f"cudaMemory() after re-init failed: {cuda_err}", force=True)
                     return False
@@ -878,6 +907,7 @@ class TDSenderEngine:
         self._last_fmt_needs_conv = False
         self._warned_dtype_size = False
         self._warned_format = False
+        self._f16_convert_to = None
 
         # Reset windowed-report state so the next activation starts with a fresh window.
         self._reset_report_window()

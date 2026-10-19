@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Float16 source TOPs export as float32**: TDSender requests the matching `*32float`
+  format through `cudaMemory(pixelFormat=...)`, so TD converts on the GPU instead of the
+  Sender rejecting the frame. Lossless; costs one GPU pass and 2x the bytes per frame.
+
 ## [1.13.0] - 2026-09-26
 
 ### Added
