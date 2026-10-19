@@ -47,3 +47,21 @@ def test_failed_initialize_releases_barrier_every_time(monkeypatch: pytest.Monke
         assert engine.initialize(64, 64, 4) is False
         assert port.active_count == 0
         assert engine._barrier.held is False
+
+
+def test_unexpected_initialize_exception_still_releases_barrier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exception outside the handled (OSError, RuntimeError, ValueError) set
+    propagates, but must not leave the hold behind."""
+
+    def _failing_open(*args, **kwargs):
+        raise KeyError("simulated unexpected failure")
+
+    monkeypatch.setattr(Exporter, "open", staticmethod(_failing_open))
+    host = FakeTDHost(params={"Active": True, "Debug": False})
+    engine = _make_engine(host)
+    port = engine._barrier.port
+
+    with pytest.raises(KeyError):
+        engine.initialize(64, 64, 4)
+    assert port.active_count == 0
+    assert engine._barrier.held is False

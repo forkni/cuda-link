@@ -132,10 +132,14 @@ def decrement(shm: SharedMemory, pid: int) -> int:
 
 
 def _write_holder_fields(shm: SharedMemory, count: int, pid: int) -> None:
-    """Write active_count, last_change_ns and last_writer_pid; nothing else."""
-    _U32.pack_into(shm.buf, _OFF_ACTIVE_COUNT, count)
+    """Write active_count, last_change_ns and last_writer_pid; nothing else.
+
+    active_count goes last: a producer that sees the new count also sees its fresh
+    timestamp, never a stale one that would read as SKIP_STALE.
+    """
     _U64.pack_into(shm.buf, _OFF_LAST_CHANGE_NS, time.monotonic_ns())
     _U32.pack_into(shm.buf, _OFF_LAST_WRITER_PID, pid)
+    _U32.pack_into(shm.buf, _OFF_ACTIVE_COUNT, count)
 
 
 def bump_skip(shm: SharedMemory) -> None:

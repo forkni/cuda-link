@@ -505,10 +505,13 @@ class TDSenderEngine:
             self._log(f"Initialization failed: {e}", force=True)
             self._host.set_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
-            # A failed init never arms the settle countdown, so drop the hold now —
-            # otherwise the producer stays paused until the 5 s stale timeout.
-            self._barrier.force_release(os.getpid(), log_fn=self._log)
             return False
+        finally:
+            # A failed init never arms the settle countdown, so drop the hold now —
+            # otherwise the producer stays paused until the 5 s stale timeout. In a
+            # finally so an unexpected exception type releases it too.
+            if not self._initialized:
+                self._barrier.force_release(os.getpid(), log_fn=self._log)
 
     def export_frame(self, top_op: object = None) -> bool:
         """Export the ExportBuffer TOP texture via CUDA IPC.

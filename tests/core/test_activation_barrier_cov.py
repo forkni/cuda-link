@@ -404,6 +404,35 @@ def test_decrement_returns_active_count_not_pad_kills_index_mutant():
         shm.close()
 
 
+def test_holder_writes_publish_active_count_last(monkeypatch):
+    """A producer that sees the new active_count must also see its fresh timestamp,
+    so active_count is the last field increment()/decrement() write."""
+    from cuda_link import activation_barrier as ab
+
+    offsets: list[int] = []
+
+    class _Recording:
+        def __init__(self, inner: struct.Struct) -> None:
+            self._inner = inner
+
+        def unpack_from(self, buf, offset=0):
+            return self._inner.unpack_from(buf, offset)
+
+        def pack_into(self, buf, offset, *values):
+            offsets.append(offset)
+            self._inner.pack_into(buf, offset, *values)
+
+    monkeypatch.setattr(ab, "_U32", _Recording(ab._U32))
+    monkeypatch.setattr(ab, "_U64", _Recording(ab._U64))
+    shm = types.SimpleNamespace(buf=bytearray(SHM_SIZE))
+
+    for op in (increment, decrement):
+        offsets.clear()
+        op(shm, pid=7)
+        assert offsets[-1] == ab._OFF_ACTIVE_COUNT
+        assert offsets.count(ab._OFF_ACTIVE_COUNT) == 1
+
+
 # ---------------------------------------------------------------------------
 # RealShmAdapter (lines 191, 197, 213).
 # ---------------------------------------------------------------------------
