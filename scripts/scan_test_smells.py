@@ -294,12 +294,12 @@ def d_no_assert(func):
             name = dotted_name(node)
             if name in RAISES_NAMES:
                 return
+            # The node.func.attr fallback covers `x().assertY(...)`, where the receiver is not a
+            # plain name chain. Only calls count: a bare attribute read (`md.expected_size`,
+            # `mock.assert_called` without parentheses) is not an assertion.
             leaf = name.rsplit(".", 1)[-1] if name else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
             if leaf.lower().lstrip("_").startswith(ASSERT_CALL_PREFIXES) and leaf not in ("check_output", "check_call"):
                 return
-        # `self.assertX(...)` where the receiver is not a plain name chain
-        if isinstance(node, ast.Attribute) and node.attr.lower().lstrip("_").startswith(ASSERT_CALL_PREFIXES):
-            return
     yield "no-assert", func.lineno, f"{func.name} has no assertion"
 
 
@@ -407,7 +407,7 @@ def d_overprotective(func):
             stmts = getattr(node, field, None)
             if not isinstance(stmts, list):
                 continue
-            for first, second in zip(stmts, stmts[1:], strict=False):
+            for first, second in zip(stmts, stmts[1:]):  # noqa: B905  # zip(strict=) needs 3.10; requires-python is >=3.9
                 name = _is_not_none_guard(first)
                 if (
                     name
