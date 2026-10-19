@@ -134,6 +134,7 @@ max-complexity = 43
 "tests/td/test_tdsender_h2_channel_inference.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 "tests/td/test_tdsender_pixelformat_override.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 "tests/td/test_td_status_emission.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_tdsender_reopen_guard.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 
 [tool.ruff.format]
 quote-style = "double"

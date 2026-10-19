@@ -21,6 +21,7 @@ _STATUS_FROM_INT = {
     2: WaitStatus.READY_LATE,  # retired 2026-07-04 (torn-frame fix) -- kept for ABI
     3: WaitStatus.TIMEOUT,
     4: WaitStatus.READY_POLL,
+    5: WaitStatus.CUDA_ERROR,  # method slot carries the cudaError_t code
 }
 
 
@@ -102,4 +103,19 @@ class _NativeWaitBackend:
         status_int, waited_us, method = self._mod.wait_slot(
             event_ptr, doorbell_handle, write_idx_addr, last_write_idx, spin_us, timeout_ms
         )
-        return WaitResult(status=_STATUS_FROM_INT[status_int], waited_us=waited_us, method=method)
+        return _to_wait_result(status_int, waited_us, method)
+
+
+def _to_wait_result(status_int: int, waited_us: float, method: int) -> WaitResult:
+    """Translate a native result tuple, raising per the WaitBackend contract.
+
+    A hard cudaEventQuery error raises RuntimeError (as the python wait path's
+    query_event does) instead of masquerading as a TIMEOUT; an unknown status int
+    (a native module newer than this loader) raises rather than KeyError-ing.
+    """
+    status = _STATUS_FROM_INT.get(status_int)
+    if status is None:
+        raise RuntimeError(f"_native_waiter.wait_slot returned unknown status {status_int}")
+    if status is WaitStatus.CUDA_ERROR:
+        raise RuntimeError(f"cudaEventQuery failed: {method}")
+    return WaitResult(status=status, waited_us=waited_us, method=method)

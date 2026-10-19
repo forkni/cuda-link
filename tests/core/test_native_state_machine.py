@@ -87,6 +87,7 @@ def _wait_slot_test(**kwargs):
         2: WaitStatus.READY_LATE,
         3: WaitStatus.TIMEOUT,
         4: WaitStatus.READY_POLL,
+        5: WaitStatus.CUDA_ERROR,
     }[status_int]
     return WaitResult(status=status, waited_us=waited_us, method=method)
 
@@ -228,6 +229,138 @@ def test_nap_is_clamped_to_remaining_deadline():
     assert naps, "block phase must have napped at least once"
     assert all(0 < n <= 200 for n in naps), f"naps must be bounded by kBlockNapUs: {naps}"
     assert naps[-1] < 200, f"final nap must be clamped below the standard 200us: {naps}"
+
+
+# ---------------------------------------------------------------------------
+# Hard CUDA errors and zero-timeout polls (2026-10-19 review item 2)
+# ---------------------------------------------------------------------------
+
+_CUDA_ERROR_ILLEGAL_ADDRESS = 700
+
+
+def test_hard_error_in_spin_phase_reports_cuda_error_with_code():
+    """A non-600 cudaEventQuery code is a hard error, not "not ready" -- it must
+    surface immediately as CUDA_ERROR carrying the code, never as a TIMEOUT."""
+    clock = _FakeClock()
+    result = _wait_slot_test(
+        event_query=lambda ptr: _CUDA_ERROR_ILLEGAL_ADDRESS,
+        read_write_idx=lambda addr: 0,
+        nap=lambda nap_us: pytest.fail("a hard error must not fall through to the block phase"),
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0x2000,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=200,
+        timeout_ms=1000,
+    )
+    assert result.status.name == "CUDA_ERROR"
+    assert result.method == _CUDA_ERROR_ILLEGAL_ADDRESS
+
+
+def test_hard_error_in_block_phase_reports_cuda_error_with_code():
+    clock = _FakeClock()
+    calls = {"n": 0}
+
+    def event_query(ptr):
+        calls["n"] += 1
+        return 600 if calls["n"] < 3 else _CUDA_ERROR_ILLEGAL_ADDRESS  # pending, then a fault
+
+    def nap(nap_us):
+        clock.advance(float(nap_us))
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=nap,
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0x2000,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=0,
+        timeout_ms=1000,
+    )
+    assert result.status.name == "CUDA_ERROR"
+    assert result.method == _CUDA_ERROR_ILLEGAL_ADDRESS
+    assert calls["n"] == 3
+
+
+def test_int_codes_zero_and_600_behave_like_bools():
+    """Int fakes: 0 is ready, 600 (cudaErrorNotReady) is pending."""
+    clock = _FakeClock()
+    calls = {"n": 0}
+
+    def event_query(ptr):
+        calls["n"] += 1
+        return 0 if calls["n"] >= 2 else 600
+
+    def nap(nap_us):
+        clock.advance(float(nap_us))
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=nap,
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=0,
+        timeout_ms=1000,
+    )
+    assert result.status.name == "READY_POLL"
+
+
+def test_zero_timeout_polls_once_and_reports_ready():
+    """timeout_ms=0 with an already-signaled event must poll and report ready,
+    not return TIMEOUT before ever querying the event."""
+    clock = _FakeClock()
+    calls = {"n": 0}
+
+    def event_query(ptr):
+        calls["n"] += 1
+        return True
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=lambda nap_us: pytest.fail("a ready zero-timeout poll must not nap"),
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=0,
+        timeout_ms=0,
+    )
+    assert result.status.name == "READY_POLL"
+    assert calls["n"] == 1
+
+
+def test_zero_timeout_with_pending_event_times_out_after_one_poll():
+    clock = _FakeClock()
+    calls = {"n": 0}
+
+    def event_query(ptr):
+        calls["n"] += 1
+        return False
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=lambda nap_us: pytest.fail("a zero-timeout poll must not nap"),
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0x2000,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=0,
+        timeout_ms=0,
+    )
+    assert result.status.name == "TIMEOUT"
+    assert calls["n"] == 1
 
 
 def test_hr_nap_supported_on_this_host():
