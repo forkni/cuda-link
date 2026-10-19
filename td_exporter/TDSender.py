@@ -92,7 +92,9 @@ _PIXEL_FMT_NAME_TO_DTYPE: dict[str, tuple[str, int]] = {
 # Float16 source → 32-bit float target requested via cudaMemory(pixelFormat=...).
 # cudaMemory() cannot share float16 textures, but TD converts on the GPU before sharing,
 # and the float32 result matches numpyArray() bit-exactly with the full range kept
-# (pixel-format matrix probe, TD 2025.33230). Costs one GPU pass and 2x the bytes.
+# (pixel-format matrix probe, TD 2025.33230). Measured at 1280x720 RGBA, TD 2025.33230:
+# cudaMemory() median 0.89 ms converted vs 0.86 ms native float32 (numpyArray() readback
+# 3.4 ms), so no CPU round trip. The shared frame is 2x the bytes of the float16 source.
 _F16_CONVERT_TARGET: dict[str, str] = {
     "rgba16float": "rgba32float",
     "rg16float": "rg32float",

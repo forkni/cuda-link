@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Float16 source TOPs export as float32**: TDSender requests the matching `*32float`
   format through `cudaMemory(pixelFormat=...)`, so TD converts on the GPU instead of the
-  Sender rejecting the frame. Lossless; costs one GPU pass and 2x the bytes per frame.
+  Sender rejecting the frame. Lossless. At 1280x720 the call takes a median 0.89 ms vs
+  0.86 ms for a native float32 source (a CPU readback takes 3.4 ms); the shared frame is
+  2x the bytes of the float16 source.
 
 ## [1.13.0] - 2026-09-26
 
