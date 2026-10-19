@@ -404,3 +404,14 @@ def test_cupy_backend_materialize_returns_cached_array() -> None:
     backend = _CupyBackend(imp, stream=None)
 
     assert backend.materialize(imp._conn, 0) is sentinel_array
+
+
+def test_cupy_backend_prepare_raises_clear_error_when_views_dropped() -> None:
+    """Views dropped for a CuPy-unsupported dtype must fail with guidance, not an
+    AttributeError on None inside materialize()."""
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="bfloat16", with_numpy=False)
+    assert imp._cupy is None
+    backend = _CupyBackend(imp, stream=None)
+
+    with pytest.raises(RuntimeError, match="CuPy views are unavailable for bfloat16"):
+        backend.prepare(imp)

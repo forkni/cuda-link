@@ -340,11 +340,10 @@ def test_importer_reconnecting_on_version_change(temp_shm_name: str, shared_memo
     """When the producer re-initializes (version bump), the importer returns RECONNECTING
     and then _reinitialize() picks up the new version.
 
-    Pins the retained-_last_write_idx behavior:
-    - _reinitialize does NOT reset _last_write_idx (importer.py:1420-1456).
-    - After version change and one reconnect, first export from the new producer
-      yields NO_FRAME (write_idx=1 == _last_write_idx=1), second yields NEW_FRAME.
-    This is a characterization of current behavior; it may be a product bug.
+    Pins the reset of _last_write_idx on reconnect:
+    - _reinitialize resets _last_write_idx to 0, since the new producer restarts write_idx at 0.
+    - After version change and one reconnect, the first export from the new producer
+      yields NEW_FRAME instead of being dropped as NO_FRAME (write_idx=1 == stale 1).
     """
     shared_memory_cleanup.append(temp_shm_name)
     exp_a, _ = _open_exporter(temp_shm_name)
@@ -365,13 +364,14 @@ def test_importer_reconnecting_on_version_change(temp_shm_name: str, shared_memo
                 assert r2.outcome is ImportOutcome.RECONNECTING
                 assert imp._conn.ipc_version == 2
 
-                # _reinitialize does NOT reset _last_write_idx (characterization test).
-                assert imp._last_write_idx == 1
+                # _reinitialize resets _last_write_idx for the new producer.
+                assert imp._last_write_idx == 0
 
-                # First B export: write_idx=1 == _last_write_idx=1 → NO_FRAME.
+                # First B export: write_idx=1 != _last_write_idx=0 → NEW_FRAME, not dropped.
                 _export_frame(exp_b)
                 r3 = imp.get_frame_numpy()
-                assert r3.outcome is ImportOutcome.NO_FRAME  # characterization of retained _last_write_idx
+                assert r3.outcome is ImportOutcome.NEW_FRAME
+                assert imp._last_write_idx == 1
 
                 # Second B export: write_idx=2 != _last_write_idx=1 → NEW_FRAME.
                 _export_frame(exp_b)

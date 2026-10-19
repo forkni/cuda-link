@@ -155,11 +155,9 @@ def test_torch_backend_cached_and_stream_refreshed() -> None:
 
 def test_cupy_backend_cached_and_stream_refreshed() -> None:
     """_CupyBackend must be created once; _stream updated in-place on subsequent calls."""
-    from cuda_link.importer import CUPY_AVAILABLE, _CupyBackend
+    from cuda_link.importer import _CupyBackend
 
-    if not CUPY_AVAILABLE:
-        pytest.skip("cupy not installed")
-
+    # Constructing the backend never touches cp, so no CuPy install is needed.
     imp = _make_importer_stub()
     assert imp._cupy_backend is None
 
