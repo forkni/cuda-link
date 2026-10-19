@@ -283,11 +283,11 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 | State | Visual | Cause |
 |---|---|---|
-| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — 10-bit RGB / 2-bit Alpha, 11-bit float RGB, or a float16 source with an unmapped format name |
 | **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
 | **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. Float16 sources whose format name is one of the five float16 menu entries do not warn: the Sender asks `cudaMemory(pixelFormat=...)` for the matching 32-bit float format and shares that (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 

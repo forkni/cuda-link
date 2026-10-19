@@ -90,10 +90,12 @@ class FakeTOPHandle(TOPHandle):
         self.copy_numpy_calls: list[Any] = []
         self.resolution_set: list[tuple[int, int]] = []
         self.cook_calls: list[bool] = []
+        self.cuda_memory_calls: list[tuple[Any, str | None]] = []  # (stream, pixel_format)
 
     def cuda_memory(self, stream: Any = None, pixel_format: str | None = None) -> FakeCUDAMemoryRef:
-        # pixel_format is intentionally ignored in the fake — channel expansion is a TD runtime
-        # behaviour that the in-process test double cannot replicate.
+        # pixel_format is recorded but not applied — TD's on-GPU conversion is a runtime
+        # behaviour the in-process test double cannot replicate.
+        self.cuda_memory_calls.append((stream, pixel_format))
         channels = self._cuda_channels if self._cuda_channels is not None else self._channels
         size = self._cuda_size if self._cuda_size is not None else self._width * self._height * self._channels * 4
         return FakeCUDAMemoryRef(

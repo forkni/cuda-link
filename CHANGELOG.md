@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Float16 source TOPs export as float32**: TDSender requests the matching `*32float`
+  format through `cudaMemory(pixelFormat=...)`, so TD converts on the GPU instead of the
+  Sender rejecting the frame. Lossless. At 1280x720 the call takes a median 0.89 ms vs
+  0.86 ms for a native float32 source (a CPU readback takes 3.4 ms); the shared frame is
+  2x the bytes of the float16 source.
+
+### Fixed
+
+- **TDSender sets `FLAGS_BGRA` for 8-bit RGBA frames**: TD's `cudaMemory()` returns
+  `rgba8fixed` textures in B,G,R,A order. The flag existed in the SHM protocol but no
+  producer set it, so Python consumers received BGRA bytes with no marker.
+
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order. `cm.size` can report a stale
+  larger allocation after a dtype shrink, so it is not the payload size.
+
 ## [1.13.0] - 2026-09-26
 
 ### Added
