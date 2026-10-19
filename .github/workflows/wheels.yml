@@ -35,7 +35,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1.13.0
+      # No vcvars step: scikit-build-core keeps CMake's default Visual Studio generator on
+      # MSVC Python, which locates the compiler through vswhere on its own.
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
