@@ -29,7 +29,7 @@ from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
-from SHMProtocol import DtypeCodec, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
+from SHMProtocol import DtypeCodec, FLAGS_BGRA, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
@@ -41,11 +41,11 @@ _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
     # Rejected outright by cudaMemory(): "Texture is invalid pixel format to be shared with CUDA."
     "16-bit float",
     "16float",
-    # Bug A: rejected outright with "Source TOP has unsupported pixel format." (no fallback)
+    # Packed formats: rejected outright with "Source TOP has unsupported pixel format."
+    # (TD 2025.33230). On 2025.32820 the 11-bit one instead "succeeded" with uint8x4 raw
+    # bytes of the packed word, which would silently corrupt the receiver.
     "10-bit",
     "10bit",
-    # Bug B: cudaMemory() "succeeds" but returns dataType=uint8/numComps=4 — raw byte layout,
-    # NOT the 11:11:10 packed float semantic. Silent receiver corruption without conversion.
     "11-bit",
     "11bit",
 }
@@ -161,6 +161,20 @@ def _resolve_frame_dtype(
         if DtypeCodec.itemsize(guessed) * px == cm_size:
             return guessed
     return fallback_dtype
+
+
+def _channel_flags(pixel_format_name: str, channels: int, dtype: str) -> int:
+    """Return the SHM channel-semantic flag bits for a TD source frame.
+
+    FLAGS_MONO_ALPHA: 2-channel Mono+Alpha source (R+A, not R+G).
+    FLAGS_BGRA: 4-channel uint8 frame. TD's cudaMemory() hands 8-bit RGBA textures
+    over in B,G,R,A order (pixel-format matrix probe, TD 2025.33230); 16-bit and
+    32-bit RGBA come back R,G,B,A.
+    """
+    flags = FLAGS_MONO_ALPHA if pixel_format_name.startswith("monoalpha") else 0
+    if channels == 4 and dtype == "uint8":
+        flags |= FLAGS_BGRA
+    return flags
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +403,11 @@ class TDSenderEngine:
     def _is_unsupported_format(self, top_op: object) -> bool:
         """Return True if TOP pixel format is unsupported by cudaMemory() in TD 2025.
 
-        Empirical probe (verification/results/cuda_memory_probe_20260510_090919.json,
-        TD 2025.32820): cudaMemory() rejects all 4 float16 variants and 10:10:10:2 fixed
-        outright; 11:11:10 float "succeeds" but returns dataType=uint8/numComps=4 (raw
-        byte layout, NOT semantic) — silent corruption. On True: sender skips the frame
-        and emits a component warning; on False: warning is cleared.
+        Pixel-format matrix probe (TD 2025.33230, see docs/ARCHITECTURE.md): cudaMemory()
+        rejects all 5 float16 variants and both packed formats (10:10:10:2 fixed,
+        11:11:10 float). On TD 2025.32820 the 11-bit format "succeeded" with raw uint8x4
+        bytes instead, so it stays on the list either way. On True: sender skips the
+        frame and emits a component warning; on False: warning is cleared.
 
         top_op may be a RealTOPHandle, FakeTOPHandle, or raw TD TOP (backward compat).
         """
@@ -581,7 +595,7 @@ class TDSenderEngine:
                     f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
                     force=True,
                 )
-                _init_extra_flags = FLAGS_MONO_ALPHA if _pf_init.startswith("monoalpha") else 0
+                _init_extra_flags = _channel_flags(_pf_init, _init_ch, _init_dtype)
                 self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
                 self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
@@ -724,12 +738,13 @@ class TDSenderEngine:
                 self._last_cm_channels = cm_channels
                 self._last_pub_status = ""  # force status string rebuild after any change
 
-            _extra_flags = FLAGS_MONO_ALPHA if _pf_name.startswith("monoalpha") else 0
+            _extra_flags = _channel_flags(_pf_name, cm_channels, resolved_dtype)
             if (
                 (cm.height, cm.width) != (self._current_spec.height, self._current_spec.width)
                 or cm_channels != self._current_spec.channels
                 or resolved_dtype != self._current_spec.dtype
-                or _extra_flags != self._current_spec.extra_flags  # rg <-> monoalpha: same shape+dtype, different flags
+                or _extra_flags
+                != self._current_spec.extra_flags  # e.g. rg <-> monoalpha: same shape+dtype, different flags
             ):
                 self._log(
                     f"Geometry/dtype change: "
