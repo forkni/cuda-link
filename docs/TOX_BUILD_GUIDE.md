@@ -1,6 +1,6 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.13.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.14.0.tox` component in TouchDesigner.
 
 > **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.12.2`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each shipped build.
 
@@ -151,15 +151,15 @@ imported; a different `cuda_link` already loaded in the process stops resolution
 Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link 1.13.0 from <folder>`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 1.14.0 from <folder>`
 >
 > **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
 > siblings does the extension additionally print a cause-specific line, e.g.
-> `[CUDAIPCExtension] cuda_link 1.13.0 not found - install it next to this .toe or set
+> `[CUDAIPCExtension] cuda_link 1.14.0 not found - install it next to this .toe or set
 > CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
 > layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
 > CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
-> the component's 1.13.0`). The short line names the specific cause — not found, wrong
+> the component's 1.14.0`). The short line names the specific cause — not found, wrong
 > version, a rival install already loaded, or this extension's own glue import failing — and
 > the COMP's Status par mirrors that same short line; the full per-layer reason is
 > Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
@@ -327,7 +327,7 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 Create a **Text DAT** named `info` with version/author information:
 
 ```text
-CUDA IPC Exporter v1.13.0
+CUDA IPC Exporter v1.14.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
@@ -341,16 +341,16 @@ License: MIT
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.13.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.14.0.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.13.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.14.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
-**Release manifest**: `TOXES/RELEASES.tsv` records every shipped build — one row per `.tox`
+**Release manifest**: `TOXES/RELEASES.tsv` records the current release only — one row for the tracked `.tox`
 with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
 saved from. To verify a download matches the manifest:
 
 ```bash
-sha256sum TOXES/CUDAIPCLink_v1.13.0.tox   # compare with the sha256 column
+sha256sum TOXES/CUDAIPCLink_v1.14.0.tox   # compare with the sha256 column
 ```
 
 ---
@@ -359,7 +359,7 @@ sha256sum TOXES/CUDAIPCLink_v1.13.0.tox   # compare with the sha256 column
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.13.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.14.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -453,7 +453,7 @@ This error means the extension registration itself is missing. A missing or unre
 
 **Symptom**: The extension accessor exists, but no frames are transferred, and — only when
 none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
-cause-specific line, e.g. `cuda_link 1.13.0 not found - install it next to this .toe or set
+cause-specific line, e.g. `cuda_link 1.14.0 not found - install it next to this .toe or set
 CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
 mismatch, a rival install already loaded, or this extension's own glue import failing after
 a successful bootstrap.
@@ -604,8 +604,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.13.0.tox` | `TOXES/` | Final built .tox component |
-| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for each shipped `.tox` |
+| `CUDAIPCLink_v1.14.0.tox` | `TOXES/` | Final built .tox component |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -620,5 +620,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.13.0
+**Component Version**: 1.14.0
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)
