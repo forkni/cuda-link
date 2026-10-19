@@ -287,7 +287,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 | **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
 | **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The float16 rejection comes from TD's `cudaMemory()` itself. TD can convert float16 to 32-bit float losslessly via `cudaMemory(pixelFormat='rgba32float')`, but the Sender does not request that yet (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. Float16 sources whose format name is one of the five float16 menu entries do not warn: the Sender asks `cudaMemory(pixelFormat=...)` for the matching 32-bit float format and shares that (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
