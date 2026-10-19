@@ -28,9 +28,26 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-10-12, post Phase G)
+## Current baseline (2026-10-19, post Phase H1)
 
-**Supersedes the 2026-08-20 and 2026-07-12 tables below.**
+**Supersedes the 2026-10-12, 2026-08-20 and 2026-07-12 tables below.**
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1323 passed + 2 skipped (Windows; 64 deselected) · ubuntu CI runs same selection |
+| No-GPU selection wall clock | ~18 s |
+| Full suite incl. GPU/native (local) | 1386 passed + 3 skipped, ~29 s (was ~76 s before H1) |
+| Branch coverage, clean run | 99.35 % (`--cov=cuda_link`, no-GPU selection) · 88.21 % combined incl. `td_exporter` (full suite) |
+| Coverage gate (`fail_under`) | 85 (unchanged; one-way ratchet. See F4.) |
+| Order independence / flakiness | 10/10 no-GPU + 3/3 full-suite randomized runs green (audit), 3/3 full + 1 no-GPU green after H1 |
+| Slowest test | 2.9 s (the two subprocess `-O` import tests; by design — see Phase B). GPU roundtrips ~2.1 s each, were 22.5 s |
+| Test smells (AST scanner) | 77 total (unchanged; no committed `.smell-baseline.json` yet) |
+| Skipped/xfail ratio | 1.1 % (14/1227) — gated under 2.0 % threshold |
+| Complexity ceiling (`C901 max-complexity`) | 43 (unchanged). See F3 and Phase H audit for CRAP. |
+
+## Baseline metrics (2026-10-12, post Phase G)
+
+(Historical — see the current baseline above.)
 
 | Metric | Value |
 |--------|-------|
@@ -473,18 +490,83 @@ locking, warning hygiene, and smell elimination.
 - AST test smells reduced from 82 to 77 (sleep smell count: 0).
 - Suite health: **1,322 passed, 3 skipped, 64 deselected in 22.3s, 0 warnings, 99.45% package branch coverage**.
 
+## Campaign record — Phase H (2026-10-19)
+
+### H0 — Audit (full suite, GPU included)
+
+First audit that timed the **full** suite (`-m "requires_native or not requires_native"`), not
+only the no-GPU selection. Findings:
+
+| Metric | Measured |
+|--------|----------|
+| Full suite (GPU) | 1386 passed + 3 skipped, 75.8–82 s |
+| Combined branch coverage | 88.21 % (5189 stmts, 555 miss) |
+| Random order | 10/10 no-GPU + 3/3 full-suite seeds green |
+| Slowest test | 22.5 s (`test_roundtrip_data_integrity`, GPU) — invisible to the no-GPU durations |
+| CRAP > 30 (crap4py, measured) | 8 functions; worst `TDReceiverEngine.initialize_receiver` **715** (CC 40, 25 % covered) and `_refresh_on_version_change` 343.5 — replaces the F1 estimate of ≈179 |
+| Smells | 77, unchanged; no `.smell-baseline.json` committed |
+
+One random-order run failed (two `-O` subprocess tests exited `0xC0000142`, DLL init failed). It
+was a false alarm: a stopped loop was still running, so two suites ran at once. The seed passes
+alone and the clean rerun was 13/13 green.
+
+Five follow-up phases came out of it, each on its own branch off `development`: H1 roundtrip
+hermeticity and speed, H2 smell triage plus baseline, H3 mutation on the port modules, H4 the
+TDReceiver Humble-Object split (after the 2026-10-19 block-review fixes merge), and H5
+coverage-report hygiene (tmp copies of `cuda_link` show up as 0-statement files).
+
+### H1 — Roundtrip hermeticity and speed
+
+**Root cause of the 22 s tests.** The producer in `tests/integration/test_roundtrip.py` exported
+all its frames on fixed sleeps, often before the consumer had finished spawning and initializing
+CUDA. The consumer then sat out its 20 s deadline waiting for frames that never came, and the
+test still passed because it asserted only "at least one frame".
+
+**Hermeticity gap.** The producer workers called `Exporter.open` with the default policy, so every
+export checked the production `cudalink_activation_barrier` segment. A live TD sender holding that
+barrier made the exports skip. With the barrier held by a stand-in for a TD sender
+(`HolderBarrier.acquire`), the old `test_roundtrip_exporter_importer` failed with "Consumer
+received 0 frames" after 22.3 s.
+
+**Fix.**
+
+- Producer and consumer run in lockstep through three spawn-context Events (`ready`,
+  `frame_read`, `done`). The producer waits for each frame to be read before it exports the next,
+  so no fixed sleep is left.
+- Each producer points `activation_barrier.SHM_NAME` at a per-test segment before opening its
+  exporter. `test_integration.py`, which runs the real `Exporter` in-process, now uses the
+  existing `isolated_barrier_shm` fixture module-wide.
+- Assertions are now exact: every frame arrives (`frames == num_frames`, was `>= 1`), and the
+  metadata auto-detect test also checks that the auto-detected importer received a frame.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| 4 roundtrip tests | 22.6 + 22.5 + 6.4 + 4.4 = 55.9 s | ~2.1 s each, ~8.2 s total |
+| `test_roundtrip.py` + `test_integration.py` | 57.8 s | ~10 s |
+| Full suite (GPU) | 75.8 s | 29.2–33.4 s (3 random seeds) |
+| No-GPU selection | ~18 s | 18.3 s (unchanged; these tests need CUDA) |
+| Roundtrip + integration with the production barrier held | old roundtrip fails, 0 frames | 8 passed in 9.8 s |
+| Combined branch coverage | 88.21 % | 88.21 % |
+
+This closes the Phase E caution about running concurrently with a live TD session for these two
+integration files: they no longer touch the production barrier segment. Other files that call
+`Exporter.open` (core exporter tests with fakes, `test_cpu_roundtrip.py`, a few `tests/cuda`
+files) were not audited for this in H1, so the general "no pytest beside a live TD session" rule
+still stands. The roundtrip tests still use real CUDA IPC, so they stay `requires_cuda` and
+local-only.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
 |---------|-------------------------------|---------------|
-| `pytest-xdist -n auto` | fast loop > ~5 min | 22.3 s — far below |
+| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18 s, full suite ~29 s — far below |
 | `pytest-split` sharding | per-runner > ~10 min after xdist | n/a |
-| Test tiering (unit/slow dirs) | fast loop > 30 s | 22.3 s |
-| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 3.63 s |
+| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18 s (full suite ~29 s, local-only) |
+| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 2.9 s (was 22.5 s for the GPU roundtrips before H1) |
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (est. ≈179) — see F1 |
+| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (measured 715 for `initialize_receiver` in H0, est. ≈179 in F1) — planned as H4 |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |

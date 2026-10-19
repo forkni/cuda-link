@@ -8,10 +8,14 @@ Windows requires separate OS processes for CUDA IPC (cudaIpcOpenMemHandle return
 error 201 if called in the same process that created the handle). All tests here
 use multiprocessing.Process with the "spawn" context.
 
-NOTE on timing: The producer spawn process loads CUDA libraries and allocates GPU
-buffers, which takes ~1-2 seconds on first start. Consumers therefore wait for
-SharedMemory to appear using a cheap polling loop (no CUDA involvement) before
-creating the full CUDAIPCImporter.
+NOTE on timing: producer and consumer run in lockstep through multiprocessing Events
+(see _Sync), never through fixed sleeps. The producer signals `ready` once its exporter
+is open, then waits for the consumer's `frame_read` after every export, so the consumer
+sees each frame no matter how long its own CUDA start-up takes.
+
+NOTE on isolation: each producer points cuda_link.activation_barrier.SHM_NAME at a
+per-test segment before opening its exporter. The production segment is shared with
+any live TD session, and a TD sender holding it would make these exports skip.
 """
 
 from __future__ import annotations
@@ -20,27 +24,29 @@ import ctypes
 import multiprocessing
 import time
 from collections.abc import Callable
+from typing import NamedTuple
 
 import pytest
 
+pytest.importorskip("numpy")
+
+_SYNC_TIMEOUT_S = 20.0  # upper bound on any single wait; a healthy pair never comes near it
+
 # ---------------------------------------------------------------------------
-# Shared helper: wait for SharedMemory to appear (cheap, no CUDA)
+# Synchronisation between the two spawned processes
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_shm(shm_name: str, timeout_s: float = 20.0) -> bool:
-    """Poll until named SharedMemory exists. Returns True if found within timeout."""
-    from multiprocessing.shared_memory import SharedMemory
+class _Sync(NamedTuple):
+    """Events shared by one producer/consumer pair (pickled into both at spawn)."""
 
-    deadline = time.perf_counter() + timeout_s
-    while time.perf_counter() < deadline:
-        try:
-            shm = SharedMemory(name=shm_name)
-            shm.close()
-            return True
-        except FileNotFoundError:
-            time.sleep(0.1)
-    return False
+    ready: object  # producer: exporter is open, IPC handles are in SharedMemory
+    frame_read: object  # consumer: the latest exported frame was read
+    done: object  # consumer: finished, the producer may close
+
+
+def _barrier_name(shm_name: str) -> str:
+    return f"{shm_name}_barrier"
 
 
 # ---------------------------------------------------------------------------
@@ -48,34 +54,30 @@ def _wait_for_shm(shm_name: str, timeout_s: float = 20.0) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _worker_producer_basic(
+def _worker_producer(
     shm_name: str,
-    height: int,
-    width: int,
-    channels: int,
     dtype: str,
     fill_value: int,
     num_frames: int,
-    num_slots: int,
+    wait_for_done: bool,
+    sync: _Sync,
     rq: object,
 ) -> None:
-    """Exports GPU frames via Exporter."""
+    """Exports num_frames 8x8x4 GPU frames, one per consumer read.
+
+    With wait_for_done the exporter stays open until the consumer reports it is finished.
+    Without it, close() follows the last read at once: that is the shutdown under test.
+    """
     try:
+        import cuda_link.activation_barrier as activation_barrier
         from cuda_link import FrameSpec, GpuFrame
         from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
         from cuda_link.exporter import Exporter
 
+        activation_barrier.SHM_NAME = _barrier_name(shm_name)
+
         cuda = get_cuda_runtime()
-        exporter = Exporter.open(
-            FrameSpec(
-                shm_name=shm_name,
-                height=height,
-                width=width,
-                channels=channels,
-                dtype=dtype,
-                num_slots=num_slots,
-            )
-        )
+        exporter = Exporter.open(FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype=dtype, num_slots=2))
 
         data_size = exporter.data_size
         src_ptr = cuda.malloc(data_size)
@@ -89,11 +91,16 @@ def _worker_producer_basic(
             kind=1,  # cudaMemcpyHostToDevice
         )
 
-        for _ in range(num_frames):
+        sync.ready.set()
+        for i in range(num_frames):
             exporter.export(GpuFrame(ptr=int(src_ptr.value), size=data_size))
-            time.sleep(0.05)  # 50ms between frames
+            if not sync.frame_read.wait(_SYNC_TIMEOUT_S):
+                raise TimeoutError(f"consumer did not read frame {i + 1} of {num_frames}")
+            sync.frame_read.clear()
 
-        time.sleep(2.0)  # Grace period so consumer can drain
+        if wait_for_done and not sync.done.wait(_SYNC_TIMEOUT_S):
+            raise TimeoutError("consumer never reported done")
+
         cuda.free(src_ptr)
         exporter.close()
         rq.put(("OK", num_frames))
@@ -103,92 +110,41 @@ def _worker_producer_basic(
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
 
 
-def _worker_consumer_basic(
-    shm_name: str, height: int, width: int, channels: int, dtype: str, num_frames: int, rq: object
+def _connect_importer(shm_name: str, shape: tuple | None, dtype: str | None, sync: _Sync) -> object:
+    """Waits for the producer's exporter, then connects a CUDAIPCImporter to it."""
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    if not sync.ready.wait(_SYNC_TIMEOUT_S):
+        raise TimeoutError(f"producer never opened '{shm_name}'")
+
+    importer = CUDAIPCImporter(shm_name=shm_name, shape=shape, dtype=dtype)
+    importer.connect()
+    if not importer.is_ready():
+        raise RuntimeError("CUDAIPCImporter not ready after connect()")
+    return importer
+
+
+def _worker_consumer_frames(
+    shm_name: str, dtype: str, expected_fill: int, num_frames: int, sync: _Sync, rq: object
 ) -> None:
-    """Reads frames via CUDAIPCImporter."""
-    try:
-        from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
-
-        if not NUMPY_AVAILABLE:
-            rq.put(("SKIP", "numpy not available"))
-            return
-
-        # Wait cheaply for producer's SharedMemory to appear (no CUDA needed yet)
-        if not _wait_for_shm(shm_name, timeout_s=20.0):
-            rq.put(("ERROR", f"SharedMemory '{shm_name}' never appeared within 20s"))
-            return
-
-        # Short extra delay so producer can write the CIPD magic and IPC handles
-        time.sleep(0.3)
-
-        importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
-        try:
-            importer.connect()
-        except (OSError, RuntimeError) as e:
-            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
-            return
-        if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
-            return
-
-        frames_received = 0
-        deadline = time.perf_counter() + 20.0
-        while frames_received < num_frames and time.perf_counter() < deadline:
-            frame = importer.get_frame_numpy()
-            if frame is not None:
-                frames_received += 1
-            else:
-                time.sleep(0.01)
-
-        importer.cleanup()
-        rq.put(("OK", frames_received))
-    except Exception as e:  # noqa: BLE001
-        import traceback
-
-        rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
-
-
-def _worker_consumer_verify(
-    shm_name: str, height: int, width: int, channels: int, dtype: str, expected_fill: int, num_frames: int, rq: object
-) -> None:
-    """Reads frames and verifies pixel values match expected fill."""
+    """Reads num_frames frames and counts those whose pixels differ from expected_fill."""
     try:
         import numpy as np
 
-        from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
-
-        if not NUMPY_AVAILABLE:
-            rq.put(("SKIP", "numpy not available"))
-            return
-
-        if not _wait_for_shm(shm_name, timeout_s=20.0):
-            rq.put(("ERROR", f"SharedMemory '{shm_name}' never appeared"))
-            return
-
-        time.sleep(0.3)
-
-        importer = CUDAIPCImporter(shm_name=shm_name, shape=(height, width, channels), dtype=dtype)
-        try:
-            importer.connect()
-        except (OSError, RuntimeError) as e:
-            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
-            return
-        if not importer.is_ready():
-            rq.put(("ERROR", "CUDAIPCImporter not ready after connect()"))
-            return
+        importer = _connect_importer(shm_name, (8, 8, 4), dtype, sync)
 
         frames_received = 0
         mismatches = 0
-        deadline = time.perf_counter() + 20.0
+        deadline = time.perf_counter() + _SYNC_TIMEOUT_S
         while frames_received < num_frames and time.perf_counter() < deadline:
             frame = importer.get_frame_numpy()
-            if frame is not None:
-                frames_received += 1
-                if not np.all(frame == expected_fill):
-                    mismatches += 1
-            else:
-                time.sleep(0.01)
+            if frame is None:
+                time.sleep(0.001)
+                continue
+            frames_received += 1
+            if not np.all(frame == expected_fill):
+                mismatches += 1
+            sync.frame_read.set()
 
         importer.cleanup()
         rq.put(("OK", {"frames": frames_received, "mismatches": mismatches}))
@@ -196,138 +152,57 @@ def _worker_consumer_verify(
         import traceback
 
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
+    finally:
+        sync.done.set()
 
 
-def _worker_producer_shutdown(shm_name: str, num_frames: int, rq: object) -> None:
-    """Exports frames then cleanly shuts down (sets shutdown flag)."""
+def _worker_consumer_shutdown(shm_name: str, sync: _Sync, rq: object) -> None:
+    """Reads frames from a live producer until it sees the producer shut down."""
     try:
-        from cuda_link import FrameSpec, GpuFrame
-        from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
-        from cuda_link.exporter import Exporter
+        importer = _connect_importer(shm_name, (8, 8, 4), "uint8", sync)
 
-        cuda = get_cuda_runtime()
-        exporter = Exporter.open(
-            FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="uint8", num_slots=2)
-        )
-
-        src_ptr = cuda.malloc(exporter.data_size)
-        for _ in range(num_frames):
-            exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
-            time.sleep(0.05)
-
-        # Stay alive long enough for consumer to connect, read at least 1 frame,
-        # then set the shutdown flag via close()
-        time.sleep(4.0)
-        cuda.free(src_ptr)
-        exporter.close()
-        rq.put(("OK", num_frames))
-    except Exception as e:  # noqa: BLE001
-        import traceback
-
-        rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
-
-
-def _worker_consumer_shutdown(shm_name: str, rq: object) -> None:
-    """Connects to live producer, reads frames, then waits for shutdown detection."""
-    try:
-        from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
-
-        if not NUMPY_AVAILABLE:
-            rq.put(("SKIP", "numpy not available"))
-            return
-
-        if not _wait_for_shm(shm_name, timeout_s=20.0):
-            rq.put(("ERROR", "SharedMemory never appeared"))
-            return
-
-        time.sleep(0.3)
-
-        importer = CUDAIPCImporter(shm_name=shm_name, shape=(8, 8, 4), dtype="uint8")
-        try:
-            importer.connect()
-        except (OSError, RuntimeError) as e:
-            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
-            return
-        if not importer.is_ready():
-            rq.put(("ERROR", "Importer not ready after connect() — live producer present"))
-            return
-
-        # Poll for frames and watch for shutdown
+        frames_received = 0
         shutdown_detected = False
-        poll_deadline = time.perf_counter() + 20.0
-        while time.perf_counter() < poll_deadline:
+        deadline = time.perf_counter() + _SYNC_TIMEOUT_S
+        while time.perf_counter() < deadline:
             frame = importer.get_frame_numpy()
-            if frame is None and not importer.is_ready():
+            if frame is not None:
+                frames_received += 1
+                sync.frame_read.set()
+            elif not importer.is_ready():
                 shutdown_detected = True
                 break
-            time.sleep(0.05)
+            else:
+                time.sleep(0.001)
 
         importer.cleanup()
-        rq.put(("OK", {"shutdown_detected": shutdown_detected}))
+        rq.put(("OK", {"frames": frames_received, "shutdown_detected": shutdown_detected}))
     except Exception as e:  # noqa: BLE001
         import traceback
 
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
+    finally:
+        sync.done.set()
 
 
-def _worker_producer_float32(shm_name: str, num_frames: int, rq: object) -> None:
-    """Exports float32 frames for metadata auto-detect test."""
+def _worker_consumer_auto_detect(shm_name: str, sync: _Sync, rq: object) -> None:
+    """Connects with shape=None and dtype=None to test metadata auto-detection."""
     try:
-        from cuda_link import FrameSpec, GpuFrame
-        from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
-        from cuda_link.exporter import Exporter
-
-        cuda = get_cuda_runtime()
-        exporter = Exporter.open(
-            FrameSpec(shm_name=shm_name, height=8, width=8, channels=4, dtype="float32", num_slots=2)
-        )
-
-        src_ptr = cuda.malloc(exporter.data_size)
-        for _ in range(num_frames):
-            exporter.export(GpuFrame(ptr=int(src_ptr.value), size=exporter.data_size))
-            time.sleep(0.05)
-
-        time.sleep(2.0)
-        cuda.free(src_ptr)
-        exporter.close()
-        rq.put(("OK", num_frames))
-    except Exception as e:  # noqa: BLE001
-        import traceback
-
-        rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
-
-
-def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
-    """Connects with shape=None to test metadata auto-detection."""
-    try:
-        from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
-
-        if not NUMPY_AVAILABLE:
-            rq.put(("SKIP", "numpy not available"))
-            return
-
-        if not _wait_for_shm(shm_name, timeout_s=20.0):
-            rq.put(("ERROR", "SharedMemory never appeared"))
-            return
-
-        time.sleep(0.3)
-
-        importer = CUDAIPCImporter(shm_name=shm_name, shape=None, dtype=None)
-        try:
-            importer.connect()
-        except (OSError, RuntimeError) as e:
-            rq.put(("ERROR", f"CUDAIPCImporter.connect() failed: {e}"))
-            return
-        if not importer.is_ready():
-            rq.put(("ERROR", "Importer with shape=None not ready after connect()"))
-            return
+        importer = _connect_importer(shm_name, None, None, sync)
 
         detected_shape = importer.shape
         detected_dtype = importer.dtype
 
-        frame = importer.get_frame_numpy()
-        importer.cleanup()
+        frame = None
+        deadline = time.perf_counter() + _SYNC_TIMEOUT_S
+        while frame is None and time.perf_counter() < deadline:
+            frame = importer.get_frame_numpy()
+            if frame is None:
+                time.sleep(0.001)
+        if frame is not None:
+            sync.frame_read.set()
 
+        importer.cleanup()
         rq.put(
             (
                 "OK",
@@ -342,15 +217,16 @@ def _worker_consumer_auto_detect(shm_name: str, rq: object) -> None:
         import traceback
 
         rq.put(("ERROR", f"{e}\n{traceback.format_exc()}"))
+    finally:
+        sync.done.set()
 
 
 # ---------------------------------------------------------------------------
-# Helper to launch and collect results
+# Helpers to launch and collect results
 # ---------------------------------------------------------------------------
 
 
 def _run_pair(
-    producer_target: Callable,
     producer_args: tuple,
     consumer_target: Callable,
     consumer_args: tuple,
@@ -359,11 +235,11 @@ def _run_pair(
     """Launch producer + consumer as separate spawn processes, return collected results."""
     ctx = multiprocessing.get_context("spawn")
     rq = ctx.Queue()
+    sync = _Sync(ready=ctx.Event(), frame_read=ctx.Event(), done=ctx.Event())
 
-    producer = ctx.Process(target=producer_target, args=producer_args + (rq,))
-    consumer = ctx.Process(target=consumer_target, args=consumer_args + (rq,))
+    producer = ctx.Process(target=_worker_producer, args=producer_args + (sync, rq))
+    consumer = ctx.Process(target=consumer_target, args=consumer_args + (sync, rq))
 
-    # Both start together — consumer uses _wait_for_shm() to handle timing
     producer.start()
     consumer.start()
 
@@ -383,6 +259,17 @@ def _run_pair(
     return results
 
 
+def _consumer_result(results: list, num_frames: int) -> dict:
+    """Checks both processes succeeded and returns the consumer's result dict."""
+    errors = [r for r in results if r[0] == "ERROR"]
+    assert not errors, f"Process errors: {errors}"
+    assert ("OK", num_frames) in results, f"Producer did not finish all {num_frames} frames: {results}"
+
+    consumer = [r[1] for r in results if r[0] == "OK" and isinstance(r[1], dict)]
+    assert len(consumer) == 1, f"Expected one consumer result, got: {results}"
+    return consumer[0]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -391,30 +278,17 @@ def _run_pair(
 @pytest.mark.requires_cuda
 @pytest.mark.slow
 def test_roundtrip_exporter_importer(temp_shm_name: str) -> None:
-    """Exporter (producer) sends GPU frames; CUDAIPCImporter reads them."""
+    """Every frame the Exporter sends through a 2-slot ring reaches CUDAIPCImporter."""
     num_frames = 5
 
     results = _run_pair(
-        producer_target=_worker_producer_basic,
-        producer_args=(temp_shm_name, 8, 8, 4, "uint8", 42, num_frames, 2),
-        consumer_target=_worker_consumer_basic,
-        consumer_args=(temp_shm_name, 8, 8, 4, "uint8", num_frames),
+        producer_args=(temp_shm_name, "uint8", 42, num_frames, True),
+        consumer_target=_worker_consumer_frames,
+        consumer_args=(temp_shm_name, "uint8", 42, num_frames),
     )
 
-    skips = [r for r in results if r[0] == "SKIP"]
-    if skips:
-        pytest.skip(skips[0][1])
-
-    errors = [r for r in results if r[0] == "ERROR"]
-    assert not errors, f"Process errors: {errors}"
-
-    ok_results = [r for r in results if r[0] == "OK"]
-    assert ok_results, "No OK results received from any process"
-
-    # The consumer reports its frame count as an int
-    consumer_oks = [r[1] for r in ok_results if isinstance(r[1], int)]
-    if consumer_oks:
-        assert consumer_oks[-1] >= 1, f"Consumer received 0 frames (expected ≥1 of {num_frames})"
+    stats = _consumer_result(results, num_frames)
+    assert stats["frames"] == num_frames
 
 
 @pytest.mark.requires_cuda
@@ -425,23 +299,13 @@ def test_roundtrip_data_integrity(temp_shm_name: str) -> None:
     fill_value = 0xAB  # 171 decimal
 
     results = _run_pair(
-        producer_target=_worker_producer_basic,
-        producer_args=(temp_shm_name, 8, 8, 4, "uint8", fill_value, num_frames, 2),
-        consumer_target=_worker_consumer_verify,
-        consumer_args=(temp_shm_name, 8, 8, 4, "uint8", fill_value, num_frames),
+        producer_args=(temp_shm_name, "uint8", fill_value, num_frames, True),
+        consumer_target=_worker_consumer_frames,
+        consumer_args=(temp_shm_name, "uint8", fill_value, num_frames),
     )
 
-    skips = [r for r in results if r[0] == "SKIP"]
-    if skips:
-        pytest.skip(skips[0][1])
-
-    errors = [r for r in results if r[0] == "ERROR"]
-    assert not errors, f"Process errors: {errors}"
-
-    ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
-    stats = ok_dicts[-1][1]
-    assert stats["frames"] >= 1, "Consumer received 0 frames"
+    stats = _consumer_result(results, num_frames)
+    assert stats["frames"] == num_frames
     assert stats["mismatches"] == 0, (
         f"Data integrity failure: {stats['mismatches']}/{stats['frames']} frames had pixel values ≠ {fill_value}"
     )
@@ -451,24 +315,17 @@ def test_roundtrip_data_integrity(temp_shm_name: str) -> None:
 @pytest.mark.slow
 def test_roundtrip_shutdown_detection(temp_shm_name: str) -> None:
     """CUDAIPCImporter detects shutdown flag set by Exporter.close()."""
+    num_frames = 2
+
     results = _run_pair(
-        producer_target=_worker_producer_shutdown,
-        producer_args=(temp_shm_name, 5),
+        producer_args=(temp_shm_name, "uint8", 0, num_frames, False),
         consumer_target=_worker_consumer_shutdown,
         consumer_args=(temp_shm_name,),
-        timeout_s=45.0,
     )
 
-    skips = [r for r in results if r[0] == "SKIP"]
-    if skips:
-        pytest.skip(skips[0][1])
-
-    errors = [r for r in results if r[0] == "ERROR"]
-    assert not errors, f"Process errors: {errors}"
-
-    ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
-    assert ok_dicts[-1][1]["shutdown_detected"], "Consumer did not detect producer shutdown"
+    stats = _consumer_result(results, num_frames)
+    assert stats["frames"] == num_frames
+    assert stats["shutdown_detected"], "Consumer did not detect producer shutdown"
 
 
 @pytest.mark.requires_cuda
@@ -476,21 +333,12 @@ def test_roundtrip_shutdown_detection(temp_shm_name: str) -> None:
 def test_roundtrip_metadata_auto_detect(temp_shm_name: str) -> None:
     """CUDAIPCImporter with shape=None correctly auto-detects shape/dtype from metadata."""
     results = _run_pair(
-        producer_target=_worker_producer_float32,
-        producer_args=(temp_shm_name, 5),
+        producer_args=(temp_shm_name, "float32", 0, 1, True),
         consumer_target=_worker_consumer_auto_detect,
         consumer_args=(temp_shm_name,),
     )
 
-    skips = [r for r in results if r[0] == "SKIP"]
-    if skips:
-        pytest.skip(skips[0][1])
-
-    errors = [r for r in results if r[0] == "ERROR"]
-    assert not errors, f"Process errors: {errors}"
-
-    ok_dicts = [r for r in results if r[0] == "OK" and isinstance(r[1], dict)]
-    assert ok_dicts, f"No OK dict results received (no ERROR either) — got: {results}"
-    data = ok_dicts[-1][1]
+    data = _consumer_result(results, 1)
     assert data["shape"] == (8, 8, 4), f"Expected (8,8,4), got {data['shape']}"
     assert data["dtype"] == "float32", f"Expected 'float32', got {data['dtype']}"
+    assert data["got_frame"], "Auto-detected importer never received a frame"

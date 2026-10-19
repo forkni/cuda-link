@@ -19,6 +19,10 @@ from cuda_link.shm_protocol import Metadata, SHMLayout, read_num_slots, read_ver
 _HEADER_SIZE = 20  # kept for slot-offset arithmetic in test body
 _SLOT_SIZE = 128
 
+# The real Exporter checks the activation barrier on every export; keep it off the production
+# segment a live TD session may hold.
+pytestmark = pytest.mark.usefixtures("isolated_barrier_shm")
+
 
 def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: int = 0) -> None:
     """Write v0.5.0 protocol header into SharedMemory."""
