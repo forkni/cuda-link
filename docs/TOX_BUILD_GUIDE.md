@@ -283,7 +283,7 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 | State | Visual | Cause |
 |---|---|---|
-| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — 10-bit RGB / 2-bit Alpha, 11-bit float RGB, or a float16 source with an unmapped format name |
 | **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
 | **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 

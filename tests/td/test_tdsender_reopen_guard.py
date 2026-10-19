@@ -156,3 +156,17 @@ def test_rgba8_source_publishes_bgra_flag(fake_exporter_open: None) -> None:
     assert engine.export_frame() is False  # lazy-init probe
     assert engine.export_frame() is True
     assert engine._current_spec.extra_flags == FLAGS_BGRA
+
+
+def test_unmapped_rgba8_source_inits_with_bgra_flag(fake_exporter_open: None) -> None:
+    # "useinput" skips the pixelFormatName init path; the flag must still be set at init,
+    # or the first export frame reopens the Exporter over the flag mismatch.
+    top = _top("useinput", 4)
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(host)
+
+    assert engine.export_frame() is False  # lazy-init probe
+    first = engine._exporter
+    assert engine._current_spec.extra_flags == FLAGS_BGRA
+    assert engine.export_frame() is True
+    assert engine._exporter is first, "first export frame must not reopen the Exporter"

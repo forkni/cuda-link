@@ -630,7 +630,16 @@ class TDSenderEngine:
                 _init_extra_flags = _channel_flags(_pf_init, _init_ch, _init_dtype)
                 self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
-                self.initialize(cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size)
+                # Unmapped name (e.g. "useinput"): derive flags from the same dtype guess
+                # initialize() makes, so a 4ch uint8 source gets FLAGS_BGRA from the start
+                # and the first export frame does not reopen the Exporter over a flag mismatch.
+                _guess_dtype = _guess_dtype_from_buffer_size(
+                    cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size
+                )
+                _init_extra_flags = _channel_flags(_pf_init, cm_probe.channels, _guess_dtype)
+                self.initialize(
+                    cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size, extra_flags=_init_extra_flags
+                )
             return False  # skip this frame; next cook exports normally
 
         # Defense in depth: parexecute_callbacks.handle_numslots_change rejects Numslots > 10,
