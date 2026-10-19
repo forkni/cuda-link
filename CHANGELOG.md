@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  Sender does not use this conversion yet. The dead link to a removed probe-results JSON is dropped.
+
 ## [1.13.0] - 2026-09-26
 
 ### Added

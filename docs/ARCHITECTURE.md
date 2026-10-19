@@ -529,13 +529,24 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
 
-**Note on pixel format compatibility** (empirically probed, TD 2025.32820 — see `verification/results/cuda_memory_probe_20260510_090919.json`):
+**Note on pixel format compatibility** (empirically probed on TD 2025.32820, 2026-05-10; the float16 row was re-probed on TD 2025.33230, 2026-10-19):
 
 | Category | Formats | `cudaMemory()` behaviour |
 |---|---|---|
 | **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in R/RG/RGBA/A variants | Returns correct `uint8` / `uint16` / `float32` buffer |
 | **Rejected outright** | All 4 float16 variants (R/RG/RGBA/A); 10-bit RGB / 2-bit Alpha fixed | Raises exception; Sender skips frame + tints component **yellow** via `parent().color`; resumes when upstream format is corrected |
 | **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
+
+**float16 sources and the `pixelFormat` kwarg.** TD's documentation does not mention float16 CUDA sharing either way: `CUDAMemoryShape.dataType` lists only `numpy.uint8` and `numpy.float32`. The rejection is TD's, not cuda-link's. On a float16 TOP, both `cudaMemory()` and `cudaMemory(pixelFormat='rgba16float')` raise `tdError: Texture is invalid pixel format to be shared with CUDA.`
+
+TD 2025.33230 accepts a `pixelFormat=` keyword. It takes a pixel-format menu name, the same string `.pixelFormatName` returns. The live docstring documents it, but the bundled offline docs do not. Asking for a 32-bit format makes TD convert on the GPU before sharing. The 2026-10-19 probe used a 1280×720 `rgba16float` Noise TOP and called `cudaMemory(pixelFormat='rgba32float')`:
+
+- The call returned a `float32`, 4-component buffer of 14,745,600 bytes.
+- A D2H copy matched `numpyArray()` bit-exactly. The max |diff| was 0.0, and row order was unchanged, with no vertical flip.
+- Every value was exactly representable in float16, so the widening is lossless.
+- Out-of-range values were kept: the sampled range was −0.20 to 1.26, with no clamping.
+
+`RealTOPHandle.cuda_memory(stream, pixel_format)` already forwards this kwarg. TDSender does not use it yet, so float16 sources still take the skip + yellow-tint path below. The workaround costs one GPU conversion pass and doubles the bytes per frame. 16-bit fixed (`uint16`) sources share natively. Requesting `pixelFormat='rgba16fixed'` from a float16 TOP would keep 8 bytes per pixel, but fixed formats are unsigned-normalized, so values outside [0, 1] would clamp. This conversion has not been probed.
 
 The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
 
