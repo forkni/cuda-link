@@ -883,8 +883,13 @@ class _CupyBackend:
         self._imp = importer
         self._stream = stream
 
-    def prepare(self, importer: Importer) -> None:  # noqa: ARG002
-        pass
+    def prepare(self, importer: Importer) -> None:
+        if importer._cupy is None:
+            # Views are dropped when the current format has no CuPy dtype (bfloat16).
+            raise RuntimeError(
+                f"CuPy views are unavailable for {importer._format.dtype_str} frames. "
+                "Use get_frame() to retrieve a torch.Tensor instead."
+            )
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
         evt = conn.ipc_events[read_slot]
@@ -1835,9 +1840,11 @@ class Importer:
         self._format = new_fmt
         if self._torch is not None:
             self._torch = TorchBuffers.build(self._conn, new_fmt)
-        if self._cupy is not None:
+        if CUPY_AVAILABLE:
             # The old arrays wrap the previous dev_ptrs (unmapped after a reinitialize)
-            # and the previous geometry — rebuild them like the torch views above.
+            # and the previous geometry — rebuild them like the torch views above. Gated
+            # on CuPy, not on self._cupy, so views dropped for an unsupported dtype come
+            # back once the producer switches to a supported one.
             try:
                 self._cupy = CupyBuffers.build(self._conn, new_fmt)
             except ValueError as e:
@@ -1881,11 +1888,10 @@ class Importer:
             self._last_write_idx = 0
 
             self._apply_format_change(new_fmt)
-            if not provisional:
-                # A1: a genuine SHM read (not the "still absent, kept old format" fallback
-                # above) means geometry is now authoritative — clear any stale provisional
-                # flag from the original connect so _try_acquire() doesn't re-resolve again.
-                self._format_provisional = False
+            # A1: a genuine SHM read makes geometry authoritative, so _try_acquire() stops
+            # re-resolving; a provisional one (metadata not yet written by the restarted
+            # producer) must re-arm it, or the kept old format is never corrected.
+            self._format_provisional = provisional
 
             logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:

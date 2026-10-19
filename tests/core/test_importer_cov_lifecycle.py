@@ -18,6 +18,7 @@ import pytest
 import torch
 from fakes import make_connected_importer, make_fake_ipc_connection
 
+import cuda_link.importer as _imp_mod
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
 from cuda_link.importer import CupyBuffers, Format, Importer, TorchBuffers
@@ -300,6 +301,7 @@ def test_apply_format_change_rebuilds_cupy_buffers_when_present(monkeypatch: pyt
     imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8", cupy=old_cupy)
     build = MagicMock(return_value=new_cupy)
     monkeypatch.setattr(CupyBuffers, "build", build)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
     new_fmt = Format.from_overrides((4, 4, 4), "int16")
 
     imp._apply_format_change(new_fmt)
@@ -308,10 +310,13 @@ def test_apply_format_change_rebuilds_cupy_buffers_when_present(monkeypatch: pyt
     assert imp._cupy is new_cupy
 
 
-def test_apply_format_change_drops_cupy_buffers_for_unsupported_dtype(caplog: pytest.LogCaptureFixture) -> None:
+def test_apply_format_change_drops_cupy_buffers_for_unsupported_dtype(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """bfloat16 has no CuPy dtype: CupyBuffers.build raises ValueError, so the stale
     views are dropped (None) and the change is logged instead of propagating."""
     imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8", cupy=MagicMock(name="old_cupy"))
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
     new_fmt = Format.from_overrides((4, 4, 4), "bfloat16")
 
     with caplog.at_level(logging.WARNING, logger="cuda_link.importer"):
@@ -322,11 +327,32 @@ def test_apply_format_change_drops_cupy_buffers_for_unsupported_dtype(caplog: py
     assert any("CuPy views dropped" in r.getMessage() for r in caplog.records)
 
 
-def test_apply_format_change_leaves_cupy_none_when_not_built(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_format_change_restores_cupy_after_unsupported_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
+    """float32 -> bfloat16 drops the views; bfloat16 -> float32 must rebuild them,
+    not leave get_frame_cupy() without views for the rest of the session."""
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="float32", cupy=MagicMock(name="old_cupy"))
+    new_cupy = MagicMock(name="new_cupy")
+
+    def build(conn, fmt):  # noqa: ANN001, ARG001
+        if fmt.dtype_str == "bfloat16":
+            raise ValueError("bfloat16 is not supported by the CuPy consumer")
+        return new_cupy
+
+    monkeypatch.setattr(CupyBuffers, "build", build)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
+
+    imp._apply_format_change(Format.from_overrides((4, 4, 4), "bfloat16"))
+    assert imp._cupy is None
+    imp._apply_format_change(Format.from_overrides((4, 4, 4), "float32"))
+    assert imp._cupy is new_cupy
+
+
+def test_apply_format_change_leaves_cupy_none_when_cupy_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8")
     assert imp._cupy is None
     build = MagicMock()
     monkeypatch.setattr(CupyBuffers, "build", build)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", False)
 
     imp._apply_format_change(Format.from_overrides((8, 8, 4), "uint8"))
 
@@ -348,6 +374,26 @@ def test_reinitialize_falls_back_to_partial_cleanup_on_failure(monkeypatch: pyte
     imp._reinitialize()  # must not raise
 
     spy.assert_called_once_with()
+
+
+def test_reinitialize_rearms_provisional_flag_when_metadata_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restarted producer that has not written metadata yet resolves provisionally:
+    the old format is kept, and _try_acquire() must re-resolve on the next NEW_FRAME."""
+    import dataclasses
+
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8")
+    imp._spec = dataclasses.replace(imp._spec, shape=None, dtype=None)  # auto-detect
+    imp._format_provisional = False
+    old_fmt = imp._format
+    conn = imp._conn
+    monkeypatch.setattr(imp, "_open_ipc_slots", lambda *_a: conn)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", False)
+
+    imp._reinitialize()
+
+    assert imp._conn is conn
+    assert imp._format is old_fmt
+    assert imp._format_provisional is True
 
 
 # ---------------------------------------------------------------------------
