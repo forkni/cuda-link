@@ -20,7 +20,7 @@ from fakes import make_connected_importer, make_fake_ipc_connection
 
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
-from cuda_link.importer import Format, Importer, TorchBuffers
+from cuda_link.importer import CupyBuffers, Format, Importer, TorchBuffers
 from cuda_link.shm_protocol import DtypeCodec, Metadata
 
 # ---------------------------------------------------------------------------
@@ -289,6 +289,49 @@ def test_apply_format_change_rebuilds_torch_buffers_when_present(monkeypatch: py
     # skips the rebuild (leaving the stale pre-existing buffers in place)
     # is actually caught rather than passing vacuously.
     assert imp._torch is not old_torch
+
+
+def test_apply_format_change_rebuilds_cupy_buffers_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CuPy views wrap the connection's dev_ptrs and geometry just like the torch
+    views -- after a format change (or a _reinitialize handle reopen) they must be
+    rebuilt, not left pointing at unmapped memory."""
+    old_cupy = MagicMock(name="old_cupy")
+    new_cupy = MagicMock(name="new_cupy")
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8", cupy=old_cupy)
+    build = MagicMock(return_value=new_cupy)
+    monkeypatch.setattr(CupyBuffers, "build", build)
+    new_fmt = Format.from_overrides((4, 4, 4), "int16")
+
+    imp._apply_format_change(new_fmt)
+
+    build.assert_called_once_with(imp._conn, new_fmt)
+    assert imp._cupy is new_cupy
+
+
+def test_apply_format_change_drops_cupy_buffers_for_unsupported_dtype(caplog: pytest.LogCaptureFixture) -> None:
+    """bfloat16 has no CuPy dtype: CupyBuffers.build raises ValueError, so the stale
+    views are dropped (None) and the change is logged instead of propagating."""
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8", cupy=MagicMock(name="old_cupy"))
+    new_fmt = Format.from_overrides((4, 4, 4), "bfloat16")
+
+    with caplog.at_level(logging.WARNING, logger="cuda_link.importer"):
+        imp._apply_format_change(new_fmt)
+
+    assert imp._format is new_fmt
+    assert imp._cupy is None
+    assert any("CuPy views dropped" in r.getMessage() for r in caplog.records)
+
+
+def test_apply_format_change_leaves_cupy_none_when_not_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    imp = make_connected_importer(shape=(4, 4, 4), dtype="uint8")
+    assert imp._cupy is None
+    build = MagicMock()
+    monkeypatch.setattr(CupyBuffers, "build", build)
+
+    imp._apply_format_change(Format.from_overrides((8, 8, 4), "uint8"))
+
+    build.assert_not_called()
+    assert imp._cupy is None
 
 
 # ---------------------------------------------------------------------------

@@ -498,6 +498,43 @@ def test_connect_closes_shm_and_reraises_when_open_ipc_slots_fails(
         writer.close()
 
 
+def test_connect_closes_ipc_handles_and_shm_when_buffer_build_fails(
+    temp_shm_name: str, shared_memory_cleanup: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Torch/CuPy view build failing after _open_ipc_slots() succeeded must
+    release the opened IPC slots and the SharedMemory before re-raising --
+    otherwise every reconnect retry leaks a full IPCConnection."""
+    import cuda_link.importer as _imp_mod
+
+    monkeypatch.setattr(_imp_mod, "TORCH_AVAILABLE", False)
+    monkeypatch.setattr(_imp_mod, "CUPY_AVAILABLE", True)
+    monkeypatch.setattr(
+        _imp_mod.CupyBuffers, "build", classmethod(MagicMock(side_effect=ValueError("simulated cupy build failure")))
+    )
+
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=2)
+    try:
+        imp = _make_importer(temp_shm_name, shape=(4, 4, 4), dtype="uint8", wait_backend="python")
+        opened: list = []
+        real_open_shm = imp._open_and_validate_shm
+
+        def _capture_open_shm(**kwargs):
+            result = real_open_shm(**kwargs)
+            opened.append(result[0])
+            return result
+
+        monkeypatch.setattr(imp, "_open_and_validate_shm", _capture_open_shm)
+
+        with pytest.raises(ValueError, match="simulated cupy build failure"):
+            imp._connect()
+
+        assert imp._initialized is False
+        assert imp._cuda.opened_mem_handles == {}, "IPC mem handles must be closed on build failure"
+        assert opened and opened[0].buf is None, "the reader's SharedMemory handle must be closed"
+    finally:
+        writer.close()
+
+
 # ---------------------------------------------------------------------------
 # Importer.open()
 # ---------------------------------------------------------------------------

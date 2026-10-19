@@ -454,10 +454,13 @@ def test_cupy_buffers_bfloat16_raises_clear_error() -> None:
 
 
 def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_reinitialize routes through Format.from_shm, not a hand-written decoder."""
+    """_reinitialize resolves geometry like _connect: SHM metadata via Format.from_shm,
+    with ImportSpec overrides layered on top, and restarts frame tracking at 0."""
+    import dataclasses
     import struct as _struct
 
     from cuda_link.importer import Format
+    from cuda_link.shm_protocol import DtypeCodec, Metadata
 
     original_from_shm = Format.from_shm
     calls: list = []
@@ -468,9 +471,22 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(Format, "from_shm", staticmethod(spy_from_shm))
 
-    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1)
-    # Trigger a reinitialize by bumping the SHM version
+    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=5, last_write_idx=5)
+    # Shape stays a spec override; dtype is auto-detected from SHM.
+    imp._spec = dataclasses.replace(imp._spec, dtype=None)
+
+    # The restarted producer publishes different geometry and dtype.
     shm_buf = imp._conn.shm_handle.buf
+    kind, bits, flags = DtypeCodec.encode("uint8")
+    Metadata(
+        width=2,
+        height=2,
+        num_comps=4,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=2 * 2 * 4,
+    ).pack_into(shm_buf, imp._conn.layout)
     # Bump version to trigger VERSION_CHANGED
     current_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
     _struct.pack_into("<Q", shm_buf, 4, current_ver + 1)
@@ -479,6 +495,10 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
     imp._reinitialize()
 
     assert len(calls) >= 1, "_reinitialize must call Format.from_shm"
+    assert imp._initialized
+    assert imp._format.shape == (4, 4, 4), "spec shape override must survive a restart"
+    assert imp._format.dtype_str == "uint8", "auto-detected dtype must follow the SHM"
+    assert imp._last_write_idx == 0, "frame tracking must restart for the new producer session"
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +706,11 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
     mock_numpy = MagicMock()
     mock_numpy.needs_rebuild.return_value = False
     imp = _make_connected_importer(shape=old_shape, dtype=dtype, num_slots=1, write_idx=1, numpy=mock_numpy)
+    # Auto-detecting consumer: with spec overrides set, _reinitialize keeps them and
+    # the SHM shape below would not count as a change.
+    import dataclasses
+
+    imp._spec = dataclasses.replace(imp._spec, shape=None, dtype=None)
 
     # Write SHM metadata with a DIFFERENT shape (8×8 instead of 4×4)
     shm_buf = imp._conn.shm_handle.buf
