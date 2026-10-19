@@ -89,6 +89,7 @@ pytestmark = pytest.mark.usefixtures("fake_exporter_open")
         ("a16float", "a32float", 1, 0),
         ("monoalpha16float", "monoalpha32float", 2, FLAGS_MONO_ALPHA),
     ],
+    ids=["rgba", "rg", "mono", "a", "monoalpha"],
 )
 def test_float16_source_exports_as_float32(source: str, target: str, channels: int, flags: int) -> None:
     top = _top(source, channels)
