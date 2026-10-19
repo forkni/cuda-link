@@ -62,6 +62,17 @@ class TestAcquire:
         assert hb.held
         assert fake.active_count == 1
 
+    def test_second_acquire_while_held_does_not_increment(self):
+        """A retried initialize() re-runs acquire(); it must not stack a second hold."""
+        fake = FakeShmAdapter()
+        hb = _make_holder(enabled=True, port=fake)
+        hb.acquire(_PID, log_fn=_noop_log)
+        hb.acquire(_PID, log_fn=_noop_log)
+        assert hb.held
+        assert fake.active_count == 1
+        hb.force_release(_PID, log_fn=_noop_log)
+        assert fake.active_count == 0
+
     def test_acquire_logs_message_on_success(self):
         logs: list[str] = []
         fake = FakeShmAdapter()
@@ -267,9 +278,14 @@ class TestClose:
         assert closed == [True]
 
     def test_close_before_acquire_is_idempotent(self):
+        """close() with nothing held must not open or touch the segment, even twice."""
         fake = FakeShmAdapter()
         hb = _make_holder(port=fake)
-        hb.close()  # must not raise
+        hb.close()
+        hb.close()
+        assert not hb.held
+        assert fake.attached is False
+        assert fake.active_count == 0
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ the installed WINFUNCTYPE routine and invoke it directly in-process.
 from __future__ import annotations
 
 import sys
-import time
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,14 +78,18 @@ def test_watchdog_completes_within_timeout() -> None:
 
 def test_watchdog_prints_timeout_message(capsys: pytest.CaptureFixture) -> None:
     """run_with_watchdog prints a timeout message when fn exceeds the timeout."""
+    stop_event = threading.Event()
 
     def _slow() -> None:
-        time.sleep(5.0)  # far beyond the watchdog
+        stop_event.wait(5.0)  # far beyond the watchdog
 
-    run_with_watchdog(_slow, timeout_s=0.05, label="slow fn", prefix="[t]")
-    out = capsys.readouterr().out
-    assert "slow fn" in out
-    assert "timed out" in out
+    try:
+        run_with_watchdog(_slow, timeout_s=0.05, label="slow fn", prefix="[t]")
+        out = capsys.readouterr().out
+        assert "slow fn" in out
+        assert "timed out" in out
+    finally:
+        stop_event.set()
 
 
 def test_watchdog_fn_exceptions_do_not_propagate_to_caller() -> None:

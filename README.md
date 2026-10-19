@@ -74,7 +74,7 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network
+1. Drag `TOXES/CUDAIPCLink_v1.14.0.tox` into your TD network
 2. Wire your source TOP to the `input` In TOP
 3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
 4. Enable `Active` toggle
@@ -123,8 +123,8 @@ importer = Importer.open(
     ImportSpec(
         shm_name="my_texture_ipc",
         shape=(1080, 1920, 4),  # height, width, channels (RGBA) — or None for auto-detect
-        dtype="float32",         # "float32", "float16", "uint8" — or None for auto-detect
-        timeout_ms=5000.0,       # Wait up to 5s for producer to appear (default)
+        dtype="float32",  # "float32", "float16", "uint8" — or None for auto-detect
+        timeout_ms=5000.0,  # Wait up to 5s for producer to appear (default)
     )
 )
 
@@ -161,6 +161,13 @@ importer.close()
 
 > ▶ Runnable version: [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py) — spawns its own demo producer, so no TouchDesigner is needed to try it.
 
+**What a TD source arrives as.** 8-bit RGBA TOPs arrive in **B, G, R, A** channel order
+(that is how TD's `cudaMemory()` returns them; the Sender sets `FLAGS_BGRA` in the SHM
+header). 16-bit and 32-bit RGBA arrive as R, G, B, A. **Float16 TOPs arrive as `float32`**:
+TD converts them on the GPU, losslessly. 10-bit and 11-bit packed formats can't be shared,
+and the COMP tints yellow until you change the source TOP's pixel format. Full matrix:
+[ARCHITECTURE.md → pixel format compatibility](docs/ARCHITECTURE.md).
+
 ### 3. Python → TouchDesigner (AI Output)
 
 Send AI-generated frames **back to TD** for display:
@@ -171,9 +178,11 @@ from cuda_link import Exporter, FrameSpec, GpuFrame
 with Exporter.open(
     FrameSpec(
         shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
-        height=512, width=512,
-        channels=4, dtype="uint8",
-        num_slots=2,               # Ring buffer slots (double-buffering)
+        height=512,
+        width=512,
+        channels=4,
+        dtype="uint8",
+        num_slots=2,  # Ring buffer slots (double-buffering)
     )
 ) as exporter:
     # Export each AI-generated frame (~10-20μs overhead at 512x512).
@@ -182,11 +191,13 @@ with Exporter.open(
     # PyTorch: torch.cuda.current_stream().cuda_stream
     # CuPy:    cupy.cuda.get_current_stream().ptr
     stream_handle = torch.cuda.current_stream().cuda_stream
-    exporter.export(GpuFrame(
-        ptr=output_tensor.data_ptr(),
-        size=output_tensor.nbytes,
-        producer_stream=stream_handle,
-    ))
+    exporter.export(
+        GpuFrame(
+            ptr=output_tensor.data_ptr(),
+            size=output_tensor.nbytes,
+            producer_stream=stream_handle,
+        )
+    )
 ```
 
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
@@ -214,7 +225,7 @@ Exporter                           CUDAIPCExtension facade
 Both directions share the same v0.5.0 binary protocol.
 ```
 
-The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` (~300 LOC) holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter (~415 LOC) over the canonical `Exporter` — it owns pixel-format bridging, the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
+The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter over the canonical `Exporter` — it owns pixel-format bridging (including the float16 → float32 request), the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
 
 ### Ring Buffer (3 Slots)
 
@@ -304,10 +315,21 @@ Disable for a single run: add `-p no:randomly`.
 pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 85`, set against the combined bare-`--cov` run (87.10% measured
-2026-08-20, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
+The gate is `fail_under = 85`, set against the combined bare-`--cov` run (88.21% measured
+2026-10-19, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
 See `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
+
+### Suite rules
+
+- Warnings are errors (`filterwarnings = ["error"]`) and `xfail` is strict.
+- `scripts/check_skipped_tests.py` caps the skipped/xfail ratio at 2%, not counting
+  deliberate `requires_cuda` / `requires_native` deselection.
+- `scripts/scan_test_smells.py tests/ --baseline .smell-baseline.json` fails when any
+  test-smell category grows. It runs in pre-commit and CI.
+
+The current baseline and the history of the hardening phases are in
+[TESTING_GUIDE.md](TESTING_GUIDE.md).
 
 ### Test doubles
 
@@ -360,6 +382,7 @@ For GPU-timeline profiling (Nsight Systems / Nsight Compute / compute-sanitizer)
 
 ```python
 from cuda_link import Importer, ImportSpec
+
 importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.0))  # Wait up to 10s
 ```
 
@@ -375,6 +398,13 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 
 **Solution**: The importer automatically detects version changes and re-opens handles. No action needed.
 
+### Red and blue swapped
+
+**Cause**: the source TOP is 8-bit RGBA, which TD shares in B, G, R, A order.
+
+**Solution**: swap channels on the consumer (`tensor[..., [2, 1, 0, 3]]`), or set the source
+TOP to 16-bit fixed or 32-bit float, which arrive as R, G, B, A.
+
 ### GPU memory leak
 
 **Cause**: Importer not cleaned up properly.
@@ -383,6 +413,7 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 
 ```python
 from cuda_link import Importer, ImportSpec, ImportOutcome
+
 with Importer.open(ImportSpec(shm_name="my_project_ipc")) as importer:
     # importer.close() is called automatically on exit
     result = importer.get_frame()
@@ -432,13 +463,13 @@ python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 ```bash
 # Download the wheel matching your interpreter from
 # https://github.com/forkni/cuda-link/releases, then:
-pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
-pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
-pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
-pip install "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
+pip install "cuda_link-1.14.0-cp311-cp311-win_amd64.whl[torch]"   # PyTorch GPU tensors
+pip install "cuda_link-1.14.0-cp311-cp311-win_amd64.whl[cupy]"    # CuPy GPU arrays
+pip install "cuda_link-1.14.0-cp311-cp311-win_amd64.whl[numpy]"   # NumPy CPU arrays
+pip install "cuda_link-1.14.0-cp311-cp311-win_amd64.whl[all]"     # All output modes
 
 # Force reinstall to update:
-pip install --force-reinstall "cuda_link-1.13.0-cp311-cp311-win_amd64.whl[torch]"
+pip install --force-reinstall "cuda_link-1.14.0-cp311-cp311-win_amd64.whl[torch]"
 ```
 
 #### Method 3: Editable install from source (for development)
@@ -485,7 +516,7 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v1.13.0.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v1.14.0.tox` into your TouchDesigner network.
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -571,11 +602,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
    [`.github/workflows/merge-development-to-master.yml`](.github/workflows/merge-development-to-master.yml)).
 2. `pip install -e ".[all]"` for an editable install with every output backend.
 3. Run the checks CI enforces before opening a PR: `pytest tests/ -v` (see
-   [Testing](#testing) for the coverage gate) and `pyrefly` for static typing.
+   [Testing](#testing) for the coverage gate and suite rules), `ruff check`,
+   `ruff format --check` and `pyrefly check`. `pre-commit install` runs the same lint and
+   smell checks on every commit.
 4. Use [conventional-commit](https://www.conventionalcommits.org/) messages
    (`feat:`, `fix:`, `docs:`, …).
-5. Open the PR against `development`. CI runs tests, typecheck, and docs validation, and
-   Claude's automated reviewer leaves feedback.
+5. Open the PR against `development`. The `ci.yml` gates run lint, type-check, workflow
+   lint and the smell ratchet, build the wheel once, and test that wheel on Ubuntu and
+   Windows (Python 3.11 and 3.12, plus 3.9 and 3.10 on Ubuntu). Docs validation and the native wheel build run alongside.
+   Claude and CodeRabbit leave automated review comments.
 
 Use plain `git`/`gh` for your fork — the `scripts/git/*` wrappers in this repo are the
 maintainer's local automation, not a contributor requirement.

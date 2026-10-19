@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 from cuda_link import ExportPolicy, FrameOutcome, FrameSpec, GpuFrame
 from cuda_link._cuda_adapters import FakeCUDAAdapter
+from cuda_link.cuda_runtime_types import StreamCaptureMode
 from cuda_link.exporter import Exporter
 
 _H = _W = _C = 4
@@ -115,6 +116,27 @@ def test_build_export_graphs_success_path_builds_and_destroys_cleanly() -> None:
 
     assert exp._graph_execs == [None, None]
     assert exp._graph_templates == [None, None]
+
+
+def test_build_export_graphs_captures_every_slot_in_relaxed_mode() -> None:
+    """C2 regression: each slot's capture uses cudaStreamCaptureModeRelaxed.
+
+    Global mode (0) makes a concurrent capture elsewhere in the process (TensorRT,
+    CuPy, PyTorch) fail EndCapture with error 901. The GPU-side coexistence check
+    lives in tests/cuda/test_graph_coexistence_capture.py; this pins the mode the
+    exporter actually passes.
+    """
+    fake = FakeCUDAAdapter(device=0)
+    with (
+        patch.object(fake, "create_ipc_event", return_value=None),
+        patch.object(fake, "stream_begin_capture", wraps=fake.stream_begin_capture) as begin,
+    ):
+        exp = Exporter.open(_spec(num_slots=2), policy=_graphs_policy(), cuda=fake)
+    try:
+        assert exp._graphs_disabled is False
+        assert [c.kwargs.get("mode") for c in begin.call_args_list] == [StreamCaptureMode.RELAXED] * 2
+    finally:
+        exp.close()
 
 
 # ---------------------------------------------------------------------------
@@ -222,5 +244,57 @@ def test_export_graph_launch_failure_falls_back_to_legacy() -> None:
         assert exp._graphs_disabled is True
         messages = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
         assert any("Graph launch failed" in m for m in messages)
+    finally:
+        exp.close()
+
+
+def test_export_graph_launch_failure_clears_latched_error() -> None:
+    """A failed graph_launch latches a CUDA error; the fallback must consume it so
+    check_sticky_error() does not raise on this and every later frame (review item 1)."""
+    fake = FakeCUDAAdapter(device=0)
+    with patch.object(fake, "create_ipc_event", return_value=None):
+        exp = Exporter.open(_spec(), policy=_graphs_policy(), cuda=fake)
+
+    def _failing_launch(_exec, _stream) -> None:
+        fake._sticky_error = 1  # cudaErrorInvalidValue latched by the failed launch
+        raise RuntimeError("simulated launch failure")
+
+    try:
+        with (
+            patch.object(fake, "graph_launch", side_effect=_failing_launch),
+            patch("cuda_link.exporter.logger") as mock_logger,
+        ):
+            first = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
+        second = exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE))
+        assert first == FrameOutcome.PUBLISHED
+        assert second == FrameOutcome.PUBLISHED
+        assert fake.peek_last_error() == 0
+        messages = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
+        assert any("Cleared latched CUDA error" in m for m in messages)
+    finally:
+        exp.close()
+
+
+def test_build_export_graphs_failure_clears_latched_error() -> None:
+    """A CUDA call failing inside _build_export_graphs() latches an error too; the
+    build-time fallback must consume it, or every export() after open() raises."""
+    fake = FakeCUDAAdapter(device=0)
+
+    def _failing_memcpy(*_args, **_kwargs) -> None:
+        fake._sticky_error = 1  # cudaErrorInvalidValue latched during capture
+        raise RuntimeError("simulated capture failure")
+
+    with (
+        patch.object(fake, "create_ipc_event", return_value=None),
+        patch.object(fake, "memcpy_async", side_effect=_failing_memcpy),
+        patch("cuda_link.exporter.logger") as mock_logger,
+    ):
+        exp = Exporter.open(_spec(), policy=_graphs_policy(), cuda=fake)
+    try:
+        assert exp._graphs_disabled is True
+        assert fake.peek_last_error() == 0
+        messages = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
+        assert any("Cleared latched CUDA error" in m for m in messages)
+        assert exp.export(GpuFrame(ptr=0xDEAD0000, size=_DATA_SIZE)) == FrameOutcome.PUBLISHED
     finally:
         exp.close()

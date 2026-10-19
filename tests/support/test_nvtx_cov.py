@@ -108,12 +108,23 @@ def test_push_range_and_pop_range_delegate_when_available(monkeypatch):
 
 
 def test_push_range_and_pop_range_noop_when_unavailable(monkeypatch):
-    fake_state = _NvtxState(lib=None, available=False, verbose=False)
+    """available=False gates delegation, even when a lib object is present."""
+    calls = []
+
+    class _FakeLib:
+        def push_range(self, message, color="white"):
+            calls.append(("push", message, color))
+
+        def pop_range(self):
+            calls.append(("pop",))
+
+    fake_state = _NvtxState(lib=_FakeLib(), available=False, verbose=False)
     monkeypatch.setattr(nvtx_mod, "_NVTX_STATE", fake_state)
 
-    # Must not raise even though lib is None.
     nvtx_mod.push_range("phase")
     nvtx_mod.pop_range()
+
+    assert calls == []
 
 
 def test_is_enabled_and_is_verbose_reflect_state(monkeypatch):

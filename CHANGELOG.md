@@ -5,6 +5,106 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-10-19
+
+### Added
+
+- **Float16 source TOPs export as float32**: TDSender requests the matching `*32float`
+  format through `cudaMemory(pixelFormat=...)`, so TD converts on the GPU instead of the
+  Sender rejecting the frame. Lossless. At 1280x720 the call takes a median 0.89 ms vs
+  0.86 ms for a native float32 source (a CPU readback takes 3.4 ms); the shared frame is
+  2x the bytes of the float16 source.
+- **Native waiter reports CUDA errors**: `cudaEventQuery` results are tri-state (ready,
+  not ready, error), and a new `WaitStatus.CUDA_ERROR` (5) carries the error code. The
+  Python loader raises `RuntimeError` on it, the same contract as the pure-Python wait path.
+
+### Fixed
+
+- **TDSender sets `FLAGS_BGRA` for 8-bit RGBA frames**: TD's `cudaMemory()` returns
+  `rgba8fixed` textures in B,G,R,A order. The flag existed in the SHM protocol but no
+  producer set it, so Python consumers received BGRA bytes with no marker. The flag is
+  also set when the source format name is unmapped, so the first frame no longer forces a
+  reopen.
+- **Exporter recovers after a failed CUDA graph launch** (#65): the fallback to the
+  legacy path now clears the error the failure latched. Before, every later `export()`
+  re-raised it from `check_sticky_error`.
+- **Native waiter no longer hides CUDA faults as timeouts** (#65): a hard
+  `cudaEventQuery` error used to count as "not ready" until the deadline. A call with
+  `timeout_ms=0` now polls once instead of never, and an unknown native status raises
+  `RuntimeError` instead of `KeyError`.
+- **TDSender geometry reopen** (#65): a failing `Exporter.open` during a resolution or
+  format change no longer escapes the cook callback; the Sender drops the exporter and
+  re-initializes on the next cook. An rg↔monoalpha switch at the same size now reopens,
+  so `FLAGS_MONO_ALPHA` is republished.
+- **Activation barrier holds** (#66): `increment`, `decrement` and `bump_skip` write only
+  their own fields, so the producer's `bump_skip` can't overwrite a Sender's concurrent
+  increment. `HolderBarrier.acquire` is a no-op while held, so a retried `initialize()`
+  can't stack a hold that is never released. A failed `TDSender.initialize` force-releases
+  the barrier instead of pausing the producer until the 5 s stale timeout.
+- **Importer reconnect and restart** (#67): `_reinitialize` keeps `ImportSpec` shape and
+  dtype overrides and resets the write index, so the first frame from a restarted sender
+  isn't dropped. A format change rebuilds the CuPy views. `_connect` closes its IPC handles
+  and SharedMemory if a buffer build fails.
+- **TDReceiver in-place refresh** (#67): new IPC handles are opened before the old ones
+  are closed, so a partial failure leaves the existing connection intact. The float16
+  staging buffers are rebuilt over the new device pointers, the write index is reset, and
+  a flags-only change counts as a format update.
+- **bfloat16 producers connect with CuPy installed** (#68): CuPy has no bfloat16 dtype, so
+  the Importer now skips only the CuPy views and logs a warning. Torch and NumPy consumers
+  connect normally; `get_frame_cupy()` raises a clear `RuntimeError`.
+- **Receiver reconnects promptly after a sender drop** (#74): `cleanup()` resets the retry
+  backoff interval as well as the attempt counter. Before, the first reconnect could wait
+  up to 120 frames.
+
+### Changed
+
+- **CI pipeline rebuilt** (a8b3ac0, #70): one `ci.yml` gate workflow replaces `tests.yml`,
+  `typecheck.yml` and `branch-protection.yml`. The wheel is built once and the same wheel is
+  tested on Ubuntu and Windows, plus Python 3.9 and 3.10 legs on Ubuntu. Dependencies install from
+  the committed `uv.lock`. A weekly `nightly.yml` runs the full matrix plus a lock-refresh
+  canary, and `wheels.yml` builds the Windows native wheel. Superseded runs are cancelled on
+  PRs only, every job has a `timeout-minutes`, and actionlint and zizmor lint the workflows.
+- **Tests fail on warnings** (`filterwarnings = ["error"]`, `xfail_strict = true`), and
+  the skipped/xfail ratio is capped by `scripts/check_skipped_tests.py`.
+- **Test-smell ratchet** (#72): `scripts/scan_test_smells.py` compares `tests/` against
+  `.smell-baseline.json` in pre-commit and CI; smells were triaged from 73 to 19.
+- **Roundtrip tests are hermetic and event-driven** (#69): producer and consumer run in
+  lockstep instead of sleeping, every frame must arrive, and each test uses its own
+  activation-barrier segment, so a live TD sender can't make them skip. The four roundtrip
+  tests dropped from 55.9 s to about 8 s.
+- **`claude.yml` token** reduced to `contents: read`; checkouts in both Claude workflows use
+  `persist-credentials: false` (#70).
+- **Windows wheel build** no longer runs `ilammy/msvc-dev-cmd`, the last Node 20 action;
+  CMake's Visual Studio generator finds MSVC on its own (#76). Actions bumped by Dependabot
+  (#58, #61, #63, #64).
+- **CodeRabbit** added as a bugs-only second PR reviewer (`.coderabbit.yaml`).
+
+### Removed
+
+- **Charlie** CI config, daemons and the vendored `.claude/Charlie_DOC.md` (the service
+  ended).
+- **`cc-block-dangerous-git` Claude Code hook** (#71); the user-level guard covers it.
+
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order. `cm.size` can report a stale
+  larger allocation after a dtype shrink, so it is not the payload size.
+- `docs/reviews/2026-10-19-block-review.md`: block-by-block dual code review of
+  `development`; items 1–9 are fixed in #65–#68 (#71).
+- TESTING_GUIDE.md: new baseline and records of the test-suite hardening phases H1 and H2
+  (#69, #72).
+- examples/README.md: the examples use an editable install from a checkout; `cuda-link` is
+  not on PyPI, and prebuilt wheels install through `scripts/install_td_library.py` (#59).
+- TOX_BUILD_GUIDE.md: Library mode explains project-relative discovery (#60), and the
+  `Numslots` menu lists the full 2–10 range, with 2–5 the tested range (#62).
+
 ## [1.13.0] - 2026-09-26
 
 ### Added

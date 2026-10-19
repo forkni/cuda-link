@@ -30,6 +30,7 @@ class WaitStatus(Enum):
     READY_LATE = auto()  # retired 2026-07-04 (torn-frame fix) -- never emitted anymore, kept for ABI
     TIMEOUT = auto()  # deadline exceeded with no frame
     READY_POLL = auto()  # block phase caught it with no doorbell channel present (same timer-nap loop; distinct name only so telemetry never implies a doorbell that wasn't there)
+    CUDA_ERROR = auto()  # cudaEventQuery returned a hard error (method carries the cudaError_t code); _NativeWaitBackend raises RuntimeError on it, so callers never see it as a result
 
 
 @dataclass(frozen=True)
@@ -122,4 +123,7 @@ class FakeWaitBackend:
         )
         if len(self.calls) <= self.ready_after_calls:
             return WaitResult(status=WaitStatus.TIMEOUT, waited_us=float(timeout_ms) * 1000.0, method=0)
+        if self.force_status is WaitStatus.CUDA_ERROR:
+            # Same contract as _NativeWaitBackend: a hard CUDA error raises, never returns.
+            raise RuntimeError(f"cudaEventQuery failed: {self.force_method}")
         return WaitResult(status=self.force_status, waited_us=self.force_waited_us, method=self.force_method)

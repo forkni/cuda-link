@@ -75,7 +75,8 @@ def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:
 def test_unsupported_format_emits_warning_then_clear(fake_exporter_open: None) -> None:
     top = FakeTOPHandle(
         pixel_format="16-bit float (RGBA)",  # matches _CUDA_UNSUPPORTED_PIXEL_FORMATS ("16float")
-        pixel_format_name="rgba16float",
+        # Unmapped name: the five float16 menu names are converted to float32 and never warn.
+        pixel_format_name="useinput",
         width=64,
         height=64,
         channels=4,

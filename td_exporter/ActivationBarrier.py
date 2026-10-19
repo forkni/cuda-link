@@ -49,6 +49,16 @@ assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {
 # unpack_from() reads directly from the memoryview — no intermediate bytes() copy.
 _ST_STATE = struct.Struct("<IIIIQI")  # magic version active_count pad last_change_ns barrier_skips
 
+# Per-field writers: each mutator touches only the fields it owns, so a
+# producer bump_skip() can never write back a stale active_count snapshot
+# taken before a Sender's concurrent increment()/decrement().
+_U32 = struct.Struct("<I")
+_U64 = struct.Struct("<Q")
+_OFF_ACTIVE_COUNT = 8
+_OFF_LAST_CHANGE_NS = 16
+_OFF_BARRIER_SKIPS = 24
+_OFF_LAST_WRITER_PID = 28
+
 
 def open_or_create(*, create: bool) -> SharedMemory:
     """Open the existing segment or create and initialise it.
@@ -95,39 +105,50 @@ def read_state(shm: SharedMemory) -> tuple[int, int, int]:
 def increment(shm: SharedMemory, pid: int) -> int:
     """Increment active_count, refresh last_change_ns and last_writer_pid.
 
-    Best-effort: no OS-level atomic. Race window is microseconds; the
-    producer-side stale-timeout absorbs any stuck state.
+    Best-effort: no OS-level atomic. Two Senders racing on the same
+    read-modify-write of active_count can still lose one update (microsecond
+    window); the producer-side stale-timeout absorbs any stuck state. Only the
+    owned fields are written, so the producer's bump_skip() cannot clobber it.
 
     Returns:
         New active_count value.
     """
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[2] += 1  # active_count
-    fields[4] = time.monotonic_ns()  # last_change_ns
-    fields[6] = pid  # last_writer_pid
-    _STRUCT.pack_into(shm.buf, 0, *fields)
-    return fields[2]
+    count = _U32.unpack_from(shm.buf, _OFF_ACTIVE_COUNT)[0] + 1
+    _write_holder_fields(shm, count, pid)
+    return count
 
 
 def decrement(shm: SharedMemory, pid: int) -> int:
     """Decrement active_count (clamps at zero), refresh timestamps.
 
+    Same best-effort, owned-fields-only semantics as increment().
+
     Returns:
         New active_count value.
     """
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[2] = max(0, fields[2] - 1)  # active_count, no underflow
-    fields[4] = time.monotonic_ns()  # last_change_ns
-    fields[6] = pid  # last_writer_pid
-    _STRUCT.pack_into(shm.buf, 0, *fields)
-    return fields[2]
+    count = max(0, _U32.unpack_from(shm.buf, _OFF_ACTIVE_COUNT)[0] - 1)  # no underflow
+    _write_holder_fields(shm, count, pid)
+    return count
+
+
+def _write_holder_fields(shm: SharedMemory, count: int, pid: int) -> None:
+    """Write active_count, last_change_ns and last_writer_pid; nothing else.
+
+    active_count goes last: a producer that sees the new count also sees its fresh
+    timestamp, never a stale one that would read as SKIP_STALE.
+    """
+    _U64.pack_into(shm.buf, _OFF_LAST_CHANGE_NS, time.monotonic_ns())
+    _U32.pack_into(shm.buf, _OFF_LAST_WRITER_PID, pid)
+    _U32.pack_into(shm.buf, _OFF_ACTIVE_COUNT, count)
 
 
 def bump_skip(shm: SharedMemory) -> None:
-    """Increment barrier_skips counter (producer-only diagnostic)."""
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[5] += 1  # barrier_skips
-    _STRUCT.pack_into(shm.buf, 0, *fields)
+    """Increment barrier_skips counter (producer-only diagnostic).
+
+    Touches only the barrier_skips field, never active_count.
+    """
+    skips = _U32.unpack_from(shm.buf, _OFF_BARRIER_SKIPS)[0]
+    _U32.pack_into(shm.buf, _OFF_BARRIER_SKIPS, (skips + 1) & 0xFFFFFFFF)
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +352,12 @@ class HolderBarrier:
     port: HolderShmPort = field(default_factory=RealShmAdapter)
 
     def acquire(self, pid: int, *, log_fn: Callable) -> None:
-        """Open-or-create the segment, increment, set held=True. Log+swallow failures."""
-        if not self.enabled:
+        """Open-or-create the segment, increment, set held=True. Log+swallow failures.
+
+        No-op while already held: a re-run of initialize() (failed init retried
+        on the next cook) must not stack a second increment it never releases.
+        """
+        if not self.enabled or self.held:
             return
         try:
             count = self.port.open_and_increment(pid)

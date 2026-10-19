@@ -190,6 +190,14 @@ class CudaPort(Protocol):
         """
         ...
 
+    def clear_last_error(self) -> int:
+        """Consume the thread-local latched CUDA error; return the code cleared (0 if none).
+
+        Called once after a caught, recovered failure (graph-launch fallback) so a
+        non-sticky error does not make check_sticky_error() raise on every later frame.
+        """
+        ...
+
     def set_device(self, device: int) -> Any:
         """Switch to the CUDA primary context for *device*; return an opaque restore token.
 

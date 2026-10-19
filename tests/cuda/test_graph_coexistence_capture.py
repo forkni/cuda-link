@@ -10,11 +10,16 @@ With mode=2 (Relaxed), independent captures do not invalidate each other.
 Reproducer: two threads each perform stream_begin_capture + stream_end_capture
 on independent streams. With mode=0, one EndCapture fails with 901. With
 mode=2, both succeed.
+
+Only the mode=2 half is tested. A mode=0 companion used to sit here as a
+strict xfail that skipped whenever the driver serialized the captures. It
+could only xfail or skip, never fail, so it pinned nothing and was removed
+in H2. Whether mode=0 collides depends on the driver; the contract
+cuda-link owns is that mode=2 never does.
 """
 
 from __future__ import annotations
 
-import contextlib
 import threading
 
 import pytest
@@ -47,52 +52,3 @@ def test_concurrent_captures_mode_relaxed(cuda_runtime: object) -> None:
     t2.join()
 
     assert not errors, f"Concurrent relaxed captures failed: {errors}"
-
-
-@pytest.mark.requires_cuda
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "mode=0 may produce cudaErrorStreamCaptureInvalidated (901) on some "
-        "CUDA/driver combos -- documents the C2 regression. If this stops "
-        "xfailing, the driver changed behaviour and C2's fix may need re-evaluation."
-    ),
-)
-def test_mode0_invalidates_concurrent_capture(cuda_runtime: object) -> None:
-    """Verify that mode=0 DOES cause the collision (documents the regression).
-
-    If this test stops failing it means the CUDA driver changed behaviour and
-    C2's fix may need re-evaluation.
-    """
-    errors: list[Exception] = []
-    barrier = threading.Barrier(2)
-
-    def capture_cycle(mode: int) -> None:
-        try:
-            stream = cuda_runtime.create_stream()
-            try:
-                barrier.wait()
-                cuda_runtime.stream_begin_capture(stream, mode=mode)
-                cuda_runtime.stream_end_capture(stream)
-            finally:
-                with contextlib.suppress(Exception):
-                    cuda_runtime.destroy_stream(stream)
-        except Exception as exc:
-            errors.append(exc)
-
-    t1 = threading.Thread(target=capture_cycle, args=(0,))
-    t2 = threading.Thread(target=capture_cycle, args=(0,))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    # With mode=0 on some CUDA/driver combinations this will fail (error 901).
-    # The class-level xfail marker (strict=True) turns that failure into an
-    # expected-failure outcome instead of a hard CI failure. If the driver
-    # happens to serialize captures instead, skip rather than XPASS.
-    if not errors:
-        pytest.skip(
-            "mode=0 did not produce errors on this driver — driver may serialize captures; C2 fix still safe to land."
-        )
-    raise AssertionError(f"mode=0 produced errors as expected (C2 regression confirmed): {errors}")

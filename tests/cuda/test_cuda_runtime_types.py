@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,22 +34,21 @@ def _subprocess_env() -> dict[str, str]:
     env = dict(os.environ)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = _SRC_DIR if not existing else f"{_SRC_DIR}{os.pathsep}{existing}"
+    env.setdefault("CUPY_CACHE_DIR", os.path.join(tempfile.gettempdir(), "cupy_cache"))
     return env
 
 
-def test_abi_guard_passes_for_correct_size() -> None:
-    """_abi_guard() is a no-op when actual == expected."""
+@pytest.mark.parametrize("actual", [63, 65], ids=["too-small", "too-large"])
+def test_abi_guard_raises_runtime_error_on_mismatch(actual: int) -> None:
+    """_abi_guard() raises RuntimeError (not AssertionError) on a size mismatch either way.
+
+    The equal-size case needs no test of its own: the module runs _abi_guard() on every
+    struct at import time, so a guard that rejected a matching size would fail every import.
+    """
     from cuda_link.cuda_runtime_types import _abi_guard
 
-    _abi_guard(64, 64, "some_struct")  # must not raise
-
-
-def test_abi_guard_raises_runtime_error_on_mismatch() -> None:
-    """_abi_guard() raises RuntimeError (not AssertionError) on a size mismatch."""
-    from cuda_link.cuda_runtime_types import _abi_guard
-
-    with pytest.raises(RuntimeError, match="ABI mismatch"):
-        _abi_guard(63, 64, "some_struct")
+    with pytest.raises(RuntimeError, match=f"some_struct ABI mismatch: expected 64 bytes, got {actual}"):
+        _abi_guard(actual, 64, "some_struct")
 
 
 def test_module_imports_cleanly_under_dash_o() -> None:

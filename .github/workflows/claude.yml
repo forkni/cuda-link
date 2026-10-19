@@ -25,8 +25,10 @@ jobs:
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     timeout-minutes: 10  # Prevent runaway workflows
+    # No contents: write on GITHUB_TOKEN: the action pushes with its GitHub App token,
+    # obtained through OIDC (id-token: write below).
     permissions:
-      contents: write  # Allow Claude to make commits and create branches if needed
+      contents: read
       pull-requests: write  # Allow Claude to comment on PRs and issues
       issues: write  # Allow Claude to comment on issues
       id-token: write
@@ -37,10 +39,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@4036a180cf690f49529f5d8c79c998855287f590  # v1.0.230
+        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967  # v1.0.252
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "*"  # Allow all bots (including claude[bot])

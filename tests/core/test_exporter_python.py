@@ -105,19 +105,28 @@ def test_num_slots_max_valid() -> None:
     assert exp._spec.num_slots == 10
 
 
-def test_double_close_no_crash() -> None:
-    """Calling close() twice does not raise."""
+def test_double_close_frees_each_slot_exactly_once() -> None:
+    """close() releases every slot; a second close() is a no-op, not a double free."""
     from cuda_link import ExportPolicy, FrameSpec
     from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
+    cuda = FakeCUDAAdapter()
     exp = Exporter.open(
         FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
         policy=ExportPolicy.for_testing(),
-        cuda=FakeCUDAAdapter(),
+        cuda=cuda,
     )
+    slot_ptrs = sorted(cuda.allocations)
+    assert len(slot_ptrs) == exp._spec.num_slots
+
     exp.close()
-    exp.close()  # Double-close must not raise
+    assert cuda.allocations == {}
+    assert sorted(cuda.freed) == slot_ptrs
+    assert exp.shm_handle is None
+
+    exp.close()
+    assert sorted(cuda.freed) == slot_ptrs, "second close() must not free again"
 
 
 def test_export_sync_false_no_stream_sync_when_event_present() -> None:
@@ -202,13 +211,18 @@ def test_open_succeeds(temp_shm_name: str, shared_memory_cleanup: list) -> None:
 
 @pytest.mark.requires_cuda
 def test_close_idempotent(temp_shm_name: str, shared_memory_cleanup: list) -> None:
-    """Calling close() twice does not raise (CUDA path)."""
+    """close() releases the GPU slots and SHM; a second close() is a no-op (CUDA path)."""
     from cuda_link import Exporter, FrameSpec
 
     shared_memory_cleanup.append(temp_shm_name)
     exp = Exporter.open(FrameSpec(shm_name=temp_shm_name, height=64, width=64))
     exp.close()
-    exp.close()  # Second close must not raise
+    assert exp.shm_handle is None
+    assert not exp.is_ready()
+
+    exp.close()
+    assert exp.shm_handle is None
+    assert not exp.is_ready()
 
 
 @pytest.mark.requires_cuda

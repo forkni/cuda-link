@@ -48,6 +48,9 @@ def _doorbell_policy() -> ExportPolicy:
 
 
 def test_doorbell_creation_failure_logs_warning() -> None:
+    import gc
+
+    gc.collect()
     with (
         patch("cuda_link.exporter._doorbell.create_doorbell", return_value=None),
         patch("cuda_link.exporter.logger") as mock_logger,
@@ -63,6 +66,9 @@ def test_doorbell_creation_failure_logs_warning() -> None:
 
 def test_doorbell_full_lifecycle_signals_and_closes() -> None:
     """Successful doorbell creation -> export() signals it -> close() signals + closes it."""
+    import gc
+
+    gc.collect()
     sentinel = MagicMock(name="doorbell_handle")
     with (
         patch("cuda_link.exporter._doorbell.create_doorbell", return_value=sentinel) as mock_create,

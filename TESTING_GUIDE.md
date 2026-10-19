@@ -28,11 +28,44 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-08-20, post Phase E/F)
+## Current baseline (2026-10-19, post Phase H2)
 
-**Supersedes the 2026-07-12 table below.** That table's "20/20 consecutive randomized-order
-runs green" claim was re-audited on 2026-08-20 and found **false** (4 failures in 13 runs) —
-see Phase E in the campaign record. The number here is freshly re-earned, not re-asserted.
+**Supersedes the 2026-10-12, 2026-08-20 and 2026-07-12 tables below.**
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1327 passed + 2 skipped (Windows; 63 deselected) · ubuntu CI runs same selection |
+| No-GPU selection wall clock | ~18 s (H1, without coverage) · ~22 s with `--cov=cuda_link --cov-branch` (H2) |
+| Full suite incl. GPU/native (local) | 1386 passed + 3 skipped, ~29 s (was ~76 s before H1; H1 figure, full suite not re-run in H2) |
+| Branch coverage, clean run | 99.35 % (`--cov=cuda_link`, no-GPU selection) · 88.21 % combined incl. `td_exporter` (full suite) |
+| Coverage gate (`fail_under`) | 85 (unchanged; one-way ratchet. See F4.) |
+| Order independence / flakiness | 10/10 no-GPU + 3/3 full-suite randomized runs green (audit), 3/3 full + 1 no-GPU green after H1, 3/3 no-GPU seeds green after H2 |
+| Slowest test | 2.9 s (the two subprocess `-O` import tests; by design — see Phase B). GPU roundtrips ~2.1 s each, were 22.5 s |
+| Test smells (AST scanner) | 19 total (was 77 at the H0 audit, 73 on the H2 base); ratcheted by committed `.smell-baseline.json` (see H2) |
+| Skipped/xfail ratio | 1.1 % (13/1224) — gated under 2.0 % threshold |
+| Complexity ceiling (`C901 max-complexity`) | 43 (unchanged). See F3 and Phase H audit for CRAP. |
+
+## Baseline metrics (2026-10-12, post Phase G)
+
+(Historical — see the current baseline above.)
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1322 passed + 3 skipped (Windows; 64 deselected: 61 requires_cuda, 3 requires_native) · ubuntu CI runs same selection |
+| Full-suite wall clock | ~22.3 s |
+| Branch coverage, clean run | 99.45 % (`--cov=cuda_link`) · 87.10 % combined incl. `td_exporter` |
+| Coverage gate (`fail_under`) | 85 (honest floor: ⌊87.10⌋ − 1.5, rounded down; one-way ratchet — bump only upward. See F4.) |
+| Warnings | 0 (strict `filterwarnings = ["error"]` enforced with targeted compatibility deprecation ignores) |
+| Order independence / flakiness | 20/20 consecutive randomized-order runs green — skip count stable 3 in every run |
+| Slowest test | 3.63 s (subprocess `-O` import test; by design — see Phase B) |
+| Test smells (AST scanner) | 77 total (0 sleep smells, down from 82 smells / 1 sleep; see Phase G) |
+| Skipped/xfail ratio | 1.1 % (14/1247 disabled, 59 platform-gated excluded) — gated under 2.0 % threshold |
+| Complexity ceiling (`C901 max-complexity`) | 43, ratcheted downward-only from unenforced. See F3. |
+| Type check errors | 0 errors (15 baseline-suppressed legacy diagnostics in `pyrefly-baseline.json`) |
+
+## Baseline metrics (2026-08-20, post Phase E/F)
+
+(Historical — see the current baseline above. Retained for the Phase E–F record below.)
 
 | Metric | Value |
 |--------|-------|
@@ -325,8 +358,8 @@ categories weren't in the original estimate, which never scanned `.claude/hooks/
 
 Tooling for this pass (`cosmic-ray`, `radon`, `crap4py`) installs via `pip install -e ".[quality]"`
 — a separate extra from `dev`, kept out of it deliberately so a resolver failure in these
-manual, local-only analysis tools can never break CI's Python 3.9 gate (`branch-protection.yml`
-installs `.[dev]`; `tests.yml` never installs an extra at all). crap4py's only PyPI release is
+manual, local-only analysis tools can never break CI's Python 3.9 leg (`ci.yml` installs the
+locked `dev` extra only). crap4py's only PyPI release is
 0.1.1 and it requires Python ≥3.10, so it's marker-gated (`python_version >= '3.10'`) and simply
 skipped on 3.9 rather than failing the install — the CRAP table below can only be regenerated on
 3.10+.
@@ -394,20 +427,223 @@ of the existing sender test (4 tests total between the two files, all passing). 
 test's docstring — which had documented the receiver's bug as unfixed — now points to the new
 test instead.
 
+### Phase G — CI/CD Pipeline Modernization & Test Hardening (2026-10-12)
+
+Executed a systematic hardening campaign using the `/setup-ci-cd-pipeline` and `/harden-test-suite`
+skills to bring the project into strict compliance with modern Python CI/CD standards, reproducible
+locking, warning hygiene, and smell elimination.
+
+#### G1 — Virtual environment & lockfile pinning
+
+- Pinned exact versions for all 78 production, test, and quality dependencies in `uv.lock` via `uv lock`.
+- Synchronized local environment via `uv sync --extra dev --extra quality` (`torch 2.14.1`, `numpy 2.5.4`, `ruff 0.17.0`, `pyrefly 1.3.2`).
+- Updated `.pre-commit-config.yaml` to pin `ruff v0.17.0` matching `uv.lock`.
+
+#### G2 — Git attributes & line endings
+
+- Hardened `.gitattributes` to explicitly enforce `eol=lf` across all text sources (`*.py`, `*.md`,
+  `*.yml`, `*.yaml`, `*.toml`, `*.json`, `*.jsonc`), `eol=crlf` for Windows command scripts (`*.cmd`,
+  `*.ps1`, `*.bat`), and marked binary distributions and native assets (`*.whl`, `*.dll`, `*.pyd`,
+  `*.toe`, `*.tox`, `*.sqlite`) as `-text`.
+- Eliminates CRLF/LF churn and checkout diff hazards across cross-platform CI runners.
+
+#### G3 — Pytest & warning strictness
+
+- Enabled `xfail_strict = true` in `pyproject.toml` so unexpected passes trigger immediate CI failures.
+- Added strict warnings policy: `filterwarnings = ["error"]` with targeted ignores for PyTorch/CUDA
+  driver deprecation (`pynvml`) and the backward-compatibility `CUDAIPCImporter` shim.
+- Registered standard markers: `smoke`, `integration`, and `quarantine`.
+- Added quarantine collection hook in `tests/conftest.py` enforcing `reason`, `issue`, and unexpired
+  `expires` date (YYYY-MM-DD) for any quarantined tests.
+
+#### G4 — Skipped-test drift ratchet
+
+- Implemented `scripts/check_skipped_tests.py` using stdlib-only AST parsing to count disabled tests
+  vs platform/hardware-gated tests.
+- Configured `[tool.check_skipped_tests] max_ratio = 0.02` in `pyproject.toml`.
+- Active ratio measured at 1.1% (14 disabled / 1,247 collected, 59 platform-gated excluded), passing well
+  under the 2.0% ceiling. Integrated into pre-commit and CI lint stages.
+
+#### G5 — Type checking baseline
+
+- Created `pyrefly-baseline.json` via `pyrefly check --generate-baseline`.
+- Establishes a zero-error baseline (15 legacy warnings suppressed), allowing `pyrefly check --baseline`
+  to run as a non-breaking blocker in both pre-commit and CI.
+
+#### G6 — 3-Tier GitHub Actions pipeline
+
+- **`ci.yml`**: Parallel lint and test matrix. Built once via universal fallback wheel (`py3-none-any.whl`),
+  provenance recorded in `BUILD_INFO.txt`, promoted artifact verified via SHA256 checksums, installed
+  via `uv pip install --no-deps`, smoke tested, and exercised via `uv run --no-sync pytest`.
+- **`wheels.yml`**: Windows MSVC native wheel build (`cibuildwheel`/`scikit-build-core`) triggering on tags
+  and manual dispatch with download-and-test verification.
+- **`nightly.yml`**: Weekly deep CI run including a dependency lockfile refresh canary (`uv lock --upgrade`)
+  and quarantine test watcher.
+
+#### G7 — Test hardening & AST smell remediation
+
+- Remediated test smells:
+  - Eliminated `sleep` smell in `tests/support/test_console_shutdown.py` by switching to cancelable `threading.Event().wait(5.0)`.
+  - Resolved `DeprecationWarning` in `tests/integration/test_importer_deprecation.py` with `pytest.deprecated_call()`.
+  - Added assertions to `tests/core/test_numpybuffers_close.py` and `tests/core/test_importer_port.py`.
+  - Configured sandboxed `CUPY_CACHE_DIR` isolation in `tests/cuda/test_cuda_runtime_types.py`.
+- AST test smells reduced from 82 to 77 (sleep smell count: 0).
+- Suite health: **1,322 passed, 3 skipped, 64 deselected in 22.3s, 0 warnings, 99.45% package branch coverage**.
+
+## Campaign record — Phase H (2026-10-19)
+
+### H0 — Audit (full suite, GPU included)
+
+First audit that timed the **full** suite (`-m "requires_native or not requires_native"`), not
+only the no-GPU selection. Findings:
+
+| Metric | Measured |
+|--------|----------|
+| Full suite (GPU) | 1386 passed + 3 skipped, 75.8–82 s |
+| Combined branch coverage | 88.21 % (5189 stmts, 555 miss) |
+| Random order | 10/10 no-GPU + 3/3 full-suite seeds green |
+| Slowest test | 22.5 s (`test_roundtrip_data_integrity`, GPU) — invisible to the no-GPU durations |
+| CRAP > 30 (crap4py, measured) | 8 functions; worst `TDReceiverEngine.initialize_receiver` **715** (CC 40, 25 % covered) and `_refresh_on_version_change` 343.5 — replaces the F1 estimate of ≈179 |
+| Smells | 77, unchanged; no `.smell-baseline.json` committed |
+
+One random-order run failed (two `-O` subprocess tests exited `0xC0000142`, DLL init failed). It
+was a false alarm: a stopped loop was still running, so two suites ran at once. The seed passes
+alone and the clean rerun was 13/13 green.
+
+Five follow-up phases came out of it, each on its own branch off `development`: H1 roundtrip
+hermeticity and speed, H2 smell triage plus baseline, H3 mutation on the port modules, H4 the
+TDReceiver Humble-Object split (after the 2026-10-19 block-review fixes merge), and H5
+coverage-report hygiene (tmp copies of `cuda_link` show up as 0-statement files).
+
+### H1 — Roundtrip hermeticity and speed
+
+**Root cause of the 22 s tests.** The producer in `tests/integration/test_roundtrip.py` exported
+all its frames on fixed sleeps, often before the consumer had finished spawning and initializing
+CUDA. The consumer then sat out its 20 s deadline waiting for frames that never came, and the
+test still passed because it asserted only "at least one frame".
+
+**Hermeticity gap.** The producer workers called `Exporter.open` with the default policy, so every
+export checked the production `cudalink_activation_barrier` segment. A live TD sender holding that
+barrier made the exports skip. With the barrier held by a stand-in for a TD sender
+(`HolderBarrier.acquire`), the old `test_roundtrip_exporter_importer` failed with "Consumer
+received 0 frames" after 22.3 s.
+
+**Fix.**
+
+- Producer and consumer run in lockstep through three spawn-context Events (`ready`,
+  `frame_read`, `done`). The producer waits for each frame to be read before it exports the next,
+  so no fixed sleep is left.
+- Each producer points `activation_barrier.SHM_NAME` at a per-test segment before opening its
+  exporter. `test_integration.py`, which runs the real `Exporter` in-process, now uses the
+  existing `isolated_barrier_shm` fixture module-wide.
+- Assertions are now exact: every frame arrives (`frames == num_frames`, was `>= 1`), and the
+  metadata auto-detect test also checks that the auto-detected importer received a frame.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| 4 roundtrip tests | 22.6 + 22.5 + 6.4 + 4.4 = 55.9 s | ~2.1 s each, ~8.2 s total |
+| `test_roundtrip.py` + `test_integration.py` | 57.8 s | ~10 s |
+| Full suite (GPU) | 75.8 s | 29.2–33.4 s (3 random seeds) |
+| No-GPU selection | ~18 s | 18.3 s (unchanged; these tests need CUDA) |
+| Roundtrip + integration with the production barrier held | old roundtrip fails, 0 frames | 8 passed in 9.8 s |
+| Combined branch coverage | 88.21 % | 88.21 % |
+
+This closes the Phase E caution about running concurrently with a live TD session for these two
+integration files: they no longer touch the production barrier segment. Other files that call
+`Exporter.open` (core exporter tests with fakes, `test_cpu_roundtrip.py`, a few `tests/cuda`
+files) were not audited for this in H1, so the general "no pytest beside a live TD session" rule
+still stands. The roundtrip tests still use real CUDA IPC, so they stay `requires_cuda` and
+local-only.
+
+### H2 — Smell triage and baseline
+
+`scripts/scan_test_smells.py` (AST scanner) over `tests/`. The H2 base (H1 branch) had 73 smells.
+The 77 from the audit included four early-exit tests H1 had already fixed. Each no-assert and
+early-exit test was rewritten to assert an observable effect, or deleted when it had no
+regression protection. No test was skipped or xfailed to drop the count.
+
+| Smell | H2 base | After |
+|-------|---------|-------|
+| no-assert | 30 | 0 |
+| early-exit (`pytest.skip`/`return` mid-test) | 9 | 0 |
+| parametrize-no-ids | 15 | 0 |
+| multi-mock-assert | 2 | 2 |
+| overprotective | 11 | 11 |
+| platform-check | 4 | 4 |
+| bitwise-assert | 2 | 2 |
+| **Total** | **73** | **19** |
+| Test functions scanned | 1227 | 1224 |
+| Skipped/xfail ratio | 1.1 % (14/1227) | 1.1 % (13/1224) |
+
+**Deleted.** Each of these had no regression protection.
+
+- `test_fake_adapter_graph_exec_memcpy_node_noop`
+- `test_fake_adapter_restore_context_is_callable`
+- `test_fake_adapter_synchronize_noop`
+
+  These three only called a no-op on the fake adapter.
+- `test_abi_guard_passes_for_correct_size` duplicated every other import of the module. The
+  mismatch test is now parametrized over `too-small`/`too-large`.
+- `test_mode0_invalidates_concurrent_capture` was a strict xfail behind a skip, so it could never
+  fail. The mode-2 half stays, and the contract is pinned GPU-free by the new
+  `test_build_export_graphs_captures_every_slot_in_relaxed_mode`. That test asserts every slot is
+  captured with `StreamCaptureMode.RELAXED`.
+
+**Rewritten.**
+
+- **No-assert tests** now assert the effect they exercised: log output via `capsys`/`caplog`,
+  freed slots counted on double close, D2D memcpy pattern round-tripped, event query after
+  synchronize, and barrier state.
+- **Backend caching** (`test_backend_reuse.py`):
+  - The old tests re-implemented the caching inline. The new ones drive `get_frame*` twice and
+    assert the same backend instance is reused with `_stream` refreshed.
+  - A missing library raises before anything is cached.
+- **`test_adaptive_torch_backend_uses_gpu_wait_when_latched`** no longer skips without torch. A
+  fake `torch` module is injected, and the test asserts the outgoing `stream_wait_event` args to
+  prove the stream handle is cached, rather than stub interactions.
+- **`test_get_frame_numpy_without_numpy`** always skipped where numpy is installed, and would have
+  failed where it isn't (an unconnected facade returns `None`). It now patches `NUMPY_AVAILABLE`
+  on a connected facade.
+- **`test_td_bootstrap.py`**: four `if not bootstrap._active: pytest.skip(...)` became
+  precondition asserts.
+- **Parametrize ids** were added to all 15 parametrizations. A duplicate row in
+  `test_shm_protocol.py` (float16 was identical to rgba16fixed) was merged into one row.
+
+**Hand mutants.** Five source mutants were each killed by the rewritten test aimed at them:
+
+- the `_stream` refresh dropped
+- the cupy backend rebuilt every call
+- the capture mode changed to 0
+- the torch wait stream re-read every call
+- the facade swallowing the numpy `RuntimeError`
+
+**Gate.** `.smell-baseline.json` is committed, and the scanner exits 1 when any category grows.
+
+- **Pre-commit:** the `scan-test-smells` local hook runs on `tests/**.py` and baseline changes.
+- **CI:** the `smell-ratchet` step in the lint job, aggregated like the skip-drift check.
+
+`--baseline` is passed explicitly in both places. The `[tool.scan_test_smells]` fallback in
+`pyproject.toml` needs `tomllib` (Python 3.11+). An injected no-assert test failed the gate with
+`no-assert increased 0 -> 1`.
+
+**Verification.** No-GPU selection on seeds 1729, 424242 and 90210: 1327 passed, 2 skipped,
+63 deselected each, ~22.4 s with coverage. `--cov=cuda_link` branch coverage is 99.35 %
+(3154 stmts, 22 miss), equal to the H1 baseline. `fail_under` stays at 85.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
 |---------|-------------------------------|---------------|
-| `pytest-xdist -n auto` | fast loop > ~5 min | 19 s — far below |
+| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18 s, full suite ~29 s — far below |
 | `pytest-split` sharding | per-runner > ~10 min after xdist | n/a |
-| Test tiering (unit/slow dirs) | fast loop > 30 s | 19 s |
-| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 3.63 s |
+| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18 s (full suite ~29 s, local-only) |
+| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 2.9 s (was 22.5 s for the GPU roundtrips before H1) |
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (est. ≈179) — see F1 |
+| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (measured 715 for `initialize_receiver` in H0, est. ≈179 in F1) — planned as H4 |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
-| Ruff version drift | Before the `C901` ratchet is trusted long-term | `.pre-commit-config.yaml` pins `v0.14.11`, CI (`branch-protection.yml`) pins `0.14.13`, dev extra unpinned, local is `0.14.10` |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | Resolved in Phase G: pinned to 0.17.0 across `uv.lock`, `.pre-commit-config.yaml`, and CI |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

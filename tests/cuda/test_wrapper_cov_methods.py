@@ -103,6 +103,15 @@ def test_peek_last_error_returns_int() -> None:
     api.cudart.cudaPeekAtLastError.assert_called_once_with()
 
 
+def test_clear_last_error_calls_get_last_error() -> None:
+    api = make_bare_runtime_api()
+    api.cudart.cudaGetLastError.return_value = CUDAError.INVALID_VALUE
+
+    assert api.clear_last_error() == CUDAError.INVALID_VALUE
+    api.cudart.cudaGetLastError.assert_called_once_with()
+    api.cudart.cudaPeekAtLastError.assert_not_called()
+
+
 def test_check_sticky_error_noop_when_disabled() -> None:
     api = make_bare_runtime_api()
     api._sticky_check_enabled = False
@@ -312,10 +321,14 @@ def test_restore_context_noop_when_stack_empty() -> None:
 
 
 def test_restore_context_noop_when_no_driver_api() -> None:
+    """Without nvcuda.dll there is no retained context to release, even if the stack is non-empty."""
     api = make_bare_runtime_api()
     api._drv = None
+    api._retained_ctx_stack = [0]
 
-    api.restore_context(0)  # must not raise
+    api.restore_context(0)
+
+    assert api._retained_ctx_stack == [0]
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +458,7 @@ def test_record_event_external_uses_external_flag() -> None:
         (CUDAError.SUCCESS, True),
         (CUDAError.NOT_READY, False),
     ],
+    ids=["success", "not-ready"],
 )
 def test_query_event_poll_results(cuda_result: int, expected: bool) -> None:
     import cuda_link.cuda_ipc_wrapper as _w
@@ -640,6 +654,7 @@ def test_mem_get_info_returns_tuple() -> None:
         (CUDAError.SUCCESS, True),
         (CUDAError.NOT_READY, False),
     ],
+    ids=["success", "not-ready"],
 )
 def test_stream_query_poll_results(cuda_result: int, expected: bool) -> None:
     import cuda_link.cuda_ipc_wrapper as _w

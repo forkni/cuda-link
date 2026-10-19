@@ -240,7 +240,7 @@ Use this when distributing the component to end-users who should not need to int
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.13.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v1.14.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -249,9 +249,10 @@ Use this when distributing the component to end-users who should not need to int
 
    ```python
    from cuda_link import Importer, ImportSpec, ImportOutcome
+
    importer = Importer.open(ImportSpec(shm_name="my_pipeline"))
-   result = importer.get_frame()          # ImportResult; .frame is torch.Tensor (zero-copy)
-   result_np = importer.get_frame_numpy() # ImportResult; .frame is numpy array (CPU copy)
+   result = importer.get_frame()  # ImportResult; .frame is torch.Tensor (zero-copy)
+   result_np = importer.get_frame_numpy()  # ImportResult; .frame is numpy array (CPU copy)
    ```
 
 **Installing `cuda_link`:** the package is **not published on PyPI** — install the prebuilt
@@ -278,14 +279,17 @@ to see all five install modes. **Mode 5 (TD's own Python) is deprecated** — pr
    ```python
    from cuda_link import Exporter, FrameSpec, GpuFrame
    import torch
+
    exporter = Exporter.open(FrameSpec(shm_name="ai_output", width=1920, height=1080))
    # Pass producer_stream so the D2D copy is ordered after your kernel writes.
    # PyTorch: torch.cuda.current_stream().cuda_stream
-   exporter.export(GpuFrame(
-       ptr=gpu_tensor.data_ptr(),
-       size=gpu_tensor.nbytes,
-       producer_stream=torch.cuda.current_stream().cuda_stream,
-   ))
+   exporter.export(
+       GpuFrame(
+           ptr=gpu_tensor.data_ptr(),
+           size=gpu_tensor.nbytes,
+           producer_stream=torch.cuda.current_stream().cuda_stream,
+       )
+   )
    ```
 
 2. Drop the component into TD and set **Mode** = `Receiver`.
@@ -345,7 +349,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 ### "Stale SharedMemory" or version mismatch logged
 
-- The sender was restarted while the receiver is still holding old IPC handles. Toggle the receiver's `Active` Off → On to force reconnection.
+- The sender was restarted while the receiver is still holding old IPC handles. The receiver reopens the new handles in place on the next frame; if the message keeps repeating, toggle the receiver's `Active` Off → On to force a full reconnection.
 
 ### "Protocol magic mismatch" error
 
@@ -372,7 +376,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
   set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v1.13.0.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v1.14.0.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 

@@ -46,9 +46,9 @@ def test_load_native_backend_refuses_hosts_without_hr_timers(monkeypatch):
     falls back to the python wait path.
 
     Does not require a live GPU: the sentinel fn_ptr just has to be non-zero to
-    get past the cudart_resolved() gate; it is never dereferenced because the
-    hr_nap_supported() check raises first. The pointer is reset to 0 afterwards
-    so no other test can observe the sentinel as a resolved cudart.
+    get past the zero-pointer gate; it is never registered because the
+    hr_nap_supported() check raises first. The pointer is still reset to 0
+    afterwards so no other test can observe a sentinel as a resolved cudart.
     """
     from cuda_link import _native_waiter
 

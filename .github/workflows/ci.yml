@@ -1,0 +1,302 @@
+name: CI
+
+on:
+  push:
+    branches: [development, main, master]
+  pull_request:
+    branches: [development, main, master]
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs only: a cancelled push run leaves a mainline commit with no verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint + type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          enable-cache: auto
+      - name: Install lint dependencies
+        run: uv sync --locked --extra dev --no-install-project
+      - name: ruff check
+        id: ruff-check
+        continue-on-error: true
+        run: uv run --no-sync ruff check --output-format=github .
+      - name: ruff format check
+        id: ruff-format
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+      - name: pyrefly check
+        id: pyrefly-check
+        continue-on-error: true
+        run: uv run --no-sync pyrefly check --baseline pyrefly-baseline.json --output-format=github
+      - name: Skipped/xfail-test drift check
+        id: skip-drift
+        continue-on-error: true
+        run: uv run --no-sync python scripts/check_skipped_tests.py tests/ --max-ratio 0.02
+      # Workflow lint. actionlint reads .github/actionlint.yaml and runs shellcheck on every
+      # `run:` (preinstalled on ubuntu-latest). zizmor --offline keeps the gate deterministic:
+      # its online audits query live advisories, so an unchanged tree could turn red.
+      - name: actionlint
+        id: actionlint
+        continue-on-error: true
+        run: uvx --from actionlint-py==1.7.12.25 actionlint
+      - name: zizmor
+        id: zizmor
+        continue-on-error: true
+        run: uvx zizmor@1.30.1 --offline --format=github .github/workflows/
+      - name: Test-smell ratchet
+        id: smell-ratchet
+        continue-on-error: true
+        run: uv run --no-sync python scripts/scan_test_smells.py tests/ --baseline .smell-baseline.json
+      - name: Aggregate lint results
+        if: always()
+        run: |
+          status=0
+          if [ "${{ steps.ruff-check.outcome }}" = "failure" ]; then
+            echo "::error::ruff check failed"; status=1
+          fi
+          if [ "${{ steps.ruff-format.outcome }}" = "failure" ]; then
+            echo "::error::ruff format --check failed"; status=1
+          fi
+          if [ "${{ steps.pyrefly-check.outcome }}" = "failure" ]; then
+            echo "::error::pyrefly check failed"; status=1
+          fi
+          if [ "${{ steps.skip-drift.outcome }}" = "failure" ]; then
+            echo "::error::skipped/xfail-test drift check failed"; status=1
+          fi
+          if [ "${{ steps.actionlint.outcome }}" = "failure" ]; then
+            echo "::error::actionlint failed"; status=1
+          fi
+          if [ "${{ steps.zizmor.outcome }}" = "failure" ]; then
+            echo "::error::zizmor failed"; status=1
+          fi
+          if [ "${{ steps.smell-ratchet.outcome }}" = "failure" ]; then
+            echo "::error::test-smell ratchet failed (new smells vs .smell-baseline.json)"; status=1
+          fi
+          exit $status
+
+  hygiene:
+    name: Validate Branch State & Hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check for local-only files
+        run: |
+          echo "Checking for accidentally committed local files..."
+          FOUND_ISSUES=0
+
+          for file in CLAUDE.md MEMORY.md GEMINI.md; do
+            if git ls-files | grep -q "^$file$"; then
+              echo "❌ ERROR: $file is tracked in git (should be local-only)"
+              FOUND_ISSUES=1
+            fi
+          done
+
+          for dir in TD_RAG Backup; do
+            if git ls-files | grep -q "^$dir/"; then
+              echo "❌ ERROR: $dir/ is tracked in git (should be local-only)"
+              FOUND_ISSUES=1
+            fi
+          done
+
+          if [ $FOUND_ISSUES -eq 0 ]; then
+            echo "✅ No local-only files detected"
+          else
+            echo ""
+            echo "Fix: Remove these files from git tracking with 'git rm --cached <file>'"
+            exit 1
+          fi
+
+      - name: Verify .gitattributes exists
+        run: |
+          if [ ! -f .gitattributes ]; then
+            echo "❌ ERROR: .gitattributes not found"
+            exit 1
+          fi
+          echo "✅ .gitattributes found"
+
+      - name: Check for unauthorized docs
+        run: |
+          ALLOWED_DOCS="ARCHITECTURE\.md|AUTOMATED_GIT_WORKFLOW\.md|BASH_STYLE_GUIDE\.md|BATCH_STYLE_GUIDE\.md|BENCHMARKS\.md|BRANCHING\.md|ENV_VARS\.md|IMPLEMENTATION_SUMMARY\.md|INTEGRATION_EXAMPLES\.md|PERFORMANCE_OPTIMIZATIONS\.md|PROFILING\.md|PYTHON_DEBUGGING_PROTOCOL\.md|PYTHON_STYLE_GUIDE\.md|PYTHON_STYLE_GUIDE_QUICK\.md|SHELL_STYLE_GUIDE\.md|TOX_BUILD_GUIDE\.md"
+
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            UNAUTHORIZED=$(git ls-files docs/ \
+              | grep -v -E "docs/($ALLOWED_DOCS)$" \
+              | grep -v -E "^docs/(adr|plans)/" || true)
+
+            if [ -n "$UNAUTHORIZED" ]; then
+              echo "❌ ERROR: Unauthorized documentation files found on master branch:"
+              echo "$UNAUTHORIZED"
+              exit 1
+            fi
+          fi
+          echo "✅ Documentation validation passed"
+
+  build:
+    name: Build wheel + sdist (once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          enable-cache: auto
+      - name: Build universal wheel + sdist
+        run: uv build -C cmake.define.BUILD_NATIVE_WAITER=OFF -C wheel.py-api=py3 -C wheel.platlib=false
+      - name: Record build provenance
+        run: |
+          mkdir -p dist
+          {
+            echo "commit_sha=${{ github.sha }}"
+            echo "workflow_run=${{ github.run_id }}"
+            for f in dist/*; do
+              if [ -f "$f" ]; then
+                sha256sum "$f"
+              fi
+            done
+          } | tee dist/BUILD_INFO.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 14
+
+  test:
+    name: Test (${{ matrix.os }}, py${{ matrix.python }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+        python: ["3.11", "3.12"]
+        include:
+          # requires-python floor (>=3.9) and 3.10, Linux only: the code is version-sensitive,
+          # not OS-sensitive, below 3.11. These legs replace the old tests.yml and
+          # branch-protection.yml test jobs.
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.10"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      UV_NO_SYNC: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          enable-cache: auto
+          python-version: "${{ matrix.python }}"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Verify artifact integrity (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          grep -E '^[0-9a-f]{64}  ' dist/BUILD_INFO.txt > dist/BUILD_INFO.sha256
+          sha256sum -c dist/BUILD_INFO.sha256
+      - name: Verify artifact integrity (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Content dist\BUILD_INFO.txt | Select-String -Pattern '^[0-9a-f]{64}\s+' | ForEach-Object {
+            $parts = $_.Line.Trim() -split '\s+', 2
+            $expectedHash = $parts[0].ToLower()
+            $filePath = $parts[1]
+            $actualHash = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToLower()
+            if ($actualHash -ne $expectedHash) {
+              Write-Error "Hash mismatch for $($filePath): expected $($expectedHash), got $($actualHash)"
+              exit 1
+            }
+          }
+          Write-Host "Artifact integrity verified successfully."
+      - name: Install locked dependency graph (without project source)
+        run: uv sync --locked --extra dev --no-install-project
+      - name: Install the promoted wheel
+        run: uv pip install --no-deps --no-index --find-links dist cuda-link
+      - name: Smoke test (fail-fast, verify import from installed wheel)
+        run: |
+          uv run --no-sync python -I -c "import pathlib, cuda_link as m; p = pathlib.Path(m.__file__).resolve(); print(p, getattr(m, '__version__', '?')); assert 'site-packages' in p.parts, f'imported from checkout instead of wheel: {p}'"
+      - name: Run test suite
+        run: >
+          uv run --no-sync pytest tests/
+          -m "not requires_cuda and not requires_native and not integration and not quarantine"
+          --cov=cuda_link --cov-branch
+          --cov-report=xml --cov-report=term-missing
+          --junitxml=junit.xml --durations=20 -q
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+        with:
+          files: coverage.xml
+          flags: main
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: always()
+        with:
+          name: test-reports-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            junit.xml
+            coverage.xml
+          retention-days: 14
+
+  all-gates-green:
+    name: All gates green
+    if: always()
+    needs: [lint, hygiene, build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check all required jobs succeeded
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.hygiene.result }}" != "success" ] || \
+             [ "${{ needs.build.result }}" != "success" ] || \
+             [ "${{ needs.test.result }}" != "success" ]; then
+            echo "::error::one or more required gates did not succeed - lint=${{ needs.lint.result }} hygiene=${{ needs.hygiene.result }} build=${{ needs.build.result }} test=${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "✅ All required CI gates passed successfully."
+
+  broken-main-summary:
+    name: Broken main - revert first
+    if: ${{ always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push' && contains(needs.*.result, 'failure') }}
+    needs: [lint, hygiene, build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SHA: ${{ github.sha }}
+      ACTOR: ${{ github.actor }}
+    steps:
+      - run: |
+          {
+            echo "## Main is red - revert first"
+            echo "Failing commit: \`$SHA\` pushed by $ACTOR"
+            echo
+            echo '```bash'
+            echo "git revert --no-edit $SHA   # add -m 1 if it is a merge commit"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

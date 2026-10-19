@@ -68,9 +68,31 @@ def _engage_native_seam(imp, backend, *, doorbell_handle: int = 0xDEAD_BEEF, eve
     imp._conn.doorbell_handle = doorbell_handle
 
 
-def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
+@pytest.fixture
+def managed_importer():
+    """Fixture that tracks and tears down Importer instances cleanly.
+
+    Ensures doorbell_handle is cleared and the importer is closed before
+    test teardown, preventing leaked instances from invoking _doorbell.close()
+    during subsequent tests when Python garbage collection runs.
+    """
+    importers: list = []
+
+    def _factory(*args, **kwargs):
+        imp = make_connected_importer(*args, **kwargs)
+        importers.append(imp)
+        return imp
+
+    yield _factory
+    for imp in importers:
+        if getattr(imp, "_conn", None) is not None:
+            imp._conn.doorbell_handle = None
+        imp.close()
+
+
+def test_ready_spin_updates_spin_counters_and_returns_waited_us(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=3.3)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -90,9 +112,9 @@ def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
     assert imp.total_wait_spin_us == pytest.approx(3.3)
 
 
-def test_ready_doorbell_updates_sleep_counters() -> None:
+def test_ready_doorbell_updates_sleep_counters(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_DOORBELL, waited_us=42.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -103,9 +125,9 @@ def test_ready_doorbell_updates_sleep_counters() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(42.0)
 
 
-def test_ready_late_also_counts_as_sleep_bucket() -> None:
+def test_ready_late_also_counts_as_sleep_bucket(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_LATE, waited_us=7.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -115,9 +137,9 @@ def test_ready_late_also_counts_as_sleep_bucket() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(7.0)
 
 
-def test_timeout_status_raises_timeout_error_same_as_python_path() -> None:
+def test_timeout_status_raises_timeout_error_same_as_python_path(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
-    imp = make_connected_importer(write_idx=1, timeout_ms=1.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -129,10 +151,27 @@ def test_timeout_status_raises_timeout_error_same_as_python_path() -> None:
     assert result.frame is None
 
 
-def test_backend_not_engaged_without_doorbell_handle() -> None:
+def test_cuda_error_raises_runtime_error_not_timeout(managed_importer) -> None:
+    """A hard cudaEventQuery error must surface as RuntimeError (like the python
+    path's query_event), never be reported as a TIMEOUT outcome."""
+    from cuda_link._wait_backend import FakeWaitBackend, WaitStatus  # noqa: PLC0415
+
+    backend = FakeWaitBackend()
+    backend.force_status = WaitStatus.CUDA_ERROR
+    backend.force_method = 700
+    imp = managed_importer(write_idx=1)
+    _engage_native_seam(imp, backend)
+
+    with pytest.raises(RuntimeError, match="cudaEventQuery failed: 700"):
+        imp.get_frame_numpy()
+    assert imp.wait_sleep_hits == 0
+    assert imp.wait_spin_hits == 0
+
+
+def test_backend_not_engaged_without_doorbell_handle(managed_importer) -> None:
     """Even with a resolved backend, no doorbell handle means the python path runs."""
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=1.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     imp._wait_backend = backend
     imp._conn.ipc_events[0] = ctypes.c_uint64(0x1)
     imp._conn.doorbell_handle = None  # not opened
@@ -144,9 +183,9 @@ def test_backend_not_engaged_without_doorbell_handle() -> None:
     assert backend.calls == []  # never called — python path took over
 
 
-def test_wait_backend_defaults_to_none_and_python_path_is_unaffected() -> None:
+def test_wait_backend_defaults_to_none_and_python_path_is_unaffected(managed_importer) -> None:
     """Importer.from_connection() never resolves a backend — pre-R5 behavior exactly."""
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     assert imp._wait_backend is None
 
     imp._conn.ipc_events[0] = None  # no-event path
