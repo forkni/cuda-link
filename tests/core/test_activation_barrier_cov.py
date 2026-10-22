@@ -22,6 +22,7 @@ from cuda_link.activation_barrier import (
     MAGIC,
     SHM_SIZE,
     VERSION,
+    BarrierHeaderError,
     CheckerBarrier,
     CheckerOutcome,
     HolderBarrier,
@@ -30,6 +31,7 @@ from cuda_link.activation_barrier import (
     decrement,
     increment,
     open_or_create,
+    read_state,
 )
 
 # ---------------------------------------------------------------------------
@@ -767,3 +769,83 @@ def test_force_release_failure_logs_with_force_true_kills_force_mutant():
     holder = HolderBarrier(enabled=True, settle_frames=1, held=True, port=_FailingHolderPort())
     holder.force_release(pid=1, log_fn=_make_recording_log(calls))
     assert calls[-1][1] is True
+
+
+# ---------------------------------------------------------------------------
+# Header validation — a foreign or incompatible segment must not be trusted
+# ---------------------------------------------------------------------------
+
+_U32X2 = struct.Struct("<II")  # magic, version
+
+
+def _attached_adapter_with_header(magic: int, version: int, *, active_count: int = 1) -> RealShmAdapter:
+    adapter = RealShmAdapter()
+    adapter.attach(create=True)
+    _U32X2.pack_into(adapter._shm.buf, 0, magic, version)
+    struct.pack_into("<I", adapter._shm.buf, 8, active_count)  # would read as SKIP_ACTIVE if trusted
+    struct.pack_into("<Q", adapter._shm.buf, 16, 2**62)  # far-future timestamp: never stale
+    return adapter
+
+
+@pytest.mark.parametrize(
+    ("magic", "version"),
+    [(0xDEADBEEF, VERSION), (MAGIC, VERSION + 1)],
+    ids=["foreign-magic", "unknown-version"],
+)
+def test_read_state_rejects_mismatched_header(magic: int, version: int) -> None:
+    adapter = _attached_adapter_with_header(magic, version)
+    try:
+        with pytest.raises(BarrierHeaderError, match="header mismatch") as excinfo:
+            read_state(adapter._shm)
+        assert excinfo.value.uninitialised is False
+    finally:
+        adapter.close()
+
+
+def test_read_state_flags_all_zero_header_as_uninitialised() -> None:
+    adapter = _attached_adapter_with_header(0, 0)
+    try:
+        with pytest.raises(BarrierHeaderError) as excinfo:
+            read_state(adapter._shm)
+        assert excinfo.value.uninitialised is True
+    finally:
+        adapter.close()
+
+
+def test_checker_fails_open_and_warns_once_on_foreign_header(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = _attached_adapter_with_header(0xDEADBEEF, VERSION)
+    checker = CheckerBarrier(enabled=True, stale_ns=5_000_000_000, shm=adapter)
+    try:
+        with caplog.at_level(logging.WARNING, logger="cuda_link.activation_barrier"):
+            outcomes = [checker.evaluate() for _ in range(3)]
+        assert outcomes == [CheckerOutcome.SHM_ABSENT] * 3
+        assert not any(o.should_skip for o in outcomes)
+        assert [r.getMessage().count("header mismatch") for r in caplog.records] == [1]
+    finally:
+        adapter.close()
+
+
+def test_checker_stays_quiet_on_uninitialised_header(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = _attached_adapter_with_header(0, 0)
+    checker = CheckerBarrier(enabled=True, stale_ns=5_000_000_000, shm=adapter)
+    try:
+        with caplog.at_level(logging.WARNING, logger="cuda_link.activation_barrier"):
+            assert checker.evaluate() is CheckerOutcome.SHM_ABSENT
+        assert caplog.records == []
+    finally:
+        adapter.close()
+
+
+def test_checker_warns_again_after_header_recovers(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = _attached_adapter_with_header(0xDEADBEEF, VERSION)
+    checker = CheckerBarrier(enabled=True, stale_ns=5_000_000_000, shm=adapter)
+    try:
+        with caplog.at_level(logging.WARNING, logger="cuda_link.activation_barrier"):
+            checker.evaluate()  # mismatch -> warn
+            _U32X2.pack_into(adapter._shm.buf, 0, MAGIC, VERSION)
+            assert checker.evaluate() is CheckerOutcome.SKIP_ACTIVE  # trusted again
+            _U32X2.pack_into(adapter._shm.buf, 0, 0xDEADBEEF, VERSION)
+            checker.evaluate()  # new streak -> warn again
+        assert sum("header mismatch" in r.getMessage() for r in caplog.records) == 2
+    finally:
+        adapter.close()
