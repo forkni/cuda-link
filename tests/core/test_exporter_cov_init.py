@@ -13,15 +13,16 @@ from __future__ import annotations
 import sys
 import types
 import uuid
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from cuda_link import ExportPolicy, FrameSpec
+from cuda_link import ExportPolicy, FrameSpec, Metadata
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.cuda_runtime_types import CudaIpcError
 from cuda_link.exporter import IPC_HANDLE_SIZE, CTypesCUDAAdapter, Exporter, _read_hws_mode
+from cuda_link.shm_protocol import SHMLayout, bump_version
 
 _H = _W = _C = 4
 _DATA_SIZE = _H * _W * _C  # uint8
@@ -261,5 +262,50 @@ def test_slot_buffer_size_is_2mib_aligned() -> None:
         assert exp.buffer_size == two_mib  # 64-byte payload rounds up to exactly one page
         slot_sizes = [fake.allocations[ptr.value] for ptr in exp.dev_ptrs]
         assert slot_sizes == [exp.buffer_size] * 3
+    finally:
+        exp.close()
+
+
+# ---------------------------------------------------------------------------
+# _initialize() — existing SHM segment: size pre-flight and publish ordering
+# ---------------------------------------------------------------------------
+
+
+def test_existing_undersized_shm_is_rejected_before_any_gpu_allocation() -> None:
+    """A live segment smaller than this layout needs must fail up front: writing the
+    handles into it would run off the end (IndexError in set_shutdown). The segment
+    belongs to another process, so it is closed but never unlinked.
+
+    The size is faked: Windows rounds a real segment up to a 4 KiB page, which already
+    exceeds the largest layout (10 slots), so no real segment can be undersized there.
+    """
+    fake = FakeCUDAAdapter(device=0)
+    undersized = MagicMock()
+    undersized.size = 64
+    with (
+        patch("cuda_link.exporter.SharedMemory", return_value=undersized),
+        pytest.raises(RuntimeError, match=r"Existing SharedMemory .* is 64 bytes but \d+ are required"),
+    ):
+        Exporter.open(_spec(num_slots=2), policy=ExportPolicy.for_testing(), cuda=fake)
+    assert fake.allocations == {}
+    undersized.close.assert_called_once_with()
+    undersized.unlink.assert_not_called()
+
+
+def test_metadata_is_written_before_the_version_bump() -> None:
+    """The version bump is the publish point: a consumer that sees it must already find
+    the new metadata."""
+    spec = _spec(num_slots=2)
+    seen: list[Metadata] = []
+
+    def spying_bump(buf):
+        seen.append(Metadata.read_from(buf, SHMLayout(spec.num_slots)))
+        return bump_version(buf)
+
+    with patch("cuda_link.exporter.bump_version", side_effect=spying_bump):
+        exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0))
+    try:
+        assert len(seen) == 1
+        assert (seen[0].width, seen[0].height, seen[0].data_size) == (_W, _H, _DATA_SIZE)
     finally:
         exp.close()

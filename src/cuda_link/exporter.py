@@ -257,6 +257,27 @@ class Exporter:
     # Initialization (called only from open())
     # ------------------------------------------------------------------
 
+    def _check_existing_shm_size(self) -> None:
+        """Reject a live segment too small for this layout, before any GPU allocation.
+
+        The segment is not ours to unlink: another process may still hold it.
+        """
+        try:
+            existing = SharedMemory(name=self._spec.shm_name)
+        except FileNotFoundError:
+            return
+        try:
+            existing_size = existing.size
+        finally:
+            existing.close()
+        required = self._layout.total_size
+        if existing_size < required:
+            raise RuntimeError(
+                f"Existing SharedMemory {self._spec.shm_name!r} is {existing_size} bytes but "
+                f"{required} are required for {self._spec.num_slots} slots; "
+                "close the other producer or use a different shm_name"
+            )
+
     def _initialize(self) -> None:
         actual_device = self._cuda.get_device()
         if actual_device != self._spec.device:
@@ -266,6 +287,7 @@ class Exporter:
                 "cudaSetDevice() with a different index before Exporter.open()."
             )
         logger.info("Loaded CUDA runtime on device %d", actual_device)
+        self._check_existing_shm_size()
 
         # Raises only when the driver reports CUDA IPC as flatly unsupported on this
         # device; Windows WDDM (this project's normal, undocumented-but-validated
@@ -347,8 +369,10 @@ class Exporter:
             self.shm_handle = SharedMemory(name=self._spec.shm_name, create=True, size=shm_size)
             logger.info("Created SharedMemory: %s (%d bytes)", self._spec.shm_name, shm_size)
 
-        self._write_handles_to_shm()
+        # Metadata first: the version bump inside _write_handles_to_shm is the publish
+        # point, so a consumer that sees the new version also sees the new metadata.
         self._write_metadata_to_shm()
+        self._write_handles_to_shm()
         self._ts_offset = self._layout.timestamp_offset
         self._initialized = True
 
@@ -387,7 +411,6 @@ class Exporter:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
         _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
-        new_version = bump_version(self.shm_handle.buf)
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
@@ -399,6 +422,8 @@ class Exporter:
             if self.ipc_event_handles[slot]:
                 self.shm_handle.buf[evt_off : evt_off + IPC_HANDLE_SIZE] = bytes(self.ipc_event_handles[slot].reserved)
         clear_shutdown(self.shm_handle.buf, self._layout)
+        # Last write: consumers re-read everything above when they see the new version.
+        new_version = bump_version(self.shm_handle.buf)
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
     def _write_metadata_to_shm(self) -> None:
