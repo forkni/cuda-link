@@ -377,27 +377,29 @@ class RealTDHost(TDHost):
     def set_warning_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"WARNING: {msg}"
-        needs_cook = self._status_msg != full_msg
+        if self._status_msg == full_msg:
+            return  # called every cook while the condition lasts; nothing new to write
         self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
+            self._comp.clearScriptErrors(error="*")  # drop a badge left by an earlier error
             self._comp.color = _WARNING_COLOR
             self._comp.store("cuda_link_status_msg", full_msg)
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def set_error_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"ERROR: {msg}"
-        needs_cook = self._status_msg != full_msg
+        if self._status_msg == full_msg:
+            return  # called every cook while the condition lasts; nothing new to write
         self._status_msg = full_msg
         with contextlib.suppress(AttributeError, RuntimeError):
+            self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
             self._comp.color = _ERROR_COLOR
             self._comp.addScriptError(msg)
             self._comp.store("cuda_link_status_msg", full_msg)
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def clear_status(self) -> None:
         needs_cook = self._status_msg is not None
