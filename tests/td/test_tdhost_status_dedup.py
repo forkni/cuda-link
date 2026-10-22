@@ -18,10 +18,10 @@ class _NoPar:
 class _RecordingComp:
     """ownerComp stub that counts the writes the status setters make."""
 
-    par = _NoPar()
-
     def __init__(self) -> None:
+        self.par = _NoPar()
         self._color = (0.55, 0.55, 0.55)
+        self.fail_color_writes = 0
         self.color_writes = 0
         self.store_writes = 0
         self.script_errors: list[str] = []
@@ -32,6 +32,9 @@ class _RecordingComp:
 
     @color.setter
     def color(self, value) -> None:
+        if self.fail_color_writes:
+            self.fail_color_writes -= 1
+            raise RuntimeError("COMP is cooking")
         self.color_writes += 1
         self._color = tuple(value)
 
@@ -102,3 +105,28 @@ def test_same_warning_is_written_again_after_clear_status() -> None:
     writes_before = comp.color_writes
     host.set_warning_status("w")
     assert comp.color_writes == writes_before + 1
+
+
+def test_repeated_error_restores_the_status_par_after_an_info_write() -> None:
+    host, comp = _host()
+    host.set_error_status("Initialization failed: boom")
+    host.set_info_status("1920x1080 rgba8")
+    host.set_error_status("Initialization failed: boom")
+    assert comp.par.Status == "ERROR: Initialization failed: boom"
+    assert comp.color_writes == 1
+
+
+def test_warning_does_not_clear_script_errors_it_did_not_add() -> None:
+    host, comp = _host()
+    comp.script_errors.append("raised by a user callback")
+    host.set_warning_status("unsupported pixel format 'rgb8'")
+    assert comp.script_errors == ["raised by a user callback"]
+
+
+def test_failed_comp_write_is_retried_on_the_next_call() -> None:
+    host, comp = _host()
+    comp.fail_color_writes = 1
+    host.set_warning_status("w")
+    host.set_warning_status("w")
+    assert comp.color_writes == 1
+    assert comp.store_writes == 1

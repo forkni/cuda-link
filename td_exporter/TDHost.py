@@ -378,12 +378,16 @@ class RealTDHost(TDHost):
         self._capture_default_color()
         full_msg = f"WARNING: {msg}"
         if self._status_msg == full_msg:
-            return  # called every cook while the condition lasts; nothing new to write
-        self._status_msg = full_msg
+            # Called every cook while the condition lasts. The COMP is already marked; only the
+            # Status par can have moved on (set_info_status), and the write dedups when it has not.
+            self._write_status_par(full_msg)
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.clearScriptErrors(error="*")  # drop a badge left by an earlier error
             self._comp.color = _WARNING_COLOR
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # drop the badge the earlier error left
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
         self._cook_warning_emitter()
 
@@ -391,13 +395,15 @@ class RealTDHost(TDHost):
         self._capture_default_color()
         full_msg = f"ERROR: {msg}"
         if self._status_msg == full_msg:
-            return  # called every cook while the condition lasts; nothing new to write
-        self._status_msg = full_msg
+            self._write_status_par(full_msg)  # see set_warning_status
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
             self._comp.color = _ERROR_COLOR
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
             self._comp.addScriptError(msg)
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
         self._cook_warning_emitter()
 
