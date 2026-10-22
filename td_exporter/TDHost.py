@@ -401,8 +401,8 @@ class RealTDHost(TDHost):
             self._comp.color = _ERROR_COLOR
             if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
                 self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
-            self._comp.addScriptError(msg)
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
             self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
         self._cook_warning_emitter()

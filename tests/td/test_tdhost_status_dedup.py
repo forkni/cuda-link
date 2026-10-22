@@ -22,6 +22,7 @@ class _RecordingComp:
         self.par = _NoPar()
         self._color = (0.55, 0.55, 0.55)
         self.fail_color_writes = 0
+        self.fail_store_writes = 0
         self.color_writes = 0
         self.store_writes = 0
         self.script_errors: list[str] = []
@@ -39,6 +40,9 @@ class _RecordingComp:
         self._color = tuple(value)
 
     def store(self, key: str, value: object) -> None:
+        if self.fail_store_writes:
+            self.fail_store_writes -= 1
+            raise RuntimeError("COMP is cooking")
         self.store_writes += 1
 
     def unstore(self, key: str) -> None:
@@ -130,3 +134,11 @@ def test_failed_comp_write_is_retried_on_the_next_call() -> None:
     host.set_warning_status("w")
     assert comp.color_writes == 1
     assert comp.store_writes == 1
+
+
+def test_error_retry_after_a_failed_store_adds_one_badge() -> None:
+    host, comp = _host()
+    comp.fail_store_writes = 1
+    host.set_error_status("Initialization failed: boom")
+    host.set_error_status("Initialization failed: boom")
+    assert comp.script_errors == ["Initialization failed: boom"]
