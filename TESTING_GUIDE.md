@@ -28,9 +28,46 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-10-19, post Phase H2)
+## Current baseline (2026-10-22, Phase I audit)
 
-**Supersedes the 2026-10-12, 2026-08-20 and 2026-07-12 tables below.**
+**Supersedes the 2026-10-19 table below.** Measured on `development` at `1da5339` (PRs #79-#87
+merged), Python 3.12.11, Windows, before any Phase I change.
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1415 passed + 1 skipped, 68 deselected |
+| No-GPU wall clock | ~23 s (10 runs, 22.6-26.2 s); 28 s with `--cov --cov-branch` |
+| Slowest tests | 3.9 s and 3.8 s (the two subprocess `-O` import tests; by design); next is 0.6 s |
+| Branch coverage, clean run | 90.76 % combined (`--cov`, 5364 stmts, 448 miss) |
+| Coverage gate (`fail_under`) | 85 at the audit (raised in I1) |
+| Coverage by module | `cuda_link` 99 %; `TDReceiver.py` 72 % (173 miss), `CUDAIPCExtension.py` 88 %, `CUDALinkBootstrap.py` 89 %, `TDSender.py` 91 %, `TDHost.py` 92 % |
+| Order independence / flakiness | 10/10 randomized runs green, identical counts; `rank_failures.py` found no failing test |
+| Test smells (AST scanner) | 19, equal to `.smell-baseline.json` (ratchet OK) |
+| Functions over CRAP 30 | `cuda_link`: 2 (`Exporter.export` 46, `_do_cleanup` 32, both 100 % covered, so complexity alone). `td_exporter`: 6, worst `TDReceiverEngine.initialize_receiver` **244** (CC 33, 42 % covered), `parexecute_callbacks.handle_mode_change` and `handle_numslots_change` 72 each (0 %), `TDSenderEngine.export_frame` 68, `_refresh_on_version_change` 52, `import_frame` 44 |
+| C901 over 15 | 10 (`Exporter.export` 43, `_do_cleanup` 26, `TDSender.export_frame` 34, `initialize_receiver` 28, ...) |
+| Mutation score | last measured 2026-07-12 (`_profile` 100 %, `shm_protocol` 99.78 %, `activation_barrier` 99.4 %); stale, both modules changed in #82/#83. Re-run in I2 |
+| Tests / test LOC | 1295 `def test_` · 26.9k test LOC vs 8.5k `src/cuda_link` LOC |
+| Logic in test bodies | 368 `if/for/while/try` lines; top: `test_cpu_roundtrip.py` 36, `test_td_bootstrap.py` 25 |
+| Sleeps / private patch targets | 4 `time.sleep` · 24 patches of `_private` names |
+| Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
+
+**Full local suite (GPU + native) was red at the audit: 6 failed, 1477 passed, 1 skipped, ~115 s.**
+CI never sees these because it deselects `requires_cuda`.
+
+- `test_ctypes_adapter_satisfies_protocol` and `..._importer_protocol` (2): stale tests. On
+  Python 3.12+ `isinstance(adapter, Protocol)` uses `inspect.getattr_static`, which skips the
+  adapter's `__getattr__` delegation, so it is `False` until every member has been cached. The
+  adapter itself is fine. Fixed in I1 with a `hasattr` member check.
+- `test_roundtrip.py` (4): environmental. The venv holds `torch 2.14.1+cpu` (no CUDA), so the
+  consumer's torch backend fails with "Cannot initialize CUDA without ATen_cuda library" after the
+  IPC slots and events have opened. `uv.lock` resolves torch from PyPI, whose Windows wheels are
+  CPU-only, so a `uv sync` replaces a CUDA build. Needs a CUDA torch in the local venv; not a code
+  regression. Product note: the Importer reports this as "Producer not yet available" and retries,
+  which hides a permanent local failure.
+
+## Previous baseline (2026-10-19, post Phase H2)
+
+(Historical — see the current baseline above.)
 
 | Metric | Value |
 |--------|-------|
@@ -629,6 +666,25 @@ regression protection. No test was skipped or xfailed to drop the count.
 **Verification.** No-GPU selection on seeds 1729, 424242 and 90210: 1327 passed, 2 skipped,
 63 deselected each, ~22.4 s with coverage. `--cov=cuda_link` branch coverage is 99.35 %
 (3154 stmts, 22 miss), equal to the H1 baseline. `fail_under` stays at 85.
+
+## Campaign record — Phase I (2026-10-22)
+
+Audit numbers are in the current baseline above. Four phases, each on its own branch off
+`development`: I1 ratchet and baseline, I2 mutation re-run on `shm_protocol` and
+`activation_barrier`, I3 `TDReceiver.initialize_receiver` tests, I4 mutation on the port modules.
+
+### I1 — Ratchet and baseline
+
+| Measure | Before | After |
+|---------|--------|-------|
+| `fail_under` | 85 | 89 (`floor(90.76) - 1.5`, rounded down) |
+| Gate run at the new floor | n/a | "Required test coverage of 89.0% reached. Total coverage: 90.76%" |
+| Red tests in the full local suite | 6 | 4 (the 2 stale protocol tests fixed; the 4 roundtrip tests need a CUDA torch) |
+| No-GPU selection | 1415 passed + 1 skipped | 1415 passed + 1 skipped (unchanged) |
+
+The stale "TDReceiver.py at 51 %" comment in `pyproject.toml` now says 72 %. No test was skipped,
+`xfail`ed or deleted. Both repaired tests fail when a protocol member is missing from the adapter
+(the same members `test_ctypes_adapter_api_covers_protocol_without_gpu` guards without a GPU).
 
 ## Deferral table — tooling we deliberately did NOT add
 

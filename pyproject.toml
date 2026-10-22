@@ -322,19 +322,17 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Soft regression gate, re-measured 2026-08-20 (1196 tests, -m "not requires_cuda and
-# not requires_native", branch=true, bare `--cov` so `source` above applies: cuda_link +
-# TD-only td_exporter files) after omitting the 4 untestable TD demo/benchmark scripts
-# above: 87.10%. The cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's
-# invocation); the gate is set against the weaker combined run so both invocations pass.
-# The remaining gap is the TD integration layer (TDReceiver.py at 51% is the largest —
-# see TESTING_GUIDE.md F1 triage / deferral table).
-# fail_under = floor(87.10) - 1.5, rounded down = 85. Replaces the old floor(baseline) - 3
-# convention with a tighter ~1.5-point margin now that the denominator excludes code that
-# was never testable in the first place (the previous 3-point margin was partly
-# compensating for those same 4 files dragging the number down). Raise incrementally as
-# coverage grows; never lower without a documented reason.
-fail_under = 85
+# Soft regression gate, re-measured 2026-10-22 (1415 tests, -m "not requires_cuda and
+# not requires_native and not integration and not quarantine", branch=true, bare `--cov`
+# so `source` above applies: cuda_link + TD-only td_exporter files): 90.76%. The
+# cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's invocation); the gate is
+# set against the weaker combined run so both invocations pass. The remaining gap is the
+# TD integration layer (TDReceiver.py at 72% is the largest — see TESTING_GUIDE.md
+# deferral table).
+# fail_under = floor(90.76) - 1.5, rounded down = 89 (was 85 at 87.10%, 2026-08-20; the
+# TDReceiver/Importer work in PRs #81-#85 raised the measured value). Raise incrementally
+# as coverage grows; never lower without a documented reason.
+fail_under = 89
 show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------
