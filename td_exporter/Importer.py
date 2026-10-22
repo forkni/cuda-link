@@ -1708,8 +1708,11 @@ class Importer:
         """
         conn = self._conn
         h = conn.doorbell_handle if conn is not None else None
-        if h is None:
-            return False  # disabled / not opened / non-Windows → caller polls
+        if h is None or not self._policy.doorbell:
+            # Disabled / not opened / non-Windows → caller polls.  The handle is
+            # also opened for the native wait backend, so policy.doorbell must be
+            # checked here or a disabled doorbell would still block.
+            return False
 
         # Early return: frame already arrived since last get_frame() call.
         cur = read_write_idx(conn.shm_handle.buf)

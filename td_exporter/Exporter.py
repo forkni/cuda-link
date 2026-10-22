@@ -193,7 +193,6 @@ class Exporter:
 
         # Cached layout offsets (set by _write_handles_to_shm)
         self._layout: SHMLayout = SHMLayout(spec.num_slots)
-        self._ts_offset: int = self._layout.timestamp_offset
         self._shutdown_offset: int = self._layout.shutdown_offset
 
         # Device-affinity cache
@@ -376,7 +375,6 @@ class Exporter:
         # point, so a consumer that sees the new version also sees the new metadata.
         self._write_metadata_to_shm()
         self._write_handles_to_shm()
-        self._ts_offset = self._layout.timestamp_offset
         self._initialized = True
 
         if self._policy.doorbell:
