@@ -19,6 +19,18 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0013](0013-prebuilt-wheel-distribution.md) | Prebuilt wheel distribution — Windows-only, cp311 native + py3-none-any fallback | Accepted | 2026-07-07 |
 | [0014](0014-project-anchored-install-resolution.md) | Project-anchored install resolution with a mirror version stamp (amends 0003) | Accepted | 2026-09-23 |
 
+## Numbering gaps (0007, 0010, 0011)
+
+These numbers are not missing: the ADRs were written on feature branches that have not merged,
+and the numbers stay reserved so references (for example in ADR-0009 and ADR-0012) keep
+resolving. They land with their branch.
+
+| # | Title | Branch |
+|---|-------|--------|
+| 0007 | Spout as launcher, not transport | `feat/spout-bridge` |
+| 0010 | Park the Out TOP CUDA-Graphs path | `feat/cpp-custom-top` |
+| 0011 | In TOP graphs keyed cache | `feat/cpp-custom-top` |
+
 ## Adding a new ADR
 
 Copy the structure from an existing ADR (title / status / date / applies-to / context / decision /
