@@ -44,11 +44,13 @@ dev = [
     "ruff",
     "pyrefly",
     "snoop>=0.4",
-    "py-heat>=0.0.6",
     "nvtx>=0.2",
     "scalene>=1.5",
 ]
 quality = [
+    # py-heat pulls matplotlib -> pillow; nothing in the repo imports it, so it lives here
+    # (never installed by CI) instead of in the locked `dev` graph.
+    "py-heat>=0.0.6",
     # Manual, local-only analysis tools -- never installed by CI. Kept out of `dev` so a
     # resolver failure here can't break the Python 3.9 leg of ci.yml, which installs the
     # locked `dev` extra (`uv sync --locked --extra dev`) and never sees this one.
