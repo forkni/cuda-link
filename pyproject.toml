@@ -65,7 +65,7 @@ quality = [
 
 [project.urls]
 Homepage = "https://github.com/forkni/cuda-link"
-Documentation = "https://github.com/forkni/cuda-link/tree/main/docs"
+Documentation = "https://github.com/forkni/cuda-link/tree/master/docs"
 Repository = "https://github.com/forkni/cuda-link"
 Issues = "https://github.com/forkni/cuda-link/issues"
 
