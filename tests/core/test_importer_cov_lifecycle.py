@@ -10,6 +10,7 @@ monkeypatched so results never depend on this dev machine's actual GPU.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -161,6 +162,7 @@ def test_wait_for_doorbell_delegates_to_doorbell_wait_when_no_frame_yet(monkeypa
 
     imp = make_connected_importer(write_idx=1, last_write_idx=1)  # cur == last_write_idx -- no early return
     imp._conn.doorbell_handle = 0xFEED
+    imp._policy = dataclasses.replace(imp._policy, doorbell=True)
     calls: list = []
     monkeypatch.setattr(_imp_mod._doorbell, "wait", lambda h, ms: calls.append((h, ms)) or True)
 

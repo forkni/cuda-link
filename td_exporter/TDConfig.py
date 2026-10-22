@@ -37,11 +37,8 @@ class TDSenderConfig:
     export_flush_probe: bool = True
     use_graphs: bool = False
     stream_high_prio: bool = False
-    init_pace: bool = False
-    persist_stream: bool = True
     activation_barrier: bool = True
     barrier_settle_frames: int = 30
-    nvml: bool = False
 
     @classmethod
     def from_env(cls) -> TDSenderConfig:
@@ -52,11 +49,8 @@ class TDSenderConfig:
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
-            init_pace=env_bool("CUDALINK_TD_INIT_PACE", default=False),
-            persist_stream=env_bool("CUDALINK_TD_PERSIST_STREAM", default=True),
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
-            nvml=env_bool("CUDALINK_NVML", default=False),
         )
 
     def __post_init__(self) -> None:

@@ -10,6 +10,7 @@ Three groups:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from unittest.mock import MagicMock
 
@@ -50,6 +51,23 @@ def test_wait_for_doorbell_returns_false_when_handle_none() -> None:
     assert result is False
 
 
+def test_wait_for_doorbell_returns_false_when_policy_disabled_even_with_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handle opened for the native wait backend must not make a disabled doorbell block."""
+    import cuda_link.importer as _imp_mod
+
+    imp = _make_importer(write_idx=1, last_write_idx=1)  # no frame waiting
+    imp._conn.doorbell_handle = 0xFEED
+    assert imp._policy.doorbell is False
+    waits: list = []
+    monkeypatch.setattr(_imp_mod._doorbell, "wait", lambda h, ms: waits.append((h, ms)) or True)
+    try:
+        result = imp.wait_for_doorbell(250.0)
+    finally:
+        imp._conn.doorbell_handle = None
+    assert result is False
+    assert waits == []
+
+
 def test_wait_for_doorbell_returns_true_on_advanced_write_idx() -> None:
     """Early-return path: returns True immediately when a frame is already waiting.
 
@@ -64,6 +82,7 @@ def test_wait_for_doorbell_returns_true_on_advanced_write_idx() -> None:
     # object works as the handle here.
     sentinel = object()
     imp._conn.doorbell_handle = sentinel
+    imp._policy = dataclasses.replace(imp._policy, doorbell=True)
     try:
         result = imp.wait_for_doorbell(2.0)
     finally:

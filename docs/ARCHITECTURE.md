@@ -390,7 +390,7 @@ outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDA
 Three distinct stream hazards are each addressed by the correct mechanism:
 
 - **Receiver teardown TDR** (fixed v1.4.1) — eliminated by dedicated, persistent per-engine
-  streams (`CUDALINK_TD_PERSIST_STREAM=1`, default). No sender-side sync needed.
+  streams (the former `CUDALINK_TD_PERSIST_STREAM=1`, no longer a switch). No sender-side sync needed.
 - **Producer-side cross-stream race** (fixed v1.9.0) — eliminated by `record_source_sync` /
   `require_source_sync` (see above). These ordering primitives guarantee the source is fully
   written before the copy *starts* — they do not keep the source alive past the queued D2D read.

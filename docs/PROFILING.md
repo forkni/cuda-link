@@ -229,6 +229,11 @@ stream lanes, not stack vertically (which would indicate stream priority content
 Two env flags are required for stable concurrent topology. They were discovered by subtractive
 probing (see `SESSION_LOG.md` Phase 3.6 for the full timeline).
 
+> **Historical:** `CUDALINK_TD_PERSIST_STREAM` is no longer read. The ADR-0001 step 7 collapse
+> (`8eebda5c`) moved the Sender onto the canonical `Exporter`, and the TD config dropped the flag.
+> Only `CUDALINK_TD_STREAM_PRIO` is still honoured. The `PERSIST_STREAM` steps below describe the
+> v4 captures and cannot be reproduced on current builds.
+
 ### Correct topology (flags set)
 
 ```cmd

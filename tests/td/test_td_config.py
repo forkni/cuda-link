@@ -20,11 +20,8 @@ def test_sender_config_defaults() -> None:
     assert cfg.export_flush_probe is True
     assert cfg.use_graphs is False
     assert cfg.stream_high_prio is False
-    assert cfg.init_pace is False
-    assert cfg.persist_stream is True
     assert cfg.activation_barrier is True
     assert cfg.barrier_settle_frames == 30
-    assert cfg.nvml is False
 
 
 def test_sender_config_is_frozen() -> None:
@@ -128,24 +125,6 @@ def test_sender_config_from_env_barrier_settle_frames(monkeypatch: pytest.Monkey
     monkeypatch.setenv("CUDALINK_TD_BARRIER_SETTLE_FRAMES", "60")
     cfg = TDSenderConfig.from_env()
     assert cfg.barrier_settle_frames == 60
-
-
-def test_sender_config_from_env_nvml(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_NVML=1 enables nvml."""
-    from TDConfig import TDSenderConfig
-
-    monkeypatch.setenv("CUDALINK_NVML", "1")
-    cfg = TDSenderConfig.from_env()
-    assert cfg.nvml is True
-
-
-def test_sender_config_from_env_persist_stream_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_TD_PERSIST_STREAM=0 disables persist_stream."""
-    from TDConfig import TDSenderConfig
-
-    monkeypatch.setenv("CUDALINK_TD_PERSIST_STREAM", "0")
-    cfg = TDSenderConfig.from_env()
-    assert cfg.persist_stream is False
 
 
 def test_sender_config_from_env_activation_barrier_off(monkeypatch: pytest.MonkeyPatch) -> None:
