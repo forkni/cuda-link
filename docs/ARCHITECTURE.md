@@ -635,7 +635,12 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 **Impact**: On the default CPU-side wait paths, the consumer waits until
 `ImportSpec.timeout_ms` (5 seconds by default) and then returns
-`ImportOutcome.TIMEOUT`; it does not wait indefinitely.
+`ImportOutcome.TIMEOUT`; it does not wait indefinitely. The timed-out frame is
+not consumed: the next `get_frame*()` call sees it pending again, but only
+re-checks its event once instead of blocking for another `timeout_ms`. It returns
+`ImportOutcome.NEW_FRAME` if the event has fired by then, otherwise
+`ImportOutcome.NO_FRAME`, until the event fires or a newer frame is published
+(which gets a full wait of its own).
 
 **Mitigation**: Handle `ImportOutcome.TIMEOUT` and inspect the producer's logs.
 The opt-in torch GPU-side wait (`CUDALINK_TORCH_GPU_WAIT=1`, or an explicit

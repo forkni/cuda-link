@@ -19,6 +19,7 @@ segment leaks across the (randomly-ordered) test suite.
 
 from __future__ import annotations
 
+import logging
 import os
 import struct
 import uuid
@@ -29,7 +30,7 @@ import pytest
 
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportPolicy, ImportSpec
-from cuda_link.cuda_runtime_types import CudaIpcError, ProtocolError
+from cuda_link.cuda_runtime_types import CudaIpcError, IPCEventOpenError, ProtocolError
 from cuda_link.importer import Format, Importer
 from cuda_link.shm_protocol import NUM_SLOTS_OFFSET, Metadata, SHMLayout
 
@@ -347,11 +348,34 @@ def test_open_ipc_slots_event_open_failure_fails_connect(temp_shm_name: str, sha
     imp._cuda.ipc_close_mem_handle = MagicMock()
     fmt = Format.from_overrides((4, 4, 4), "uint8")
 
-    with pytest.raises(RuntimeError, match="Failed to open IPC event for slot 0: boom"):
+    with pytest.raises(IPCEventOpenError, match="Failed to open IPC event for slot 0: boom"):
         imp._open_ipc_slots(shm, 1, 1, fmt)
 
     # The slot's mem handle opened before the event must be rolled back, not leaked.
     imp._cuda.ipc_close_mem_handle.assert_called_once()
+
+
+def test_event_open_failure_warns_once_per_streak(caplog: pytest.LogCaptureFixture) -> None:
+    imp = _make_importer("unused-shm-name", shape=(4, 4, 4), dtype="uint8", wait_backend="python")
+    imp._connect = MagicMock(side_effect=IPCEventOpenError("Failed to open IPC event for slot 1: boom"))
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.importer"):
+        assert imp._connect_silent() is False
+        assert imp._connect_silent() is False
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "slot 1" in warnings[0].getMessage()
+
+
+def test_other_connect_failures_stay_quiet(caplog: pytest.LogCaptureFixture) -> None:
+    imp = _make_importer("unused-shm-name", shape=(4, 4, 4), dtype="uint8", wait_backend="python")
+    imp._connect = MagicMock(side_effect=FileNotFoundError("no segment"))
+
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.importer"):
+        assert imp._connect_silent() is False
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 def test_open_ipc_slots_doorbell_policy_true_not_found_logs_warning(
