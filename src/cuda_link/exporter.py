@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Exporter — deep module for zero-copy GPU frame export via CUDA IPC.
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDConfig — frozen configuration dataclasses for CUDAIPCExtension.
 

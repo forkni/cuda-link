@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Native backend loader — adapts the compiled ``_native_waiter`` pybind11 module to
 the :class:`WaitBackend` Protocol.

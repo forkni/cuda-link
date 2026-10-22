@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """NVTX annotation shim for cuda-link profiling.
 
 Enabled via environment variables (read at module import time, zero-cost when off):

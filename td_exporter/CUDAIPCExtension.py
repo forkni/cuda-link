@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA IPC Extension for TouchDesigner - Dual-Mode Sender/Receiver
 Supports both exporting (Sender) and importing (Receiver) GPU textures via CUDA IPC

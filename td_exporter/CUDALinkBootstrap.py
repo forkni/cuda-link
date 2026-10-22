@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDALinkBootstrap.py — Project-anchored cuda_link resolver + bare-name alias registry.
 

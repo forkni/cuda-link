@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Wait backend port — the seam between cuda-link's Importer and the native
 CUDA-event/doorbell wait module.
