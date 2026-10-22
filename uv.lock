@@ -1162,7 +1162,6 @@ dev = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "nvidia-ml-py" },
     { name = "nvtx" },
-    { name = "py-heat" },
     { name = "pyrefly" },
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
@@ -1187,6 +1186,7 @@ nvml = [
 quality = [
     { name = "cosmic-ray" },
     { name = "crap4py", marker = "python_full_version >= '3.10'" },
+    { name = "py-heat" },
     { name = "radon" },
 ]
 torch = [
@@ -1204,7 +1204,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'numpy'", specifier = ">=1.21" },
     { name = "nvidia-ml-py", marker = "extra == 'nvml'", specifier = ">=12.535" },
     { name = "nvtx", marker = "extra == 'dev'", specifier = ">=0.2" },
-    { name = "py-heat", marker = "extra == 'dev'", specifier = ">=0.0.6" },
+    { name = "py-heat", marker = "extra == 'quality'", specifier = ">=0.0.6" },
     { name = "pyrefly", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
