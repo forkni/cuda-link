@@ -7,6 +7,7 @@ These tests run entirely without a GPU. Mirrors tests/test_exporter_port.py.
 from __future__ import annotations
 
 import pytest
+from typing_extensions import get_protocol_members
 
 from cuda_link._cuda_adapters import CTypesCUDAAdapter, FakeCUDAAdapter
 from cuda_link._importer_port import (
@@ -254,5 +255,8 @@ def test_fake_adapter_host_unregister_noop() -> None:
 
 @pytest.mark.requires_cuda
 def test_ctypes_adapter_satisfies_importer_protocol() -> None:
+    # hasattr, not isinstance: on Python 3.12+ isinstance(…, Protocol) resolves members with
+    # inspect.getattr_static, which never calls the adapter's __getattr__ delegation.
     adapter = CTypesCUDAAdapter.for_device(device=0)
-    assert isinstance(adapter, ImporterCudaPort)
+    missing = sorted(m for m in get_protocol_members(ImporterCudaPort) if not hasattr(adapter, m))
+    assert not missing, f"CTypesCUDAAdapter does not expose ImporterCudaPort members: {missing}"

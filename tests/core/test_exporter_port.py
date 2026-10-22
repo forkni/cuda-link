@@ -336,8 +336,11 @@ def test_ctypes_adapter_api_covers_protocol_without_gpu() -> None:
 
 @pytest.mark.requires_cuda
 def test_ctypes_adapter_satisfies_protocol() -> None:
+    # hasattr, not isinstance: on Python 3.12+ isinstance(…, Protocol) resolves members with
+    # inspect.getattr_static, which never calls the adapter's __getattr__ delegation.
     adapter = CTypesCUDAAdapter.for_device(device=0)
-    assert isinstance(adapter, CudaPort)
+    missing = sorted(m for m in get_protocol_members(CudaPort) if not hasattr(adapter, m))
+    assert not missing, f"CTypesCUDAAdapter does not expose CudaPort members: {missing}"
 
 
 @pytest.mark.requires_cuda
