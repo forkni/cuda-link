@@ -87,7 +87,11 @@ def test_invalid_dtype_raises() -> None:
         _make_bare("x", 64, 64, dtype="int32")
 
 
-@pytest.mark.parametrize(("height", "width"), [(0, 64), (64, 0), (-1, 64), (64, -8)])
+@pytest.mark.parametrize(
+    ("height", "width"),
+    [(0, 64), (64, 0), (-1, 64), (64, -8)],
+    ids=["zero-height", "zero-width", "negative-height", "negative-width"],
+)
 def test_non_positive_height_or_width_raises(height: int, width: int) -> None:
     """height/width <= 0 is rejected up front, not at allocation time."""
     with pytest.raises(ValueError, match="height and width must be positive"):
