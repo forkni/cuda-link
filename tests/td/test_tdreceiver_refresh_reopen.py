@@ -216,3 +216,76 @@ def test_refresh_flags_only_change_requests_format_update_and_resets_cursor(shm:
     assert engine._format.flags == FLAGS_MONO_ALPHA
     assert engine._connection.last_write_idx == 0
     assert engine._connection.ipc_version == 2
+
+
+class _EventOpenFailCuda(_RefreshCuda):
+    """_RefreshCuda whose ipc_open_event_handle raises on one call."""
+
+    def __init__(self, fail_event_call: int) -> None:
+        super().__init__()
+        self._fail_event_call = fail_event_call
+        self._event_calls = 0
+        self.destroyed_streams: list[object] = []
+
+    def ipc_open_event_handle(self, handle) -> object:
+        call = self._event_calls
+        self._event_calls += 1
+        if call == self._fail_event_call:
+            raise RuntimeError("injected ipc_open_event_handle failure")
+        return object()
+
+    def get_device(self) -> int:
+        return 0
+
+    def create_stream_with_priority(self, flags: int = 0) -> c_void_p:
+        return c_void_p(0x5000)
+
+    def destroy_stream(self, stream) -> None:
+        self.destroyed_streams.append(stream)
+
+
+def _write_event_handles(shm: SharedMemory, tag: int) -> None:
+    for slot in range(NUM_SLOTS):
+        base = SHM_HEADER_SIZE + slot * SLOT_SIZE
+        shm.buf[base + 64 : base + 128] = _handle_bytes(tag + slot)
+
+
+def test_refresh_event_open_failure_returns_none_and_closes_new_handles(shm: SharedMemory) -> None:
+    """Slot 1's event fails to open: the refresh is abandoned, closing what it opened, old conn untouched."""
+    md = _metadata(64, 32, 4, 32)
+    cuda = _EventOpenFailCuda(fail_event_call=1)
+    engine = _make_receiver(f"test_rro_{uuid.uuid4().hex[:8]}")
+    old_ptrs = _connect(engine, shm, cuda, md, old_tag=0x10, last_write_idx=7)
+    _write_shm(shm, version=2, slot_tag=0x20, md=md)
+    _write_event_handles(shm, 0x40)
+
+    assert engine._open_refresh_handles(shm, NUM_SLOTS) is None
+
+    # Slots 0 and 1 had their mem handles opened (slot 1 before its event failed): both released.
+    assert len(cuda.closed_ptrs) == 2
+    assert not set(cuda.closed_ptrs) & set(old_ptrs)
+    assert len(cuda.destroyed_events) == 1  # slot 0's event
+    assert cuda.open_ptrs == set(old_ptrs)
+
+
+def test_initialize_receiver_event_open_failure_fails_connect_and_releases_handles(
+    shm: SharedMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-zero event handle that won't open must not silently connect without ordering."""
+    import TDReceiver
+
+    md = _metadata(64, 32, 4, 32)
+    cuda = _EventOpenFailCuda(fail_event_call=1)
+    monkeypatch.setattr(TDReceiver, "get_cuda_runtime", lambda device=0: cuda)
+    _write_shm(shm, version=1, slot_tag=0x20, md=md)
+    _write_event_handles(shm, 0x40)
+    engine = _make_receiver(shm.name)
+
+    assert engine.initialize_receiver() is False
+
+    assert engine._initialized is False
+    # Slots 0 and 1 mem handles (slot 1's included) closed; slot 0's event destroyed; stream freed.
+    assert len(cuda.closed_ptrs) == 2
+    assert cuda.open_ptrs == set()
+    assert len(cuda.destroyed_events) == 1
+    assert len(cuda.destroyed_streams) == 1
