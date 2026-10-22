@@ -13,15 +13,17 @@ from __future__ import annotations
 import sys
 import types
 import uuid
-from unittest.mock import ANY, patch
+from multiprocessing.shared_memory import SharedMemory
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from cuda_link import ExportPolicy, FrameSpec
+from cuda_link import ExportPolicy, FrameSpec, Metadata
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.cuda_runtime_types import CudaIpcError
 from cuda_link.exporter import IPC_HANDLE_SIZE, CTypesCUDAAdapter, Exporter, _read_hws_mode
+from cuda_link.shm_protocol import SHMLayout, bump_version, clear_shutdown
 
 _H = _W = _C = 4
 _DATA_SIZE = _H * _W * _C  # uint8
@@ -261,5 +263,94 @@ def test_slot_buffer_size_is_2mib_aligned() -> None:
         assert exp.buffer_size == two_mib  # 64-byte payload rounds up to exactly one page
         slot_sizes = [fake.allocations[ptr.value] for ptr in exp.dev_ptrs]
         assert slot_sizes == [exp.buffer_size] * 3
+    finally:
+        exp.close()
+
+
+# ---------------------------------------------------------------------------
+# _initialize() — existing SHM segment: size pre-flight and publish ordering
+# ---------------------------------------------------------------------------
+
+
+def test_existing_undersized_shm_is_rejected_before_any_gpu_allocation() -> None:
+    """A live segment smaller than this layout needs must fail up front: writing the
+    handles into it would run off the end (IndexError in set_shutdown). The segment
+    belongs to another process, so it is closed but never unlinked.
+
+    The size is faked: Windows rounds a real segment up to a 4 KiB page, which already
+    exceeds the largest layout (10 slots), so no real segment can be undersized there.
+    """
+    fake = FakeCUDAAdapter(device=0)
+    undersized = MagicMock()
+    undersized.size = 64
+    with (
+        patch("cuda_link.exporter.SharedMemory", return_value=undersized),
+        pytest.raises(RuntimeError, match=r"Existing SharedMemory .* is 64 bytes but \d+ are required"),
+    ):
+        Exporter.open(_spec(num_slots=2), policy=ExportPolicy.for_testing(), cuda=fake)
+    assert fake.allocations == {}
+    undersized.close.assert_called_once_with()
+    undersized.unlink.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("delta", "fits"),
+    [(0, True), (-1, False)],
+    ids=["exactly-sized", "one-byte-short"],
+)
+def test_existing_shm_size_boundary(delta: int, fits: bool) -> None:
+    """A live segment exactly as large as the layout is reused; one byte less is refused."""
+    spec = _spec(num_slots=2)
+    existing = MagicMock()
+    existing.size = SHMLayout(spec.num_slots).total_size + delta
+    real_shm = SharedMemory
+    attaches: list[MagicMock] = []
+
+    def shm_factory(*args, **kwargs):
+        if not attaches and not kwargs.get("create"):
+            attaches.append(existing)  # the pre-flight attach; later calls are real
+            return existing
+        return real_shm(*args, **kwargs)
+
+    with patch("cuda_link.exporter.SharedMemory", side_effect=shm_factory):
+        if fits:
+            Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0)).close()
+        else:
+            with pytest.raises(RuntimeError, match="required for 2 slots"):
+                Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0))
+    existing.close.assert_called_once_with()
+
+
+def test_version_bump_is_the_last_publish_step() -> None:
+    """The version bump is the publish point: a consumer that sees it must already find
+    the metadata and the handles, with the shutdown flag cleared."""
+    spec = _spec(num_slots=2)
+    layout = SHMLayout(spec.num_slots)
+    order: list[str] = []
+    seen: list[Metadata] = []
+    event_bytes: list[bytes] = []
+
+    def spying_bump(buf):
+        order.append("bump_version")
+        seen.append(Metadata.read_from(buf, layout))
+        # The fake memory handles are all zero; the distinctive event handles are not.
+        event_bytes.extend(bytes(buf[layout.event_handle_offset(s) :][:IPC_HANDLE_SIZE]) for s in range(2))
+        return bump_version(buf)
+
+    def spying_clear(buf, layout):
+        order.append("clear_shutdown")
+        return clear_shutdown(buf, layout)
+
+    fake = FakeCUDAAdapter(device=0)
+    with (
+        patch.object(fake, "ipc_get_event_handle", side_effect=lambda _evt: _DistinctiveEventHandle()),
+        patch("cuda_link.exporter.bump_version", side_effect=spying_bump),
+        patch("cuda_link.exporter.clear_shutdown", side_effect=spying_clear),
+    ):
+        exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=fake)
+    try:
+        assert order == ["clear_shutdown", "bump_version"]
+        assert event_bytes == [_DistinctiveEventHandle.reserved] * 2
+        assert (seen[0].width, seen[0].height, seen[0].data_size) == (_W, _H, _DATA_SIZE)
     finally:
         exp.close()
