@@ -8,6 +8,7 @@ Exporter.open(spec, policy=ExportPolicy(...), cuda=FakeCUDAAdapter(device=device
 
 from __future__ import annotations
 
+import ctypes
 import uuid
 from unittest.mock import patch
 
@@ -163,18 +164,47 @@ def test_export_non_int_ptr_raises_clear_value_error() -> None:
         exp.close()
 
 
-def test_export_int_coercible_ptr_is_accepted() -> None:
-    """A non-int ptr that supports __int__ still exports."""
+def test_export_index_ptr_is_accepted() -> None:
+    """A non-int ptr that is a true integer (supports __index__, like numpy ints) still exports."""
     from cuda_link import FrameOutcome
 
-    class _IntLike:
-        def __int__(self) -> int:
+    class _IndexLike:
+        def __index__(self) -> int:
             return 0xDEAD0000
 
     exp, _fake = _make_exporter(device=0)
     try:
-        outcome = exp.export(GpuFrame(ptr=_IntLike(), size=_DATA_SIZE))  # type: ignore[arg-type]
+        outcome = exp.export(GpuFrame(ptr=_IndexLike(), size=_DATA_SIZE))  # type: ignore[arg-type]
         assert outcome != FrameOutcome.FAILED
+    finally:
+        exp.close()
+
+
+class _IntOnly:
+    def __int__(self) -> int:
+        return 0xDEAD0000
+
+
+@pytest.mark.parametrize(
+    "bad_ptr",
+    [3735879680.5, "0xdead0000", ctypes.c_void_p(0xDEAD0000), _IntOnly()],
+    ids=["float", "str", "c_void_p", "int-only"],
+)
+def test_export_rejects_non_integer_ptr(bad_ptr: object) -> None:
+    """int() would truncate a float or parse a str; only true integers are device pointers."""
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match="frame.ptr must be an int device pointer"):
+            exp.export(GpuFrame(ptr=bad_ptr, size=_DATA_SIZE))  # type: ignore[arg-type]
+    finally:
+        exp.close()
+
+
+def test_export_c_void_p_ptr_error_says_pass_value() -> None:
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match=r"pass \.value"):
+            exp.export(GpuFrame(ptr=ctypes.c_void_p(0xDEAD0000), size=_DATA_SIZE))  # type: ignore[arg-type]
     finally:
         exp.close()
 

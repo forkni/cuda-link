@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import operator
 import threading
 import time
 from ctypes import c_void_p
@@ -118,11 +119,16 @@ def _read_hws_mode() -> str:
 
 
 def _coerce_device_ptr(ptr: object) -> int:
-    """Return ``ptr`` as an int, or raise ValueError naming the offending value."""
+    """Return ``ptr`` as an int, or raise ValueError naming the offending value.
+
+    Uses ``operator.index`` so only true integers (``int``, numpy ints, anything with
+    ``__index__``) pass; ``int()`` would silently truncate a float or parse a string.
+    """
     try:
-        return int(ptr)  # type: ignore[call-overload]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"export: frame.ptr must be an int device pointer, got {ptr!r}") from exc
+        return operator.index(ptr)  # type: ignore[call-overload]
+    except TypeError as exc:
+        hint = " (pass .value)" if isinstance(ptr, c_void_p) else ""
+        raise ValueError(f"export: frame.ptr must be an int device pointer, got {ptr!r}{hint}") from exc
 
 
 class Exporter:
