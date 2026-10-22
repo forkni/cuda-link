@@ -789,8 +789,8 @@ def _attached_adapter_with_header(magic: int, version: int, *, active_count: int
 
 @pytest.mark.parametrize(
     ("magic", "version"),
-    [(0xDEADBEEF, VERSION), (MAGIC, VERSION + 1)],
-    ids=["foreign-magic", "unknown-version"],
+    [(0xDEADBEEF, VERSION), (MAGIC, VERSION + 1), (0, VERSION), (MAGIC, 0)],
+    ids=["foreign-magic", "unknown-version", "zero-magic", "zero-version"],
 )
 def test_read_state_rejects_mismatched_header(magic: int, version: int) -> None:
     adapter = _attached_adapter_with_header(magic, version)
