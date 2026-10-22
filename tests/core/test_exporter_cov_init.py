@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import types
 import uuid
+from multiprocessing.shared_memory import SharedMemory
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -22,7 +23,7 @@ from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link.activation_barrier import CheckerBarrier
 from cuda_link.cuda_runtime_types import CudaIpcError
 from cuda_link.exporter import IPC_HANDLE_SIZE, CTypesCUDAAdapter, Exporter, _read_hws_mode
-from cuda_link.shm_protocol import SHMLayout, bump_version
+from cuda_link.shm_protocol import SHMLayout, bump_version, clear_shutdown
 
 _H = _W = _C = 4
 _DATA_SIZE = _H * _W * _C  # uint8
@@ -292,20 +293,57 @@ def test_existing_undersized_shm_is_rejected_before_any_gpu_allocation() -> None
     undersized.unlink.assert_not_called()
 
 
-def test_metadata_is_written_before_the_version_bump() -> None:
-    """The version bump is the publish point: a consumer that sees it must already find
-    the new metadata."""
+@pytest.mark.parametrize(
+    ("delta", "fits"),
+    [(0, True), (-1, False)],
+    ids=["exactly-sized", "one-byte-short"],
+)
+def test_existing_shm_size_boundary(delta: int, fits: bool) -> None:
+    """A live segment exactly as large as the layout is reused; one byte less is refused."""
     spec = _spec(num_slots=2)
+    existing = MagicMock()
+    existing.size = SHMLayout(spec.num_slots).total_size + delta
+    real_shm = SharedMemory
+    attaches: list[MagicMock] = []
+
+    def shm_factory(*args, **kwargs):
+        if not attaches and not kwargs.get("create"):
+            attaches.append(existing)  # the pre-flight attach; later calls are real
+            return existing
+        return real_shm(*args, **kwargs)
+
+    with patch("cuda_link.exporter.SharedMemory", side_effect=shm_factory):
+        if fits:
+            Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0)).close()
+        else:
+            with pytest.raises(RuntimeError, match="required for 2 slots"):
+                Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0))
+    existing.close.assert_called_once_with()
+
+
+def test_version_bump_is_the_last_publish_step() -> None:
+    """The version bump is the publish point: a consumer that sees it must already find
+    the metadata and the handles, with the shutdown flag cleared."""
+    spec = _spec(num_slots=2)
+    order: list[str] = []
     seen: list[Metadata] = []
 
     def spying_bump(buf):
+        order.append("bump_version")
         seen.append(Metadata.read_from(buf, SHMLayout(spec.num_slots)))
         return bump_version(buf)
 
-    with patch("cuda_link.exporter.bump_version", side_effect=spying_bump):
+    def spying_clear(buf, layout):
+        order.append("clear_shutdown")
+        return clear_shutdown(buf, layout)
+
+    with (
+        patch("cuda_link.exporter.bump_version", side_effect=spying_bump),
+        patch("cuda_link.exporter.clear_shutdown", side_effect=spying_clear),
+    ):
         exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0))
     try:
-        assert len(seen) == 1
+        assert order == ["clear_shutdown", "bump_version"]
         assert (seen[0].width, seen[0].height, seen[0].data_size) == (_W, _H, _DATA_SIZE)
     finally:
         exp.close()
