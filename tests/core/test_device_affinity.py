@@ -153,6 +153,32 @@ def test_export_valid_device_ptr_no_warning() -> None:
         exp.close()
 
 
+def test_export_non_int_ptr_raises_clear_value_error() -> None:
+    """A ptr that cannot be coerced to int raises ValueError, not a bare TypeError."""
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match="frame.ptr must be an int device pointer"):
+            exp.export(GpuFrame(ptr=None, size=_DATA_SIZE))  # type: ignore[arg-type]
+    finally:
+        exp.close()
+
+
+def test_export_int_coercible_ptr_is_accepted() -> None:
+    """A non-int ptr that supports __int__ still exports."""
+    from cuda_link import FrameOutcome
+
+    class _IntLike:
+        def __int__(self) -> int:
+            return 0xDEAD0000
+
+    exp, _fake = _make_exporter(device=0)
+    try:
+        outcome = exp.export(GpuFrame(ptr=_IntLike(), size=_DATA_SIZE))  # type: ignore[arg-type]
+        assert outcome != FrameOutcome.FAILED
+    finally:
+        exp.close()
+
+
 def test_export_managed_ptr_no_warning() -> None:
     """Managed memory (type=3) is treated as valid for D2D."""
     exp, fake = _make_exporter(device=0)

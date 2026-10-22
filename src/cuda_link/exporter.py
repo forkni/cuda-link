@@ -117,6 +117,14 @@ def _read_hws_mode() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_device_ptr(ptr: object) -> int:
+    """Return ``ptr`` as an int, or raise ValueError naming the offending value."""
+    try:
+        return int(ptr)  # type: ignore[call-overload]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"export: frame.ptr must be an int device pointer, got {ptr!r}") from exc
+
+
 class Exporter:
     """Deep module: zero-copy GPU frame export over a CUDA IPC ring buffer.
 
@@ -135,6 +143,8 @@ class Exporter:
             raise ValueError(f"Unsupported dtype: {spec.dtype!r}. Must be one of {list(DtypeCodec.supported())}")
         if not (0 < spec.num_slots <= 10):
             raise ValueError(f"num_slots must be 1-10, got {spec.num_slots}")
+        if spec.height <= 0 or spec.width <= 0:
+            raise ValueError(f"height and width must be positive, got {spec.height}x{spec.width}")
 
         self._spec = spec
         self._policy = policy
@@ -623,7 +633,7 @@ class Exporter:
                     self._unordered_export_warned = True
 
             # Device-affinity pointer check (first appearance; capped cache)
-            gpu_ptr_int = frame.ptr if isinstance(frame.ptr, int) else int(frame.ptr)
+            gpu_ptr_int = frame.ptr if isinstance(frame.ptr, int) else _coerce_device_ptr(frame.ptr)
             if gpu_ptr_int not in self._ptr_device_cache:
                 self._profile.record("ptr_cache_miss", 1.0)
                 attrs = _cuda.pointer_get_attributes(gpu_ptr_int)
