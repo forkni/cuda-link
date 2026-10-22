@@ -1,7 +1,7 @@
 """
 TDReceiverEngine.initialize_receiver() rejects a segment whose header fails validation.
 
-The magic, version and slot-count reads go through the SHMProtocol helpers, so these
+The magic and slot-count reads go through the SHMProtocol helpers, so these
 pin the reject paths (and that each one releases the mapping it opened) alongside them.
 """
 
