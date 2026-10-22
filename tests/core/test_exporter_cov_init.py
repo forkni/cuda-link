@@ -325,25 +325,32 @@ def test_version_bump_is_the_last_publish_step() -> None:
     """The version bump is the publish point: a consumer that sees it must already find
     the metadata and the handles, with the shutdown flag cleared."""
     spec = _spec(num_slots=2)
+    layout = SHMLayout(spec.num_slots)
     order: list[str] = []
     seen: list[Metadata] = []
+    event_bytes: list[bytes] = []
 
     def spying_bump(buf):
         order.append("bump_version")
-        seen.append(Metadata.read_from(buf, SHMLayout(spec.num_slots)))
+        seen.append(Metadata.read_from(buf, layout))
+        # The fake memory handles are all zero; the distinctive event handles are not.
+        event_bytes.extend(bytes(buf[layout.event_handle_offset(s) :][:IPC_HANDLE_SIZE]) for s in range(2))
         return bump_version(buf)
 
     def spying_clear(buf, layout):
         order.append("clear_shutdown")
         return clear_shutdown(buf, layout)
 
+    fake = FakeCUDAAdapter(device=0)
     with (
+        patch.object(fake, "ipc_get_event_handle", side_effect=lambda _evt: _DistinctiveEventHandle()),
         patch("cuda_link.exporter.bump_version", side_effect=spying_bump),
         patch("cuda_link.exporter.clear_shutdown", side_effect=spying_clear),
     ):
-        exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=FakeCUDAAdapter(device=0))
+        exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=fake)
     try:
         assert order == ["clear_shutdown", "bump_version"]
+        assert event_bytes == [_DistinctiveEventHandle.reserved] * 2
         assert (seen[0].width, seen[0].height, seen[0].data_size) == (_W, _H, _DATA_SIZE)
     finally:
         exp.close()

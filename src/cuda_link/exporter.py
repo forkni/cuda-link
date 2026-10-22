@@ -260,7 +260,9 @@ class Exporter:
     def _check_existing_shm_size(self) -> None:
         """Reject a live segment too small for this layout, before any GPU allocation.
 
-        The segment is not ours to unlink: another process may still hold it.
+        The segment is not ours to unlink: another process may still hold it. (On POSIX
+        with Python < 3.13 any attach registers the name with ``resource_tracker``, which
+        unlinks it when this process exits; that applies to every attach in the package.)
         """
         try:
             existing = SharedMemory(name=self._spec.shm_name)
