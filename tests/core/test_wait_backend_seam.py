@@ -151,6 +151,23 @@ def test_timeout_status_raises_timeout_error_same_as_python_path(managed_importe
     assert result.frame is None
 
 
+def test_timeout_leaves_frame_unconsumed_for_next_call(managed_importer) -> None:
+    """A frame whose wait timed out was never delivered: the cursor must not advance past it."""
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    before = imp._last_write_idx
+
+    result = imp.get_frame_numpy()
+    assert result.outcome is ImportOutcome.TIMEOUT
+    assert imp._last_write_idx == before
+
+    # Same slot is still pending, so the next call re-acquires (and re-waits) it
+    # instead of reporting NO_FRAME.
+    again = imp.get_frame_numpy()
+    assert again.outcome is ImportOutcome.TIMEOUT
+
+
 def test_cuda_error_raises_runtime_error_not_timeout(managed_importer) -> None:
     """A hard cudaEventQuery error must surface as RuntimeError (like the python
     path's query_event), never be reported as a TIMEOUT outcome."""

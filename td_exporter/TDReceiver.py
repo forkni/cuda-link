@@ -845,8 +845,15 @@ class TDReceiverEngine:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        self._log(f"Failed to open IPC event for slot {slot}: {e}")
-                        ipc_events[slot] = None
+                        # Without the event the wait has nothing to order against the
+                        # sender, so every frame would be read unsynced: fail the init
+                        # (slot + 1 also releases this slot's just-opened mem handle).
+                        self._log(
+                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
+                            force=True,
+                        )
+                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -1277,9 +1284,13 @@ class TDReceiverEngine:
                 return None
             event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
             if any(event_handle_bytes):
-                with contextlib.suppress(RuntimeError, OSError):
+                try:
                     ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                     new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
+                except (RuntimeError, OSError) as e:
+                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
+                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                    return None
         return new_dev_ptrs, new_ipc_handles, new_ipc_events
 
     def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:

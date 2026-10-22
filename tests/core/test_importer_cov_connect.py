@@ -339,16 +339,19 @@ def test_open_ipc_slots_opens_event_handle_when_nonzero_bytes_present(
     conn.close()
 
 
-def test_open_ipc_slots_swallows_event_open_failure(temp_shm_name: str, shared_memory_cleanup: list) -> None:
+def test_open_ipc_slots_event_open_failure_fails_connect(temp_shm_name: str, shared_memory_cleanup: list) -> None:
+    """A published event that won't open must fail the connect, not degrade to unsynced reads."""
     shm, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=1, nonzero_event_slots=(0,))
     imp = _make_importer(temp_shm_name, shape=(4, 4, 4), dtype="uint8", wait_backend="python")
     imp._cuda.ipc_open_event_handle = MagicMock(side_effect=RuntimeError("boom"))
+    imp._cuda.ipc_close_mem_handle = MagicMock()
     fmt = Format.from_overrides((4, 4, 4), "uint8")
 
-    conn = imp._open_ipc_slots(shm, 1, 1, fmt)  # must not raise
+    with pytest.raises(RuntimeError, match="Failed to open IPC event for slot 0: boom"):
+        imp._open_ipc_slots(shm, 1, 1, fmt)
 
-    assert conn.ipc_events[0] is None
-    conn.close()
+    # The slot's mem handle opened before the event must be rolled back, not leaked.
+    imp._cuda.ipc_close_mem_handle.assert_called_once()
 
 
 def test_open_ipc_slots_doorbell_policy_true_not_found_logs_warning(

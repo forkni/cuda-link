@@ -1000,6 +1000,8 @@ class Importer:
 
         # Frame tracking
         self._last_write_idx = 0
+        # _last_write_idx before the latest acquire; restored if that frame's wait times out
+        self._prev_write_idx = 0
         self.frame_count = 0
         self.last_latency = 0.0
 
@@ -1302,7 +1304,10 @@ class Importer:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
+                        # A published event that won't open leaves the wait with nothing to
+                        # order against the producer, so every frame would be read unsynced.
+                        # Fail the connect (rolled back below) instead of degrading silently.
+                        raise RuntimeError(f"Failed to open IPC event for slot {slot}: {e}") from e
 
                 logger.info(
                     "Slot %d: GPU ptr=0x%016x, event=%s",
@@ -1509,6 +1514,7 @@ class Importer:
         if result.state is SlotState.NO_FRAME:
             return None, ImportOutcome.NO_FRAME
 
+        self._prev_write_idx = self._last_write_idx
         self._last_write_idx = result.write_idx
 
         # A1 fix: the first NEW_FRAME after a connect that had to guess geometry
@@ -1704,6 +1710,9 @@ class Importer:
             except TimeoutError:
                 logger.error("Producer timeout — slot %d", read_slot)
                 _nvtx.pop_range()
+                # The frame was never delivered: un-consume it so the next call
+                # re-evaluates write_idx (newest frame, or this slot again).
+                self._last_write_idx = self._prev_write_idx
                 return ImportResult(outcome=ImportOutcome.TIMEOUT)
 
         frame = backend.materialize(conn, read_slot)
