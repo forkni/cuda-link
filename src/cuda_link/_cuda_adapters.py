@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA adapters — concrete implementations of CudaPort and ImporterCudaPort.
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA Graphs Mixin — CUDA Graph capture, instantiation, launch, and node-update methods.
 

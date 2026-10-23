@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDHost adapter — isolates all TouchDesigner runtime access behind a Protocol seam.
 

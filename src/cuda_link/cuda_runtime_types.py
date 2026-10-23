@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA Runtime Types — ctypes structs, type aliases, and error codes for CUDA IPC.
 

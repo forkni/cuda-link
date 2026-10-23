@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 cuda-link - Zero-copy GPU texture sharing between processes via CUDA IPC.
 

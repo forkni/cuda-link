@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 _td_fakes.py — In-process test doubles for the TDHost / TOPHandle seam.
 

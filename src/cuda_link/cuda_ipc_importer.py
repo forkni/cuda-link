@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDAIPCImporter — deprecation shim for the pre-v1.5.x API.
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Cross-process SHM activation barrier for cuda-link.
 
 Coordinates Python producer <-> TD-side Sender activation windows.
