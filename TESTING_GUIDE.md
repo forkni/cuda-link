@@ -45,7 +45,7 @@ merged), Python 3.12.11, Windows, before any Phase I change.
 | Test smells (AST scanner) | 19, equal to `.smell-baseline.json` (ratchet OK) |
 | Functions over CRAP 30 | `cuda_link`: 2 (`Exporter.export` 46, `_do_cleanup` 32, both 100 % covered, so complexity alone). `td_exporter`: 6, worst `TDReceiverEngine.initialize_receiver` **244** (CC 33, 42 % covered), `parexecute_callbacks.handle_mode_change` and `handle_numslots_change` 72 each (0 %), `TDSenderEngine.export_frame` 68, `_refresh_on_version_change` 52, `import_frame` 44 |
 | C901 over 15 | 10 (`Exporter.export` 43, `_do_cleanup` 26, `TDSender.export_frame` 34, `initialize_receiver` 28, ...) |
-| Mutation score | last measured 2026-07-12 (`_profile` 100 %, `shm_protocol` 99.78 %, `activation_barrier` 99.4 %); stale, both modules changed in #82/#83. Re-run in I2 |
+| Mutation score | at the audit: last measured 2026-07-12 (`_profile` 100 %, `shm_protocol` 99.78 %, `activation_barrier` 99.4 %), stale after #82/#83. Re-measured in I2: `shm_protocol` and `activation_barrier` both 100 % with no genuine survivors |
 | Tests / test LOC | 1295 `def test_` · 26.9k test LOC vs 8.5k `src/cuda_link` LOC |
 | Logic in test bodies | 368 `if/for/while/try` lines; top: `test_cpu_roundtrip.py` 36, `test_td_bootstrap.py` 25 |
 | Sleeps / private patch targets | 4 `time.sleep` · 24 patches of `_private` names |
@@ -685,6 +685,41 @@ Audit numbers are in the current baseline above. Four phases, each on its own br
 The stale "TDReceiver.py at 51 %" comment in `pyproject.toml` now says 72 %. No test was skipped,
 `xfail`ed or deleted. Both repaired tests fail when a protocol member is missing from the adapter
 (the same members `test_ctypes_adapter_api_covers_protocol_without_gpu` guards without a GPU).
+
+### I2 — Mutation re-run on `shm_protocol` and `activation_barrier`
+
+Both modules changed in #82/#83 after the 2026-07-12 run. Whole-module cosmic-ray run, then a
+second full run after the fixes to confirm the final score.
+
+| Target | Measure | Before (2026-07-12 run) | First re-run | After fixes |
+|--------|---------|-------------------------|--------------|-------------|
+| `shm_protocol.py` | Mutants | 506 | 506 | 506 |
+| | Survivors, genuine / pragma'd | 1 / 51 | 1 / 51 | 0 / 52 |
+| | Score | 99.78 % | 99.78 % | **100 %** |
+| `activation_barrier.py` | Mutants | 349 | 438 | 434 |
+| | Survivors, genuine / pragma'd | 2 / 9 | 18 / 9 | 0 / 13 |
+| | Score | 99.4 % | 95.8 % | **100 %** |
+| No-GPU selection | Tests | 1415 passed | n/a | 1423 passed, 1 skipped |
+
+What changed:
+
+- **Kill-tests, 8 new** in `test_activation_barrier_cov.py`: `BarrierHeaderError` default and
+  keyword-only marker, field indices in the header-mismatch message, the `last_change_ns` offset,
+  the `bump_skip` u32 wrap, the stale-age divisor (two rounding cases), and the `_header_warned`
+  field flags (added in #83, so never mutated before). Each was verified by applying the mutant by
+  hand and confirming the test fails (13 mutants, all killed).
+- **Proven-equivalent, now pragma'd:** `write_idx == 0` vs `<= 0` and the two `uninitialised`
+  `== 0` checks (unsigned u32 fields), `fields[1] != VERSION` vs `is not` (interned small int), and
+  `[0]` vs `[-1]` on a one-field unpack (moved into a `_read_u32` helper so one pragma covers its
+  three call sites). A line pragma also hides other mutants on the same line; the proof comments
+  note the existing tests that kill them.
+- **Tooling fix:** the `cr-*.toml` `test-command` pointed at a Python 3.11 install that imported a
+  stale `cuda_link` from site-packages. It now uses the project venv and
+  `--randomly-seed=1`, so a mutant gets the same verdict on every run. `cr-profile.toml` still
+  has the old path and was not re-run.
+- The mutant count differs from the 2026-07-12 run because the modules changed.
+
+Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
 ## Deferral table — tooling we deliberately did NOT add
 

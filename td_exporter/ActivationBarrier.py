@@ -115,13 +115,25 @@ def read_state(shm: SharedMemory) -> tuple[int, int, int]:
     """
     fields = _ST_STATE.unpack_from(shm.buf, 0)
     # (magic, version, active_count, pad, last_change_ns, barrier_skips)
-    if fields[0] != MAGIC or fields[1] != VERSION:
+    if (
+        fields[0] != MAGIC
+        # EQUIVALENT(NotEq_IsNot): fields[1] is a u32 and VERSION is 1, a CPython-interned small int,
+        # so `is not` and `!=` agree.
+        or fields[1] != VERSION  # pragma: no mutate
+    ):
         raise BarrierHeaderError(
             f"activation barrier header mismatch: magic=0x{fields[0]:08X} version={fields[1]} "
             f"(expected 0x{MAGIC:08X} v{VERSION})",
-            uninitialised=fields[0] == 0 and fields[1] == 0,
+            # EQUIVALENT(Eq_LtE): fields are unsigned u32, never negative, so `== 0` and `<= 0` agree. The
+            # pragma also covers And_Or on this line, which test_read_state_rejects_mismatched_header kills.
+            uninitialised=fields[0] == 0 and fields[1] == 0,  # pragma: no mutate
         )
     return fields[2], fields[4], fields[5]
+
+
+def _read_u32(shm: SharedMemory, offset: int) -> int:
+    """Read one little-endian u32 at ``offset``."""
+    return _U32.unpack_from(shm.buf, offset)[0]  # pragma: no mutate  # 1-field unpack: [0] == [-1]
 
 
 def increment(shm: SharedMemory, pid: int) -> int:
@@ -135,7 +147,7 @@ def increment(shm: SharedMemory, pid: int) -> int:
     Returns:
         New active_count value.
     """
-    count = _U32.unpack_from(shm.buf, _OFF_ACTIVE_COUNT)[0] + 1
+    count = _read_u32(shm, _OFF_ACTIVE_COUNT) + 1
     _write_holder_fields(shm, count, pid)
     return count
 
@@ -148,7 +160,7 @@ def decrement(shm: SharedMemory, pid: int) -> int:
     Returns:
         New active_count value.
     """
-    count = max(0, _U32.unpack_from(shm.buf, _OFF_ACTIVE_COUNT)[0] - 1)  # no underflow
+    count = max(0, _read_u32(shm, _OFF_ACTIVE_COUNT) - 1)  # no underflow
     _write_holder_fields(shm, count, pid)
     return count
 
@@ -169,7 +181,7 @@ def bump_skip(shm: SharedMemory) -> None:
 
     Touches only the barrier_skips field, never active_count.
     """
-    skips = _U32.unpack_from(shm.buf, _OFF_BARRIER_SKIPS)[0]
+    skips = _read_u32(shm, _OFF_BARRIER_SKIPS)
     _U32.pack_into(shm.buf, _OFF_BARRIER_SKIPS, (skips + 1) & 0xFFFFFFFF)
 
 
