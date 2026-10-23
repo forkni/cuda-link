@@ -721,6 +721,49 @@ What changed:
 
 Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
+### I3 — `TDReceiverEngine.initialize_receiver` and the par-exec handlers
+
+The audit's three worst CRAP entries. Two new files under `tests/td/`:
+`test_tdreceiver_initialize.py` (29 tests) and `test_parexecute_handlers.py` (38 tests). The
+receiver tests run the real `initialize_receiver` against an in-memory SharedMemory built with
+the real `SHMLayout` and `Metadata` (a fake CUDA runtime is the only double); one test uses a
+real `SharedMemory` segment. The handler tests record calls on a stub extension. Every
+parametrize carries `ids=`.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1423 passed + 1 skipped | 1490 passed + 1 skipped (+67) |
+| Branch coverage, combined | 90.76 % | **93.39 %** (5366 stmts, 324 miss) |
+| `TDReceiver.py` | 72 % (173 miss) | **82 %** (111 miss) |
+| `parexecute_callbacks.py` | 35 % | **95 %** |
+| `initialize_receiver` CRAP | 244 (CC 33, 42 % covered) | **33.5** (92.1 % covered) |
+| `handle_mode_change` / `handle_numslots_change` CRAP | 72 / 72 (0 %) | **8.0 / 8.0** (100 %) |
+| `fail_under` | 89 | 91 (`floor(93.39) - 1.5`, rounded down) |
+| Smell scanner | 19 | 19 (ratchet OK) |
+
+CRAP re-measured with `crap4py td_exporter` on an lcov export of the same coverage run. The
+remaining `initialize_receiver` figure is complexity: CC 33 is the floor until the function is
+split.
+
+Agent-written-test acceptance, by hand-applied mutants (one anchor swapped in the source, the
+new tests run, the original bytes restored):
+
+| Target | Mutants | Killed | Survivors |
+|--------|---------|--------|-----------|
+| `initialize_receiver` | 26 | 24 | 2, proven equivalent |
+| `parexecute_callbacks` handlers | 24 | 24 | 0 |
+
+The two `initialize_receiver` survivors are the `width == 0` and `height == 0` guards. Once the
+size invariant passes with non-zero bits per component, a zero width or height forces
+`data_size == 0`, which the `buffer_size == 0` check in the same condition already rejects. One
+mutant (`num_slots` upper bound 11) survived the first pass and led to a boundary test (10
+accepted, 11 rejected).
+
+Still uncovered in `initialize_receiver`: two defensive header reads that cannot fail once the
+length check passed, the numpy-missing import branch, the bfloat16 fallback, and one loop-exit
+branch. The handlers' remaining misses are the no-op stubs for unused callbacks. All tests pass
+under four `pytest-randomly` seeds.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
@@ -732,7 +775,7 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (measured 715 for `initialize_receiver` in H0, est. ≈179 in F1) — planned as H4 |
+| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
