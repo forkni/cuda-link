@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Cross-process SHM activation barrier for cuda-link.
 
 Coordinates Python producer <-> TD-side Sender activation windows.
@@ -90,15 +92,37 @@ def open_or_create(*, create: bool) -> SharedMemory:
         return shm
 
 
+class BarrierHeaderError(RuntimeError):
+    """The segment's magic/version is not this protocol's (foreign or incompatible writer).
+
+    ``uninitialised`` is True for an all-zero header: a Sender created the segment
+    but has not yet written the header, which is transient rather than a mismatch.
+    """
+
+    def __init__(self, message: str, *, uninitialised: bool = False) -> None:
+        super().__init__(message)
+        self.uninitialised = uninitialised
+
+
 def read_state(shm: SharedMemory) -> tuple[int, int, int]:
     """Return (active_count, last_change_ns, barrier_skips).
 
     Uses _ST_STATE.unpack_from() on the raw memoryview — no intermediate bytes()
     copy per call.  Snapshot semantics are equivalent: reads the same 24 bytes in
     one pass (fields 0-5; skips the 32-byte reserved tail).
+
+    Raises:
+        BarrierHeaderError: magic/version do not match this protocol, so the
+            counters cannot be trusted.
     """
     fields = _ST_STATE.unpack_from(shm.buf, 0)
     # (magic, version, active_count, pad, last_change_ns, barrier_skips)
+    if fields[0] != MAGIC or fields[1] != VERSION:
+        raise BarrierHeaderError(
+            f"activation barrier header mismatch: magic=0x{fields[0]:08X} version={fields[1]} "
+            f"(expected 0x{MAGIC:08X} v{VERSION})",
+            uninitialised=fields[0] == 0 and fields[1] == 0,
+        )
     return fields[2], fields[4], fields[5]
 
 
@@ -287,6 +311,7 @@ class CheckerBarrier:
     shm: BarrierShmPort = field(default_factory=RealShmAdapter)
     _skip_log_last_ns: int = field(init=False, default=0, repr=False)
     _stale_log_last_ns: int = field(init=False, default=0, repr=False)
+    _header_warned: bool = field(init=False, default=False, repr=False)
 
     def evaluate(self) -> CheckerOutcome:
         """Return the current barrier state. Hot path."""
@@ -301,8 +326,16 @@ class CheckerBarrier:
                 return CheckerOutcome.SHM_ABSENT
         try:
             active_count, last_change_ns, _ = self.shm.read_state()
+        except BarrierHeaderError as exc:
+            # Fail open: a foreign segment must not block publishing. Warn once per
+            # mismatch streak; an uninitialised header is a transient creation race.
+            if not exc.uninitialised and not self._header_warned:
+                logger.warning("[ACTIVATION_BARRIER] %s — barrier ignored", exc)
+                self._header_warned = True
+            return CheckerOutcome.SHM_ABSENT
         except (OSError, RuntimeError, struct.error):
             return CheckerOutcome.SHM_ABSENT
+        self._header_warned = False
         if active_count <= 0:
             return CheckerOutcome.NO_SKIP
         now_ns = time.monotonic_ns()

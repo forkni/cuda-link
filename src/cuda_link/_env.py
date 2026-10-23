@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Typed helpers for CUDALINK_* environment variable reads.
 
 Each helper reads os.environ at call time so monkeypatch.setenv works reliably

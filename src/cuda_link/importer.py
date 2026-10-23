@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Importer — deep consumer-side module for CUDA IPC GPU memory.
 
@@ -33,7 +35,13 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
-from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS, CudaIpcError, ProducerTimeoutError, ProtocolError
+from .cuda_runtime_types import (
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+    CudaIpcError,
+    IPCEventOpenError,
+    ProducerTimeoutError,
+    ProtocolError,
+)
 from .shm_protocol import (
     IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
@@ -999,6 +1007,13 @@ class Importer:
 
         # Frame tracking
         self._last_write_idx = 0
+        # _last_write_idx before the latest acquire; restored if that frame's wait times out
+        self._prev_write_idx = 0
+        # write_idx whose wait already timed out in full; while it is still the pending
+        # frame, later calls only re-check the event once instead of blocking again
+        self._timed_out_write_idx: int | None = None
+        # True once an event-open connect failure was logged at WARNING this streak
+        self._event_open_warned = False
         self.frame_count = 0
         self.last_latency = 0.0
 
@@ -1054,7 +1069,9 @@ class Importer:
             try:
                 imp._connect()
             except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-                logger.info("Producer not yet available (%s) — will retry on get_frame*()", e)
+                imp._log_connect_failure(
+                    e, logging.INFO, "Producer not yet available (%s) — will retry on get_frame*()"
+                )
         else:
             imp._connect()
         return imp
@@ -1177,6 +1194,7 @@ class Importer:
             cupy=cupy_bufs,
             format_provisional=provisional,
         )
+        self._event_open_warned = False
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
     def _open_and_validate_shm(self, *, quiet: bool = False) -> tuple[SharedMemory, int, int]:
@@ -1301,7 +1319,12 @@ class Importer:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
+                        # A published event that won't open leaves the wait with nothing to
+                        # order against the producer, so every frame would be read unsynced.
+                        # Fail the connect (rolled back below) instead of degrading silently.
+                        raise IPCEventOpenError(
+                            f"Failed to open IPC event for slot {slot}: {e}", code=getattr(e, "code", None)
+                        ) from e
 
                 logger.info(
                     "Slot %d: GPU ptr=0x%016x, event=%s",
@@ -1422,8 +1445,23 @@ class Importer:
             self._connect(quiet=True)
             return True
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-            logger.debug("Connect attempt failed: %s", e)
+            self._log_connect_failure(e, logging.DEBUG, "Connect attempt failed: %s")
             return False
+
+    def _log_connect_failure(self, exc: Exception, level: int, msg: str) -> None:
+        """Log a failed connect at ``level``, except a failed IPC event open.
+
+        That one means the producer is up but this consumer cannot order against it,
+        which retrying quietly would hide: warn on the first failure of a streak, then
+        drop to DEBUG until a connect succeeds (``_connect`` clears the flag).
+        """
+        if isinstance(exc, IPCEventOpenError) and not self._event_open_warned:
+            self._event_open_warned = True
+            logger.warning("%s — will keep retrying", exc)
+        elif isinstance(exc, IPCEventOpenError):
+            logger.debug(msg, exc)
+        else:
+            logger.log(level, msg, exc)
 
     def _drive_retry(self) -> bool:
         """Advance the reconnect state machine by one frame. Returns True if just connected."""
@@ -1508,6 +1546,7 @@ class Importer:
         if result.state is SlotState.NO_FRAME:
             return None, ImportOutcome.NO_FRAME
 
+        self._prev_write_idx = self._last_write_idx
         self._last_write_idx = result.write_idx
 
         # A1 fix: the first NEW_FRAME after a connect that had to guess geometry
@@ -1553,6 +1592,13 @@ class Importer:
         policy = self._policy
         wait_start = time.perf_counter()
         deadline = wait_start + self._spec.timeout_ms / 1000
+
+        # This frame already burned a full timeout_ms: look at the event once instead of
+        # blocking again, so polling a stuck producer stays cheap.
+        if self._timed_out_write_idx == self._last_write_idx and conn.ipc_events[slot]:
+            if conn.cuda.query_event(conn.ipc_events[slot]):
+                return (time.perf_counter() - wait_start) * 1_000_000
+            raise ProducerTimeoutError(f"IPC event still not signaled (slot={slot})")
 
         # R5: native wait backend — only engaged when resolved AND this slot has
         # both an IPC event and an open doorbell (the backend needs both to reach
@@ -1663,8 +1709,11 @@ class Importer:
         """
         conn = self._conn
         h = conn.doorbell_handle if conn is not None else None
-        if h is None:
-            return False  # disabled / not opened / non-Windows → caller polls
+        if h is None or not self._policy.doorbell:
+            # Disabled / not opened / non-Windows → caller polls.  The handle is
+            # also opened for the native wait backend, so policy.doorbell must be
+            # checked here or a disabled doorbell would still block.
+            return False
 
         # Early return: frame already arrived since last get_frame() call.
         cur = read_write_idx(conn.shm_handle.buf)
@@ -1692,29 +1741,54 @@ class Importer:
         self.last_latency = latency_ms
         conn = self._conn
 
-        backend.prepare(self)
+        pushed = False
+        try:
+            backend.prepare(self)
 
-        _nvtx.push_range(backend.nvtx_slot_names[read_slot], backend.nvtx_color)
-        with _nvtx.verbose_range("cudalink.importer.event_wait", backend.nvtx_color):
-            try:
-                wait_us = backend.wait(conn, read_slot)
+            _nvtx.push_range(backend.nvtx_slot_names[read_slot], backend.nvtx_color)
+            pushed = True
+            with _nvtx.verbose_range("cudalink.importer.event_wait", backend.nvtx_color):
+                try:
+                    wait_us = backend.wait(conn, read_slot)
+                except TimeoutError:
+                    return self._on_wait_timeout(read_slot)
                 if debug:
                     self.total_wait_event_time += wait_us
-            except TimeoutError:
-                logger.error("Producer timeout — slot %d", read_slot)
+
+            frame = backend.materialize(conn, read_slot)
+
+            self._timed_out_write_idx = None
+            self.frame_count += 1
+            if debug:
+                frame_time = (time.perf_counter() - frame_start) * 1_000_000
+                self.total_get_frame_time += frame_time
+                self._log_frame_stats(backend.backend_name, read_slot, conn)
+
+            return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=frame)
+        except Exception:
+            # The frame was never delivered: un-consume it so the next call re-evaluates.
+            self._last_write_idx = self._prev_write_idx
+            raise
+        finally:
+            if pushed:
                 _nvtx.pop_range()
-                return ImportResult(outcome=ImportOutcome.TIMEOUT)
 
-        frame = backend.materialize(conn, read_slot)
+    def _on_wait_timeout(self, read_slot: int) -> ImportResult:
+        """Un-consume a frame whose wait timed out and pick the outcome.
 
-        self.frame_count += 1
-        if debug:
-            frame_time = (time.perf_counter() - frame_start) * 1_000_000
-            self.total_get_frame_time += frame_time
-            self._log_frame_stats(backend.backend_name, read_slot, conn)
-
-        _nvtx.pop_range()
-        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=frame)
+        The first timeout for a given write_idx reports TIMEOUT (and logs). While that
+        same frame stays pending, ``_wait_for_slot`` only re-checks the event, so a
+        repeat reports NO_FRAME without blocking or logging again.
+        """
+        timed_out_idx = self._last_write_idx
+        # Restore the pre-acquire cursor: next call re-evaluates write_idx (newest
+        # frame, or this slot again).
+        self._last_write_idx = self._prev_write_idx
+        if self._timed_out_write_idx == timed_out_idx:
+            return ImportResult(outcome=ImportOutcome.NO_FRAME)
+        logger.error("Producer timeout — slot %d", read_slot)
+        self._timed_out_write_idx = timed_out_idx
+        return ImportResult(outcome=ImportOutcome.TIMEOUT)
 
     def _begin_frame(self) -> tuple:
         """Common preamble for all get_frame* methods.
@@ -1897,6 +1971,7 @@ class Importer:
             # The restarted producer counts write_idx from scratch; a stale index from
             # the old session would make its first frame read as already consumed.
             self._last_write_idx = 0
+            self._timed_out_write_idx = None
 
             self._apply_format_change(new_fmt)
             # A1: a genuine SHM read makes geometry authoritative, so _try_acquire() stops
@@ -1906,7 +1981,7 @@ class Importer:
 
             logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-            logger.info("Reinitialize failed (%s) — waiting for producer restart", e)
+            self._log_connect_failure(e, logging.INFO, "Reinitialize failed (%s) — waiting for producer restart")
             self._partial_cleanup_for_reconnect()
 
     # ------------------------------------------------------------------

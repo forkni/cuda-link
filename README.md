@@ -617,9 +617,26 @@ maintainer's local automation, not a contributor requirement.
 
 ---
 
-## License
+## License, provenance and trademarks
 
-MIT License - See LICENSE file
+**License.** cuda-link is released under the [MIT License](LICENSE).
+Copyright (c) 2026 Alexander Korneev.
+
+**AI-assisted authorship.** Parts of this project's code and documentation were drafted
+with the help of Claude, an AI assistant. The author reviewed, edited, tested, selected
+and arranged that material and is responsible for it. No copyright is claimed over raw,
+unedited AI output.
+
+**Contributions.** Under
+[GitHub's Terms of Service, section D.6](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license),
+anything you contribute to this repository is licensed to the project and its users
+under the repository's MIT License ("inbound = outbound"). No separate contributor
+agreement or sign-off is required.
+
+**Trademarks.** NVIDIA and CUDA are trademarks or registered trademarks of NVIDIA
+Corporation. TouchDesigner is a trademark of Derivative Inc. These names are used only
+to identify the software cuda-link works with. cuda-link is an independent project and
+is not affiliated with, sponsored by or endorsed by NVIDIA Corporation or Derivative Inc.
 
 ## Credits
 

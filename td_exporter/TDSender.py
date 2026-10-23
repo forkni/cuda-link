@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDSender — Sender engine: thin TD-COMP adapter over the canonical Exporter.
 

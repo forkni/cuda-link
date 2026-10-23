@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 SHM protocol v0.5.0 — canonical source of truth for the CUDA IPC shared-memory layout.
 

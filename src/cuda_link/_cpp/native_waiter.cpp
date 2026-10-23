@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Alexander Korneev
+// SPDX-License-Identifier: MIT
 // native_waiter.cpp — native notification-wait accelerator for cuda-link's Importer.
 //
 // Implements the WaitBackend surface (see _wait_backend.py) as a pybind11 module named

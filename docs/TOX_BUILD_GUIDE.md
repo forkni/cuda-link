@@ -339,6 +339,10 @@ License: MIT
 
 ## Step 8: Save as .tox
 
+**Release checklist** (before saving a release build):
+
+- [ ] Embed a `LICENSE` Text DAT (MIT text + third-party credits) inside the .tox before export.
+
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
 3. Save to: `TOXES\CUDAIPCLink_v1.14.0.tox` inside the project root

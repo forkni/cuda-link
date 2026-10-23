@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDHost adapter — isolates all TouchDesigner runtime access behind a Protocol seam.
 
@@ -377,27 +379,35 @@ class RealTDHost(TDHost):
     def set_warning_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"WARNING: {msg}"
-        needs_cook = self._status_msg != full_msg
-        self._status_msg = full_msg
+        if self._status_msg == full_msg:
+            # Called every cook while the condition lasts. The COMP is already marked; only the
+            # Status par can have moved on (set_info_status), and the write dedups when it has not.
+            self._write_status_par(full_msg)
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _WARNING_COLOR
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # drop the badge the earlier error left
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def set_error_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"ERROR: {msg}"
-        needs_cook = self._status_msg != full_msg
-        self._status_msg = full_msg
+        if self._status_msg == full_msg:
+            self._write_status_par(full_msg)  # see set_warning_status
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _ERROR_COLOR
-            self._comp.addScriptError(msg)
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def clear_status(self) -> None:
         needs_cook = self._status_msg is not None

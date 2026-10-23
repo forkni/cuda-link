@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDReceiver - Receiver engine for CUDAIPCExtension.
 
@@ -34,22 +36,17 @@ from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
     FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
-    MAGIC_OFFSET,
-    MAGIC_SIZE,
     METADATA_SIZE,
-    NUM_SLOTS_OFFSET,
-    NUM_SLOTS_SIZE,
     PROTOCOL_MAGIC,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
-    VERSION_OFFSET,
-    VERSION_SIZE,
-    WRITE_IDX_OFFSET,
     Metadata,
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_magic,
+    read_num_slots,
     read_version,
     read_write_idx,
 )
@@ -673,10 +670,7 @@ class TDReceiverEngine:
 
             # Validate protocol magic number (new in this version)
             try:
-                magic = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]),
-                )[0]
+                magic = read_magic(shm_handle.buf)
                 if magic != PROTOCOL_MAGIC:
                     self._log(
                         f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
@@ -694,14 +688,8 @@ class TDReceiverEngine:
                 return False
 
             # Read header
-            ipc_version = struct.unpack(
-                "<Q",
-                bytes(shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]),
-            )[0]
-            num_slots = struct.unpack(
-                "<I",
-                bytes(shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]),
-            )[0]
+            ipc_version = read_version(shm_handle.buf)
+            num_slots = read_num_slots(shm_handle.buf)
 
             if num_slots == 0 or num_slots > 10:
                 self._log(
@@ -779,7 +767,7 @@ class TDReceiverEngine:
 
             # Log write_idx for diagnostics (0 = no frames sent yet, handles still valid)
             try:
-                write_idx_diag = struct.unpack_from("<I", shm_handle.buf, WRITE_IDX_OFFSET)[0]
+                write_idx_diag = read_write_idx(shm_handle.buf)
                 self._log(f"Producer write_idx={write_idx_diag} (0 = no frames sent yet)", force=True)
             except (struct.error, ValueError):
                 pass
@@ -845,8 +833,15 @@ class TDReceiverEngine:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        self._log(f"Failed to open IPC event for slot {slot}: {e}")
-                        ipc_events[slot] = None
+                        # Without the event the wait has nothing to order against the
+                        # sender, so every frame would be read unsynced: fail the init
+                        # (slot + 1 also releases this slot's just-opened mem handle).
+                        self._log(
+                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
+                            force=True,
+                        )
+                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -1277,9 +1272,13 @@ class TDReceiverEngine:
                 return None
             event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
             if any(event_handle_bytes):
-                with contextlib.suppress(RuntimeError, OSError):
+                try:
                     ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                     new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
+                except (RuntimeError, OSError) as e:
+                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
+                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                    return None
         return new_dev_ptrs, new_ipc_handles, new_ipc_events
 
     def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA IPC Wrapper for Windows
 Based on vLLM cuda_wrapper.py pattern

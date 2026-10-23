@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 # Stub for TouchDesigner ambient globals — checker-only, never imported at runtime.
 #
 # TD injects these names into the COMP namespace at interpreter startup.

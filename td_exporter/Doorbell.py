@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Win32 named auto-reset event doorbell for single-consumer frame notification.
 
 The producer calls create_doorbell() once at open() and signal() after each

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA Runtime Types — ctypes structs, type aliases, and error codes for CUDA IPC.
 
@@ -208,6 +210,14 @@ class CudaLinkError(RuntimeError):
 
 class CudaIpcError(CudaLinkError):
     """A CUDA driver/runtime call (alloc, IPC handle, event, memcpy, ...) failed."""
+
+
+class IPCEventOpenError(CudaIpcError):
+    """A producer-published IPC event handle could not be opened by the consumer.
+
+    Internal: lets the reconnect driver warn once per failure streak instead of
+    logging every retry. Callers keep catching CudaIpcError / RuntimeError.
+    """
 
 
 class ProtocolError(CudaLinkError, ValueError):

@@ -11,13 +11,16 @@ carrying `.status.name` / `.waited_us` satisfies what `_wait_for_slot` needs.
 from __future__ import annotations
 
 import ctypes
+import struct
 from dataclasses import dataclass
 from enum import Enum, auto
 
 import pytest
 from fakes import make_connected_importer
 
+from cuda_link import importer as importer_mod
 from cuda_link._importer_port import ImportOutcome, ImportPolicy
+from cuda_link.shm_protocol import WRITE_IDX_OFFSET
 
 
 class _FakeStatus(Enum):
@@ -149,6 +152,87 @@ def test_timeout_status_raises_timeout_error_same_as_python_path(managed_importe
     # test_outcome_timeout_raises_no_exception_returns_result in test_importer.py).
     assert result.outcome is ImportOutcome.TIMEOUT
     assert result.frame is None
+
+
+def test_timeout_leaves_frame_unconsumed_for_next_call(managed_importer) -> None:
+    """A frame whose wait timed out was never delivered: the cursor must not advance past it."""
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    before = imp._last_write_idx
+
+    result = imp.get_frame_numpy()
+    assert result.outcome is ImportOutcome.TIMEOUT
+    assert imp._last_write_idx == before
+
+    # Same slot is still pending: the next call re-acquires it but only re-checks the
+    # event once (still unsignaled), so it reports NO_FRAME without waiting again.
+    imp._conn.cuda.query_event.return_value = False
+    again = imp.get_frame_numpy()
+    assert again.outcome is ImportOutcome.NO_FRAME
+    assert len(backend.calls) == 1
+    assert imp._last_write_idx == before
+
+
+def test_recheck_after_timeout_delivers_frame_once_event_fires(managed_importer) -> None:
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    assert imp.get_frame_numpy().outcome is ImportOutcome.TIMEOUT
+
+    imp._conn.cuda.query_event.return_value = True  # producer resumed: event signaled
+    result = imp.get_frame_numpy()
+
+    assert result.outcome is ImportOutcome.NEW_FRAME
+    assert len(backend.calls) == 1  # the re-check never re-entered the blocking backend
+    assert imp._timed_out_write_idx is None
+    assert imp.frame_count == 1
+
+
+def test_newer_frame_after_timeout_gets_a_full_wait(managed_importer) -> None:
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    assert imp.get_frame_numpy().outcome is ImportOutcome.TIMEOUT
+
+    struct.pack_into("<I", imp._conn.shm_handle.buf, WRITE_IDX_OFFSET, 2)  # producer published again
+    result = imp.get_frame_numpy()
+
+    assert result.outcome is ImportOutcome.TIMEOUT  # a new frame is waited on in full, not re-checked
+    assert len(backend.calls) == 2
+    assert imp._timed_out_write_idx == 2
+
+
+def test_failure_after_acquire_restores_cursor_and_balances_nvtx(managed_importer, monkeypatch) -> None:
+    """An exception past the wait must not consume the frame or leak the NVTX range."""
+    imp = managed_importer(write_idx=1)
+    imp._conn.cuda.query_event.return_value = True
+    imp._conn.ipc_events[0] = ctypes.c_uint64(0x1)
+    depth = {"n": 0}
+    real_push, real_pop = importer_mod._nvtx.push_range, importer_mod._nvtx.pop_range
+
+    def push(*a, **kw):
+        depth["n"] += 1
+        return real_push(*a, **kw)
+
+    def pop(*a, **kw):
+        depth["n"] -= 1
+        return real_pop(*a, **kw)
+
+    def boom(self, conn, slot):
+        raise RuntimeError("materialize failed")
+
+    monkeypatch.setattr(importer_mod._nvtx, "push_range", push)
+    monkeypatch.setattr(importer_mod._nvtx, "pop_range", pop)
+    monkeypatch.setattr(importer_mod._NumpyBackend, "materialize", boom)
+    before = imp._last_write_idx
+
+    with pytest.raises(RuntimeError, match="materialize failed"):
+        imp.get_frame_numpy()
+
+    assert imp._last_write_idx == before
+    assert imp.frame_count == 0
+    assert depth["n"] == 0
 
 
 def test_cuda_error_raises_runtime_error_not_timeout(managed_importer) -> None:

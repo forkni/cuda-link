@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Exporter — deep module for zero-copy GPU frame export via CUDA IPC.
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import operator
 import threading
 import time
 from ctypes import c_void_p
@@ -118,6 +121,19 @@ def _read_hws_mode() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_device_ptr(ptr: object) -> int:
+    """Return ``ptr`` as an int, or raise ValueError naming the offending value.
+
+    Uses ``operator.index`` so only true integers (``int``, numpy ints, anything with
+    ``__index__``) pass; ``int()`` would silently truncate a float or parse a string.
+    """
+    try:
+        return operator.index(ptr)  # type: ignore[call-overload]
+    except TypeError as exc:
+        hint = " (pass .value)" if isinstance(ptr, c_void_p) else ""
+        raise ValueError(f"export: frame.ptr must be an int device pointer, got {ptr!r}{hint}") from exc
+
+
 class Exporter:
     """Deep module: zero-copy GPU frame export over a CUDA IPC ring buffer.
 
@@ -136,6 +152,8 @@ class Exporter:
             raise ValueError(f"Unsupported dtype: {spec.dtype!r}. Must be one of {list(DtypeCodec.supported())}")
         if not (0 < spec.num_slots <= 10):
             raise ValueError(f"num_slots must be 1-10, got {spec.num_slots}")
+        if spec.height <= 0 or spec.width <= 0:
+            raise ValueError(f"height and width must be positive, got {spec.height}x{spec.width}")
 
         self._spec = spec
         self._policy = policy
@@ -177,7 +195,6 @@ class Exporter:
 
         # Cached layout offsets (set by _write_handles_to_shm)
         self._layout: SHMLayout = SHMLayout(spec.num_slots)
-        self._ts_offset: int = self._layout.timestamp_offset
         self._shutdown_offset: int = self._layout.shutdown_offset
 
         # Device-affinity cache
@@ -242,6 +259,29 @@ class Exporter:
     # Initialization (called only from open())
     # ------------------------------------------------------------------
 
+    def _check_existing_shm_size(self) -> None:
+        """Reject a live segment too small for this layout, before any GPU allocation.
+
+        The segment is not ours to unlink: another process may still hold it. (On POSIX
+        with Python < 3.13 any attach registers the name with ``resource_tracker``, which
+        unlinks it when this process exits; that applies to every attach in the package.)
+        """
+        try:
+            existing = SharedMemory(name=self._spec.shm_name)
+        except FileNotFoundError:
+            return
+        try:
+            existing_size = existing.size
+        finally:
+            existing.close()
+        required = self._layout.total_size
+        if existing_size < required:
+            raise RuntimeError(
+                f"Existing SharedMemory {self._spec.shm_name!r} is {existing_size} bytes but "
+                f"{required} are required for {self._spec.num_slots} slots; "
+                "close the other producer or use a different shm_name"
+            )
+
     def _initialize(self) -> None:
         actual_device = self._cuda.get_device()
         if actual_device != self._spec.device:
@@ -251,6 +291,7 @@ class Exporter:
                 "cudaSetDevice() with a different index before Exporter.open()."
             )
         logger.info("Loaded CUDA runtime on device %d", actual_device)
+        self._check_existing_shm_size()
 
         # Raises only when the driver reports CUDA IPC as flatly unsupported on this
         # device; Windows WDDM (this project's normal, undocumented-but-validated
@@ -332,9 +373,10 @@ class Exporter:
             self.shm_handle = SharedMemory(name=self._spec.shm_name, create=True, size=shm_size)
             logger.info("Created SharedMemory: %s (%d bytes)", self._spec.shm_name, shm_size)
 
-        self._write_handles_to_shm()
+        # Metadata first: the version bump inside _write_handles_to_shm is the publish
+        # point, so a consumer that sees the new version also sees the new metadata.
         self._write_metadata_to_shm()
-        self._ts_offset = self._layout.timestamp_offset
+        self._write_handles_to_shm()
         self._initialized = True
 
         if self._policy.doorbell:
@@ -372,7 +414,6 @@ class Exporter:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
         _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
-        new_version = bump_version(self.shm_handle.buf)
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
         for slot in range(self._spec.num_slots):
@@ -384,6 +425,8 @@ class Exporter:
             if self.ipc_event_handles[slot]:
                 self.shm_handle.buf[evt_off : evt_off + IPC_HANDLE_SIZE] = bytes(self.ipc_event_handles[slot].reserved)
         clear_shutdown(self.shm_handle.buf, self._layout)
+        # Last write: consumers re-read everything above when they see the new version.
+        new_version = bump_version(self.shm_handle.buf)
         logger.info("Wrote IPC handles v%d to SharedMemory", new_version)
 
     def _write_metadata_to_shm(self) -> None:
@@ -624,7 +667,7 @@ class Exporter:
                     self._unordered_export_warned = True
 
             # Device-affinity pointer check (first appearance; capped cache)
-            gpu_ptr_int = frame.ptr if isinstance(frame.ptr, int) else int(frame.ptr)
+            gpu_ptr_int = frame.ptr if isinstance(frame.ptr, int) else _coerce_device_ptr(frame.ptr)
             if gpu_ptr_int not in self._ptr_device_cache:
                 self._profile.record("ptr_cache_miss", 1.0)
                 attrs = _cuda.pointer_get_attributes(gpu_ptr_int)
