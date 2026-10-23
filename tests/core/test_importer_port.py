@@ -6,6 +6,8 @@ These tests run entirely without a GPU. Mirrors tests/test_exporter_port.py.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import pytest
 from typing_extensions import get_protocol_members
 
@@ -114,6 +116,129 @@ def test_import_policy_low_latency() -> None:
     assert pol.d2h_num_streams == 2
     assert pol.d2h_stream_high_priority is True
     assert pol.allow_pageable_fallback is False
+
+
+# Documented defaults (docs/ENV_VARS.md; the backoff ladder is documented only on the field),
+# written out literally rather than read from the source.
+_IMPORT_DEFAULTS = {
+    "wait_spin_us": 200,
+    "d2h_num_streams": 1,
+    "d2h_stream_high_priority": False,
+    "allow_pageable_fallback": False,
+    "d2h_pipelined": False,
+    "torch_gpu_wait": False,
+    "torch_gpu_wait_adaptive": False,
+    "gpu_wait_adaptive_window": 120,
+    "gpu_wait_adaptive_sleep_pct": 5,
+    "debug": False,
+    "reconnect_enabled": True,
+    "reconnect_max_attempts": 20,
+    "reconnect_backoff_frames": (1, 2, 4, 8, 16, 32, 64, 120),
+    "doorbell": False,
+    "wait_backend": "auto",
+}
+
+# env var -> policy field
+_IMPORT_BOOL_ENV = {
+    "CUDALINK_ALLOW_PAGEABLE_FALLBACK": "allow_pageable_fallback",
+    "CUDALINK_D2H_PIPELINED": "d2h_pipelined",
+    "CUDALINK_TORCH_GPU_WAIT": "torch_gpu_wait",
+    "CUDALINK_TORCH_GPU_WAIT_ADAPTIVE": "torch_gpu_wait_adaptive",
+    "CUDALINK_IMPORT_RECONNECT": "reconnect_enabled",
+    "CUDALINK_DOORBELL": "doorbell",
+}
+_IMPORT_INT_ENV = {
+    "CUDALINK_WAIT_SPIN_US": "wait_spin_us",
+    "CUDALINK_D2H_STREAMS": "d2h_num_streams",
+    "CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW": "gpu_wait_adaptive_window",
+    "CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT": "gpu_wait_adaptive_sleep_pct",
+    "CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS": "reconnect_max_attempts",
+}
+
+
+@pytest.fixture
+def clean_import_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    for var in (*_IMPORT_BOOL_ENV, *_IMPORT_INT_ENV, "CUDALINK_D2H_STREAM_PRIO", "CUDALINK_WAIT_BACKEND"):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_import_policy_every_default() -> None:
+    assert asdict(ImportPolicy()) == _IMPORT_DEFAULTS
+
+
+def test_import_policy_from_env_unset_every_default(clean_import_env: pytest.MonkeyPatch) -> None:
+    assert asdict(ImportPolicy.from_env()) == _IMPORT_DEFAULTS
+
+
+@pytest.mark.parametrize(
+    ("var", "raw", "field", "expected"),
+    [(var, raw, field, raw == "1") for var, field in _IMPORT_BOOL_ENV.items() for raw in ("1", "0")],
+    ids=[f"{field}-{raw}" for field in _IMPORT_BOOL_ENV.values() for raw in ("1", "0")],
+)
+def test_import_policy_from_env_bool_sets_only_its_field(
+    clean_import_env: pytest.MonkeyPatch, var: str, raw: str, field: str, expected: bool
+) -> None:
+    clean_import_env.setenv(var, raw)
+    assert asdict(ImportPolicy.from_env()) == {**_IMPORT_DEFAULTS, field: expected}
+
+
+@pytest.mark.parametrize(
+    ("var", "field"),
+    list(_IMPORT_INT_ENV.items()),
+    ids=list(_IMPORT_INT_ENV.values()),
+)
+def test_import_policy_from_env_int_sets_only_its_field(
+    clean_import_env: pytest.MonkeyPatch, var: str, field: str
+) -> None:
+    clean_import_env.setenv(var, "7")
+    assert asdict(ImportPolicy.from_env()) == {**_IMPORT_DEFAULTS, field: 7}
+
+
+@pytest.mark.parametrize("raw", ["0", "-3"], ids=["zero", "negative"])
+def test_import_policy_from_env_d2h_streams_clamped_to_one(clean_import_env: pytest.MonkeyPatch, raw: str) -> None:
+    clean_import_env.setenv("CUDALINK_D2H_STREAMS", raw)
+    assert ImportPolicy.from_env().d2h_num_streams == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "high"),
+    [("high", True), ("normal", False), ("zzz", False), ("", False)],
+    ids=["high", "normal", "unknown", "empty"],
+)
+def test_import_policy_from_env_d2h_stream_prio(clean_import_env: pytest.MonkeyPatch, raw: str, high: bool) -> None:
+    """Only the literal "high" raises the D2H stream priority."""
+    clean_import_env.setenv("CUDALINK_D2H_STREAM_PRIO", raw)
+    assert ImportPolicy.from_env().d2h_stream_high_priority is high
+
+
+def test_import_policy_from_env_wait_backend(clean_import_env: pytest.MonkeyPatch) -> None:
+    clean_import_env.setenv("CUDALINK_WAIT_BACKEND", "native")
+    assert ImportPolicy.from_env().wait_backend == "native"
+
+
+def test_import_policy_for_testing_every_field() -> None:
+    assert asdict(ImportPolicy.for_testing()) == {
+        **_IMPORT_DEFAULTS,
+        "wait_spin_us": 0,
+        "d2h_num_streams": 1,
+        "d2h_stream_high_priority": False,
+        "allow_pageable_fallback": True,
+        "debug": False,
+        "reconnect_enabled": False,
+        "wait_backend": "python",
+    }
+
+
+def test_import_policy_low_latency_every_field() -> None:
+    assert asdict(ImportPolicy.low_latency()) == {
+        **_IMPORT_DEFAULTS,
+        "wait_spin_us": 2000,
+        "d2h_num_streams": 2,
+        "d2h_stream_high_priority": True,
+        "allow_pageable_fallback": False,
+        "debug": False,
+    }
 
 
 # ---------------------------------------------------------------------------

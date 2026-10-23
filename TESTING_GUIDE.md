@@ -764,6 +764,50 @@ length check passed, the numpy-missing import branch, the bfloat16 fallback, and
 branch. The handlers' remaining misses are the no-op stubs for unused callbacks. All tests pass
 under four `pytest-randomly` seeds.
 
+### I4 — Mutation testing on `_env`, `_exporter_port` and `_importer_port`
+
+The deferred "ready now" targets: no direct or transitive mocks, whole-module cosmic-ray runs.
+Before the new tests, the existing default and `from_env` tests covered only 5-6 fields of each
+policy, so most survivors were unchecked defaults and env fallbacks.
+
+| Target | Measure | Before | After |
+|--------|---------|--------|-------|
+| `_env.py` | Mutants | 67 | 67 |
+| | Survivors, genuine / pragma'd | 3 / 11 | 0 / 11 |
+| | Score | 94.6 % | **100 %** |
+| `_exporter_port.py` | Mutants | 114 | 114 |
+| | Survivors, genuine / pragma'd | 29 / 50 | 0 / 50 |
+| | Score | 54.7 % | **100 %** |
+| `_importer_port.py` | Mutants | 88 | 88 |
+| | Survivors, genuine / pragma'd | 41 / 1 | 0 / 1 |
+| | Score | 52.9 % | **100 %** |
+| No-GPU selection | Tests | 1490 passed + 1 skipped | 1549 passed + 1 skipped (+59) |
+| Branch coverage, combined | | 93.39 % | 93.39 % (unchanged: these lines already ran) |
+| Smell scanner | | 19 | 19 (ratchet OK) |
+
+What changed:
+
+- **Kill-tests.** `test_exporter_port.py` and `test_importer_port.py` now compare every field of
+  `ExportPolicy` / `ImportPolicy` against a literal table taken from `docs/ENV_VARS.md` (the
+  backoff ladder is documented only on the field): the dataclass defaults, `from_env()` with every
+  variable unset, one test per variable setting `"1"` and `"0"` that must change only its own
+  field, and both presets field by field. Also added: `FrameSpec.extra_flags`, the
+  `barrier_stale_ns` value, `LIB_STREAM_PRIO` / `D2H_STREAM_PRIO` against `normal`, `high`, an
+  unknown value and empty (separates `!=` from `<` / `>`), and `D2H_STREAMS` of `0` / `-3`
+  clamping to 1. `test_env.py` gains a keyword-only-default check for the three typed helpers.
+- **Proven-equivalent, pragma'd.** Annotation operator mutants (`int | None` becomes
+  `int + None`; never evaluated under `from __future__ import annotations`), the default arguments
+  of `CudaPort` Protocol stubs (never called; the real defaults live in the adapters), and
+  `default=1` vs `0` inside `max(1, env_int(...))` for `D2H_STREAMS`. A line pragma hides every
+  mutant on its line; the justification sits next to each.
+- Verified by re-running cosmic-ray on the two port modules after the tests and pragmas landed
+  (`cr-filter-pragma` applied before `cr-report`); `_env` was verified earlier in the phase. The
+  `src` and `td_exporter` diff is comments only; the mirror was re-synced.
+- New configs `cr-env.toml`, `cr-exporter_port.toml`, `cr-importer_port.toml` use the project venv
+  and `--randomly-seed=1`.
+
+Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
@@ -777,7 +821,7 @@ under four `pytest-randomly` seeds.
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
 | TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
-| Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
+| Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
 | Ruff version drift | Before the `C901` ratchet is trusted long-term | Resolved in Phase G: pinned to 0.17.0 across `uv.lock`, `.pre-commit-config.yaml`, and CI |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

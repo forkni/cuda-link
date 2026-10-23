@@ -1,0 +1,16 @@
+# Mutation-testing config for src/cuda_link/_importer_port.py (cosmic-ray 8.x).
+# Workflow: cosmic-ray init cr-importer_port.toml cr-importer_port.sqlite
+#           cosmic-ray baseline cr-importer_port.toml
+#           cosmic-ray exec cr-importer_port.toml cr-importer_port.sqlite
+#           cr-report cr-importer_port.sqlite
+# The sqlite session files are regenerated artifacts — gitignored (cr-*.sqlite).
+[cosmic-ray]
+module-path = "src/cuda_link/_importer_port.py"
+timeout = 30.0
+excluded-modules = []
+# Absolute interpreter path: bare "python" resolves through the Windows App Paths
+# registry to a potentially different environment.
+test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_importer_port.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
+
+[cosmic-ray.distributor]
+name = "local"

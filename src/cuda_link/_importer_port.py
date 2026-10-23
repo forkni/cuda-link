@@ -112,7 +112,8 @@ class ImportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
             wait_spin_us=env_int("CUDALINK_WAIT_SPIN_US", default=200),
-            d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),
+            # default=1 vs 0 is equivalent: max(1, ...) clamps either to 1
+            d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),  # pragma: no mutate
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
             allow_pageable_fallback=env_bool("CUDALINK_ALLOW_PAGEABLE_FALLBACK", default=False),
             d2h_pipelined=env_bool("CUDALINK_D2H_PIPELINED", default=False),

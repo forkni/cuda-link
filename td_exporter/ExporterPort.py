@@ -166,6 +166,9 @@ class FrameOutcome(Enum):
 
 
 @runtime_checkable
+# Mutation testing: the `# pragma: no mutate` marks on the signatures below cover annotations (never
+# evaluated, `from __future__ import annotations`) and Protocol-stub default arguments (never
+# called -- the real defaults live in the adapters), so mutants there are equivalent.
 class CudaPort(Protocol):
     """Structural interface that Exporter requires from the CUDA runtime.
 
@@ -240,7 +243,9 @@ class CudaPort(Protocol):
         ...
 
     def create_stream_with_priority(
-        self, flags: int = StreamFlags.NON_BLOCKING, priority: int | None = None
+        self,
+        flags: int = StreamFlags.NON_BLOCKING,  # pragma: no mutate
+        priority: int | None = None,  # pragma: no mutate
     ) -> CUDAStream_t:
         """Create a high-priority stream. None → highest priority on this device."""
         ...
@@ -249,7 +254,7 @@ class CudaPort(Protocol):
         """Destroy a CUDA stream."""
         ...
 
-    def stream_wait_event(self, stream: CUDAStream_t, event: CUDAEvent_t, flags: int = 0) -> None:
+    def stream_wait_event(self, stream: CUDAStream_t, event: CUDAEvent_t, flags: int = 0) -> None:  # pragma: no mutate
         """GPU-side: make stream wait until event has been recorded (non-blocking CPU)."""
         ...
 
@@ -275,7 +280,7 @@ class CudaPort(Protocol):
         """Export an IPC event handle for sharing with another process."""
         ...
 
-    def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:
+    def record_event(self, event: CUDAEvent_t, stream: CUDAStream_t | None = None) -> None:  # pragma: no mutate
         """Record event on stream (None → default stream)."""
         ...
 
@@ -305,7 +310,7 @@ class CudaPort(Protocol):
         """Warn and raise if a sticky CUDA error is latched. No-op when all is well."""
         ...
 
-    def check_ipc_capability(self, device: int | None = None) -> str | None:
+    def check_ipc_capability(self, device: int | None = None) -> str | None:  # pragma: no mutate
         """Probe CUDA IPC support for this device; return a diagnostic string to log.
 
         Raises only when the driver reports IPC as flatly unsupported (not merely
@@ -328,7 +333,7 @@ class CudaPort(Protocol):
         """End capture; return the template graph."""
         ...
 
-    def graph_instantiate(self, graph: CUDAGraph_t, flags: int = 0) -> CUDAGraphExec_t:
+    def graph_instantiate(self, graph: CUDAGraph_t, flags: int = 0) -> CUDAGraphExec_t:  # pragma: no mutate
         """Instantiate a graph template into an executable graph."""
         ...
 
@@ -402,7 +407,7 @@ class CudaPort(Protocol):
         """Free pinned host memory allocated with malloc_host_alloc()."""
         ...
 
-    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
+    def host_register(self, ptr: int, size: int, flags: int = 0) -> None:  # pragma: no mutate
         """Page-lock an existing host allocation via cudaHostRegister."""
         ...
 
