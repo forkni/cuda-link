@@ -118,9 +118,48 @@ must be a narrow per-file sub-config or a line-level `# type: ignore[code]`
   `td_exporter/**` to path triggers. Pre-commit hook widened to
   `^(src/cuda_link|td_exporter)/.*\.py$`.
 
+## Deferred: tensor-shape typing (2026-10-24)
+
+Pyrefly 1.4 (2026-10-15) ships experimental static tensor-shape checking
+(`Tensor[[B, C, H, W]]`, `IntVar`, shape arithmetic) through the
+`pyrefly-torch-stubs` + `pyrefly-shape-extensions` packages. It was evaluated
+for this repo and **deferred**; `torch` stays in `replace-imports-with-any`
+(decision point 2). Reasons, in order of weight:
+
+- **Deployment model.** Shape checking only works when pyrefly resolves the
+  stubs' `torch` instead of treating it as `Any`. Our torch surface is a
+  best-effort optional path exercised inside TouchDesigner's embedded Python
+  and from a torch-less CI job (`ci.yml` → `pyrefly check` runs under
+  `uv run --no-sync` with no torch installed). Making the stubs resolvable
+  means a torch-flavoured type-check environment and a second baseline
+  regeneration, for a handful of functions that return `object`
+  (`Importer.get_frame`, `get_frame_cupy`, `TorchBuffers`).
+- **Stub lockstep.** `pyrefly`, `pyrefly-shape-extensions` and
+  `pyrefly-torch-stubs` must be pinned to the same version and bumped together
+  with a baseline refresh. Today pyrefly is a plain dev pin with no companion
+  packages; the lockstep is a recurring maintenance cost we do not want for
+  the current torch footprint.
+- **Numpy is the real tensor surface here**, and `pyrefly-numpy-stubs`
+  requires Python >= 3.12 while `requires-python` is `>=3.9` and the checker
+  runs at 3.11. Numpy shapes cannot be adopted on this interpreter floor, so
+  only the torch half would benefit.
+
+Where it is adopted instead: `StreamDiffusion` (latent-path contracts) and
+`voro-engine` (detection-helper contracts), both of which do tensor math at
+module level. The porting procedure lives in the
+`add-shape-types-to-torch-model` skill in `claude-dotfiles`.
+
+First candidate when this is revisited: `Importer.get_frame` returning
+`Tensor[[H, W, C]]` (and `get_frame_cupy` its CuPy twin), with the frame
+geometry taken from `CUDAMemoryShape`. The symbols would live under
+`TYPE_CHECKING` only, so no runtime dependency on `shape_extensions` is added
+and TouchDesigner's embedded Python is unaffected.
+
 ## Reopen condition
 
-Revisit if pyrefly is replaced, if the optional-dependency strategy changes, or
+Revisit if pyrefly is replaced, if the optional-dependency strategy changes, if
+the interpreter floor reaches Python 3.12 or torch becomes a required dependency
+(both unblock the deferred tensor-shape typing above), or
 if the excluded pure-TD glue scripts (`callbacks_template.py`,
 `parexecute_callbacks.py`, `script_top_callbacks.py`, example launchers) are
 brought under checking (which would require per-file handling of the full
