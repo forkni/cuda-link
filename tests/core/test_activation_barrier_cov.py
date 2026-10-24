@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 import types
 
 import pytest
@@ -849,3 +850,72 @@ def test_checker_warns_again_after_header_recovers(caplog: pytest.LogCaptureFixt
         assert sum("header mismatch" in r.getMessage() for r in caplog.records) == 2
     finally:
         adapter.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase I2 (2026-10-22) — survivors from the post-#83 mutation re-run.
+# ---------------------------------------------------------------------------
+
+
+def test_barrier_header_error_uninitialised_defaults_false_kills_default_mutant():
+    assert BarrierHeaderError("m").uninitialised is False
+
+
+def test_barrier_header_error_uninitialised_is_keyword_only_kills_separator_mutant():
+    with pytest.raises(TypeError):
+        BarrierHeaderError("m", True)  # type: ignore[misc]
+
+
+def test_read_state_mismatch_message_names_magic_and_version_kills_index_mutants():
+    # active_count=1 and barrier_skips=0 differ from the version (7) and the magic, so any wrong field
+    # index lands a visibly different number in the message.
+    adapter = _attached_adapter_with_header(0xDEADBEEF, 7)
+    try:
+        with pytest.raises(BarrierHeaderError) as excinfo:
+            read_state(adapter._shm)
+        assert "magic=0xDEADBEEF version=7 " in str(excinfo.value)
+    finally:
+        adapter.close()
+
+
+def test_increment_stamps_last_change_ns_at_its_own_offset_kills_offset_mutant():
+    shm = open_or_create(create=True)
+    try:
+        before = time.monotonic_ns()
+        increment(shm, pid=1)
+        after = time.monotonic_ns()
+        _, last_change_ns, _ = read_state(shm)
+        assert before <= last_change_ns <= after
+    finally:
+        shm.close()
+
+
+def test_bump_skip_wraps_u32_to_zero_kills_mask_mutant():
+    shm = open_or_create(create=True)
+    try:
+        struct.pack_into("<I", shm.buf, 24, 0xFFFFFFFF)  # barrier_skips
+        bump_skip(shm)
+        assert struct.unpack_from("<I", shm.buf, 24)[0] == 0
+    finally:
+        shm.close()
+
+
+@pytest.mark.parametrize(
+    ("age_ns", "expected"),
+    [(1_049_999_999, "age=1.0s"), (1_050_000_000, "age=1.1s")],
+    ids=["just-under-rounding-edge", "on-rounding-edge"],
+)
+def test_log_stale_age_uses_exactly_1e9_ns_per_second_kills_divisor_mutants(caplog, age_ns, expected):
+    # %.1f rounds at 1.05 s: a divisor of 999_999_999 or 1_000_000_001 flips one of the two cases.
+    checker = CheckerBarrier(enabled=True, stale_ns=1)
+    with caplog.at_level(logging.WARNING):
+        checker._log_stale(age_ns, active_count=1, last_change_ns=0)
+    assert expected in caplog.records[0].getMessage()
+
+
+def test_checker_barrier_header_warned_is_private_and_defaults_false_kills_field_mutants():
+    checker = CheckerBarrier(enabled=True, stale_ns=1)
+    assert "_header_warned" not in repr(checker)
+    assert checker._header_warned is False
+    with pytest.raises(TypeError):
+        CheckerBarrier(enabled=True, stale_ns=1, _header_warned=True)

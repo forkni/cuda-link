@@ -19,7 +19,7 @@ timeout = 60.0
 excluded-modules = []
 # Absolute interpreter path: bare "python" resolves through the Windows App Paths
 # registry to a potentially different environment.
-test-command = "C:/Users/INTER/AppData/Local/Programs/Python/Python311/python.exe -m pytest tests/core/test_activation_barrier.py tests/core/test_activation_barrier_checker.py tests/core/test_activation_barrier_holder.py tests/core/test_activation_barrier_cov.py -x -q --tb=no -p no:cacheprovider"
+test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_activation_barrier.py tests/core/test_activation_barrier_checker.py tests/core/test_activation_barrier_holder.py tests/core/test_activation_barrier_cov.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
 
 [cosmic-ray.distributor]
 name = "local"

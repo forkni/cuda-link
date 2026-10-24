@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link"
-version = "1.14.0"
+version = "1.14.1"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,11 @@ nvml = ["nvidia-ml-py>=12.535"]
 all = ["cuda-link[torch,numpy,cupy,nvml]"]
 dev = [
     "cuda-link[all]",
+    # Dev/CI pin only -- the published `torch` extra stays `>=2.0`. 2.11.0 is the newest
+    # release with a cu128 wheel (download.pytorch.org/whl/cu128); PyPI's Windows wheels
+    # are CPU-only, so a GPU box installs the CUDA build by hand and runs `uv run --no-sync`.
+    # Python 3.9 is excluded: torch 2.11 needs >=3.10, and the lock keeps 2.8.0 there.
+    "torch==2.11.0; python_version >= '3.10'",
     "pytest>=7.0",
     "pytest-randomly>=3.15",
     "pytest-cov>=5.0",
@@ -322,19 +327,17 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Soft regression gate, re-measured 2026-08-20 (1196 tests, -m "not requires_cuda and
-# not requires_native", branch=true, bare `--cov` so `source` above applies: cuda_link +
-# TD-only td_exporter files) after omitting the 4 untestable TD demo/benchmark scripts
-# above: 87.10%. The cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's
-# invocation); the gate is set against the weaker combined run so both invocations pass.
-# The remaining gap is the TD integration layer (TDReceiver.py at 51% is the largest —
-# see TESTING_GUIDE.md F1 triage / deferral table).
-# fail_under = floor(87.10) - 1.5, rounded down = 85. Replaces the old floor(baseline) - 3
-# convention with a tighter ~1.5-point margin now that the denominator excludes code that
-# was never testable in the first place (the previous 3-point margin was partly
-# compensating for those same 4 files dragging the number down). Raise incrementally as
-# coverage grows; never lower without a documented reason.
-fail_under = 85
+# Soft regression gate, re-measured 2026-10-22 (1490 tests, -m "not requires_cuda and
+# not requires_native and not integration and not quarantine", branch=true, bare `--cov`
+# so `source` above applies: cuda_link + TD-only td_exporter files): 93.39%. The
+# cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's invocation); the gate is
+# set against the weaker combined run so both invocations pass. The remaining gap is the
+# TD integration layer (TDReceiver.py at 82% is the largest — see TESTING_GUIDE.md
+# deferral table).
+# fail_under = floor(93.39) - 1.5, rounded down = 91 (was 89 at 90.76%, and 85 at 87.10%,
+# 2026-08-20; Phase I3 added the initialize_receiver and par-exec handler tests). Raise
+# incrementally as coverage grows; never lower without a documented reason.
+fail_under = 91
 show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------

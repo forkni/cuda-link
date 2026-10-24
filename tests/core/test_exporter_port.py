@@ -8,6 +8,8 @@ is available, ensuring both adapters satisfy the same behavioural contract.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import pytest
 from typing_extensions import get_protocol_members
 
@@ -102,6 +104,110 @@ def test_export_policy_low_latency() -> None:
     assert pol.flush_probe is False
     assert pol.use_graphs is True
     assert pol.high_priority_stream is True
+
+
+# Documented defaults (docs/ENV_VARS.md), written out literally rather than read from the source.
+_EXPORT_DEFAULTS = {
+    "export_sync": False,
+    "use_graphs": True,
+    "flush_probe": True,
+    "strict_device": False,
+    "require_source_sync": False,
+    "barrier_enabled": True,
+    "barrier_stale_ns": 5_000_000_000,
+    "high_priority_stream": True,
+    "export_profile": False,
+    "doorbell": False,
+}
+
+# env var -> policy field, for the plain "1"/"0" booleans
+_EXPORT_BOOL_ENV = {
+    "CUDALINK_EXPORT_SYNC": "export_sync",
+    "CUDALINK_USE_GRAPHS": "use_graphs",
+    "CUDALINK_EXPORT_FLUSH_PROBE": "flush_probe",
+    "CUDALINK_STRICT_DEVICE": "strict_device",
+    "CUDALINK_REQUIRE_SOURCE_SYNC": "require_source_sync",
+    "CUDALINK_ACTIVATION_BARRIER": "barrier_enabled",
+    "CUDALINK_EXPORT_PROFILE": "export_profile",
+    "CUDALINK_DOORBELL": "doorbell",
+}
+
+
+@pytest.fixture
+def clean_export_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    for var in (*_EXPORT_BOOL_ENV, "CUDALINK_BARRIER_STALE_NS", "CUDALINK_LIB_STREAM_PRIO"):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_frame_spec_extra_flags_default() -> None:
+    assert FrameSpec(shm_name="x", height=1, width=1).extra_flags == 0
+
+
+def test_export_policy_every_default() -> None:
+    assert asdict(ExportPolicy()) == _EXPORT_DEFAULTS
+
+
+def test_export_policy_from_env_unset_every_default(clean_export_env: pytest.MonkeyPatch) -> None:
+    assert asdict(ExportPolicy.from_env()) == _EXPORT_DEFAULTS
+
+
+@pytest.mark.parametrize(
+    ("var", "raw", "field", "expected"),
+    [(var, raw, field, raw == "1") for var, field in _EXPORT_BOOL_ENV.items() for raw in ("1", "0")],
+    ids=[f"{field}-{raw}" for field in _EXPORT_BOOL_ENV.values() for raw in ("1", "0")],
+)
+def test_export_policy_from_env_bool_sets_only_its_field(
+    clean_export_env: pytest.MonkeyPatch, var: str, raw: str, field: str, expected: bool
+) -> None:
+    clean_export_env.setenv(var, raw)
+    assert asdict(ExportPolicy.from_env()) == {**_EXPORT_DEFAULTS, field: expected}
+
+
+@pytest.mark.parametrize("raw", ["0", "1", "123456789"], ids=["zero", "one", "large"])
+def test_export_policy_from_env_barrier_stale_ns(clean_export_env: pytest.MonkeyPatch, raw: str) -> None:
+    clean_export_env.setenv("CUDALINK_BARRIER_STALE_NS", raw)
+    assert ExportPolicy.from_env().barrier_stale_ns == int(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "high"),
+    [("normal", False), ("high", True), ("zzz", True), ("", True)],
+    ids=["normal", "high", "unknown", "empty"],
+)
+def test_export_policy_from_env_lib_stream_prio(clean_export_env: pytest.MonkeyPatch, raw: str, high: bool) -> None:
+    """Only the literal "normal" drops the stream to normal priority; anything else stays high."""
+    clean_export_env.setenv("CUDALINK_LIB_STREAM_PRIO", raw)
+    assert ExportPolicy.from_env().high_priority_stream is high
+
+
+def test_export_policy_low_latency_every_field() -> None:
+    assert asdict(ExportPolicy.low_latency()) == {
+        **_EXPORT_DEFAULTS,
+        "export_sync": False,
+        "flush_probe": False,
+        "use_graphs": True,
+        "strict_device": False,
+        "require_source_sync": False,
+        "barrier_enabled": True,
+        "high_priority_stream": True,
+        "export_profile": False,
+    }
+
+
+def test_export_policy_for_testing_every_field() -> None:
+    assert asdict(ExportPolicy.for_testing()) == {
+        "export_sync": False,
+        "use_graphs": False,
+        "flush_probe": False,
+        "strict_device": False,
+        "require_source_sync": False,
+        "barrier_enabled": False,
+        "barrier_stale_ns": 0,
+        "high_priority_stream": False,
+        "export_profile": False,
+        "doorbell": False,
+    }
 
 
 def test_gpu_frame_frozen() -> None:
@@ -336,8 +442,11 @@ def test_ctypes_adapter_api_covers_protocol_without_gpu() -> None:
 
 @pytest.mark.requires_cuda
 def test_ctypes_adapter_satisfies_protocol() -> None:
+    # hasattr, not isinstance: on Python 3.12+ isinstance(…, Protocol) resolves members with
+    # inspect.getattr_static, which never calls the adapter's __getattr__ delegation.
     adapter = CTypesCUDAAdapter.for_device(device=0)
-    assert isinstance(adapter, CudaPort)
+    missing = sorted(m for m in get_protocol_members(CudaPort) if not hasattr(adapter, m))
+    assert not missing, f"CTypesCUDAAdapter does not expose CudaPort members: {missing}"
 
 
 @pytest.mark.requires_cuda

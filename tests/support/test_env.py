@@ -95,3 +95,16 @@ class TestEnvStr:
     def test_empty_string_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CUDALINK_TEST_STR", "")
         assert env_str("CUDALINK_TEST_STR", default="fallback") == ""
+
+
+class TestDefaultIsKeywordOnly:
+    """A bare positional default would read as a flag value at call sites; keep it keyword-only."""
+
+    @pytest.mark.parametrize(
+        ("helper", "default"),
+        [(env_bool, True), (env_int, 7), (env_str, "x")],
+        ids=["env_bool", "env_int", "env_str"],
+    )
+    def test_positional_default_is_rejected(self, helper, default) -> None:  # noqa: ANN001
+        with pytest.raises(TypeError):
+            helper("CUDALINK_TEST_POSITIONAL", default)

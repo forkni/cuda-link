@@ -28,9 +28,46 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-10-19, post Phase H2)
+## Current baseline (2026-10-22, Phase I audit)
 
-**Supersedes the 2026-10-12, 2026-08-20 and 2026-07-12 tables below.**
+**Supersedes the 2026-10-19 table below.** Measured on `development` at `1da5339` (PRs #79-#87
+merged), Python 3.12.11, Windows, before any Phase I change.
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1415 passed + 1 skipped, 68 deselected |
+| No-GPU wall clock | ~23 s (10 runs, 22.6-26.2 s); 28 s with `--cov --cov-branch` |
+| Slowest tests | 3.9 s and 3.8 s (the two subprocess `-O` import tests; by design); next is 0.6 s |
+| Branch coverage, clean run | 90.76 % combined (`--cov`, 5364 stmts, 448 miss) |
+| Coverage gate (`fail_under`) | 85 at the audit (raised in I1) |
+| Coverage by module | `cuda_link` 99 %; `TDReceiver.py` 72 % (173 miss), `CUDAIPCExtension.py` 88 %, `CUDALinkBootstrap.py` 89 %, `TDSender.py` 91 %, `TDHost.py` 92 % |
+| Order independence / flakiness | 10/10 randomized runs green, identical counts; `rank_failures.py` found no failing test |
+| Test smells (AST scanner) | 19, equal to `.smell-baseline.json` (ratchet OK) |
+| Functions over CRAP 30 | `cuda_link`: 2 (`Exporter.export` 46, `_do_cleanup` 32, both 100 % covered, so complexity alone). `td_exporter`: 6, worst `TDReceiverEngine.initialize_receiver` **244** (CC 33, 42 % covered), `parexecute_callbacks.handle_mode_change` and `handle_numslots_change` 72 each (0 %), `TDSenderEngine.export_frame` 68, `_refresh_on_version_change` 52, `import_frame` 44 |
+| C901 over 15 | 10 (`Exporter.export` 43, `_do_cleanup` 26, `TDSender.export_frame` 34, `initialize_receiver` 28, ...) |
+| Mutation score | at the audit: last measured 2026-07-12 (`_profile` 100 %, `shm_protocol` 99.78 %, `activation_barrier` 99.4 %), stale after #82/#83. Re-measured in I2: `shm_protocol` and `activation_barrier` both 100 % with no genuine survivors |
+| Tests / test LOC | 1295 `def test_` · 26.9k test LOC vs 8.5k `src/cuda_link` LOC |
+| Logic in test bodies | 368 `if/for/while/try` lines; top: `test_cpu_roundtrip.py` 36, `test_td_bootstrap.py` 25 |
+| Sleeps / private patch targets | 4 `time.sleep` · 24 patches of `_private` names |
+| Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
+
+**Full local suite (GPU + native) was red at the audit: 6 failed, 1477 passed, 1 skipped, ~115 s.**
+CI never sees these because it deselects `requires_cuda`.
+
+- `test_ctypes_adapter_satisfies_protocol` and `..._importer_protocol` (2): stale tests. On
+  Python 3.12+ `isinstance(adapter, Protocol)` uses `inspect.getattr_static`, which skips the
+  adapter's `__getattr__` delegation, so it is `False` until every member has been cached. The
+  adapter itself is fine. Fixed in I1 with a `hasattr` member check.
+- `test_roundtrip.py` (4): environmental. The venv holds `torch 2.14.1+cpu` (no CUDA), so the
+  consumer's torch backend fails with "Cannot initialize CUDA without ATen_cuda library" after the
+  IPC slots and events have opened. `uv.lock` resolves torch from PyPI, whose Windows wheels are
+  CPU-only, so a `uv sync` replaces a CUDA build. Needs a CUDA torch in the local venv; not a code
+  regression. Product note: the Importer reports this as "Producer not yet available" and retries,
+  which hides a permanent local failure.
+
+## Previous baseline (2026-10-19, post Phase H2)
+
+(Historical — see the current baseline above.)
 
 | Metric | Value |
 |--------|-------|
@@ -630,6 +667,147 @@ regression protection. No test was skipped or xfailed to drop the count.
 63 deselected each, ~22.4 s with coverage. `--cov=cuda_link` branch coverage is 99.35 %
 (3154 stmts, 22 miss), equal to the H1 baseline. `fail_under` stays at 85.
 
+## Campaign record — Phase I (2026-10-22)
+
+Audit numbers are in the current baseline above. Four phases, each on its own branch off
+`development`: I1 ratchet and baseline, I2 mutation re-run on `shm_protocol` and
+`activation_barrier`, I3 `TDReceiver.initialize_receiver` tests, I4 mutation on the port modules.
+
+### I1 — Ratchet and baseline
+
+| Measure | Before | After |
+|---------|--------|-------|
+| `fail_under` | 85 | 89 (`floor(90.76) - 1.5`, rounded down) |
+| Gate run at the new floor | n/a | "Required test coverage of 89.0% reached. Total coverage: 90.76%" |
+| Red tests in the full local suite | 6 | 4 (the 2 stale protocol tests fixed; the 4 roundtrip tests need a CUDA torch) |
+| No-GPU selection | 1415 passed + 1 skipped | 1415 passed + 1 skipped (unchanged) |
+
+The stale "TDReceiver.py at 51 %" comment in `pyproject.toml` now says 72 %. No test was skipped,
+`xfail`ed or deleted. Both repaired tests fail when a protocol member is missing from the adapter
+(the same members `test_ctypes_adapter_api_covers_protocol_without_gpu` guards without a GPU).
+
+### I2 — Mutation re-run on `shm_protocol` and `activation_barrier`
+
+Both modules changed in #82/#83 after the 2026-07-12 run. Whole-module cosmic-ray run, then a
+second full run after the fixes to confirm the final score.
+
+| Target | Measure | Before (2026-07-12 run) | First re-run | After fixes |
+|--------|---------|-------------------------|--------------|-------------|
+| `shm_protocol.py` | Mutants | 506 | 506 | 506 |
+| | Survivors, genuine / pragma'd | 1 / 51 | 1 / 51 | 0 / 52 |
+| | Score | 99.78 % | 99.78 % | **100 %** |
+| `activation_barrier.py` | Mutants | 349 | 438 | 434 |
+| | Survivors, genuine / pragma'd | 2 / 9 | 18 / 9 | 0 / 13 |
+| | Score | 99.4 % | 95.8 % | **100 %** |
+| No-GPU selection | Tests | 1415 passed | n/a | 1423 passed, 1 skipped |
+
+What changed:
+
+- **Kill-tests, 8 new** in `test_activation_barrier_cov.py`: `BarrierHeaderError` default and
+  keyword-only marker, field indices in the header-mismatch message, the `last_change_ns` offset,
+  the `bump_skip` u32 wrap, the stale-age divisor (two rounding cases), and the `_header_warned`
+  field flags (added in #83, so never mutated before). Each was verified by applying the mutant by
+  hand and confirming the test fails (13 mutants, all killed).
+- **Proven-equivalent, now pragma'd:** `write_idx == 0` vs `<= 0` and the two `uninitialised`
+  `== 0` checks (unsigned u32 fields), `fields[1] != VERSION` vs `is not` (interned small int), and
+  `[0]` vs `[-1]` on a one-field unpack (moved into a `_read_u32` helper so one pragma covers its
+  three call sites). A line pragma also hides other mutants on the same line; the proof comments
+  note the existing tests that kill them.
+- **Tooling fix:** the `cr-*.toml` `test-command` pointed at a Python 3.11 install that imported a
+  stale `cuda_link` from site-packages. It now uses the project venv and
+  `--randomly-seed=1`, so a mutant gets the same verdict on every run. `cr-profile.toml` still
+  has the old path and was not re-run.
+- The mutant count differs from the 2026-07-12 run because the modules changed.
+
+Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
+
+### I3 — `TDReceiverEngine.initialize_receiver` and the par-exec handlers
+
+The audit's three worst CRAP entries. Two new files under `tests/td/`:
+`test_tdreceiver_initialize.py` (29 tests) and `test_parexecute_handlers.py` (38 tests). The
+receiver tests run the real `initialize_receiver` against an in-memory SharedMemory built with
+the real `SHMLayout` and `Metadata` (a fake CUDA runtime is the only double); one test uses a
+real `SharedMemory` segment. The handler tests record calls on a stub extension. Every
+parametrize carries `ids=`.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1423 passed + 1 skipped | 1490 passed + 1 skipped (+67) |
+| Branch coverage, combined | 90.76 % | **93.39 %** (5366 stmts, 324 miss) |
+| `TDReceiver.py` | 72 % (173 miss) | **82 %** (111 miss) |
+| `parexecute_callbacks.py` | 35 % | **95 %** |
+| `initialize_receiver` CRAP | 244 (CC 33, 42 % covered) | **33.5** (92.1 % covered) |
+| `handle_mode_change` / `handle_numslots_change` CRAP | 72 / 72 (0 %) | **8.0 / 8.0** (100 %) |
+| `fail_under` | 89 | 91 (`floor(93.39) - 1.5`, rounded down) |
+| Smell scanner | 19 | 19 (ratchet OK) |
+
+CRAP re-measured with `crap4py td_exporter` on an lcov export of the same coverage run. The
+remaining `initialize_receiver` figure is complexity: CC 33 is the floor until the function is
+split.
+
+Agent-written-test acceptance, by hand-applied mutants (one anchor swapped in the source, the
+new tests run, the original bytes restored):
+
+| Target | Mutants | Killed | Survivors |
+|--------|---------|--------|-----------|
+| `initialize_receiver` | 26 | 24 | 2, proven equivalent |
+| `parexecute_callbacks` handlers | 24 | 24 | 0 |
+
+The two `initialize_receiver` survivors are the `width == 0` and `height == 0` guards. Once the
+size invariant passes with non-zero bits per component, a zero width or height forces
+`data_size == 0`, which the `buffer_size == 0` check in the same condition already rejects. One
+mutant (`num_slots` upper bound 11) survived the first pass and led to a boundary test (10
+accepted, 11 rejected).
+
+Still uncovered in `initialize_receiver`: two defensive header reads that cannot fail once the
+length check passed, the numpy-missing import branch, the bfloat16 fallback, and one loop-exit
+branch. The handlers' remaining misses are the no-op stubs for unused callbacks. All tests pass
+under four `pytest-randomly` seeds.
+
+### I4 — Mutation testing on `_env`, `_exporter_port` and `_importer_port`
+
+The deferred "ready now" targets: no direct or transitive mocks, whole-module cosmic-ray runs.
+Before the new tests, the existing default and `from_env` tests covered only 5-6 fields of each
+policy, so most survivors were unchecked defaults and env fallbacks.
+
+| Target | Measure | Before | After |
+|--------|---------|--------|-------|
+| `_env.py` | Mutants | 67 | 67 |
+| | Survivors, genuine / pragma'd | 3 / 11 | 0 / 11 |
+| | Score | 94.6 % | **100 %** |
+| `_exporter_port.py` | Mutants | 114 | 114 |
+| | Survivors, genuine / pragma'd | 29 / 50 | 0 / 50 |
+| | Score | 54.7 % | **100 %** |
+| `_importer_port.py` | Mutants | 88 | 88 |
+| | Survivors, genuine / pragma'd | 41 / 1 | 0 / 1 |
+| | Score | 52.9 % | **100 %** |
+| No-GPU selection | Tests | 1490 passed + 1 skipped | 1549 passed + 1 skipped (+59) |
+| Branch coverage, combined | | 93.39 % | 93.39 % (unchanged: these lines already ran) |
+| Smell scanner | | 19 | 19 (ratchet OK) |
+
+What changed:
+
+- **Kill-tests.** `test_exporter_port.py` and `test_importer_port.py` now compare every field of
+  `ExportPolicy` / `ImportPolicy` against a literal table taken from `docs/ENV_VARS.md` (the
+  backoff ladder is documented only on the field): the dataclass defaults, `from_env()` with every
+  variable unset, one test per variable setting `"1"` and `"0"` that must change only its own
+  field, and both presets field by field. Also added: `FrameSpec.extra_flags`, the
+  `barrier_stale_ns` value, `LIB_STREAM_PRIO` / `D2H_STREAM_PRIO` against `normal`, `high`, an
+  unknown value and empty (separates `!=` from `<` / `>`), and `D2H_STREAMS` of `0` / `-3`
+  clamping to 1. `test_env.py` gains a keyword-only-default check for the three typed helpers.
+- **Proven-equivalent, pragma'd.** Annotation operator mutants (`int | None` becomes
+  `int + None`; never evaluated under `from __future__ import annotations`), the default arguments
+  of `CudaPort` Protocol stubs (never called; the real defaults live in the adapters), and
+  `default=1` vs `0` inside `max(1, env_int(...))` for `D2H_STREAMS`. A line pragma hides every
+  mutant on its line; the justification sits next to each.
+- Verified by re-running cosmic-ray on the two port modules after the tests and pragmas landed
+  (`cr-filter-pragma` applied before `cr-report`); `_env` was verified earlier in the phase. The
+  `src` and `td_exporter` diff is comments only; the mirror was re-synced.
+- New configs `cr-env.toml`, `cr-exporter_port.toml`, `cr-importer_port.toml` use the project venv
+  and `--randomly-seed=1`.
+
+Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
@@ -641,9 +819,9 @@ regression protection. No test was skipped or xfailed to drop the count.
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push (`TDReceiver.py` 51 %) | Next campaign | Largest genuine coverage gap, highest CRAP (measured 715 for `initialize_receiver` in H0, est. ≈179 in F1) — planned as H4 |
+| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
-| Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Ready now, deferred for scope | Confirmed zero direct *and* transitive mocks — see F1 |
+| Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
 | Ruff version drift | Before the `C901` ratchet is trusted long-term | Resolved in Phase G: pinned to 0.17.0 across `uv.lock`, `.pre-commit-config.yaml`, and CI |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

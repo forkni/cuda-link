@@ -483,7 +483,10 @@ def acquire_slot(
         return AcquireResult(state=SlotState.VERSION_CHANGED, new_version=version)
 
     write_idx = read_write_idx(buf)
-    if write_idx == 0 or write_idx == last_write_idx:
+    if (
+        write_idx == 0  # u32 from read_write_idx is never negative; == 0 and <= 0 agree  # pragma: no mutate
+        or write_idx == last_write_idx
+    ):
         return AcquireResult(state=SlotState.NO_FRAME)
 
     slot = (write_idx - 1) % layout.num_slots
