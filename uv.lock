@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1134,7 +1134,7 @@ wheels = [
 
 [[package]]
 name = "cuda-link"
-version = "1.14.0"
+version = "1.14.1"
 source = { editable = "." }
 
 [package.optional-dependencies]
