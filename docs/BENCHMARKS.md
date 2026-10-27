@@ -1,6 +1,7 @@
 # cuda-link Benchmarks
 
-All results measured on **RTX 4090 / PCIe 4.0 x16 / Windows 11 / NVIDIA driver 596.36**.
+All results measured on **RTX 4090 / PCIe 4.0 x16 / Windows 11 / NVIDIA driver 596.36**
+unless a section names another GPU.
 RGBA (4-channel) frames unless noted. Numbers produced by scripts in the local-only
 `benchmarks/` folder (gitignored). See [README](../README.md) for a summary view and
 [ARCHITECTURE.md](ARCHITECTURE.md#comparison-cuda-ipc-vs-cpu-sharedmemory) for
@@ -58,6 +59,11 @@ CUDA 719 under a loaded consumer (see CHANGELOG 1.10.1). The Python library `Exp
 async as its default (Cell D / Cell B). Coexistence safety comes from explicit per-engine
 streams and producer-stream ordering (`record_source_sync` / `require_source_sync`), not from
 blocking export.
+
+> **Caveat:** these export timings re-export the same source buffer in a tight loop, so the
+> frame stays in L2 (the 4090's 72 MB holds a 1080p float32 frame). See
+> [Hot vs cold L2](#hot-vs-cold-l2-rtx-4060-laptop) for how L2 temperature and GPU idle time move
+> an export timing on another GPU.
 
 **P3 graph gain (B→D): −4.0 µs p50 (22%)** — `cudaStreamWaitEvent` + `cudaEventRecord`
 are folded into the CUDA graph; only `cudaGraphLaunch` fires per frame. nsys confirms:
@@ -209,6 +215,36 @@ Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder
 The historical `bench_sweep.py` script used for this table is not included in the repository, so
 these results are reference data rather than commands that can be run from a fresh checkout. For
 a tracked runnable benchmark, see [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py).
+
+### Hot vs cold L2 (RTX 4060 Laptop)
+
+The sweep above exports the same source buffer on every frame and lets the GPU idle between
+frames at 60 FPS, so its `export p50` mixes two conditions a real pipeline may not share: a hot
+L2 and an idle (possibly downclocked) GPU. A local run of the sweep script on an **RTX 4060 Laptop
+(32 MB L2, PCIe 4.0 x8, driver 617.42)** separated them with two options that run a synchronous
+device-to-device copy before each timed export (not timed): `--wake` copies 4 KB (GPU awake, L2
+untouched) and `--cold` copies a buffer the size of L2 (GPU awake, L2 flushed). Float32 RGBA,
+graphs on, 200 warmup + 1000 frames at 60 FPS, one run per cell.
+
+```text
+Resolution   Frame     default p50 (µs)   --wake p50 (µs)   --cold p50 (µs)   cold − wake
+----------   -------   ----------------   ---------------   ---------------   -----------
+512x512        4 MB               234.2             115.5              97.8         −17.7
+1920x1080     33 MB               425.6             336.0             349.4         +13.4
+3840x2160    133 MB              1298.1            1209.3            1216.0          +6.7
+```
+
+- **Cache temperature is not the lever.** `cold − wake` stays within ±5% at every size. The
+  512x512 difference is run-to-run noise: repeat runs gave 107–119 µs cold and 108–112 µs with the
+  4 KB copy. Only frames that fit in L2 could show a gap, and 1080p float32 (33 MB) is the
+  borderline case here; the 133 MB frame is cold either way.
+- **Idle time is.** Letting the GPU idle between frames adds about 90–120 µs (`default − wake`).
+  This is consistent with the GPU waking from a low-power state; the clocks were not sampled, so
+  the mechanism is not confirmed.
+- **Reading the tables.** The default numbers include that wake cost, so they are an upper bound
+  for a producer that has just run GPU work (StreamDiffusionTD exports right after its diffusion
+  step), where `--wake` is the closer reference. The 4090 numbers above were produced in default
+  mode and were not re-measured.
 
 ---
 

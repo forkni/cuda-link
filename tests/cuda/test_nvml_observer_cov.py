@@ -290,3 +290,118 @@ def test_snapshot_omits_driver_model_when_unset():
         result = obs.snapshot()
 
     assert "driver_model" not in result
+
+
+# ---------------------------------------------------------------------------
+# Per-process utilization (proc_* = this process, other_* = sum over the rest)
+# ---------------------------------------------------------------------------
+
+_PROC_KEYS = ("proc_sm_util_pct", "proc_mem_util_pct", "other_sm_util_pct", "other_mem_util_pct")
+
+
+class _NotFoundError(_NVMLError):
+    """Stand-in for pynvml.NVMLError_NotFound (no samples newer than the timestamp)."""
+
+
+def _sample(pid: int, sm: int, mem: int, ts: int) -> MagicMock:
+    s = MagicMock()
+    s.pid, s.smUtil, s.memUtil, s.timeStamp = pid, sm, mem, ts
+    return s
+
+
+def _proc_snapshot(mock_pynvml: MagicMock, obs=None) -> dict:
+    mock_pynvml.NVMLError_NotFound = _NotFoundError
+    obs = obs or _make_started_observer(mock_pynvml)
+    with patch("cuda_link.nvml_observer.pynvml", mock_pynvml):
+        return obs.snapshot()
+
+
+def test_process_util_splits_own_pid_from_others_and_sums_others():
+    import os
+
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.return_value = [
+        _sample(os.getpid(), 30, 10, 100),
+        _sample(111, 20, 5, 100),
+        _sample(222, 15, 7, 100),
+    ]
+    result = _proc_snapshot(mock_pynvml)
+    assert result["proc_sm_util_pct"] == 30
+    assert result["proc_mem_util_pct"] == 10
+    assert result["other_sm_util_pct"] == 35
+    assert result["other_mem_util_pct"] == 12
+
+
+def test_process_util_keeps_newest_sample_per_pid_and_advances_timestamp():
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.return_value = [
+        _sample(111, 5, 1, 100),
+        _sample(111, 40, 9, 300),
+        _sample(111, 7, 2, 200),
+    ]
+    obs = _make_started_observer(mock_pynvml)
+    result = _proc_snapshot(mock_pynvml, obs)
+    assert result["other_sm_util_pct"] == 40
+    assert result["other_mem_util_pct"] == 9
+    assert obs._last_proc_ts == 300
+    # The next poll passes the advanced timestamp back to NVML.
+    _proc_snapshot(mock_pynvml, obs)
+    assert mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.call_args.args[1] == 300
+
+
+def test_process_util_reports_zero_when_own_pid_missing():
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.return_value = [_sample(111, 20, 5, 100)]
+    result = _proc_snapshot(mock_pynvml)
+    assert result["proc_sm_util_pct"] == 0
+    assert result["proc_mem_util_pct"] == 0
+    assert result["other_sm_util_pct"] == 20
+
+
+def test_process_util_not_found_reemits_cached_values():
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.NVMLError_NotFound = _NotFoundError
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.side_effect = [[_sample(111, 20, 5, 100)], _NotFoundError()]
+    obs = _make_started_observer(mock_pynvml)
+    first = _proc_snapshot(mock_pynvml, obs)
+    second = _proc_snapshot(mock_pynvml, obs)
+    assert {k: second[k] for k in _PROC_KEYS} == {k: first[k] for k in _PROC_KEYS}
+
+
+def test_process_util_not_found_before_any_sample_omits_keys():
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.NVMLError_NotFound = _NotFoundError
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.side_effect = _NotFoundError()
+    result = _proc_snapshot(mock_pynvml)
+    assert not any(k in result for k in _PROC_KEYS)
+
+
+def test_process_util_other_nvml_error_omits_keys():
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.NVMLError_NotFound = _NotFoundError
+    mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo.side_effect = _NVMLError("boom")
+    result = _proc_snapshot(mock_pynvml)
+    assert not any(k in result for k in _PROC_KEYS)
+    assert result["nvml_available"] is True
+
+
+def test_process_util_falls_back_to_legacy_api():
+    mock_pynvml = _make_mock_pynvml()
+    del mock_pynvml.nvmlDeviceGetProcessesUtilizationInfo
+    mock_pynvml.nvmlDeviceGetProcessUtilization.return_value = [_sample(111, 12, 3, 100)]
+    result = _proc_snapshot(mock_pynvml)
+    assert result["other_sm_util_pct"] == 12
+    mock_pynvml.nvmlDeviceGetProcessUtilization.assert_called_once()
+
+
+def test_stop_resets_process_util_cache():
+    from cuda_link.nvml_observer import NVMLObserver
+
+    mock_pynvml = _make_mock_pynvml()
+    obs = _make_started_observer(mock_pynvml)
+    obs._last_proc_ts = 123
+    obs._last_proc_util = {"proc_sm_util_pct": 1}
+    with patch("cuda_link.nvml_observer._NVML_REFS"):
+        NVMLObserver.stop(obs)
+    assert obs._last_proc_ts == 0
+    assert obs._last_proc_util is None
