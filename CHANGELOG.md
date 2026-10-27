@@ -22,6 +22,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old
   "97-frame stats line" wording was wrong. `gpu_util_pct` is documented as device activity, not SM
   occupancy.
+## [1.14.1] - 2026-10-24
+
+### Added
+
+- **LICENSE Text DAT in the .tox**: the component now carries the MIT license, the
+  credits, a note that no third-party code is bundled, and the NVIDIA/CUDA/TouchDesigner
+  trademark notice. The text is embedded, not file-synced, so it travels with the binary.
+  `docs/TOX_BUILD_GUIDE.md` documents it as Step 7b.
+
+### Fixed
+
+- **Exporter input validation** (#80): `FrameSpec` rejects a height or width of zero or
+  less up front instead of failing at allocation. `frame.ptr` must be a true integer
+  (`operator.index`): a float, str or `ctypes.c_void_p` raises `ValueError` (the last with
+  a "pass .value" hint) instead of being truncated or escaping as a raw `TypeError`.
+- **Consumers fail on an unopenable IPC event** (#81): a non-zero event handle that won't
+  open used to be ignored, so frames were read with no ordering against the producer. The
+  Importer and TDReceiver now fail the connect or refresh, release what they opened, and
+  raise `IPCEventOpenError`; reconnect logs it at WARNING once per failure streak.
+- **Wait timeout no longer blocks every call** (#81): after a `TIMEOUT` the frame cursor is
+  rolled back, and later calls give the same pending frame one non-blocking check
+  (`NEW_FRAME` if it fired, else `NO_FRAME`), so a stuck producer no longer stalls each
+  `get_frame*()` for `timeout_ms`. The cursor is also restored on any exception.
+- **Exporter size-checks a reused SHM segment** (#82): a leftover segment that is too small
+  is not reused, and the protocol version is published last.
+- **Activation barrier ignores a foreign segment** (#83): a segment whose magic or version
+  don't match is treated as a mismatch, half-zero headers included.
+- **TD status tint lifecycle** (#84): unchanged status writes are skipped, a stale error
+  badge is replaced, a failed write is retried, and the status is stored before the badge
+  is added, so a retry can't stack a second badge. Script errors from other code are kept.
+- **`wait_for_doorbell` honours `doorbell=False`** (#86): it could block on a handle that
+  was only opened for the native wait backend.
+
+### Changed
+
+- TDReceiver reads the SHM header through the `SHMProtocol` helpers (#85).
+- Removed never-read config: `Exporter._ts_offset` and the `TDSenderConfig` fields
+  `init_pace`, `persist_stream` and `nvml`. `CUDALINK_TD_PERSIST_STREAM` and
+  `CUDALINK_TD_INIT_PACE` are gone from `docs/ENV_VARS.md` (#86).
+- Licensing (#88): the copyright holder is Alexander Korneev (2026), the MIT text is unchanged,
+  SPDX headers are on the shipped sources, and the README has a license, provenance and
+  trademarks section.
+- Release workflows run `sync_td_wrapper.py --check`, so mirror drift fails the release.
+  Dependabot now uses the uv ecosystem, and dev torch is pinned to 2.11.0 (cu128) (#87, #92).
 
 ## [1.14.0] - 2026-10-19
 

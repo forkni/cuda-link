@@ -900,4 +900,4 @@ See `docs/adr/` for the full Architecture Decision Record index:
 ---
 
 **Last Updated**: 2026-09-26
-**Version**: 1.14.0
+**Version**: 1.14.1
