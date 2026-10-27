@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`NVMLObserver` per-process utilization**: `snapshot()` now adds `proc_sm_util_pct`,
+  `proc_mem_util_pct` (this process) and `other_sm_util_pct`, `other_mem_util_pct` (sum over every
+  other process), from `nvmlDeviceGetProcessesUtilizationInfo` with the legacy
+  `nvmlDeviceGetProcessUtilization` as a fallback. The keys are absent when NVML returns no usable
+  sample; the last good values are re-emitted when NVML has no newer sample. This tells a caller
+  whether TouchDesigner or the consumer owns the GPU's time in a slow round trip.
+
+### Changed
+
+- **NVML docs**: `CUDALINK_NVML` only sets the default `enabled` of an `NVMLObserver`; the observer
+  is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old
+  "97-frame stats line" wording was wrong. `gpu_util_pct` is documented as device activity, not SM
+  occupancy.
+
 ## [1.14.0] - 2026-10-19
 
 ### Added
