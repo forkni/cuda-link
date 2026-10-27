@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old
   "97-frame stats line" wording was wrong. `gpu_util_pct` is documented as device activity, not SM
   occupancy.
+
 ## [1.14.1] - 2026-10-24
 
 ### Added
