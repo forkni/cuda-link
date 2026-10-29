@@ -514,8 +514,10 @@ locking, warning hygiene, and smell elimination.
   via `uv pip install --no-deps`, smoke tested, and exercised via `uv run --no-sync pytest`.
 - **`wheels.yml`**: Windows MSVC native wheel build (`cibuildwheel`/`scikit-build-core`) triggering on tags
   and manual dispatch with download-and-test verification.
-- **`nightly.yml`**: Weekly deep CI run including a dependency lockfile refresh canary (`uv lock --upgrade`)
-  and quarantine test watcher.
+- **`nightly.yml`**: Weekly deep CI run: the matrix legs PR CI does not cover (py3.13 on both OSes,
+  Windows py3.10), a dependency lockfile refresh canary (`uv lock --upgrade`) and a quarantine test
+  watcher. A gate job skips the matrix when the default branch has not moved since the last green
+  scheduled run, and skips the quarantine watcher when no test is quarantined.
 
 #### G7 — Test hardening & AST smell remediation
 

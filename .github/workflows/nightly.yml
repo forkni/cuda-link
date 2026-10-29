@@ -2,7 +2,9 @@ name: Nightly (scheduled deep CI)
 
 on:
   schedule:
-    - cron: "0 6 * * 1"  # Mondays 06:00 UTC — weekly cadence
+    # Mondays 05:43 UTC — weekly cadence, off the top of the hour (cron slots at :00 are the
+    # most congested and the most likely to be delayed or dropped).
+    - cron: "43 5 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -13,13 +15,70 @@ permissions:
   contents: read
 
 jobs:
+  # Cheap ubuntu gate so a scheduled run on an unchanged default branch costs ~1 runner-minute
+  # instead of the full matrix. workflow_dispatch always runs everything.
+  gate:
+    name: Gate (skip unchanged commit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      changed: ${{ steps.sha.outputs.changed }}
+      quarantined: ${{ steps.quarantine.outputs.present }}
+    steps:
+      - name: Compare HEAD with the last successful scheduled run
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail open: if the API call errors, run the matrix rather than silently skip it.
+          last=$(gh api "repos/$REPO/actions/workflows/nightly.yml/runs?event=schedule&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""' || echo "")
+          if [ -n "$last" ] && [ "$last" = "$SHA" ]; then
+            echo "HEAD $SHA already passed a scheduled nightly; skipping the test matrix."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tests
+      - name: Detect quarantined tests
+        id: quarantine
+        run: |
+          if grep -rlE '^[[:space:]]*@pytest\.mark\.quarantine|pytestmark.*quarantine' tests/ --include='test_*.py' >/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Only the legs PR CI (ci.yml) does not already run: PR CI covers ubuntu 3.9-3.12 and
+  # windows 3.11/3.12, so nightly adds the newest interpreter on both OSes and the oldest
+  # supported Windows interpreter.
   full-matrix:
     name: Full matrix (${{ matrix.os }}, py${{ matrix.python }})
+    needs: gate
+    if: needs.gate.outputs.changed == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2025]
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-2025
+            python: "3.10"
+          - os: windows-2025
+            python: "3.13"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -37,6 +96,8 @@ jobs:
 
   quarantine-watch:
     name: Quarantined tests (capped reruns, non-blocking)
+    needs: gate
+    if: needs.gate.outputs.quarantined == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
@@ -56,6 +117,7 @@ jobs:
 
   lock-refresh-canary:
     name: Lock-refresh canary (uv lock --upgrade)
+    # Not gated on the commit: upstream releases can break an unchanged tree.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
