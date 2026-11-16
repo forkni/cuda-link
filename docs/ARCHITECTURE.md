@@ -291,7 +291,7 @@ CUDA IPC events provide **GPU-side synchronization** without CPU involvement. Th
 cuda.memcpy(dst=gpu_buffer[slot], src=top_cuda_ptr, count=size, kind=D2D)
 cuda.record_event(ipc_event[slot])  # ← GPU-side signal, ~1-2μs
 write_idx += 1
-shm.buf[12:16] = struct.pack("<I", write_idx)
+shm.buf[16:20] = struct.pack("<I", write_idx)
 ```
 
 **Performance**: `cudaEventRecord` takes ~0.5-2μs, does NOT block CPU.
@@ -573,13 +573,13 @@ slot = write_idx % NUM_SLOTS
 cudaMemcpy D2D (src_ptr → gpu_buffer[slot])  ← GPU work, scales with frame size
 cudaEventRecord(ipc_event[slot])             ← ~0.5-2µs
 write_idx += 1
-shm.buf[12:16] = struct.pack("<I", write_idx) ← ~0.5µs
+shm.buf[16:20] = struct.pack("<I", write_idx) ← ~0.5µs
 ```
 
 **Consumer** (~1-3µs overhead):
 
 ```text
-write_idx = struct.unpack("<I", shm.buf[12:16])  ← ~0.5µs
+write_idx = struct.unpack("<I", shm.buf[16:20])  ← ~0.5µs
 read_slot = (write_idx - 1) % NUM_SLOTS
 cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
 return tensors[read_slot]                        ← Zero-copy, 0µs
@@ -687,6 +687,20 @@ on both the native waiter (status `CUDA_ERROR`, 5) and the pure-Python wait path
 **Where the error surfaces**: the producer's own per-frame sticky-error check (`check_sticky_error`, controlled by `CUDALINK_STICKY_ERROR_CHECK`, default ON) will catch the fault on the next producer frame and raise there.
 
 **Debugging guideline**: when the consumer reports a timeout or stall, check the **producer process logs first** — the root fault is almost always on the producer side.
+
+---
+
+## Security / trust model
+
+- **Any local process can attach.** The named SharedMemory segment and the CUDA IPC handles
+  in it are open to every process on the machine that knows the segment name. There is no
+  authentication.
+- **The receiver checks structure, not allocation size.** It validates the header (magic,
+  `num_slots`, metadata) before it opens any handle. No CUDA API reports the true size of
+  the allocation behind an imported IPC pointer, so the receiver must trust the sender's
+  declared width, height and format. A sender that over-declares them can cause an
+  out-of-bounds device read in the copy.
+- **Rule:** point a receiver's segment name only at producers you trust.
 
 ---
 
