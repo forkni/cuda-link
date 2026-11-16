@@ -668,11 +668,23 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     if (!oldDevPtrs.empty() || !oldEvents.empty()) {
         Sleep(kIpcCloseGracePeriodMs);
     }
+    // Same non-fatal policy as teardown(): the new resources are already live, so a failed
+    // free of an old one is logged (Debug-gated) but never latches myError.
     for (auto* evt : oldEvents) {
-        if (evt) cudaEventDestroy(evt);
+        if (evt) {
+            const cudaError_t err = cudaEventDestroy(evt);
+            if (err != cudaSuccess) {
+                debugLog(std::string("reallocate: cudaEventDestroy failed: ") + cudaGetErrorString(err));
+            }
+        }
     }
     for (auto* p : oldDevPtrs) {
-        if (p) cudaFree(p);
+        if (p) {
+            const cudaError_t err = cudaFree(p);
+            if (err != cudaSuccess) {
+                debugLog(std::string("reallocate: cudaFree failed: ") + cudaGetErrorString(err));
+            }
+        }
     }
 
     debugLog("reallocate: complete, elapsed=" +

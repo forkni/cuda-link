@@ -240,6 +240,8 @@ CUDA_Link_CPP_Receiver_Test.*.toe
 # C++ Custom TOP CMake build output (local-only; cpp_top/build/ already covered by the
 # generic build/ rule above, but the Ninja-generator build tree needs its own entry)
 cpp_top/build_ninja/
+# Visual Studio generator tree from the msvc-release preset (cpp_top/CMakePresets.json)
+cpp_top/build_msvc/
 
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.

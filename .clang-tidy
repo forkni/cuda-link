@@ -1,11 +1,12 @@
 # clang-tidy config for cpp_top/src/ (the C++ Custom TOP tree).
 #
-# Scope is enforced by the CI job (see docs/plans/CPP_TOP_IMPROVEMENT_PLAN.md, Phase 0.3),
+# Scope is enforced by the CI job (.github/workflows/cpp-top.yml; see docs/CPP_TOP.md),
 # which only invokes clang-tidy against files under cpp_top/src/ -- never cpp_top/vendor/
 # (vendored TouchDesigner SDK headers, treated as a primary source, never linted or reformatted).
 #
-# Requires a compile database (Phase 0.4, cpp_top/build/compile_commands.json, generated via
-# the Ninja preset) so clang-tidy resolves cuda_runtime.h and the vendored TD headers.
+# Requires a compile database (cpp_top/build/compile_commands.json, generated via the
+# ninja-tooling preset in cpp_top/CMakePresets.json) so clang-tidy resolves cuda_runtime.h
+# and the vendored TD headers.
 #
 # Derived from the code as written, same philosophy as .clang-format: the five check groups
 # below (cppcoreguidelines-*/modernize-*/bugprone-*/performance-*/readability-*) are enabled
@@ -80,7 +81,7 @@ Checks: >
 # call sites. It also relies on the do-while(0) idiom, hence avoid-do-while above.
 #
 # bugprone-empty-catch is NOT disabled here -- the tree's genuine empty `catch (...) {}`
-# ABI-exception fences (F6 in docs/plans/CPP_TOP_CUDA_GUIDELINES_VERIFICATION.md) are
+# ABI-exception fences (ADR-0009 mitigations: "No C++ exceptions cross the ABI boundary") are
 # deliberately silent by design (no logging/rethrow allowed to cross the plugin ABI), and
 # each of those ~10 sites carries its own NOLINTNEXTLINE with that rationale rather than a
 # blanket suppression, so a genuinely-forgotten empty catch elsewhere still gets flagged.

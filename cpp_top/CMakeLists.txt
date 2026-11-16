@@ -18,8 +18,8 @@ cmake_policy(SET CMP0091 NEW)
 project(cpp_top LANGUAGES CXX)
 
 # Drives clang-tidy (see repo-root .clang-tidy) and other tooling that needs include paths.
-# The MSVC generator does not emit this file -- generate via the Ninja preset for tooling
-# even though the shipping build stays MSVC.
+# The MSVC generator does not emit this file -- generate via the ninja-tooling preset
+# (CMakePresets.json) for tooling; ship from either preset (msvc-release for the VS tree).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT WIN32)

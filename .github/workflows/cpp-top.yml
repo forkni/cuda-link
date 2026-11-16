@@ -75,13 +75,16 @@ jobs:
         # runner image's MSVC STL (which demands Clang 20+ when compiled with clang).
         # The shipping build target is MSVC only (see CMakeLists.txt); clang is used here
         # solely for the separate format/tidy steps, never for the actual compile.
+        # Generator, build type and the cl pin come from the ninja-tooling preset
+        # (cpp_top/CMakePresets.json, binaryDir cpp_top/build) so CI and local builds match.
+        working-directory: cpp_top
         run: >
-          cmake -S cpp_top -B cpp_top/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          cmake --preset ninja-tooling
           "-DCUDAToolkit_ROOT=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
 
       - name: Build both Custom TOP DLLs
-        run: cmake --build cpp_top/build
+        working-directory: cpp_top
+        run: cmake --build --preset ninja-tooling
 
       - name: clang-tidy (cpp_top/src, warnings-as-errors per .clang-tidy)
         shell: bash
