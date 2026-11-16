@@ -166,8 +166,9 @@ int dump_segment(const char* name, bool full) {
     const std::wstring wname(name, name + std::strlen(name)); // ASCII names, as the TOPs use
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, wname.c_str());
     if (!mapping) {
-        std::printf("cannot open segment '%s' (error %lu): no producer has created it\n", name,
-                    GetLastError());
+        const DWORD error = GetLastError();
+        std::printf("cannot open segment '%s' (error %lu)%s\n", name, error,
+                    error == ERROR_FILE_NOT_FOUND ? ": no producer has created it" : "");
         return 2;
     }
     const void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
@@ -212,6 +213,11 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     if (segment) {
         return dump_segment(segment, full);
+    }
+#else
+    if (segment) {
+        std::printf("named segments need Windows; use --file <path.bin> for a saved image\n");
+        return 1;
     }
 #endif
     std::printf("usage: protocol_dump [--full] <segment_name>   (Windows)\n"

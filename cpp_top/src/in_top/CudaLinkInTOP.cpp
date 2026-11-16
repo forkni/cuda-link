@@ -46,21 +46,24 @@ constexpr int32_t kNumInfoDATRows = 5;    // ipc_version, status, last_error, la
 // not sticky. The In TOP always opens with a current context (CudaDeviceSession), so 201 here
 // names the same-process case; the raw status name stays in the message. Since v0.6 the
 // sender_pid header field catches this case first (openSlotHandlesIfNeeded); 201 is the
-// fallback for a sender that writes sender_pid 0.
+// fallback only for a sender that writes sender_pid 0 (unknown). With a known, different
+// sender_pid, 201 is a real context error and keeps the generic message.
 constexpr const char* kSameProcessMessage =
     "sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within one "
     "process; run the sender in a separate TD instance or use the Python peer";
 
-// Like CUDALINK_CUDA_CHECK_BOOL, but turns the same-process status into kSameProcessMessage.
-bool checkIpcOpen(cudaError_t status, const char* call, std::string& err) {
+// Like CUDALINK_CUDA_CHECK_BOOL (same "(file:line)" suffix), but turns status 201 into
+// kSameProcessMessage when the sender's PID is unknown. 'line' is the call site's __LINE__.
+bool checkIpcOpen(cudaError_t status, const char* call, bool senderPidUnknown, int line, std::string& err) {
     if (status == cudaSuccess) {
         return true;
     }
     (void)cudaGetLastError(); // clear the non-sticky error so later calls do not report it
-    if (status == cudaErrorDeviceUninitialized) {
-        err = std::string(kSameProcessMessage) + " (" + call + ": " + cudaGetErrorName(status) + ")";
+    const std::string where = std::string(" (") + __FILE__ + ":" + std::to_string(line) + ")";
+    if (status == cudaErrorDeviceUninitialized && senderPidUnknown) {
+        err = std::string(kSameProcessMessage) + " (" + call + ": " + cudaGetErrorName(status) + ")" + where;
     } else {
-        err = std::string(call) + " failed: " + cudaGetErrorString(status);
+        err = std::string(call) + " failed: " + cudaGetErrorString(status) + where;
     }
     return false;
 }
@@ -614,7 +617,7 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
         std::memcpy(&memHandle, myShmView + myLayout.mem_handle_offset(slot), sizeof(memHandle));
         void* rawDevPtr = nullptr;
         if (!checkIpcOpen(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess),
-                          "cudaIpcOpenMemHandle", myError)) {
+                          "cudaIpcOpenMemHandle", senderPid == 0, __LINE__, myError)) {
             return false;
         }
         newDevPtrs[slot].reset(rawDevPtr);
@@ -623,7 +626,7 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
         std::memcpy(&eventHandle, myShmView + myLayout.event_handle_offset(slot), sizeof(eventHandle));
         cudaEvent_t rawEvent = nullptr;
         if (!checkIpcOpen(cudaIpcOpenEventHandle(&rawEvent, eventHandle), "cudaIpcOpenEventHandle",
-                          myError)) {
+                          senderPid == 0, __LINE__, myError)) {
             return false;
         }
         newEvents[slot].reset(rawEvent);
