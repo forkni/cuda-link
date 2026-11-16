@@ -8,6 +8,7 @@ on:
       - '.clang-format-ignore'
       - '.clang-tidy'
       - '.github/workflows/cpp-top.yml'
+      - 'scripts/gen_golden_shm.py'
   pull_request:
     paths:
       - 'cpp_top/**'
@@ -15,11 +16,12 @@ on:
       - '.clang-format-ignore'
       - '.clang-tidy'
       - '.github/workflows/cpp-top.yml'
+      - 'scripts/gen_golden_shm.py'
   workflow_dispatch:
 
 jobs:
   build-lint:
-    name: format + build + tidy
+    name: format + build + test + tidy
     runs-on: windows-latest
 
     steps:
@@ -35,11 +37,11 @@ jobs:
           version: '19.1.5'
 
       - name: Format gate (clang-format --dry-run --Werror)
-        # Scoped to cpp_top/src -- cpp_top/vendor/ (vendored TD SDK headers, never
-        # reformatted; see .clang-format-ignore) is a sibling directory, never touched here.
+        # Scoped to cpp_top/src, tests and tools -- cpp_top/vendor/ (vendored TD SDK
+        # headers, never reformatted; see .clang-format-ignore) is never touched here.
         shell: bash
         run: |
-          files=$(find cpp_top/src \( -name '*.cpp' -o -name '*.h' \))
+          files=$(find cpp_top/src cpp_top/tests cpp_top/tools \( -name '*.cpp' -o -name '*.h' \))
           clang-format --dry-run --Werror $files
 
       # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll and
@@ -82,12 +84,41 @@ jobs:
           cmake --preset ninja-tooling
           "-DCUDAToolkit_ROOT=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
 
-      - name: Build both Custom TOP DLLs
+      - name: Build both Custom TOP DLLs, topcore_tests and protocol_dump
         working-directory: cpp_top
         run: cmake --build --preset ninja-tooling
+
+      - name: topcore_tests (golden-byte parity, CTest)
+        working-directory: cpp_top
+        run: ctest --preset ninja-tooling
 
       - name: clang-tidy (cpp_top/src, warnings-as-errors per .clang-tidy)
         shell: bash
         run: |
           files=$(find cpp_top/src -name '*.cpp')
           clang-tidy -p cpp_top/build $files
+
+  # The protocol core is OS-free: a Linux leg with gcc catches compiler- and
+  # platform-specific assumptions cheaply. No CUDA, no TD headers, no TOP DLLs.
+  core-linux:
+    name: core tests (Linux, gcc)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (core-only preset)
+        working-directory: cpp_top
+        run: cmake --preset core-only
+
+      - name: Build cudalink_topcore, topcore_tests, protocol_dump
+        working-directory: cpp_top
+        run: cmake --build --preset core-only
+
+      - name: topcore_tests (golden-byte parity, CTest)
+        working-directory: cpp_top
+        run: ctest --preset core-only

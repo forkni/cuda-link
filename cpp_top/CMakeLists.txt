@@ -1,9 +1,14 @@
 # cpp_top -- C++ Custom TOPs for cuda-link (PLAN-001).
 #
-# This pass builds the receiver and sender: cudalink_topcore (protocol core, both
-# ring_reader and ring_writer) + CudaLinkInTOP + CudaLinkOutTOP (the two Custom TOP
-# DLLs). protocol_dump and topcore_tests (golden-byte parity infra) remain future work
-# (out of scope for this implementation pass).
+# Targets:
+#   cudalink_topcore  protocol core (ring_reader + ring_writer), TD-free and CUDA-free
+#   topcore_tests     golden-byte parity tests for the core (CTest; fixtures from
+#                     scripts/gen_golden_shm.py)
+#   protocol_dump     read-only dump of a live SHM segment (Windows) or a saved image
+#   CudaLinkInTOP / CudaLinkOutTOP  the two Custom TOP DLLs (Windows + CUDA only)
+#
+# CUDALINK_TOP_CORE_ONLY=ON builds only the first three: no Windows guard, no CUDA
+# toolkit, no TD headers. CI uses it for the Linux leg (preset core-only).
 #
 # No .cu files exist yet (no on-GPU kernels needed for either TOP's D2D memcpy path), so
 # this does not enable the CUDA *language* -- it links against the CUDA Runtime API
@@ -17,13 +22,17 @@ cmake_policy(SET CMP0091 NEW)
 
 project(cpp_top LANGUAGES CXX)
 
+option(CUDALINK_TOP_CORE_ONLY "Build only the protocol core, its tests and protocol_dump" OFF)
+
 # Drives clang-tidy (see repo-root .clang-tidy) and other tooling that needs include paths.
 # The MSVC generator does not emit this file -- generate via the ninja-tooling preset
 # (CMakePresets.json) for tooling; ship from either preset (msvc-release for the VS tree).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(NOT WIN32)
-    message(FATAL_ERROR "cpp_top is Windows-only (CUDA IPC handle sharing is Windows-specific).")
+if(NOT WIN32 AND NOT CUDALINK_TOP_CORE_ONLY)
+    message(FATAL_ERROR
+        "cpp_top's TOPs are Windows-only (CUDA IPC handle sharing is Windows-specific). "
+        "Configure with -DCUDALINK_TOP_CORE_ONLY=ON (preset core-only) to build the core tests.")
 endif()
 
 set(CMAKE_CXX_STANDARD 20) # required for std::atomic_ref (D4)
@@ -32,6 +41,42 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Release dynamic CRT (/MD) in every configuration, including Debug, deliberately (D2):
 # debug-CRT plugin DLLs are a recurring "failed to load" report against TD.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+# --- cudalink_topcore -- TD-free, CUDA-free protocol core (D4) ---
+add_library(cudalink_topcore STATIC
+    src/core/ring_reader.cpp
+    src/core/ring_writer.cpp
+)
+target_include_directories(cudalink_topcore PUBLIC src/core)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(cudalink_topcore PRIVATE -Wall -Wextra)
+endif()
+
+# --- topcore_tests -- golden-byte parity suite (CTest) ---
+enable_testing()
+add_executable(topcore_tests tests/topcore_tests.cpp)
+target_link_libraries(topcore_tests PRIVATE cudalink_topcore)
+target_compile_definitions(topcore_tests PRIVATE
+    CUDALINK_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+add_test(NAME topcore_tests
+    COMMAND topcore_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+
+# --- protocol_dump -- read-only SHM inspector (named segments need Windows) ---
+add_executable(protocol_dump tools/protocol_dump.cpp)
+target_link_libraries(protocol_dump PRIVATE cudalink_topcore)
+add_test(NAME protocol_dump_fixture
+    COMMAND protocol_dump --file "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/ring_n3.bin")
+set_tests_properties(protocol_dump_fixture PROPERTIES
+    PASS_REGULAR_EXPRESSION "new reader  NewFrame slot 2")
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(topcore_tests PRIVATE -Wall -Wextra)
+    target_compile_options(protocol_dump PRIVATE -Wall -Wextra)
+endif()
+
+if(CUDALINK_TOP_CORE_ONLY)
+    return()
+endif()
 
 set(CUDALINK_TOP_CUDA_MAJOR "12" CACHE STRING "CUDA major version this leg targets (12 or 11)")
 
@@ -51,13 +96,6 @@ if(NOT CUDAToolkit_VERSION_MAJOR STREQUAL CUDALINK_TOP_CUDA_MAJOR)
 endif()
 
 set(TD_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/td/2025")
-
-# --- cudalink_topcore -- TD-free, CUDA-free protocol core (D4) ---
-add_library(cudalink_topcore STATIC
-    src/core/ring_reader.cpp
-    src/core/ring_writer.cpp
-)
-target_include_directories(cudalink_topcore PUBLIC src/core)
 
 # --- cudalink_topcommon -- shared, header-only helpers for both TOP DLLs ---
 # TD/CUDA-dependent (CudaDeviceSession touches TD::TOP_Context and cuda_runtime.h), so this is

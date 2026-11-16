@@ -242,6 +242,8 @@ CUDA_Link_CPP_Receiver_Test.*.toe
 cpp_top/build_ninja/
 # Visual Studio generator tree from the msvc-release preset (cpp_top/CMakePresets.json)
 cpp_top/build_msvc/
+# Core-only tree from the core-only preset (protocol core + topcore_tests)
+cpp_top/build_core/
 
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.

@@ -21,10 +21,26 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build_msvc"
+    },
+    {
+      "name": "core-only",
+      "displayName": "Ninja, protocol core + tests only (any OS)",
+      "description": "CUDALINK_TOP_CORE_ONLY=ON: no CUDA toolkit, no TD headers, no TOP DLLs. Uses the default compiler (gcc/clang on Linux).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_core",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CUDALINK_TOP_CORE_ONLY": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "ninja-tooling", "configurePreset": "ninja-tooling" },
-    { "name": "msvc-release", "configurePreset": "msvc-release", "configuration": "Release" }
+    { "name": "msvc-release", "configurePreset": "msvc-release", "configuration": "Release" },
+    { "name": "core-only", "configurePreset": "core-only" }
+  ],
+  "testPresets": [
+    { "name": "ninja-tooling", "configurePreset": "ninja-tooling", "output": { "outputOnFailure": true } },
+    { "name": "core-only", "configurePreset": "core-only", "output": { "outputOnFailure": true } }
   ]
 }
