@@ -62,6 +62,28 @@ protocol_dump --file cpp_top\tests\fixtures\ring_n3.bin
 
 The tool is built with the TOPs. The `--file` form also works on Linux.
 
+## Same-process limitation
+
+CUDA IPC cannot open a handle in the process that exported it. A `CudaLinkInTOP` that
+reads from a `CudaLinkOutTOP` (or a Python sender) in the same TD instance gets this error:
+
+```text
+sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within
+one process; run the sender in a separate TD instance or use the Python peer
+(cudaIpcOpenMemHandle: cudaErrorDeviceUninitialized)
+```
+
+Run the sender and the receiver in two TD instances. To move a texture inside one TD
+instance, use a normal TOP wire or a Select TOP.
+
+How the receiver detects it: a probe on 2026-11-16 (CUDA runtime 12.8, driver 13.05,
+RTX 4090) opened the process's own handles. `cudaIpcOpenMemHandle` and
+`cudaIpcOpenEventHandle` both returned `cudaErrorDeviceUninitialized` (201, "invalid
+device context"). The In TOP in TD gave the same result. The error is not sticky: the CUDA
+context stays usable. The In TOP always has a current context when it opens handles, so it
+reads status 201 at that call as the same-process case. Protocol v0.6 adds the sender's
+process ID to the segment header, so the receiver can then check before it opens a handle.
+
 ## Code rules
 
 - No C++ exception crosses the plugin ABI: every TD entry point is fenced (ADR-0009,
@@ -73,7 +95,6 @@ The tool is built with the TOPs. The `--file` form also works on Linux.
 ## To be written
 
 - Topology: one sender TD instance, one receiver TD instance.
-- Same-process limitation and its error message.
 - Windows display driver model (WDDM) IPC caveat (ADR-0004).
 - Teardown grace period (the 100 ms hitch on Active off or a format change).
 - Trust model for named shared memory.

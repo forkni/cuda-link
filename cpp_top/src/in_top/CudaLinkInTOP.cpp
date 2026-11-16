@@ -37,6 +37,29 @@ constexpr int32_t kNumInfoCHOPChans = 15; // frames, cook_us, copy_us, begin_us,
                                           // num_slots, event_wait_us, gpu_copy_us, noframe_count,
                                           // version_changed_count, rescued_count, graph_hits, graph_builds
 constexpr int32_t kNumInfoDATRows = 5;    // ipc_version, status, last_error, last_error_frame, init_note
+
+// CUDA IPC cannot open a handle in the process that exported it. Probed 2026-11-16 (runtime
+// 12.8, driver 13.05, RTX 4090): cudaIpcOpenMemHandle and cudaIpcOpenEventHandle on own-process
+// handles both return cudaErrorDeviceUninitialized (201, "invalid device context"). The error is
+// not sticky. The In TOP always opens with a current context (CudaDeviceSession), so 201 here
+// names the same-process case; the raw status name stays in the message.
+constexpr const char* kSameProcessMessage =
+    "sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within one "
+    "process; run the sender in a separate TD instance or use the Python peer";
+
+// Like CUDALINK_CUDA_CHECK_BOOL, but turns the same-process status into kSameProcessMessage.
+bool checkIpcOpen(cudaError_t status, const char* call, std::string& err) {
+    if (status == cudaSuccess) {
+        return true;
+    }
+    (void)cudaGetLastError(); // clear the non-sticky error so later calls do not report it
+    if (status == cudaErrorDeviceUninitialized) {
+        err = std::string(kSameProcessMessage) + " (" + call + ": " + cudaGetErrorName(status) + ")";
+    } else {
+        err = std::string(call) + " failed: " + cudaGetErrorString(status);
+    }
+    return false;
+}
 } // namespace
 
 extern "C" {
@@ -575,14 +598,19 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
         cudaIpcMemHandle_t memHandle;
         std::memcpy(&memHandle, myShmView + myLayout.mem_handle_offset(slot), sizeof(memHandle));
         void* rawDevPtr = nullptr;
-        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess),
-                                 myError);
+        if (!checkIpcOpen(cudaIpcOpenMemHandle(&rawDevPtr, memHandle, cudaIpcMemLazyEnablePeerAccess),
+                          "cudaIpcOpenMemHandle", myError)) {
+            return false;
+        }
         newDevPtrs[slot].reset(rawDevPtr);
 
         cudaIpcEventHandle_t eventHandle;
         std::memcpy(&eventHandle, myShmView + myLayout.event_handle_offset(slot), sizeof(eventHandle));
         cudaEvent_t rawEvent = nullptr;
-        CUDALINK_CUDA_CHECK_BOOL(cudaIpcOpenEventHandle(&rawEvent, eventHandle), myError);
+        if (!checkIpcOpen(cudaIpcOpenEventHandle(&rawEvent, eventHandle), "cudaIpcOpenEventHandle",
+                          myError)) {
+            return false;
+        }
         newEvents[slot].reset(rawEvent);
     }
 
