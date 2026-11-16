@@ -115,6 +115,9 @@ private:
     cudalink::core::SHMLayout myLayout{0};
     uint64_t myVersion = 0;
     uint32_t myWriteIdx = 0;
+    // Slot meta of the last publish (Info CHOP / DAT).
+    uint64_t myProducerFrame = 0;
+    uint32_t myStreamId = 0;
     bool myAllocated = false;
 
     // Cached geometry/format this allocation was built for -- a change in any of these

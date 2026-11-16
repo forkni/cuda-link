@@ -34,6 +34,11 @@ int Parameters::evalNumslots(const TD::OP_Inputs* inputs) {
     return kNumslotsOptions[index];
 }
 
+uint32_t Parameters::evalStreamid(const TD::OP_Inputs* inputs) {
+    const int value = inputs->getParInt(StreamidName);
+    return value > 0 ? static_cast<uint32_t>(value) : 0U;
+}
+
 void Parameters::setNumslotsEnabled(const TD::OP_Inputs* inputs, bool enabled) {
     inputs->enablePar(NumslotsName, enabled);
 }
@@ -87,5 +92,20 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_ParAppendResult res =
             manager->appendMenu(p, static_cast<int32_t>(names.size()), names.data(), labels.data());
         checkParamAppend(res, NumslotsName, "CudaLinkOutTOP");
+    }
+
+    {
+        TD::OP_NumericParameter p;
+        p.name = StreamidName;
+        p.label = StreamidLabel;
+        p.page = "CUDA Link";
+        p.defaultValues[0] = 0.0;
+        p.minValues[0] = 0.0;
+        p.clampMins[0] = true;
+        p.minSliders[0] = 0.0;
+        p.maxSliders[0] = static_cast<double>(kStreamidSliderMax);
+
+        TD::OP_ParAppendResult res = manager->appendInt(p);
+        checkParamAppend(res, StreamidName, "CudaLinkOutTOP");
     }
 }

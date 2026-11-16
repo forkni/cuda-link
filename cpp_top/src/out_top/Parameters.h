@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace TD {
 class OP_Inputs;
 class OP_ParameterManager;
@@ -26,6 +28,12 @@ constexpr static char DebugLabel[] = "Debug";
 constexpr static char NumslotsName[] = "Numslots";
 constexpr static char NumslotsLabel[] = "Num Slots";
 
+// User-set integer written into every slot meta stream_id, so a receiver that combines
+// several streams can tell them apart (for example camera 0-2 color/depth).
+constexpr static char StreamidName[] = "Streamid";
+constexpr static char StreamidLabel[] = "Stream ID";
+constexpr static int kStreamidSliderMax = 15;
+
 // Menu index -> actual slot count. Menu entries are the literal option strings; getParInt
 // returns the 0-based selected index (confirmed against CustomOperatorSamples/SpectrumTOP's
 // appendMenu + getParInt pattern), not the slot count itself -- evalNumslots() below
@@ -42,6 +50,8 @@ public:
     static bool evalDebug(const TD::OP_Inputs* inputs);
     // Returns the actual slot count (2, 3, or 4), not the raw menu index.
     static int evalNumslots(const TD::OP_Inputs* inputs);
+    // Never negative (the parameter clamps at 0).
+    static uint32_t evalStreamid(const TD::OP_Inputs* inputs);
 
     // Numslots is only meaningful/editable while the sender is not actively holding an
     // open SHM segment (changing it mid-run would desync a running consumer without a

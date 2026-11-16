@@ -15,9 +15,12 @@
 #include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
 #include "../common/raii_handles.h"
+#include "../common/clock.h"
 #include "../common/win_util.h"
+#include "../core/frame_step.h"
 
 using cudalink::common::asHandle;
+using cudalink::common::now_seconds;
 using cudalink::common::widen;
 using cudalink::core::AcquireResult;
 using cudalink::core::Metadata;
@@ -35,10 +38,18 @@ namespace {
 // Names the Info CHOP/DAT counts returned by getNumInfoCHOPChans()/getInfoDATSize() --
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
-constexpr int32_t kNumInfoCHOPChans = 15; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot,
+constexpr int32_t kNumInfoCHOPChans = 20; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot,
                                           // num_slots, event_wait_us, gpu_copy_us, noframe_count,
-                                          // version_changed_count, rescued_count, graph_hits, graph_builds
-constexpr int32_t kNumInfoDATRows = 5;    // ipc_version, status, last_error, last_error_frame, init_note
+                                          // version_changed_count, rescued_count, graph_hits, graph_builds,
+                                          // producer_frame, stream_id, latency_us, frame_gap_count,
+                                          // producer_skip_count
+constexpr int32_t kNumInfoDATRows = 7;    // ipc_version, status, last_error, last_error_frame, init_note,
+                                          // producer_frame, source_timestamp_us
+
+// Info CHOP values are float32, exact for integers only below 2^24. producer_frame is shown
+// mod 2^24 so it stays exact; compare two streams with (a - b) mod 2^24. The Info DAT rows
+// carry the full 64-bit producer_frame and source_timestamp_us.
+constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;
 
 // CUDA IPC cannot open a handle in the process that exported it. Probed 2026-11-16 (runtime
 // 12.8, driver 13.05, RTX 4090): cudaIpcOpenMemHandle and cudaIpcOpenEventHandle on own-process
@@ -495,6 +506,25 @@ bool CudaLinkInTOP::openSHM(const char* name) {
 //   point of the fix: trade a bounded CPU wait for a fresh frame instead of a repeat.
 // ---------------------------------------------------------------------------
 
+void CudaLinkInTOP::recordSlotMeta(const cudalink::core::AcquireResult& result) {
+    using cudalink::core::FrameStep;
+    const cudalink::core::SlotMeta& meta = result.slot_meta;
+    // myLastWriteIdx is 0 on the first frame of a connection (teardown / VersionChanged reset
+    // it), which classify_frame_step() reports as First.
+    const FrameStep step = cudalink::core::classify_frame_step(myLastWriteIdx, myProducerFrame,
+                                                               result.write_idx, meta.producer_frame);
+    if (step == FrameStep::FrameGap) {
+        ++myFrameGapCount;
+    } else if (step == FrameStep::ProducerSkip) {
+        ++myProducerSkipCount;
+    }
+    myProducerFrame = meta.producer_frame;
+    mySourceTimestampUs = meta.source_timestamp_us;
+    myStreamId = meta.stream_id;
+    myLatencyUs =
+        meta.host_timestamp > 0.0 ? static_cast<float>((now_seconds() - meta.host_timestamp) * 1e6) : 0.0f;
+}
+
 cudalink::core::AcquireResult CudaLinkInTOP::waitForFreshFrame(cudalink::core::AcquireResult result,
                                                                int waitMs) {
     // Lazy open, retried on every waiting cook until the producer has created the event
@@ -923,7 +953,9 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         myEndUs =
             std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - workEnd).count();
 
-        // Step 6.
+        // Step 6. Slot meta of the frame now on the output -- updated only after a successful
+        // copy, so the Info values never describe a frame that is not shown.
+        recordSlotMeta(result);
         myLastWriteIdx = result.write_idx;
         ++myFrameCount;
         myStatus = std::to_string(myMetadata.width) + "x" + std::to_string(myMetadata.height);
@@ -947,7 +979,7 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
 // ---------------------------------------------------------------------------
 
 int32_t CudaLinkInTOP::getNumInfoCHOPChans(void*) {
-    return kNumInfoCHOPChans; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot, num_slots
+    return kNumInfoCHOPChans;
 }
 
 void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, void*) {
@@ -1037,6 +1069,35 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
                 chan->name->setString("graph_builds");
                 chan->value = static_cast<float>(myGraphBuilds);
                 break;
+            case 15:
+                // Sender's TD absolute frame of the shown frame, mod 2^24 (exact in float32; see
+                // kInfoChopFrameMod). Equal across streams = the frames come from one sender cook.
+                chan->name->setString("producer_frame");
+                chan->value = static_cast<float>(myProducerFrame % kInfoChopFrameMod);
+                break;
+            case 16:
+                chan->name->setString("stream_id");
+                chan->value = static_cast<float>(myStreamId);
+                break;
+            case 17:
+                // Publish-to-copy time: now minus the slot meta host_timestamp (same clock on
+                // both sides, see common/clock.h). 0 when the sender wrote no timestamp.
+                chan->name->setString("latency_us");
+                chan->value = myLatencyUs;
+                break;
+            case 18:
+                // Session count of shown frames whose write_idx step was > 1: frames the ring
+                // overwrote before this receiver read them.
+                chan->name->setString("frame_gap_count");
+                chan->value = static_cast<float>(myFrameGapCount);
+                break;
+            case 19:
+                // Session count of shown frames with write_idx step 1 but producer_frame step > 1:
+                // the sender skipped TD frames (dropped frames or a sender that does not publish
+                // every cook). Not counted when the sender writes no producer_frame (0).
+                chan->name->setString("producer_skip_count");
+                chan->value = static_cast<float>(myProducerSkipCount);
+                break;
             default:
                 break;
         }
@@ -1045,7 +1106,7 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
 }
 
 bool CudaLinkInTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note
+    infoSize->rows = kNumInfoDATRows; // see kNumInfoDATRows
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
@@ -1076,6 +1137,14 @@ void CudaLinkInTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEntr
             // IPC capability probe succeeded with nothing to report.
             entries->values[0]->setString("init_note");
             entries->values[1]->setString(myInitNote.c_str());
+        } else if (index == 5) {
+            // Full 64-bit value (the Info CHOP channel shows it mod 2^24).
+            entries->values[0]->setString("producer_frame");
+            entries->values[1]->setString(std::to_string(myProducerFrame).c_str());
+        } else if (index == 6) {
+            // Optional producer time in us, not interpreted by cuda-link (the C++ Out TOP writes 0).
+            entries->values[0]->setString("source_timestamp_us");
+            entries->values[1]->setString(std::to_string(mySourceTimestampUs).c_str());
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

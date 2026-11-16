@@ -25,7 +25,7 @@ Per-frame *coordination* overhead (GPU event record + `write_idx` update) is typ
 1. Each frame, the component calls `top_op.cudaMemory()` to get a raw GPU pointer to the upstream texture.
 2. That texture is copied into a pre-allocated ring buffer slot on the GPU using `cudaMemcpyAsync` (device-to-device, never touching CPU memory).
 3. A CUDA IPC event is recorded on that slot — a lightweight GPU-side signal (~1 µs).
-4. The sender writes a producer timestamp into that slot's metadata, then updates the slot index in shared memory.
+4. The sender writes the slot metadata (a producer timestamp, the TD absolute frame `producer_frame` and the `Streamid` value), then updates the slot index in shared memory.
 5. The Python process reads the slot index, waits on the GPU event (without blocking the CPU), and accesses the texture as a zero-copy `torch.Tensor` or `cupy.ndarray`.
 
 ### Receiver Mode — Python → TD
@@ -148,6 +148,18 @@ Changing this parameter while active is silently ignored. Changing it while inac
 
 ---
 
+### Streamid
+
+**Type:** Integer | **Default:** 0 | **Range:** 0 to 2^32 − 1
+
+A number that names the stream. Sender mode only: each published frame carries this value
+in its slot metadata as `stream_id`. Give each stream a different value when one receiver
+reads several streams, so the receiver can tell them apart. A value outside the range is
+sent as 0. Receiver mode ignores this parameter; the `slot_meta` CHOP shows the sender's
+value instead.
+
+---
+
 ### Status
 
 **Type:** String (read-only) | **Default:** `Idle`
@@ -236,6 +248,32 @@ Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the p
 Hot-swappable: takes effect instantly without restarting or reinitializing the component. The setting is also applied automatically at component load time.
 
 Use this when distributing the component to end-users who should not need to interact with TD's built-in parameters.
+
+---
+
+## Slot Meta CHOP
+
+The component has a Script CHOP `slot_meta` inside it. It shows the slot metadata of the
+current frame, one sample per channel. The Out CHOP `out_slot_meta` makes it available on
+the COMP's CHOP output. The channel names are the same as the C++ `CudaLinkInTOP` Info
+CHOP channels, so a network reads both the same way.
+
+| Channel | Sender mode | Receiver mode |
+|---------|-------------|---------------|
+| `producer_frame` | TD absolute frame of the last published frame | Sender's TD absolute frame of the frame on the output |
+| `stream_id` | This COMP's `Streamid` | Sender's `stream_id` |
+| `latency_us` | 0 | Time from the sender publish to the import, in µs (0 when the sender wrote no timestamp) |
+| `frame_gap_count` | 0 | Imported frames whose `write_idx` step was more than 1 (the ring overwrote frames first) |
+| `producer_skip_count` | 0 | Imported frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1 (the sender skipped TD frames) |
+
+- **`producer_frame` is mod 2^24.** A CHOP sample is float32, which holds an integer
+  exactly only below 2^24. Compare two values with `(a - b) mod 2^24`.
+- **Match streams with `producer_frame`.** All senders that cook in one TD frame write the
+  same `producer_frame`. On the receiver, two streams with an equal `producer_frame` come
+  from the same sender cook.
+- **Update timing.** In Sender mode the `callbacks` Execute DAT cooks `slot_meta` after
+  each export. In Receiver mode the `ImportBuffer` Script TOP cooks it after each import,
+  so the values always belong to the frame on the output.
 
 ---
 

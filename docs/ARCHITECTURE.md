@@ -210,8 +210,7 @@ v0.6 removes it: the per-slot `host_timestamp` does its job. The sender writes t
 of slot `(write_idx - 1) % N` before the release fence, and writes `write_idx` last
 (`publish_frame(buf, layout, write_idx, *, host_timestamp, producer_frame=0,
 source_timestamp_us=0, stream_id=0)`). Consumers read it as `AcquireResult.slot_meta`
-(a `SlotMeta` NamedTuple). In this phase both senders (Python `Exporter` and the C++ Out TOP)
-write `producer_frame = 0` and `stream_id = 0`.
+(a `SlotMeta` NamedTuple). The C++ Out TOP and the .tox write TD's absolute frame and `Streamid`; the Python `Exporter` takes them from `GpuFrame` (`producer_frame=None` sends `write_idx`).
 
 The sender writes `sender_pid` together with `magic` and `num_slots`, before the version commit
 (Python `os.getpid()`, C++ Out TOP `GetCurrentProcessId()`). Receivers refuse a segment whose

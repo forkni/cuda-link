@@ -35,6 +35,9 @@ CUDAIPCExporter (Base COMP)
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
+├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
+├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
 └── info              (Text DAT)     ← Optional version/author info
 ```
@@ -75,6 +78,9 @@ CUDAIPCExporter (Base COMP)
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
+├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
+├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
 └── info              (Text DAT)     ← Optional version/author info
 ```
@@ -105,6 +111,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2–10 (2–5 recommended/tested; 6–10 supported but less exercised) |
+| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
 **For `Numslots` menu parameter**:
@@ -119,7 +126,12 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 - Menu Names: `Sender Receiver`
 - Menu Labels: `Sender Receiver`
 
-**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Debug).
+**For `Streamid` parameter**: add it directly after `Numslots`, on the same page. Set
+Minimum `0` and turn on Clamp Minimum. Optional: Slider Range `0`–`15`, like the C++ Out
+TOP. The Sender reads it with `param_value("Streamid")`; a .tox without the parameter
+sends `stream_id = 0`.
+
+**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Streamid → Debug).
 
 ### Step 3: Create Text DATs
 
@@ -324,6 +336,23 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 when the next cook finds no message (after `clear_status` unstores the key and
 force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-body tint.
 
+### Step 6d: Create the slot_meta Script CHOP
+
+1. Inside the `CUDAIPCExporter` COMP, create a **Text DAT**, rename to
+   `script_chop_callbacks`, and paste the contents of `td_exporter/script_chop_callbacks.py`.
+2. Create a **Script CHOP**, rename to `slot_meta`. Set its **Callbacks DAT** to
+   `op('script_chop_callbacks')`.
+3. Create an **Out CHOP**, rename to `out_slot_meta`, and wire `slot_meta` → `out_slot_meta`.
+   The Out CHOP makes the channels available on the COMP's CHOP output.
+
+**What it does**: `onCook` calls `ext.slot_meta_channels()` and writes one sample per
+channel: `producer_frame` (mod 2^24), `stream_id`, `latency_us`, `frame_gap_count`,
+`producer_skip_count`. These are the same names as the C++ In TOP Info CHOP channels.
+The names must stay `slot_meta` and `out_slot_meta`: `callbacks_template.py` (Sender,
+after each export) and `script_top_callbacks.py` (Receiver, after each import) find the
+CHOP by name and force-cook it. A .tox without the CHOP still works; it only has no slot
+meta channels.
+
 ### Step 7: Optional Info DAT
 
 Create a **Text DAT** named `info` with version/author information:
@@ -363,6 +392,11 @@ No code reads this DAT. It only travels with the .tox so the license ships with 
 3. Save to: `TOXES\CUDAIPCLink_v1.14.1.tox` inside the project root
 
 **Naming convention**: Use `CUDAIPCLink_v1.14.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+
+**Development builds**: save a dev build (for example `CUDAIPCLink_v2.0.0.dev0.tox`) to
+`local\` in the project root. `local\` is gitignored. Never save a dev build over the
+released `TOXES\CUDAIPCLink_v1.14.1.tox`. The 2.0.0.dev0 build uses classic mode: it
+holds the 15 mirror Text DATs plus the TD glue DATs.
 
 **Release manifest**: `TOXES/RELEASES.tsv` records the current release only — one row for the tracked `.tox`
 with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
@@ -598,6 +632,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Shared Script TOP onCook — ImportBuffer frame import (Receiver mode) **and** warning_emitter status badge (both Script TOPs point their Callbacks DAT here) |
+| `script_chop_callbacks.py` | `td_exporter/` | `slot_meta` Script CHOP onCook — slot meta channels (`producer_frame`, `stream_id`, `latency_us`, `frame_gap_count`, `producer_skip_count`) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
 
 **Classic/fallback mode only — mirror DATs (auto-generated by `scripts/sync_td_wrapper.py`):**

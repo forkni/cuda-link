@@ -60,6 +60,7 @@ from .cuda_runtime_types import (
 )
 from .shm_protocol import (
     _ST_U32,
+    EMPTY_SLOT_META,
     IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     NUM_SLOTS_OFFSET,
@@ -69,6 +70,7 @@ from .shm_protocol import (
     DtypeCodec,
     Metadata,
     SHMLayout,
+    SlotMeta,
     bump_version,
     clear_shutdown,
     publish_frame,
@@ -192,6 +194,8 @@ class Exporter:
 
         # Profiling
         self.frame_count: int = 0
+        # Slot meta of the last published frame (protocol v0.6).
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
         self._profile: FrameProfile = FrameProfile(_EXPORTER_PROFILE_REGIONS)
 
         # Cached layout offsets (set by _write_handles_to_shm)
@@ -596,11 +600,14 @@ class Exporter:
         on backpressure.
 
         Args:
-            frame: GpuFrame(ptr, size, producer_stream=None).
+            frame: GpuFrame(ptr, size, producer_stream=None, producer_frame=None,
+                   source_timestamp_us=0, stream_id=0).
                    ptr must be a device-resident pointer; size must equal the
                    FrameSpec geometry (height * width * channels * itemsize).
                    producer_stream, if given, triggers a GPU-side ordering event
                    before the D2D memcpy (replaces record_source_sync()).
+                   producer_frame / source_timestamp_us / stream_id go into the
+                   slot meta; producer_frame None publishes write_idx.
 
         Returns:
             PUBLISHED           — frame delivered to the ring buffer.
@@ -776,7 +783,22 @@ class Exporter:
                 _t = time.perf_counter()
             with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
                 self.write_idx += 1
-                publish_frame(self.shm_handle.buf, self._layout, self.write_idx, host_timestamp=time.perf_counter())
+                meta = SlotMeta(
+                    host_timestamp=time.perf_counter(),
+                    producer_frame=self.write_idx if frame.producer_frame is None else frame.producer_frame,
+                    source_timestamp_us=frame.source_timestamp_us,
+                    stream_id=frame.stream_id,
+                )
+                publish_frame(
+                    self.shm_handle.buf,
+                    self._layout,
+                    self.write_idx,
+                    host_timestamp=meta.host_timestamp,
+                    producer_frame=meta.producer_frame,
+                    source_timestamp_us=meta.source_timestamp_us,
+                    stream_id=meta.stream_id,
+                )
+                self.last_slot_meta = meta
                 if self._doorbell:
                     _doorbell.signal(self._doorbell)
             if profile:

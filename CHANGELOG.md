@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample; the last good values are re-emitted when NVML has no newer sample. This tells a caller
   whether TouchDesigner or the consumer owns the GPU's time in a slow round trip.
 
+- **Slot meta through the TOPs and Python** (protocol v0.6, [ADR-0015](docs/adr/0015-shm-protocol-v0-6-slot-meta.md)):
+  senders now fill the per-slot meta, and receivers show it.
+  - C++ `CudaLinkOutTOP`: new `Streamid` parameter ("Stream ID", default 0). Each publish
+    writes `producer_frame` = TD `absFrame` of that cook (equal for all Out TOPs that cook
+    in one TD frame), `stream_id` = `Streamid` and `host_timestamp` from `steady_clock`
+    (QPC, the same clock as Python `perf_counter()`). The Info CHOP gains `producer_frame`
+    (mod 2^24) and `stream_id` (13 channels); the Info DAT gains a `producer_frame` row.
+  - C++ `CudaLinkInTOP`: the Info CHOP gains `producer_frame` (mod 2^24, exact in float32),
+    `stream_id`, `latency_us`, `frame_gap_count` and `producer_skip_count` (20 channels);
+    the Info DAT gains `producer_frame` (full value) and `source_timestamp_us` rows. The
+    step rules are in `cpp_top/src/core/frame_step.h`, covered by `topcore_tests`.
+  - Python: `GpuFrame` gains `producer_frame` (`None` sends `write_idx`; 0 = not set),
+    `source_timestamp_us` and `stream_id`, range-checked (`ValueError`).
+    `Exporter.last_slot_meta` and `Importer.last_slot_meta` hold the `SlotMeta` of the last
+    published / acquired frame. `shm_protocol` gains `INFO_CHOP_FRAME_MOD`,
+    `SLOT_META_CHANNELS`, `FrameStep` and `classify_frame_step()`.
+  - TD layer: the Sender stamps `producer_frame` from `TDHost.abs_frame()` and `stream_id`
+    from a new `Streamid` custom parameter. `TDReceiver` gains `last_slot_meta`,
+    `last_latency_us`, `frame_gap_count`, `producer_skip_count` and `slot_meta_channels()`.
+    A new `slot_meta` Script CHOP (`td_exporter/script_chop_callbacks.py`) and Out CHOP
+    `out_slot_meta` show the same channels as the In TOP; it is force-cooked after each
+    export (Sender) or import (Receiver). See `docs/TOX_BUILD_GUIDE.md` Step 6d.
+
 ### Fixed
 
 - **C++ `cudalink::common::CudaDeviceSession` IPC capability probe** (the C++ port of the

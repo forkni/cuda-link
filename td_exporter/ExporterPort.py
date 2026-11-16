@@ -138,6 +138,10 @@ class ExportPolicy:
         )
 
 
+_U64_LIMIT = 1 << 64
+_U32_LIMIT = 1 << 32
+
+
 @dataclass(frozen=True)
 class GpuFrame:
     """A single GPU frame ready for export.
@@ -146,11 +150,34 @@ class GpuFrame:
     is the raw CUDA stream handle (as int) on which the producer has already
     enqueued work that writes to ptr. The Exporter will issue a GPU-side
     stream_wait_event before copying, maintaining ordering without blocking the CPU.
+
+    The last three fields go into the frame's slot meta (protocol v0.6):
+
+    - producer_frame: the producer's frame number, the key a receiver uses to match
+      frames of several streams (a TD sender passes ``int(absTime.frame)``). None
+      means "use the Exporter's write_idx". 0 means "not set". Range 0..2^64-1.
+    - source_timestamp_us: optional producer time in µs; cuda-link does not
+      interpret it. Range 0..2^64-1.
+    - stream_id: user-set integer naming the stream. Range 0..2^32-1.
+
+    Raises:
+        ValueError: if a slot meta field is out of range.
     """
 
     ptr: int
     size: int
     producer_stream: int | None = None
+    producer_frame: int | None = None
+    source_timestamp_us: int = 0
+    stream_id: int = 0
+
+    def __post_init__(self) -> None:
+        if self.producer_frame is not None and not 0 <= self.producer_frame < _U64_LIMIT:
+            raise ValueError(f"GpuFrame.producer_frame must be in 0..2^64-1, got {self.producer_frame!r}")
+        if not 0 <= self.source_timestamp_us < _U64_LIMIT:
+            raise ValueError(f"GpuFrame.source_timestamp_us must be in 0..2^64-1, got {self.source_timestamp_us!r}")
+        if not 0 <= self.stream_id < _U32_LIMIT:
+            raise ValueError(f"GpuFrame.stream_id must be in 0..2^32-1, got {self.stream_id!r}")
 
 
 class FrameOutcome(Enum):

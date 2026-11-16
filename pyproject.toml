@@ -192,6 +192,7 @@ project-excludes = [
     "td_exporter/callbacks_template.py",
     "td_exporter/parexecute_callbacks.py",
     "td_exporter/script_top_callbacks.py",
+    "td_exporter/script_chop_callbacks.py",
     "td_exporter/example_sender_launcher.py",
     "td_exporter/example_receiver_launcher.py",
     "td_exporter/example_sender_python.py",

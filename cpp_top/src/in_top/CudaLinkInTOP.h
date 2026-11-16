@@ -75,6 +75,10 @@ private:
     // been a visible repeat), or the original NoFrame on timeout. See the .cpp definition
     // for the auto-reset/stale-signal and single-waiter caveats.
     cudalink::core::AcquireResult waitForFreshFrame(cudalink::core::AcquireResult result, int waitMs);
+    // Stores result.slot_meta for the Info CHOP/DAT and counts write_idx / producer_frame
+    // gaps against the previous shown frame. Call after a successful copy, before
+    // myLastWriteIdx takes result.write_idx.
+    void recordSlotMeta(const cudalink::core::AcquireResult& result);
 
     // Reads num_slots + metadata from the currently-mapped view, (re)builds mLayout,
     // and opens cudaIpcMemHandle/cudaIpcEventHandle for every slot. Covers both the
@@ -254,4 +258,13 @@ private:
     uint64_t myTotalRescued = 0;
 
     uint32_t myReadSlot = 0;
+
+    // Slot meta of the frame on the output (Info CHOP / DAT), set by recordSlotMeta() after a
+    // successful copy. The gap counters are session-lifetime, like myTotalNoFrame.
+    uint64_t myProducerFrame = 0;
+    uint64_t mySourceTimestampUs = 0;
+    uint32_t myStreamId = 0;
+    float myLatencyUs = 0.0f;
+    uint64_t myFrameGapCount = 0;
+    uint64_t myProducerSkipCount = 0;
 };

@@ -62,12 +62,129 @@ protocol_dump --file cpp_top\tests\fixtures\ring_n3.bin
   protocol v0.5. Update the sender to cuda-link 2.x.
 - `magic ... (MISMATCH)`: the segment does not hold a cuda-link protocol.
 - `sender_pid 0 (unknown)`: the sender did not write its process ID.
-- `producer_frame 0` and `stream_id 0` on every slot: expected in this release. No sender
-  fills these fields yet.
+- `producer_frame 0` on every slot: the sender writes no frame number. The C++ Out TOP
+  writes TD's absolute frame. The Python `Exporter` writes `write_idx` unless the caller
+  sets `GpuFrame.producer_frame`.
+- `stream_id 0` on every slot: the default. Set `Streamid` on the Out TOP (or
+  `GpuFrame.stream_id` in Python) to name the stream.
 - `write_idx 0`: the sender made the segment but has not published a frame.
 - `shutdown 1`: the sender has stopped.
 
 The tool is built with the TOPs. The `--file` form also works on Linux.
+
+## Out TOP parameters
+
+All parameters are on the page "CUDA Link".
+
+| Name | Label | Type | Default | Use |
+|---|---|---|---|---|
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_TD>>Python` | Name of the shared-memory segment. The receiver must use the same name. |
+| `Active` | Active | Toggle | On | Off stops the publish and frees the ring. |
+| `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
+| `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
+| `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
+
+## Slot meta from the Out TOP
+
+Each publish writes these slot meta fields:
+
+- `producer_frame`: TD `OP_TimeInfo::absFrame` of that cook. All Out TOPs that cook in one
+  TD frame write the same value.
+- `stream_id`: the `Streamid` parameter.
+- `host_timestamp`: the publish time in seconds, from `steady_clock`
+  (`cpp_top/src/common/clock.h`). On Windows this clock is QPC, the same clock as Python
+  `time.perf_counter()`. A receiver on the same machine subtracts it from its own clock to
+  get the latency.
+- `source_timestamp_us`: always 0 from the Out TOP.
+
+## Info CHOP and Info DAT
+
+Connect an Info CHOP or an Info DAT to a TOP to read these values.
+
+### Out TOP Info CHOP (13 channels)
+
+| Channel | Value |
+|---|---|
+| `frames` | Frames published in this session |
+| `cook_us` | Time of the last cook, in microseconds |
+| `copy_us` | Time of the slot copy, in microseconds |
+| `begin_us` | Time of `beginCUDAOperations()`, in microseconds |
+| `end_us` | Time of `endCUDAOperations()`, in microseconds |
+| `write_idx` | Last published `write_idx` |
+| `num_slots` | Number of ring slots |
+| `gpu_ipc_us` | GPU time of the slot copy and the event record (0 while `Debug` is off) |
+| `gpu_pass_us` | GPU time of the pass-through copy (0 while `Debug` is off) |
+| `graph_hits` | CUDA graph cache hits (only with `Debug` on and `CUDALINK_CPP_USE_GRAPHS` set) |
+| `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
+| `producer_frame` | Last published `producer_frame`, mod 2^24 |
+| `stream_id` | Last published `stream_id` |
+
+### In TOP Info CHOP (20 channels)
+
+| Channel | Value |
+|---|---|
+| `frames` | Frames shown in this session |
+| `cook_us` | Time of the last cook, in microseconds |
+| `copy_us` | Time of the copy into the output, in microseconds |
+| `begin_us` | Time of `beginCUDAOperations()`, in microseconds |
+| `end_us` | Time of `endCUDAOperations()`, in microseconds |
+| `write_idx` | `write_idx` of the shown frame |
+| `read_slot` | Ring slot of the shown frame |
+| `num_slots` | Number of ring slots, from the segment header |
+| `event_wait_us` | GPU time of the wait on the sender event (0 while `Debug` is off) |
+| `gpu_copy_us` | GPU time of the copy into the output (0 while `Debug` is off) |
+| `noframe_count` | Cooks with no new frame (only with `Debug` on) |
+| `version_changed_count` | Cooks that saw a sender restart (only with `Debug` on) |
+| `rescued_count` | Frames that the `Framewaitms` wait got (only with `Debug` on) |
+| `graph_hits` | CUDA graph cache hits (only with `Debug` on and `CUDALINK_CPP_USE_GRAPHS` set) |
+| `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
+| `producer_frame` | `producer_frame` of the shown frame, mod 2^24 |
+| `stream_id` | `stream_id` of the shown frame |
+| `latency_us` | Time from the sender publish to the copy (now minus `host_timestamp`), in microseconds. 0 when the sender wrote no timestamp. |
+| `frame_gap_count` | Shown frames whose `write_idx` step was more than 1: the ring overwrote frames before this TOP read them |
+| `producer_skip_count` | Shown frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1: the sender skipped TD frames. Not counted when `producer_frame` is 0. |
+
+The slot meta channels (`producer_frame` to `producer_skip_count`) change only after a
+successful copy. `cpp_top/src/core/frame_step.h` classifies the step between two shown
+frames, and `topcore_tests` tests it. Python has the same rules in
+`shm_protocol.classify_frame_step()`.
+
+### Info DAT rows
+
+| Row | Out TOP | In TOP |
+|---|---|---|
+| `ipc_version` | yes | yes |
+| `status` | yes | yes |
+| `last_error` | yes | yes |
+| `last_error_frame` | yes | yes |
+| `init_note` | yes | yes |
+| `producer_frame` | yes: last published, full 64-bit value | yes: shown frame, full 64-bit value |
+| `source_timestamp_us` | no | yes: shown frame |
+
+### producer_frame in a CHOP channel
+
+A CHOP channel is float32. A float32 holds an integer exactly only below 2^24 (16,777,216).
+Thus both Info CHOPs show `producer_frame` mod 2^24 (`INFO_CHOP_FRAME_MOD` in
+`shm_protocol.py`, `kInfoChopFrameMod` in C++). At 60 FPS the value wraps after about
+78 hours. To compare two channel values `a` and `b`, use `(a - b) mod 2^24`, not `a - b`.
+For the full value, read the `producer_frame` row of the Info DAT.
+
+## Matching streams on the receiver
+
+Sender A has several Out TOPs (for example color and depth), each with its own
+`Ipcmemname` and `Streamid`. Receiver B has one In TOP for each stream. All Out TOPs that
+cook in one TD frame of A write the same `producer_frame`. Thus two frames on B with an
+equal `producer_frame` come from the same cook of A.
+
+On B, compare the `producer_frame` channels of the In TOPs:
+
+- Equal values: the frames on the outputs come from the same cook of A.
+- Different values: one In TOP shows a newer frame. The difference `(a - b) mod 2^24` is
+  the number of TD frames between them.
+- Use `stream_id` to make sure that each In TOP reads the stream that you expect.
+
+`frame_gap_count` tells you that B was too slow to read every frame. `producer_skip_count`
+tells you that A did not publish in every TD frame.
 
 ## Same-process limitation
 
@@ -109,4 +226,4 @@ process ID before it opens any handle, and gives the error above without a CUDA 
 - Windows display driver model (WDDM) IPC caveat (ADR-0004).
 - Teardown grace period (the 100 ms hitch on Active off or a format change).
 - Trust model for named shared memory.
-- Debug-log file locations and Info CHOP / Info DAT channel reference.
+- Debug-log file locations.

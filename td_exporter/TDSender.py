@@ -31,7 +31,15 @@ from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
-from SHMProtocol import DtypeCodec, FLAGS_BGRA, FLAGS_MONO_ALPHA, read_version, set_version  # noqa: E402
+from SHMProtocol import (  # noqa: E402
+    FLAGS_BGRA,
+    FLAGS_MONO_ALPHA,
+    INFO_CHOP_FRAME_MOD,
+    SLOT_META_CHANNELS,
+    DtypeCodec,
+    read_version,
+    set_version,
+)
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
 
@@ -317,6 +325,28 @@ class TDSenderEngine:
     def is_ready(self) -> bool:
         """True when Exporter is open and all ring-buffer slots are allocated."""
         return self._initialized and self._exporter is not None and self._exporter.is_ready()
+
+    def _stream_id(self) -> int:
+        """Streamid par as a slot meta stream_id; 0 when the par is missing or invalid."""
+        value = self._host.param_value("Streamid")
+        try:
+            sid = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return sid if 0 <= sid <= 0xFFFFFFFF else 0
+
+    def slot_meta_channels(self) -> dict[str, float]:
+        """Slot meta of the last published frame, as the `slot_meta` Script CHOP channels.
+
+        Sender side: producer_frame (mod 2^24, exact in float32) and stream_id; the
+        receive-only channels are 0.
+        """
+        channels = dict.fromkeys(SLOT_META_CHANNELS, 0.0)
+        if self._exporter is not None:
+            meta = self._exporter.last_slot_meta
+            channels["producer_frame"] = float(meta.producer_frame % INFO_CHOP_FRAME_MOD)
+            channels["stream_id"] = float(meta.stream_id)
+        return channels
 
     def get_stats(self) -> dict:
         """Sender statistics dict.
@@ -866,7 +896,14 @@ class TDSenderEngine:
             # Use self._exporter.data_size (dtype-derived) rather than cm.size so that on
             # a dtype-shrink we copy only the valid front region of the stale allocation.
             # In steady state and on grow (after TD reallocates) data_size == cm.size.
-            frame = GpuFrame(ptr=cm.ptr, size=self._exporter.data_size)
+            # Slot meta: TD's absolute frame of this cook (the cross-stream match key; every
+            # sender that cooks in one TD frame stamps the same value) and the Streamid par.
+            frame = GpuFrame(
+                ptr=cm.ptr,
+                size=self._exporter.data_size,
+                producer_frame=self._host.abs_frame(),
+                stream_id=self._stream_id(),
+            )
             _t_export = time.perf_counter()
             outcome = self._exporter.export(frame)
 

@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "frame_step.h"
 #include "ring_reader.h"
 #include "ring_writer.h"
 #include "shm_layout.h"
@@ -451,6 +452,32 @@ void test_publish_footprint() {
     CHECK(buf[layout.shutdown_offset()] == 0);
 }
 
+// The In TOP's frame_gap_count / producer_skip_count classify each shown frame against the previous.
+void test_frame_step_classification() {
+    // First frame of a connection: nothing to compare, whatever the stale producer_frame.
+    CHECK(classify_frame_step(0, 0, 1, 100) == FrameStep::First);
+    CHECK(classify_frame_step(0, 999, 7, 100) == FrameStep::First);
+    // Steady state: write_idx +1, producer_frame +1.
+    CHECK(classify_frame_step(5, 100, 6, 101) == FrameStep::Next);
+    // Same producer_frame twice (two publishes in one sender frame): not a skip.
+    CHECK(classify_frame_step(5, 100, 6, 100) == FrameStep::Next);
+    // Ring overwrote frames before the read.
+    CHECK(classify_frame_step(5, 100, 7, 102) == FrameStep::FrameGap);
+    CHECK(classify_frame_step(5, 100, 9, 101) == FrameStep::FrameGap);
+    // Sender skipped TD frames between two consecutive publishes.
+    CHECK(classify_frame_step(5, 100, 6, 102) == FrameStep::ProducerSkip);
+    // producer_frame 0 = not set (sender writes none): never a skip.
+    CHECK(classify_frame_step(5, 0, 6, 50) == FrameStep::Next);
+    CHECK(classify_frame_step(5, 100, 6, 0) == FrameStep::Next);
+    // Sender restarted its frame count (smaller value): not a skip.
+    CHECK(classify_frame_step(5, 100, 6, 3) == FrameStep::Next);
+    // write_idx wraps at 2^32 like the counter.
+    CHECK(classify_frame_step(0xFFFFFFFFU, 100, 1, 101) == FrameStep::FrameGap); // step 2 across the wrap
+    CHECK(classify_frame_step(0xFFFFFFFEU, 100, 0xFFFFFFFFU, 101) == FrameStep::Next);
+    // A repeated write_idx (step 0) is not a gap.
+    CHECK(classify_frame_step(5, 100, 5, 100) == FrameStep::Next);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -478,6 +505,7 @@ int main(int argc, char** argv) {
     test_regression_zero_slot_layout();
     test_regression_version_commits_last();
     test_publish_footprint();
+    test_frame_step_classification();
 
     std::printf("topcore_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

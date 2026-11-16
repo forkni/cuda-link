@@ -43,10 +43,16 @@ from SHMProtocol import (  # noqa: E402
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
+    EMPTY_SLOT_META,
+    INFO_CHOP_FRAME_MOD,
+    SLOT_META_CHANNELS,
+    FrameStep,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
+    classify_frame_step,
     is_same_process_sender,
     protocol_mismatch_message,
     read_magic,
@@ -271,6 +277,14 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
+        # Slot meta of the frame on the output (set after a successful copy), plus the
+        # session-lifetime gap counters the In TOP shows as frame_gap_count /
+        # producer_skip_count.
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
+        self.last_latency_us: float = 0.0
+        self.frame_gap_count: int = 0
+        self.producer_skip_count: int = 0
+
         # Per-frame performance tracking for Debug summary line — shares
         # ReportWindow with TDSenderEngine.
         self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
@@ -371,6 +385,38 @@ class TDReceiverEngine:
         except (AttributeError, struct.error, ValueError, IndexError, OSError):
             return True  # SHM unreadable; let import_frame handle it
 
+    def _record_slot_meta(self, prev_write_idx: int, write_idx: int, meta: SlotMeta) -> None:
+        """Store the shown frame's slot meta and count gaps (same rules as the C++ In TOP)."""
+        step = classify_frame_step(prev_write_idx, self.last_slot_meta.producer_frame, write_idx, meta.producer_frame)
+        if step is FrameStep.FRAME_GAP:
+            self.frame_gap_count += 1
+        elif step is FrameStep.PRODUCER_SKIP:
+            self.producer_skip_count += 1
+        self.last_slot_meta = meta
+        ts = meta.host_timestamp
+        self.last_latency_us = (time.perf_counter() - ts) * 1e6 if ts > 0 else 0.0
+
+    def slot_meta_channels(self) -> dict[str, float]:
+        """Slot meta of the frame on the output, as the `slot_meta` Script CHOP channels.
+
+        Same names and meaning as the C++ In TOP Info CHOP: producer_frame is shown mod
+        2^24 (exact in float32); ``last_slot_meta.producer_frame`` has the full value.
+        """
+        meta = self.last_slot_meta
+        return dict(
+            zip(
+                SLOT_META_CHANNELS,
+                (
+                    float(meta.producer_frame % INFO_CHOP_FRAME_MOD),
+                    float(meta.stream_id),
+                    float(self.last_latency_us),
+                    float(self.frame_gap_count),
+                    float(self.producer_skip_count),
+                ),
+                strict=True,
+            )
+        )
+
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
         return {
@@ -454,6 +500,7 @@ class TDReceiverEngine:
             if result.state is SlotState.NO_FRAME:
                 return False
 
+            _prev_write_idx = self._connection.last_write_idx  # for the slot meta step below
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
@@ -556,6 +603,7 @@ class TDReceiverEngine:
 
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
+            self._record_slot_meta(_prev_write_idx, write_idx, result.slot_meta)
 
             if not self._last_fmt_status:
                 # Rebuild only when format changed (initialize_receiver and update_receiver_format

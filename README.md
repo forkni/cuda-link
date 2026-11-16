@@ -154,6 +154,8 @@ with Importer.open(ImportSpec(shm_name="my_texture_ipc")) as importer:
         result = importer.get_frame()
         if result.outcome is ImportOutcome.NEW_FRAME:
             tensor = result.frame
+            meta = importer.last_slot_meta  # SlotMeta of this frame
+            # meta.producer_frame, meta.stream_id, meta.host_timestamp, meta.source_timestamp_us
 
 # Explicit cleanup
 importer.close()
@@ -199,6 +201,12 @@ with Exporter.open(
         )
     )
 ```
+
+`GpuFrame` also takes three optional slot meta fields: `producer_frame` (your frame number;
+`None`, the default, sends the Exporter's `write_idx`; `0` means "not set"),
+`source_timestamp_us` (your own time in µs, not interpreted) and `stream_id` (a number that
+names the stream). An out-of-range value raises `ValueError`. `exporter.last_slot_meta`
+and `importer.last_slot_meta` hold the `SlotMeta` of the last published or acquired frame.
 
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
 
@@ -263,7 +271,9 @@ Per slot (160 bytes each, slot base = 24 + slot*160):
 ```
 
 Total: `48 + NUM_SLOTS × 160` bytes (368 / 528 / 688 for 2 / 3 / 4 slots).
-In this release both senders write `producer_frame = 0` and `stream_id = 0`.
+The TD senders (the .tox and the C++ Out TOP) write TD's absolute frame as
+`producer_frame` and the `Streamid` parameter as `stream_id`. The Python `Exporter`
+writes `write_idx` as `producer_frame` unless `GpuFrame` sets it.
 
 Protocol v0.6 is a wire break from v0.5 (cuda-link 1.x, magic "CIPD", 433 bytes for 3 slots).
 A v0.6 receiver reports a v0.5 sender by name, and the reverse direction fails with a

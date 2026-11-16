@@ -24,6 +24,20 @@ def _extension():
         return None
 
 
+def _cook_slot_meta() -> None:
+    """Force-cook the slot_meta Script CHOP after an export (never raises).
+
+    In Sender mode nothing else makes it cook: it reads plain extension state, which
+    TD does not track as a dependency. A .tox without the CHOP (1.x layout) skips this.
+    """
+    try:
+        meta_chop = parent().op("slot_meta")  # noqa: F821
+        if meta_chop is not None:
+            meta_chop.cook(force=True)
+    except Exception:  # noqa: BLE001 -- a frame callback must never raise
+        return
+
+
 def onFrameStart(frame: int) -> None:
     """Called at the start of every frame.
 
@@ -77,6 +91,7 @@ def onFrameEnd(frame: int) -> None:
 
     if ext.mode == "Sender":
         ext.export_frame()
+        _cook_slot_meta()
 
 
 def onExit() -> None:

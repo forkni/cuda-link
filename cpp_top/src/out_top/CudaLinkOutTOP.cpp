@@ -13,9 +13,11 @@
 #include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
 #include "../common/raii_handles.h"
+#include "../common/clock.h"
 #include "../common/win_util.h"
 
 using cudalink::common::asHandle;
+using cudalink::common::now_seconds;
 using cudalink::common::widen;
 using cudalink::core::Metadata;
 using cudalink::core::SHMLayout;
@@ -40,29 +42,19 @@ constexpr DWORD kIpcCloseGracePeriodMs = 100;
 // Names the Info CHOP channel count returned by getNumInfoCHOPChans() -- must stay in
 // sync with the number of `case` labels in getInfoCHOPChan()'s switch below (frames, cook_us,
 // copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us, graph_hits,
-// graph_builds).
-constexpr int32_t kNumInfoCHOPChans = 11;
+// graph_builds, producer_frame, stream_id).
+constexpr int32_t kNumInfoCHOPChans = 13;
+
+// Info CHOP values are float32, exact for integers only below 2^24. producer_frame is shown
+// mod 2^24 so it stays exact; compare two values with (a - b) mod 2^24. The Info DAT row
+// carries the full 64-bit value.
+constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
-// last_error_frame, init_note).
-constexpr int32_t kNumInfoDATRows = 5;
+// last_error_frame, init_note, producer_frame).
+constexpr int32_t kNumInfoDATRows = 6;
 
-// Monotonic seconds as a double, for the slot meta host_timestamp consumed as a latency
-// measurement (importer.py subtracts this from a same-domain "now" to get elapsed time --
-// see importer.py's last_latency computation). steady_clock, NOT system_clock/wall-clock:
-// on Windows both MSVC's steady_clock and CPython's time.perf_counter() resolve to
-// QueryPerformanceCounter(), sharing the same boot-relative zero point, so this value is
-// directly comparable to the perf_counter() the Python exporter (exporter.py::publish_frame
-// caller) publishes and the Python importer reads back against. A wall-clock/epoch
-// timestamp here would still decode fine (same 8-byte double on the wire) but would be
-// off by ~ the epoch-vs-boot offset when read against perf_counter() -- exactly the
-// multi-hundred-billion-ms latency bug this replaced. Also avoids NTP/DST step
-// corruption landing in the 1-30 ms signal band that a wall-clock reading would risk.
-double now_seconds() {
-    using namespace std::chrono;
-    return duration<double>(steady_clock::now().time_since_epoch()).count();
-}
 } // namespace
 
 extern "C" {
@@ -766,6 +758,13 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             return;
         }
         const int numSlots = Parameters::evalNumslots(inputs);
+        // Slot meta for this publish. absFrame is TD's absolute frame of this cook: every Out
+        // TOP that cooks in one TD frame stamps the same value, so the receiver can match
+        // streams that come from one sender cook (CONTEXT.md "producer frame").
+        const TD::OP_TimeInfo* timeInfo = inputs->getTimeInfo();
+        const uint64_t producerFrame =
+            (timeInfo && timeInfo->absFrame > 0) ? static_cast<uint64_t>(timeInfo->absFrame) : 0;
+        const uint32_t streamId = Parameters::evalStreamid(inputs);
 
         // Step 3: (re)allocate on first cook / resolution / format / numslots change.
         const bool needsAlloc = !myAllocated || width != myWidth || height != myHeight ||
@@ -967,7 +966,11 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         ++myWriteIdx;
         SlotMeta meta;
         meta.host_timestamp = now_seconds();
+        meta.producer_frame = producerFrame;
+        meta.stream_id = streamId;
         publish(myShmView, myLayout, myWriteIdx, meta);
+        myProducerFrame = producerFrame;
+        myStreamId = streamId;
         if (myDoorbellHandle) {
             SetEvent(asHandle(myDoorbellHandle));
         }
@@ -996,7 +999,7 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
 int32_t CudaLinkOutTOP::getNumInfoCHOPChans(void*) {
     // frames, cook_us, copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us,
-    // gpu_pass_us, graph_hits, graph_builds
+    // gpu_pass_us, graph_hits, graph_builds, producer_frame, stream_id
     return kNumInfoCHOPChans;
 }
 
@@ -1061,6 +1064,15 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
                 chan->name->setString("graph_builds");
                 chan->value = static_cast<float>(myGraphBuilds);
                 break;
+            case 11:
+                // Last published producer_frame mod 2^24 (exact in float32; see kInfoChopFrameMod).
+                chan->name->setString("producer_frame");
+                chan->value = static_cast<float>(myProducerFrame % kInfoChopFrameMod);
+                break;
+            case 12:
+                chan->name->setString("stream_id");
+                chan->value = static_cast<float>(myStreamId);
+                break;
             default:
                 break;
         }
@@ -1069,7 +1081,8 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
 }
 
 bool CudaLinkOutTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note
+    infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note,
+                                      // producer_frame
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
@@ -1098,6 +1111,10 @@ void CudaLinkOutTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEnt
             // IPC capability probe succeeded with nothing to report.
             entries->values[0]->setString("init_note");
             entries->values[1]->setString(myInitNote.c_str());
+        } else if (index == 5) {
+            // Full 64-bit producer_frame (the Info CHOP channel shows it mod 2^24).
+            entries->values[0]->setString("producer_frame");
+            entries->values[1]->setString(std::to_string(myProducerFrame).c_str());
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

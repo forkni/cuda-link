@@ -227,6 +227,9 @@ class _NullEngine:
     def get_stats(self) -> dict:
         return {"ready": False, "error": LIBRARY_ERROR}
 
+    def slot_meta_channels(self) -> dict:
+        return {}
+
 
 class CUDAIPCExtension:
     """TouchDesigner extension facade for dual-mode CUDA IPC texture sharing.
@@ -519,6 +522,10 @@ class CUDAIPCExtension:
 
     def get_stats(self) -> dict:
         return self._engine.get_stats()
+
+    def slot_meta_channels(self) -> dict:
+        """Channel name -> value for the `slot_meta` Script CHOP (empty while inert)."""
+        return self._engine.slot_meta_channels()
 
     def switch_mode(self, new_mode: str) -> None:
         if new_mode == self._mode:

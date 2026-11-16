@@ -232,6 +232,42 @@ def read_slot_meta(buf: memoryview, layout: SHMLayout, slot: int) -> SlotMeta:
     return SlotMeta._make(_ST_SLOT_META.unpack_from(buf, layout.slot_meta_offset(slot)))
 
 
+# TD CHOP samples and Info CHOP values are float32, exact for integers only below 2^24.
+# A producer_frame shown in a CHOP channel is producer_frame % INFO_CHOP_FRAME_MOD; compare
+# two such values with (a - b) % INFO_CHOP_FRAME_MOD. Twin of the C++ kInfoChopFrameMod.
+INFO_CHOP_FRAME_MOD = 1 << 24
+
+# Slot meta channels a receiver shows, in order: the In TOP Info CHOP channels and the
+# .tox `slot_meta` Script CHOP use these names, so a B network reads either the same way.
+SLOT_META_CHANNELS = ("producer_frame", "stream_id", "latency_us", "frame_gap_count", "producer_skip_count")
+
+
+class FrameStep(Enum):
+    """Step between two frames a receiver showed (twin of cpp_top core/frame_step.h)."""
+
+    FIRST = 0  # no previous frame on this connection (prev_write_idx == 0)
+    NEXT = 1  # write_idx step 1 and producer_frame step <= 1 (or not set)
+    FRAME_GAP = 2  # write_idx step > 1: the ring overwrote frames before the read
+    PRODUCER_SKIP = 3  # write_idx step 1, producer_frame step > 1: the sender skipped frames
+
+
+def classify_frame_step(
+    prev_write_idx: int, prev_producer_frame: int, write_idx: int, producer_frame: int
+) -> FrameStep:
+    """Classify the step from the previous shown frame to this one.
+
+    producer_frame 0 means "not set" and never counts as a skip; write_idx wraps at 2^32.
+    """
+    if prev_write_idx == 0:
+        return FrameStep.FIRST
+    write_step = (write_idx - prev_write_idx) & 0xFFFFFFFF
+    if write_step > 1:
+        return FrameStep.FRAME_GAP
+    if write_step == 1 and prev_producer_frame != 0 and producer_frame > prev_producer_frame + 1:
+        return FrameStep.PRODUCER_SKIP
+    return FrameStep.NEXT
+
+
 # ---------------------------------------------------------------------------
 # Metadata — typed representation of the 20-byte metadata region
 # ---------------------------------------------------------------------------

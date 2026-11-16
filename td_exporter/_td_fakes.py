@@ -158,6 +158,8 @@ class FakeTDHost(TDHost):
         # "warning" / "error" / "info" / "clear" (msg is None for clear). Additive —
         # existing callers that ignore the return value (always None) are unaffected.
         self.status_calls: list[tuple[str, str | None]] = []
+        # Value abs_frame() returns (None = unknown, like a host outside TD).
+        self.abs_frame_value: int | None = None
 
     def param_value(self, name: str) -> Any:
         return self._params.get(name)
@@ -174,6 +176,9 @@ class FakeTDHost(TDHost):
 
     def is_active(self) -> bool:
         return bool(self._params.get("Active", True))
+
+    def abs_frame(self) -> int | None:
+        return self.abs_frame_value
 
     def find_top(self, name: str) -> FakeTOPHandle | None:
         return self._tops.get(name)

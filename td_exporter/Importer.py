@@ -45,6 +45,7 @@ from CUDARuntimeTypes import (
     ProtocolError,
 )
 from SHMProtocol import (
+    EMPTY_SLOT_META,
     IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
     MAGIC_SIZE,
@@ -55,6 +56,7 @@ from SHMProtocol import (
     DtypeCodec,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
     is_same_process_sender,
@@ -1026,6 +1028,8 @@ class Importer:
         self._event_open_warned = False
         self.frame_count = 0
         self.last_latency = 0.0
+        # Slot meta of the last acquired frame (protocol v0.6): producer_frame, stream_id, ...
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
 
         # NVML telemetry (attached after open() via attach_nvml_observer())
         self._nvml_observer: NVMLObserver | None = None
@@ -1824,6 +1828,7 @@ class Importer:
             return ImportResult(outcome=outcome), -1, 0.0, debug, frame_start
 
         read_slot = slot_result.slot
+        self.last_slot_meta = slot_result.slot_meta
         producer_timestamp = slot_result.slot_meta.host_timestamp
         latency_ms = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
         return None, read_slot, latency_ms, debug, frame_start
