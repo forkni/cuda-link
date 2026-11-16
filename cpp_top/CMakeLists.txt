@@ -58,8 +58,8 @@ add_executable(topcore_tests tests/topcore_tests.cpp)
 target_link_libraries(topcore_tests PRIVATE cudalink_topcore)
 target_compile_definitions(topcore_tests PRIVATE
     CUDALINK_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
-add_test(NAME topcore_tests
-    COMMAND topcore_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+# No argument: the test reads the fixtures from CUDALINK_FIXTURE_DIR above.
+add_test(NAME topcore_tests COMMAND topcore_tests)
 
 # --- protocol_dump -- read-only SHM inspector (named segments need Windows) ---
 add_executable(protocol_dump tools/protocol_dump.cpp)

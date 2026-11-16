@@ -19,6 +19,7 @@ using cudalink::common::asHandle;
 using cudalink::common::widen;
 using cudalink::core::Metadata;
 using cudalink::core::SHMLayout;
+using cudalink::core::SlotMeta;
 using cudalink::core::clear_shutdown;
 using cudalink::core::commit_version;
 using cudalink::core::publish;
@@ -47,7 +48,7 @@ constexpr int32_t kNumInfoCHOPChans = 11;
 // last_error_frame, init_note).
 constexpr int32_t kNumInfoDATRows = 5;
 
-// Monotonic seconds as a double, for the wire timestamp field consumed as a latency
+// Monotonic seconds as a double, for the slot meta host_timestamp consumed as a latency
 // measurement (importer.py subtracts this from a same-domain "now" to get elapsed time --
 // see importer.py's last_latency computation). steady_clock, NOT system_clock/wall-clock:
 // on Windows both MSVC's steady_clock and CPython's time.perf_counter() resolve to
@@ -570,7 +571,7 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     // session, so a concurrently-polling receiver correctly reports no change yet --
     // ring_writer::commit_version's release store is the only thing that makes this
     // visible.
-    write_init_header(view, layout, static_cast<uint32_t>(numSlots));
+    write_init_header(view, layout, static_cast<uint32_t>(numSlots), GetCurrentProcessId());
     for (int slot = 0; slot < numSlots; ++slot) {
         cudaIpcMemHandle_t memHandle;
         // No manual "if (needNewMapping) { UnmapViewOfFile/CloseHandle }" here -- newMapping
@@ -964,7 +965,9 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
         // Step 6: publish + doorbell.
         ++myWriteIdx;
-        publish(myShmView, myLayout, myWriteIdx, now_seconds());
+        SlotMeta meta;
+        meta.host_timestamp = now_seconds();
+        publish(myShmView, myLayout, myWriteIdx, meta);
         if (myDoorbellHandle) {
             SetEvent(asHandle(myDoorbellHandle));
         }

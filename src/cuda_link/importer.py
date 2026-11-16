@@ -38,6 +38,7 @@ from ._importer_port import (
 from .cuda_runtime_types import (
     IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
     CudaIpcError,
+    IncompatiblePeerError,
     IPCEventOpenError,
     ProducerTimeoutError,
     ProtocolError,
@@ -47,6 +48,7 @@ from .shm_protocol import (
     MAGIC_OFFSET,
     MAGIC_SIZE,
     PROTOCOL_MAGIC,
+    SAME_PROCESS_MESSAGE,
     WRITE_IDX_OFFSET,
     AcquireResult,
     DtypeCodec,
@@ -54,7 +56,10 @@ from .shm_protocol import (
     SHMLayout,
     SlotState,
     acquire_slot,
+    is_same_process_sender,
+    protocol_mismatch_message,
     read_num_slots,
+    read_sender_pid,
     read_version,
     read_write_idx,
 )
@@ -66,6 +71,11 @@ if TYPE_CHECKING:
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
+
+# The process id the same-process check compares with the segment's sender_pid. A module
+# attribute so tests that run an Exporter and an Importer in one process on fake CUDA can
+# replace it (real CUDA IPC cannot loop back within one process).
+_current_pid = os.getpid
 
 # Pre-built NVTX strings eliminate f-string allocation on the hot path.
 _NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
@@ -289,7 +299,6 @@ class IPCConnection:
     ipc_events: list  # [event_t | None]
     layout: object  # SHMLayout
     shutdown_offset: int
-    timestamp_offset: int
     # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
     doorbell_handle: object = None
 
@@ -1220,10 +1229,11 @@ class Importer:
 
         if magic != PROTOCOL_MAGIC:
             shm.close()
-            raise ProtocolError(
-                f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
-                "Update both TD and Python sides to the same protocol version."
-            )
+            raise IncompatiblePeerError(protocol_mismatch_message(magic))
+
+        if is_same_process_sender(read_sender_pid(shm.buf), _current_pid()):
+            shm.close()
+            raise IncompatiblePeerError(SAME_PROCESS_MESSAGE)
 
         ipc_version = read_version(shm.buf)
         num_slots = read_num_slots(shm.buf)
@@ -1373,7 +1383,6 @@ class Importer:
                 ipc_events=ipc_events,
                 layout=layout,
                 shutdown_offset=layout.shutdown_offset,
-                timestamp_offset=layout.timestamp_offset,
                 doorbell_handle=db_handle,
             ).close_ipc_handles()
             raise
@@ -1388,7 +1397,6 @@ class Importer:
             ipc_events=ipc_events,
             layout=layout,
             shutdown_offset=layout.shutdown_offset,
-            timestamp_offset=layout.timestamp_offset,
             doorbell_handle=db_handle,
         )
 
@@ -1449,16 +1457,18 @@ class Importer:
             return False
 
     def _log_connect_failure(self, exc: Exception, level: int, msg: str) -> None:
-        """Log a failed connect at ``level``, except a failed IPC event open.
+        """Log a failed connect at ``level``, except a failed IPC event open or an
+        incompatible peer (other protocol version, same process).
 
-        That one means the producer is up but this consumer cannot order against it,
-        which retrying quietly would hide: warn on the first failure of a streak, then
-        drop to DEBUG until a connect succeeds (``_connect`` clears the flag).
+        Those mean the producer is up but this consumer cannot use it, which retrying
+        quietly would hide: warn on the first failure of a streak, then drop to DEBUG
+        until a connect succeeds (``_connect`` clears the flag).
         """
-        if isinstance(exc, IPCEventOpenError) and not self._event_open_warned:
+        persistent = isinstance(exc, (IPCEventOpenError, IncompatiblePeerError))
+        if persistent and not self._event_open_warned:
             self._event_open_warned = True
             logger.warning("%s — will keep retrying", exc)
-        elif isinstance(exc, IPCEventOpenError):
+        elif persistent:
             logger.debug(msg, exc)
         else:
             logger.log(level, msg, exc)
@@ -1813,7 +1823,7 @@ class Importer:
             return ImportResult(outcome=outcome), -1, 0.0, debug, frame_start
 
         read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
+        producer_timestamp = slot_result.slot_meta.host_timestamp
         latency_ms = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
         return None, read_slot, latency_ms, debug, frame_start
 

@@ -1,7 +1,8 @@
-// protocol_dump -- read-only dump of a cuda-link SHM segment (protocol v0.5).
+// protocol_dump -- read-only dump of a cuda-link SHM segment (protocol v0.6).
 //
-// Prints the header, the slot handles (hex), the shutdown flag, the metadata and the
-// timestamp, plus what ring_reader::acquire_slot would report to a fresh receiver.
+// Prints the header (with sender_pid), the slot handles (hex) and slot meta, the shutdown
+// flag and the metadata, plus what ring_reader::acquire_slot would report to a fresh
+// receiver. A v0.5 (cuda-link 1.x) segment is named as such.
 // Use it when a receiver stays on "Waiting for producer" or shows wrong frames.
 //
 // Usage:
@@ -82,13 +83,20 @@ int dump(const uint8_t* buf, size_t size, bool full) {
     std::memcpy(&write_idx, buf + WRITE_IDX_OFFSET, WRITE_IDX_SIZE);
 
     std::printf("size        %zu bytes\n", size);
-    std::printf("magic       0x%08x %s\n", magic, magic == PROTOCOL_MAGIC ? "(v0.5, ok)" : "(MISMATCH)");
-    std::printf("version     %llu\n", static_cast<unsigned long long>(version));
-    std::printf("num_slots   %u\n", num_slots);
-    std::printf("write_idx   %u%s\n", write_idx, write_idx == 0 ? " (no frame published yet)" : "");
+    const char* magic_note = "(MISMATCH)";
+    if (magic == PROTOCOL_MAGIC) {
+        magic_note = "(v0.6, ok)";
+    } else if (magic == PROTOCOL_MAGIC_V05) {
+        magic_note = "(v0.5 sender, cuda-link 1.x: not readable by this build)";
+    }
+    std::printf("magic       0x%08x %s\n", magic, magic_note);
     if (magic != PROTOCOL_MAGIC) {
         return 3;
     }
+    std::printf("version     %llu\n", static_cast<unsigned long long>(version));
+    std::printf("num_slots   %u\n", num_slots);
+    std::printf("write_idx   %u%s\n", write_idx, write_idx == 0 ? " (no frame published yet)" : "");
+    std::printf("sender_pid  %u%s\n", read_sender_pid(buf), read_sender_pid(buf) == 0 ? " (unknown)" : "");
 
     // Cap num_slots before building a layout: a garbage header must not drive reads.
     constexpr uint32_t kMaxSlots = 64;
@@ -109,6 +117,11 @@ int dump(const uint8_t* buf, size_t size, bool full) {
         std::printf("%s\nslot %u event ", full ? "" : "...", slot);
         print_hex(buf + layout.event_handle_offset(slot), shown);
         std::printf("%s\n", full ? "" : "...");
+        const SlotMeta sm = SlotMeta::read_from(buf, layout, slot);
+        std::printf(
+            "slot %u meta  host_ts %.6f producer_frame %llu source_ts_us %llu stream_id %u flags 0x%x\n",
+            slot, sm.host_timestamp, static_cast<unsigned long long>(sm.producer_frame),
+            static_cast<unsigned long long>(sm.source_timestamp_us), sm.stream_id, sm.meta_flags);
     }
 
     std::printf("shutdown    %u\n", buf[layout.shutdown_offset()]);
@@ -128,10 +141,6 @@ int dump(const uint8_t* buf, size_t size, bool full) {
     std::printf("\ndata_size   %u (expected %llu)%s\n", m.data_size,
                 static_cast<unsigned long long>(m.expected_size()),
                 m.data_size == m.expected_size() ? "" : " MISMATCH");
-
-    double timestamp = 0.0;
-    std::memcpy(&timestamp, buf + layout.timestamp_offset(), TIMESTAMP_SIZE);
-    std::printf("timestamp   %.6f\n", timestamp);
 
     const AcquireResult r = acquire_slot(buf, layout, 0, 0);
     std::printf("new reader  %s", state_name(r.state));

@@ -97,6 +97,7 @@ markers = [
     "smoke: fast fail-fast check executed against the installed wheel (see references/build-once-promotion.md)",
     "integration: touches multi-process or external resources; runs in integration stage (see references/commit-vs-acceptance-stage.md)",
     "quarantine: known-flaky test tracked with reason, issue, and expiry date (see references/test-suite-drift.md)",
+    "same_process_check: keep the receivers' v0.6 same-process (sender_pid) check on; tests/conftest.py turns it off otherwise",
 ]
 filterwarnings = [
     "error",

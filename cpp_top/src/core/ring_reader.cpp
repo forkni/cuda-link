@@ -22,10 +22,9 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
     // num_slots/handle/metadata stores were visible, letting a receiver try to open IPC
     // handles to memory the producer had already reallocated/freed. const_cast is safe:
     // this is a load-only operation, never a store.
-    // VERSION_OFFSET is only 4-byte-aligned (see shm_layout.h) -- paired guard with
-    // ring_writer.cpp's commit_version(): a lock-free, address-free atomic_ref needs no
-    // alignment-keyed side table, so it degrades safely to a plain cacheable load/store
-    // rather than silently taking a locking slow path.
+    // Paired guard with ring_writer.cpp's commit_version(): cross-process use needs a
+    // lock-free, address-free atomic_ref on an 8-aligned field.
+    static_assert(VERSION_OFFSET % alignof(uint64_t) == 0, "SHM header 'version' must be 8-aligned");
     static_assert(std::atomic_ref<uint64_t>::is_always_lock_free,
                   "SHM header 'version' atomic_ref must be lock-free/address-free for cross-process use");
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast,cppcoreguidelines-pro-type-reinterpret-cast)
@@ -53,13 +52,10 @@ AcquireResult acquire_slot(const uint8_t* buf, const SHMLayout& layout, uint32_t
 
     const uint32_t slot = (write_idx - 1) % layout.num_slots();
 
-    double timestamp = 0.0;
-    std::memcpy(&timestamp, buf + layout.timestamp_offset(), sizeof(timestamp));
-
     AcquireResult result;
     result.state = SlotState::NewFrame;
     result.slot = slot;
-    result.timestamp = timestamp;
+    result.slot_meta = SlotMeta::read_from(buf, layout, slot);
     result.write_idx = write_idx;
     return result;
 }

@@ -407,7 +407,7 @@ Open the **Textport** (Alt+T) and look for:
 [CUDAIPCExporter] Loaded CUDA runtime
 [CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
 [CUDAIPCExporter] Created 3 IPC buffer slots with events
-[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (433 bytes)
+[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (528 bytes)
 [CUDAIPCExporter] Initialization complete - ready for zero-copy GPU transfer
 ```
 

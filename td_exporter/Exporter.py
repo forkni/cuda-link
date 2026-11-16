@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import operator
+import os
 import threading
 import time
 from ctypes import c_void_p
@@ -73,6 +74,7 @@ from SHMProtocol import (
     clear_shutdown,
     publish_frame,
     set_shutdown,
+    write_sender_pid,
 )
 
 if TYPE_CHECKING:
@@ -416,6 +418,7 @@ class Exporter:
         _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
         _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
         _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
+        write_sender_pid(self.shm_handle.buf, os.getpid())  # before bump_version: the version fence covers it
         for slot in range(self._spec.num_slots):
             mem_off = self._layout.mem_handle_offset(slot)
             evt_off = self._layout.event_handle_offset(slot)
@@ -774,7 +777,7 @@ class Exporter:
                 _t = time.perf_counter()
             with _nvtx.verbose_range("cudalink.exporter.shm_write", "green"):
                 self.write_idx += 1
-                publish_frame(self.shm_handle.buf, self._layout, self.write_idx, time.perf_counter())
+                publish_frame(self.shm_handle.buf, self._layout, self.write_idx, host_timestamp=time.perf_counter())
                 if self._doorbell:
                     _doorbell.signal(self._doorbell)
             if profile:

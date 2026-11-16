@@ -12,6 +12,7 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
 import time
 import traceback
@@ -38,6 +39,7 @@ from SHMProtocol import (  # noqa: E402
     FORMAT_KIND_FLOAT,
     METADATA_SIZE,
     PROTOCOL_MAGIC,
+    SAME_PROCESS_MESSAGE,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
@@ -45,13 +47,20 @@ from SHMProtocol import (  # noqa: E402
     SHMLayout,
     SlotState,
     acquire_slot,
+    is_same_process_sender,
+    protocol_mismatch_message,
     read_magic,
     read_num_slots,
+    read_sender_pid,
     read_version,
     read_write_idx,
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
+
+# The process id the same-process check compares with the segment's sender_pid; tests that
+# run a sender and a receiver in one process on fake CUDA replace it.
+_current_pid = os.getpid
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
@@ -448,7 +457,7 @@ class TDReceiverEngine:
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
-            _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
+            _ts = result.slot_meta.host_timestamp  # producer perf_counter() at publish, for latency
             if not self._rx_window.started:
                 # Session baseline for windowed FPS (frame_count is never reset).
                 self._rx_window.start(time.perf_counter(), self.frame_count)
@@ -672,11 +681,11 @@ class TDReceiverEngine:
             try:
                 magic = read_magic(shm_handle.buf)
                 if magic != PROTOCOL_MAGIC:
-                    self._log(
-                        f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
-                        "Sender using incompatible protocol version.",
-                        force=True,
-                    )
+                    self._log(protocol_mismatch_message(magic), force=True)
+                    shm_handle.close()
+                    return False
+                if is_same_process_sender(read_sender_pid(shm_handle.buf), _current_pid()):
+                    self._log(SAME_PROCESS_MESSAGE, force=True)
                     shm_handle.close()
                     return False
             except (struct.error, ValueError, IndexError):

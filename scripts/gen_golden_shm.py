@@ -7,8 +7,11 @@ for the wire layout. The C++ test runs the same operations through ring_writer a
 shm_layout.h and must produce identical bytes; it also runs ring_reader::acquire_slot on
 these buffers.
 
-The scenario values below (handle byte patterns, version, write_idx, timestamp, metadata
-cases) are duplicated in topcore_tests.cpp. Change both together.
+The scenario values below (handle byte patterns, version, sender_pid, write_idx, slot
+meta, metadata cases) are duplicated in topcore_tests.cpp. Change both together.
+
+ring_v05_n2.bin is not written here: it is a frozen v0.5 (cuda-link 1.x) segment, kept so
+the C++ test can check the "sender uses protocol v0.5" path.
 
 Usage:
     python scripts/gen_golden_shm.py           # (re)write the fixtures
@@ -44,9 +47,40 @@ FIXTURE_DIR = _REPO_ROOT / "cpp_top" / "tests" / "fixtures"
 # --- Scenario values (mirrored in topcore_tests.cpp) ---------------------------------
 # All eight bytes differ, so a byte-order or width error in the version field shows.
 VERSION = 0x0102030405060708
+SENDER_PID = 0x0A0B0C0D
 WRITE_IDX = 6  # slot (6 - 1) % N = 1, 2, 1 for N = 2, 3, 4
-TIMESTAMP = 12345.678
 SLOT_COUNTS = (2, 3, 4)
+
+# Frames 1..WRITE_IDX are published in order, so every slot holds the slot meta of the
+# last frame written to it. Frame w gets slot_meta_for(w); all fields differ per frame.
+HOST_TIMESTAMP_BASE = 12345.678
+PRODUCER_FRAME_BASE = 0x1122334455667700
+SOURCE_TIMESTAMP_US_BASE = 0x0102030405060700
+STREAM_ID = 0x0000ABCD
+
+
+def slot_meta_for(write_idx: int) -> sp.SlotMeta:
+    return sp.SlotMeta(
+        host_timestamp=HOST_TIMESTAMP_BASE + write_idx,
+        producer_frame=PRODUCER_FRAME_BASE + write_idx,
+        source_timestamp_us=SOURCE_TIMESTAMP_US_BASE + write_idx,
+        stream_id=STREAM_ID,
+    )
+
+
+def _publish_frames(buf: bytearray, layout: sp.SHMLayout) -> None:
+    for w in range(1, WRITE_IDX + 1):
+        m = slot_meta_for(w)
+        sp.publish_frame(
+            memoryview(buf),
+            layout,
+            w,
+            host_timestamp=m.host_timestamp,
+            producer_frame=m.producer_frame,
+            source_timestamp_us=m.source_timestamp_us,
+            stream_id=m.stream_id,
+        )
+
 
 # (name, width, height, num_comps, dtype, extra flags). data_size = expected_size.
 METADATA_CASES: tuple[tuple[str, int, int, int, str, int], ...] = (
@@ -85,7 +119,7 @@ def metadata_for(case_name: str) -> sp.Metadata:
 def _initialized(num_slots: int) -> tuple[bytearray, sp.SHMLayout]:
     """Header + every slot handle + metadata + shutdown cleared; write_idx 0."""
     layout = sp.SHMLayout(num_slots)
-    buf = layout.build_buffer(version=VERSION, write_idx=0)
+    buf = layout.build_buffer(version=VERSION, write_idx=0, sender_pid=SENDER_PID)
     view = memoryview(buf)
     for slot in range(num_slots):
         mem_off = layout.mem_handle_offset(slot)
@@ -102,14 +136,14 @@ def build_fixtures() -> dict[str, bytes]:
 
     for n in SLOT_COUNTS:
         buf, layout = _initialized(n)
-        sp.publish_frame(memoryview(buf), layout, WRITE_IDX, TIMESTAMP)
+        _publish_frames(buf, layout)
         fixtures[f"ring_n{n}.bin"] = bytes(buf)
 
     fresh, _ = _initialized(2)
     fixtures["fresh_n2.bin"] = bytes(fresh)
 
     shut, layout = _initialized(3)
-    sp.publish_frame(memoryview(shut), layout, WRITE_IDX, TIMESTAMP)
+    _publish_frames(shut, layout)
     sp.set_shutdown(memoryview(shut), layout)
     fixtures["shutdown_n3.bin"] = bytes(shut)
 

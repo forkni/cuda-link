@@ -298,7 +298,7 @@ def test_close_idempotent(temp_shm_name: str, shared_memory_cleanup: list) -> No
 
 @pytest.mark.requires_cuda
 def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> None:
-    """SharedMemory header contains correct protocol magic 0x43495044 ('CIPD')."""
+    """SharedMemory header contains correct protocol magic 0x43495036 ('CIP6')."""
     from cuda_link import Exporter, FrameSpec
     from cuda_link.shm_protocol import PROTOCOL_MAGIC
 
@@ -319,8 +319,7 @@ def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> 
 def test_shm_protocol_num_slots(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """SharedMemory header encodes the correct num_slots value."""
     from cuda_link import Exporter, FrameSpec
-
-    NUM_SLOTS_OFFSET = 12
+    from cuda_link.shm_protocol import NUM_SLOTS_OFFSET
 
     shared_memory_cleanup.append(temp_shm_name)
     exp = Exporter.open(FrameSpec(shm_name=temp_shm_name, height=64, width=64, num_slots=3))
@@ -426,8 +425,8 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
             exp.export(GpuFrame(ptr=int(gpu_buf.value), size=test_size))
             t_after = time.perf_counter()
 
-            ts_bytes = bytes(shm.buf[layout.timestamp_offset : layout.timestamp_offset + 8])
-            ts = struct.unpack("<d", ts_bytes)[0]
+            # First frame: write_idx 1 -> slot 0; host_timestamp is the first slot-meta field.
+            ts = struct.unpack_from("<d", shm.buf, layout.slot_meta_offset(0))[0]
 
             assert t_before <= ts <= t_after + 0.001, (
                 f"Timestamp {ts:.6f} not in expected perf_counter range [{t_before:.6f}, {t_after + 0.001:.6f}]"
@@ -506,19 +505,19 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
             super().__setitem__(key, val)
 
     real_st_u32 = real_struct.Struct("<I")
-    real_st_f64 = real_struct.Struct("<d")
+    real_st_meta = real_struct.Struct("<dQQII")  # slot meta
 
     def spy_u32_pack_into(buf, offset: int, *args) -> None:
         write_log.append(("pack_into", offset))
         real_st_u32.pack_into(buf, offset, *args)
 
-    def spy_f64_pack_into(buf, offset: int, *args) -> None:
-        real_st_f64.pack_into(buf, offset, *args)
+    def spy_meta_pack_into(buf, offset: int, *args) -> None:
+        real_st_meta.pack_into(buf, offset, *args)
 
     mock_st_u32 = MagicMock()
     mock_st_u32.pack_into.side_effect = spy_u32_pack_into
-    mock_st_f64 = MagicMock()
-    mock_st_f64.pack_into.side_effect = spy_f64_pack_into
+    mock_st_meta = MagicMock()
+    mock_st_meta.pack_into.side_effect = spy_meta_pack_into
 
     spy_buf = _SpyBuf(layout.total_size)
     spy_buf[layout.shutdown_offset] = 1  # stale flag
@@ -526,9 +525,9 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
-        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_SLOT_META", mock_st_meta),
     ):
-        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
+        publish_frame(spy_buf, layout=layout, write_idx=1, host_timestamp=0.0)
 
     WRITE_IDX_OFFSET = 16
     shutdown_pos = next(
@@ -570,22 +569,22 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
             super().__setitem__(key, val)
 
     real_st_u32 = real_struct.Struct("<I")
-    real_st_f64 = real_struct.Struct("<d")
+    real_st_meta = real_struct.Struct("<dQQII")  # slot meta
 
     def spy_u32_pack_into(buf, offset: int, *args) -> None:
         write_log.append(("pack_into", offset))
         real_st_u32.pack_into(buf, offset, *args)
 
-    def spy_f64_pack_into(buf, offset: int, *args) -> None:
-        real_st_f64.pack_into(buf, offset, *args)
+    def spy_meta_pack_into(buf, offset: int, *args) -> None:
+        real_st_meta.pack_into(buf, offset, *args)
 
     def spy_fence() -> None:
         fence_calls.append(len(write_log))
 
     mock_st_u32 = MagicMock()
     mock_st_u32.pack_into.side_effect = spy_u32_pack_into
-    mock_st_f64 = MagicMock()
-    mock_st_f64.pack_into.side_effect = spy_f64_pack_into
+    mock_st_meta = MagicMock()
+    mock_st_meta.pack_into.side_effect = spy_meta_pack_into
 
     spy_buf = _SpyBuf(layout.total_size)
     spy_buf[layout.shutdown_offset] = 1
@@ -593,10 +592,10 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
-        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_SLOT_META", mock_st_meta),
         patch("cuda_link.shm_protocol._release_fence", spy_fence),
     ):
-        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
+        publish_frame(spy_buf, layout=layout, write_idx=1, host_timestamp=0.0)
 
     assert len(fence_calls) == 1, "exactly one fence call per publish_frame()"
 

@@ -22,11 +22,13 @@ using cudalink::common::widen;
 using cudalink::core::AcquireResult;
 using cudalink::core::Metadata;
 using cudalink::core::PROTOCOL_MAGIC;
+using cudalink::core::PROTOCOL_MAGIC_V05;
 using cudalink::core::SHMLayout;
 using cudalink::core::SlotState;
 using cudalink::core::acquire_slot;
 using cudalink::core::read_magic;
 using cudalink::core::read_num_slots;
+using cudalink::core::read_sender_pid;
 using cudalink::core::read_version;
 
 namespace {
@@ -42,7 +44,9 @@ constexpr int32_t kNumInfoDATRows = 5;    // ipc_version, status, last_error, la
 // 12.8, driver 13.05, RTX 4090): cudaIpcOpenMemHandle and cudaIpcOpenEventHandle on own-process
 // handles both return cudaErrorDeviceUninitialized (201, "invalid device context"). The error is
 // not sticky. The In TOP always opens with a current context (CudaDeviceSession), so 201 here
-// names the same-process case; the raw status name stays in the message.
+// names the same-process case; the raw status name stays in the message. Since v0.6 the
+// sender_pid header field catches this case first (openSlotHandlesIfNeeded); 201 is the
+// fallback for a sender that writes sender_pid 0.
 constexpr const char* kSameProcessMessage =
     "sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within one "
     "process; run the sender in a separate TD instance or use the Python peer";
@@ -436,7 +440,12 @@ bool CudaLinkInTOP::openSHM(const char* name) {
 
     // Real .tox's own Troubleshooting doc documents this exact failure mode: "another
     // process is using the same Ipcmemname for a different purpose."
-    if (read_magic(guard.view()) != PROTOCOL_MAGIC) {
+    const uint32_t magic = read_magic(guard.view());
+    if (magic == PROTOCOL_MAGIC_V05) {
+        myError = "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6";
+        return false;
+    }
+    if (magic != PROTOCOL_MAGIC) {
         myError = "Protocol magic mismatch -- Ipcmemname is in use by an unrelated process";
         return false;
     }
@@ -565,6 +574,12 @@ bool CudaLinkInTOP::validateMetadata(const cudalink::core::Metadata& metadata) {
 bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
     if (myHandlesOpen) {
         return true;
+    }
+
+    const uint32_t senderPid = read_sender_pid(myShmView);
+    if (senderPid != 0 && senderPid == GetCurrentProcessId()) {
+        myError = kSameProcessMessage; // the cudaIpcOpen* status 201 path below stays as a fallback
+        return false;
     }
 
     const uint32_t numSlots = read_num_slots(myShmView);

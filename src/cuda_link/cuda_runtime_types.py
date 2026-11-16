@@ -234,6 +234,14 @@ class ProtocolError(CudaLinkError, ValueError):
     """
 
 
+class IncompatiblePeerError(ProtocolError):
+    """The segment belongs to a peer this receiver can never read (other protocol, same process).
+
+    Internal: lets the reconnect driver warn once per failure streak instead of
+    logging every retry. Callers keep catching ProtocolError / ValueError / RuntimeError.
+    """
+
+
 class ProducerTimeoutError(CudaLinkError, TimeoutError):
     """Timed out waiting for the producer to signal a slot/doorbell.
 

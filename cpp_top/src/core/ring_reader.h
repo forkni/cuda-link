@@ -19,7 +19,7 @@ enum class SlotState {
 struct AcquireResult {
     SlotState state = SlotState::NoFrame;
     uint32_t slot = 0;
-    double timestamp = 0.0;
+    SlotMeta slot_meta{};
     uint64_t new_version = 0;
     uint32_t write_idx = 0;
 };

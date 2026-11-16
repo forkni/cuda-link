@@ -10,7 +10,7 @@
 
 ## Overview
 
-CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~433 bytes) is exchanged through OS shared memory to coordinate access.
+CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~528 bytes) is exchanged through OS shared memory to coordinate access.
 
 The component operates in two modes: **Sender** (TouchDesigner exports textures to Python) and **Receiver** (Python sends frames back into TouchDesigner). Both directions use the same underlying protocol, so two TouchDesigner instances can also communicate directly with each other.
 
@@ -25,7 +25,7 @@ Per-frame *coordination* overhead (GPU event record + `write_idx` update) is typ
 1. Each frame, the component calls `top_op.cudaMemory()` to get a raw GPU pointer to the upstream texture.
 2. That texture is copied into a pre-allocated ring buffer slot on the GPU using `cudaMemcpyAsync` (device-to-device, never touching CPU memory).
 3. A CUDA IPC event is recorded on that slot — a lightweight GPU-side signal (~1 µs).
-4. A shared memory channel is updated with the current slot index and a producer timestamp.
+4. The sender writes a producer timestamp into that slot's metadata, then updates the slot index in shared memory.
 5. The Python process reads the slot index, waits on the GPU event (without blocking the CPU), and accesses the texture as a zero-copy `torch.Tensor` or `cupy.ndarray`.
 
 ### Receiver Mode — Python → TD
@@ -53,17 +53,20 @@ The shared memory channel carries only control data (no pixel data):
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic number | 4 B | Protocol validation (`CIPD`) |
-| Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
+| Magic number | 4 B | Protocol validation (`CIP6`, protocol v0.6) |
 | Slot count | 4 B | Number of ring buffer slots |
+| Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
 | Write index | 4 B | Current producer slot (atomic counter) |
+| Sender process id | 4 B | Lets a receiver refuse a sender in its own process (0 = unknown) |
 | IPC mem handle × N | 64 B each | GPU memory handle per slot |
 | IPC event handle × N | 64 B each | GPU sync event handle per slot |
+| Slot metadata × N | 32 B each | Producer timestamp (`perf_counter()`, for latency), producer frame number, stream id |
 | Shutdown flag | 1 B | Reasserted to 0 every frame; set to 1 on exit |
 | Texture metadata | 20 B | Width, height, components, dtype, buffer size |
-| Producer timestamp | 8 B | `perf_counter()` for latency measurement |
+| Padding | 3 B | Total is a multiple of 8 |
 
-Total for 3 slots: **433 bytes**.
+Total for 3 slots: **528 bytes** (`48 + N × 160`). Protocol v0.6 does not interoperate with
+the v0.5 protocol of cuda-link 1.x: update the sender and the receiver together.
 
 ### Lazy Initialization
 

@@ -44,8 +44,10 @@ sides.
 
 ## Debugging: protocol_dump
 
-`protocol_dump` prints a segment's header, slot handles, shutdown flag, metadata and
-timestamp. It also prints what a new receiver would get from `acquire_slot`. It opens the
+`protocol_dump` prints a segment's header (with `sender_pid`), the slot handles, one
+slot-meta line per slot (`host_ts`, `producer_frame`, `source_ts_us`, `stream_id`, `flags`),
+the shutdown flag and the metadata. It also prints what a new receiver would get from
+`acquire_slot`. It opens the
 segment read-only, so it never changes the state of a running sender.
 
 ```bat
@@ -56,7 +58,12 @@ protocol_dump --file cpp_top\tests\fixtures\ring_n3.bin
 
 - "cannot open segment ... error 2": no sender has created that name. Compare the
   `Ipcmemname` of the sender and the receiver.
-- `magic ... (MISMATCH)`: the sender uses a different protocol version.
+- `magic ... (v0.5 sender, cuda-link 1.x: not readable by this build)`: the sender uses
+  protocol v0.5. Update the sender to cuda-link 2.x.
+- `magic ... (MISMATCH)`: the segment does not hold a cuda-link protocol.
+- `sender_pid 0 (unknown)`: the sender did not write its process ID.
+- `producer_frame 0` and `stream_id 0` on every slot: expected in this release. No sender
+  fills these fields yet.
 - `write_idx 0`: the sender made the segment but has not published a frame.
 - `shutdown 1`: the sender has stopped.
 
@@ -81,8 +88,12 @@ RTX 4090) opened the process's own handles. `cudaIpcOpenMemHandle` and
 `cudaIpcOpenEventHandle` both returned `cudaErrorDeviceUninitialized` (201, "invalid
 device context"). The In TOP in TD gave the same result. The error is not sticky: the CUDA
 context stays usable. The In TOP always has a current context when it opens handles, so it
-reads status 201 at that call as the same-process case. Protocol v0.6 adds the sender's
-process ID to the segment header, so the receiver can then check before it opens a handle.
+reads status 201 at that call as the same-process case.
+
+Since protocol v0.6 the segment header holds the sender's process ID (`sender_pid`). The
+receiver (the In TOP, the Python `Importer` and `TDReceiver`) compares it with its own
+process ID before it opens any handle, and gives the error above without a CUDA call. The
+201 mapping stays as the fallback for a segment with `sender_pid` 0 (unknown).
 
 ## Code rules
 

@@ -16,10 +16,12 @@ namespace cudalink::core {
 // caller-owned buffer -- nothing here can throw, and declaring that accurately lets callers
 // (and the optimizer) rely on it, mirroring ring_reader.h::acquire_slot's identical treatment.
 
-// Writes magic, num_slots, and write_idx=0 at the start of a fresh or re-initialized
-// segment. Mirrors shm_protocol.py::SHMLayout.build_buffer (magic/num_slots) plus
-// _write_handles_to_shm's own WRITE_IDX_OFFSET reset to 0 -- a fresh session always
-// restarts its frame counter.
+// Writes magic, num_slots, sender_pid and write_idx=0 at the start of a fresh or
+// re-initialized segment. Mirrors shm_protocol.py::SHMLayout.build_buffer (magic/num_slots/
+// sender_pid) plus _write_handles_to_shm's own WRITE_IDX_OFFSET reset to 0 -- a fresh
+// session always restarts its frame counter. sender_pid is the sender's process id
+// (GetCurrentProcessId() in the Out TOP); 0 means unknown and turns off the receiver's
+// same-process check.
 //
 // Deliberately does NOT write 'version' -- see commit_version() below. A receiver may be
 // polling concurrently and treats a version change as its sole signal that num_slots and
@@ -32,10 +34,11 @@ namespace cudalink::core {
 //
 // 'buf' must point at byte 0 of the mapped SHM region and be at least
 // layout.total_size() bytes long. Does not touch shutdown_flag, metadata, slot handles,
-// version, or timestamp -- callers write those separately (write_slot_handle,
+// slot meta or version -- callers write those separately (write_slot_handle,
 // Metadata::pack_into, clear_shutdown, commit_version) before the segment is considered
 // ready.
-void write_init_header(uint8_t* buf, const SHMLayout& layout, uint32_t num_slots) noexcept;
+void write_init_header(uint8_t* buf, const SHMLayout& layout, uint32_t num_slots,
+                       uint32_t sender_pid) noexcept;
 
 // Publishes a new protocol version -- the "this re-init is now complete and visible"
 // signal, extending the acquire/release ordering contract (originally just write_idx) to
@@ -53,8 +56,8 @@ void commit_version(uint8_t* buf, const SHMLayout& layout, uint64_t version) noe
 void write_slot_handle(uint8_t* buf, const SHMLayout& layout, uint32_t slot, const uint8_t* mem64,
                        const uint8_t* evt64) noexcept;
 
-// Publishes one frame: writes timestamp, clears shutdown_flag, fences, then stores
-// write_idx LAST via std::atomic_ref with release ordering.
+// Publishes one frame: writes 'meta' into slot (write_idx - 1) % num_slots, clears
+// shutdown_flag, fences, then stores write_idx LAST via std::atomic_ref with release ordering.
 //
 // Ordering is critical (mirroring shm_protocol.py::publish_frame verbatim): the consumer
 // reads shutdown_flag BEFORE write_idx, so clearing shutdown_flag before the release store
@@ -64,7 +67,7 @@ void write_slot_handle(uint8_t* buf, const SHMLayout& layout, uint32_t slot, con
 // std::atomic_ref<uint32_t> is lock-free and address-free, valid for cross-process shared
 // memory, and pairs with ring_reader's acquire load on write_idx. Callers must not
 // replicate this sequence outside this function -- same rule as the Python original.
-void publish(uint8_t* buf, const SHMLayout& layout, uint32_t write_idx, double timestamp) noexcept;
+void publish(uint8_t* buf, const SHMLayout& layout, uint32_t write_idx, const SlotMeta& meta) noexcept;
 
 // Signals producer exit: shutdown_flag = 1. Mirrors shm_protocol.py::set_shutdown.
 // Call once during producer teardown, before freeing any IPC handles or device buffers --

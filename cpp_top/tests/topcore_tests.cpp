@@ -48,10 +48,42 @@ using Bytes = std::vector<uint8_t>;
 
 // --- Scenario values (mirrored from scripts/gen_golden_shm.py) ---------------------------
 constexpr uint64_t kVersion = 0x0102030405060708ULL;
+constexpr uint32_t kSenderPid = 0x0A0B0C0DU;
 constexpr uint32_t kWriteIdx = 6;
-constexpr double kTimestamp = 12345.678;
 constexpr std::array<uint32_t, 3> kSlotCounts{2, 3, 4};
 constexpr std::array<uint32_t, 3> kExpectedSlot{1, 2, 1}; // (6 - 1) % N for N = 2, 3, 4
+
+// Frame w carries slot_meta_for(w); frames 1..kWriteIdx are published in order.
+constexpr double kHostTimestampBase = 12345.678;
+constexpr uint64_t kProducerFrameBase = 0x1122334455667700ULL;
+constexpr uint64_t kSourceTimestampUsBase = 0x0102030405060700ULL;
+constexpr uint32_t kStreamId = 0x0000ABCDU;
+
+SlotMeta slot_meta_for(uint32_t write_idx) {
+    SlotMeta m;
+    m.host_timestamp = kHostTimestampBase + write_idx;
+    m.producer_frame = kProducerFrameBase + write_idx;
+    m.source_timestamp_us = kSourceTimestampUsBase + write_idx;
+    m.stream_id = kStreamId;
+    return m;
+}
+
+bool same_slot_meta(const SlotMeta& a, const SlotMeta& b) {
+    return a.host_timestamp == b.host_timestamp && a.producer_frame == b.producer_frame &&
+           a.source_timestamp_us == b.source_timestamp_us && a.stream_id == b.stream_id &&
+           a.meta_flags == b.meta_flags;
+}
+
+// The last frame in 1..kWriteIdx that went to 'slot' of an N-slot ring.
+uint32_t last_write_idx_in_slot(uint32_t slot, uint32_t num_slots) {
+    uint32_t last = 0;
+    for (uint32_t w = 1; w <= kWriteIdx; ++w) {
+        if ((w - 1) % num_slots == slot) {
+            last = w;
+        }
+    }
+    return last;
+}
 
 struct MetaCase {
     const char* name;
@@ -141,7 +173,7 @@ bool bytes_equal(const Bytes& actual, const Bytes& expected) {
 
 // The Out TOP's init sequence (CudaLinkOutTOP::reallocate) without the CUDA calls.
 void write_session(Bytes& buf, const SHMLayout& layout, uint64_t version, uint32_t salt = 0) {
-    write_init_header(buf.data(), layout, layout.num_slots());
+    write_init_header(buf.data(), layout, layout.num_slots(), kSenderPid);
     for (uint32_t slot = 0; slot < layout.num_slots(); ++slot) {
         const auto mem = mem_handle(slot, salt);
         const auto evt = event_handle(slot, salt);
@@ -157,7 +189,9 @@ Bytes cpp_ring(uint32_t num_slots, bool do_publish) {
     Bytes buf(layout.total_size(), 0);
     write_session(buf, layout, kVersion);
     if (do_publish) {
-        publish(buf.data(), layout, kWriteIdx, kTimestamp);
+        for (uint32_t w = 1; w <= kWriteIdx; ++w) {
+            publish(buf.data(), layout, w, slot_meta_for(w));
+        }
     }
     return buf;
 }
@@ -187,9 +221,18 @@ bool all_within(const std::vector<size_t>& offsets, size_t begin, size_t end) {
 void test_layout_sizes() {
     g_ctx = "layout sizes";
     // Pinned in tests/core/test_shm_protocol.py::test_layout_total_size.
-    CHECK(SHMLayout(2).total_size() == 305);
-    CHECK(SHMLayout(3).total_size() == 433);
-    CHECK(SHMLayout(4).total_size() == 561);
+    CHECK(SHMLayout(2).total_size() == 368);
+    CHECK(SHMLayout(3).total_size() == 528);
+    CHECK(SHMLayout(4).total_size() == 688);
+    // v0.6: the 64-bit fields are naturally aligned.
+    CHECK(VERSION_OFFSET % 8 == 0);
+    for (const uint32_t n : kSlotCounts) {
+        const SHMLayout layout(n);
+        CHECK(layout.total_size() % 8 == 0);
+        for (uint32_t slot = 0; slot < n; ++slot) {
+            CHECK(layout.slot_meta_offset(slot) % 8 == 0);
+        }
+    }
 }
 
 void test_writer_ring_fixtures() {
@@ -255,6 +298,7 @@ void test_reader_ring_fixtures() {
         CHECK(read_magic(buf.data()) == PROTOCOL_MAGIC);
         CHECK(read_version(buf.data()) == kVersion);
         CHECK(read_num_slots(buf.data()) == n);
+        CHECK(read_sender_pid(buf.data()) == kSenderPid);
         const SHMLayout layout(read_num_slots(buf.data()));
         CHECK(same_metadata(Metadata::read_from(buf.data(), layout), to_metadata(kMetaCases[kRingMetaCase])));
 
@@ -263,7 +307,13 @@ void test_reader_ring_fixtures() {
         CHECK(first.state == SlotState::NewFrame);
         CHECK(first.slot == kExpectedSlot[i]);
         CHECK(first.write_idx == kWriteIdx);
-        CHECK(first.timestamp == kTimestamp);
+        CHECK(same_slot_meta(first.slot_meta, slot_meta_for(kWriteIdx)));
+
+        // Every slot holds the slot meta of the last frame written to it.
+        for (uint32_t slot = 0; slot < n; ++slot) {
+            CHECK(same_slot_meta(SlotMeta::read_from(buf.data(), layout, slot),
+                                 slot_meta_for(last_write_idx_in_slot(slot, n))));
+        }
 
         // Same version, same write_idx: nothing new.
         CHECK(acquire_slot(buf.data(), layout, kWriteIdx, kVersion).state == SlotState::NoFrame);
@@ -302,17 +352,31 @@ void test_reader_shutdown_fixture() {
     CHECK(acquire_slot(buf.data(), layout, 0, kVersion - 1).state == SlotState::Shutdown);
 }
 
+// A v0.5 (cuda-link 1.x) segment keeps magic 0x43495044 at offset 0, so a v0.6 receiver
+// can name the version instead of "unrelated process".
+void test_v05_segment_magic() {
+    g_ctx = "ring_v05_n2.bin";
+    const Bytes buf = load_fixture("ring_v05_n2.bin");
+    if (buf.empty()) {
+        return;
+    }
+    CHECK(buf.size() == 305); // v0.5 total for N = 2
+    CHECK(read_magic(buf.data()) == PROTOCOL_MAGIC_V05);
+    CHECK(read_magic(buf.data()) != PROTOCOL_MAGIC);
+}
+
 void test_reader_slot_wraparound() {
     for (const uint32_t n : kSlotCounts) {
         g_ctx = "slot wraparound N=" + std::to_string(n);
         const SHMLayout layout(n);
         Bytes buf = cpp_ring(n, false);
         for (uint32_t w = 1; w <= 3 * n + 1; ++w) {
-            publish(buf.data(), layout, w, kTimestamp);
+            publish(buf.data(), layout, w, slot_meta_for(w));
             const AcquireResult r = acquire_slot(buf.data(), layout, w - 1, kVersion);
             CHECK(r.state == SlotState::NewFrame);
             CHECK(r.slot == (w - 1) % n);
             CHECK(r.slot < n);
+            CHECK(same_slot_meta(r.slot_meta, slot_meta_for(w)));
         }
     }
 }
@@ -345,7 +409,7 @@ void test_regression_version_commits_last() {
     Bytes buf = cpp_ring(2, true);
 
     Bytes before = buf;
-    write_init_header(buf.data(), layout, 2);
+    write_init_header(buf.data(), layout, 2, kSenderPid);
     CHECK(all_within(changed_offsets(before, buf), WRITE_IDX_OFFSET, WRITE_IDX_OFFSET + WRITE_IDX_SIZE));
 
     for (uint32_t slot = 0; slot < 2; ++slot) {
@@ -368,19 +432,21 @@ void test_regression_version_commits_last() {
     CHECK(r.new_version == kVersion + 1);
 }
 
-// publish() writes only the timestamp, the shutdown flag and write_idx.
+// publish() writes only the slot meta of slot (write_idx - 1) % N, the shutdown flag and
+// write_idx.
 void test_publish_footprint() {
     g_ctx = "publish footprint";
     const SHMLayout layout(3);
     Bytes buf = cpp_ring(3, false);
     buf[layout.shutdown_offset()] = 1;
     const Bytes before = buf;
-    publish(buf.data(), layout, kWriteIdx, kTimestamp);
+    publish(buf.data(), layout, kWriteIdx, slot_meta_for(kWriteIdx));
+    const uint32_t meta = layout.slot_meta_offset((kWriteIdx - 1) % 3);
     for (const size_t off : changed_offsets(before, buf)) {
         const bool in_write_idx = off >= WRITE_IDX_OFFSET && off < WRITE_IDX_OFFSET + WRITE_IDX_SIZE;
         const bool in_shutdown = off == layout.shutdown_offset();
-        const bool in_timestamp = off >= layout.timestamp_offset() && off < layout.total_size();
-        CHECK(in_write_idx || in_shutdown || in_timestamp);
+        const bool in_slot_meta = off >= meta && off < meta + SLOT_META_SIZE;
+        CHECK(in_write_idx || in_shutdown || in_slot_meta);
     }
     CHECK(buf[layout.shutdown_offset()] == 0);
 }
@@ -407,6 +473,7 @@ int main(int argc, char** argv) {
     test_reader_ring_fixtures();
     test_reader_fresh_fixture();
     test_reader_shutdown_fixture();
+    test_v05_segment_magic();
     test_reader_slot_wraparound();
     test_regression_zero_slot_layout();
     test_regression_version_commits_last();

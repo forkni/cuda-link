@@ -163,7 +163,6 @@ def make_fake_ipc_connection(
         ipc_events=ipc_events,
         layout=layout,
         shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
     )
     return conn, mock_cuda, mock_shm
 

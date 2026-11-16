@@ -5,10 +5,12 @@
 
 namespace cudalink::core {
 
-void write_init_header(uint8_t* buf, const SHMLayout& layout, uint32_t num_slots) noexcept {
+void write_init_header(uint8_t* buf, const SHMLayout& layout, uint32_t num_slots,
+                       uint32_t sender_pid) noexcept {
     uint32_t magic = PROTOCOL_MAGIC;
     std::memcpy(buf + MAGIC_OFFSET, &magic, MAGIC_SIZE);
     std::memcpy(buf + NUM_SLOTS_OFFSET, &num_slots, NUM_SLOTS_SIZE);
+    std::memcpy(buf + SENDER_PID_OFFSET, &sender_pid, SENDER_PID_SIZE);
     // A fresh/re-initialized session always restarts its frame counter at 0 (mirrors
     // _write_handles_to_shm's explicit WRITE_IDX_OFFSET reset) -- without this, a stale
     // reader's last_write_idx could numerically collide with this session's counter and
@@ -26,11 +28,8 @@ void commit_version(uint8_t* buf, const SHMLayout& layout, uint64_t version) noe
     // to any receiver whose acquire load observes it -- the same discipline publish()
     // already applies to write_idx, extended here to cover re-init/VERSION_CHANGED.
     std::atomic_thread_fence(std::memory_order_release);
-    // VERSION_OFFSET is only 4-byte-aligned (see shm_layout.h) -- this compile-time guard
-    // documents the fallback guarantee this code actually relies on: a lock-free,
-    // address-free atomic_ref never needs a side table keyed by the object's true
-    // alignment, so it degrades safely to the same cacheable-load/store the hardware
-    // already performs, rather than silently taking a locking slow path.
+    // Cross-process use needs a lock-free, address-free atomic_ref (no side table).
+    static_assert(VERSION_OFFSET % alignof(uint64_t) == 0, "SHM header 'version' must be 8-aligned");
     static_assert(std::atomic_ref<uint64_t>::is_always_lock_free,
                   "SHM header 'version' atomic_ref must be lock-free/address-free for cross-process use");
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -45,10 +44,10 @@ void write_slot_handle(uint8_t* buf, const SHMLayout& layout, uint32_t slot, con
     std::memcpy(buf + layout.event_handle_offset(slot), evt64, IPC_HANDLE_SIZE);
 }
 
-void publish(uint8_t* buf, const SHMLayout& layout, uint32_t write_idx, double timestamp) noexcept {
-    std::memcpy(buf + layout.timestamp_offset(), &timestamp, TIMESTAMP_SIZE);
+void publish(uint8_t* buf, const SHMLayout& layout, uint32_t write_idx, const SlotMeta& meta) noexcept {
+    meta.pack_into(buf, layout, (write_idx - 1) % layout.num_slots());
     buf[layout.shutdown_offset()] = 0;
-    // Release barrier: shutdown_flag (and timestamp) visible before write_idx. Only
+    // Release barrier: shutdown_flag (and the slot meta) visible before write_idx. Only
     // write_idx itself is promoted to a true atomic object (std::atomic_ref) -- this
     // matches ring_reader.cpp's documented convention that write_idx is the one field
     // with a formal cross-process ordering guarantee today.

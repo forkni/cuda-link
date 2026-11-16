@@ -136,3 +136,25 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             bad.append(f"{item.nodeid}: quarantine expired on {kw['expires']} ({kw['issue']})")
     if bad:
         raise pytest.UsageError("\n".join(bad))
+
+
+# Modules whose receiver compares the segment's sender_pid with _current_pid().
+_SAME_PROCESS_CHECK_MODULES = ("cuda_link.importer", "Importer", "TDReceiver")
+
+
+@pytest.fixture(autouse=True)
+def _allow_in_process_peer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn off the v0.6 same-process check for the in-process sender/receiver tests.
+
+    Most tests run an Exporter and an Importer (or TDReceiver) in one process on fake CUDA,
+    where the loop-back works. Real CUDA IPC cannot loop back, so production keeps the
+    check. A test marked ``same_process_check`` keeps the real check.
+    """
+    if request.node.get_closest_marker("same_process_check") is not None:
+        return
+    import sys
+
+    for name in _SAME_PROCESS_CHECK_MODULES:
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "_current_pid"):
+            monkeypatch.setattr(module, "_current_pid", lambda: 0)

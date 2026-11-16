@@ -12,7 +12,7 @@ This test parses shm_layout.h's `constexpr ... NAME = VALUE;` declarations with 
 (no C++ toolchain needed) and asserts each has an equal-valued twin in
 cuda_link.shm_protocol, plus cross-checks the derived SHMLayout.total_size formula
 against the golden byte counts already pinned in test_shm_protocol.py
-(test_layout_total_size: 2-slot=305, 3-slot=433, 4-slot=561).
+(test_layout_total_size: 2-slot=368, 3-slot=528, 4-slot=688).
 
 BITS_PER_BYTE is deliberately C++-only (no Python twin -- Python never needs a bits/8
 divisor as a named constant); it is asserted present and equal to 8, not cross-checked
@@ -48,6 +48,7 @@ _CONSTEXPR_RE = re.compile(
 # (BITS_PER_BYTE is intentionally excluded -- see module docstring.)
 _SHARED_CONSTANT_NAMES: tuple[str, ...] = (
     "PROTOCOL_MAGIC",
+    "PROTOCOL_MAGIC_V05",
     "MAGIC_OFFSET",
     "MAGIC_SIZE",
     "VERSION_OFFSET",
@@ -56,12 +57,21 @@ _SHARED_CONSTANT_NAMES: tuple[str, ...] = (
     "NUM_SLOTS_SIZE",
     "WRITE_IDX_OFFSET",
     "WRITE_IDX_SIZE",
+    "SENDER_PID_OFFSET",
+    "SENDER_PID_SIZE",
     "SHM_HEADER_SIZE",
     "SLOT_SIZE",
     "IPC_HANDLE_SIZE",
+    "SLOT_META_OFFSET_IN_SLOT",
+    "SLOT_META_SIZE",
+    "SLOT_META_HOST_TIMESTAMP_OFFSET",
+    "SLOT_META_PRODUCER_FRAME_OFFSET",
+    "SLOT_META_SOURCE_TIMESTAMP_US_OFFSET",
+    "SLOT_META_STREAM_ID_OFFSET",
+    "SLOT_META_FLAGS_OFFSET",
     "SHUTDOWN_FLAG_SIZE",
     "METADATA_SIZE",
-    "TIMESTAMP_SIZE",
+    "TRAILER_PAD_SIZE",
     "FORMAT_KIND_SIGNED",
     "FORMAT_KIND_UNSIGNED",
     "FORMAT_KIND_FLOAT",
@@ -109,21 +119,21 @@ def test_bits_per_byte_is_cpp_only_and_equals_8(cpp_constants: dict[str, int]) -
 
 @pytest.mark.parametrize(
     ("num_slots", "expected_total_size"),
-    [(2, 305), (3, 433), (4, 561)],  # golden values pinned in tests/core/test_shm_protocol.py
+    [(2, 368), (3, 528), (4, 688)],  # golden values pinned in tests/core/test_shm_protocol.py
 )
 def test_shmlayout_formula_matches_golden_and_python(
     cpp_constants: dict[str, int], num_slots: int, expected_total_size: int
 ) -> None:
     """Reproduce the C++ SHMLayout::total_size() formula (header + N*slot + shutdown +
-    metadata + timestamp) purely from the parsed constants, and cross-check it against
+    metadata + pad) purely from the parsed constants, and cross-check it against
     both the pinned golden byte count and the live Python SHMLayout(n).total_size."""
     header = cpp_constants["SHM_HEADER_SIZE"]
     slot = cpp_constants["SLOT_SIZE"]
     shutdown = cpp_constants["SHUTDOWN_FLAG_SIZE"]
     metadata = cpp_constants["METADATA_SIZE"]
-    timestamp = cpp_constants["TIMESTAMP_SIZE"]
+    pad = cpp_constants["TRAILER_PAD_SIZE"]
 
-    cpp_formula_total = header + num_slots * slot + shutdown + metadata + timestamp
+    cpp_formula_total = header + num_slots * slot + shutdown + metadata + pad
     assert cpp_formula_total == expected_total_size
 
     py_total = shm_protocol.SHMLayout(num_slots=num_slots).total_size

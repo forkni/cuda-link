@@ -20,6 +20,7 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0012](0012-native-extension-in-core-wheel.md) | Fold the native extension into the core wheel | Accepted | 2026-07-07 |
 | [0013](0013-prebuilt-wheel-distribution.md) | Prebuilt wheel distribution — Windows-only, cp311 native + py3-none-any fallback | Accepted | 2026-07-07 |
 | [0014](0014-project-anchored-install-resolution.md) | Project-anchored install resolution with a mirror version stamp (amends 0003) | Accepted | 2026-09-23 |
+| [0015](0015-shm-protocol-v0-6-slot-meta.md) | SHM protocol v0.6 — per-slot metadata, 8-aligned version, sender process ID | Proposed | 2026-11-16 |
 
 ## Numbering gaps (0007)
 

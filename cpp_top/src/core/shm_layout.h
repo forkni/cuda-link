@@ -1,18 +1,22 @@
-// SHM protocol v0.5.0 layout — verbatim transcription of src/cuda_link/shm_protocol.py.
+// SHM protocol v0.6.0 layout — verbatim transcription of src/cuda_link/shm_protocol.py.
 //
 // The Python file is the single source of truth. Any change there must be mirrored
 // here; golden-byte tests enforce equality.
 // TD-free, CUDA-free: no TD or cudart includes anywhere in this file.
 //
-// Binary layout (total = SHMLayout(num_slots).total_size()):
-//   [0-3]    magic        uint32 LE = PROTOCOL_MAGIC
-//   [4-11]   version      uint64 LE (monotonic; incremented each sender init)
-//   [12-15]  num_slots    uint32 LE
-//   [16-19]  write_idx    uint32 LE (monotonic; 0 = no frames written yet)
-//   [20 + slot*128 ...]   IPC handles (64B mem + 64B event per slot, N slots)
-//   [20 + N*128]          shutdown_flag uint8
-//   [21 + N*128 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
-//   [41 + N*128 ...]      timestamp float64 LE (producer monotonic timestamp, perf_counter seconds)
+// Binary layout (total = SHMLayout(num_slots).total_size() = 48 + N*160), little-endian:
+//   [0-3]    magic        uint32 = PROTOCOL_MAGIC ("CIP6")
+//   [4-7]    num_slots    uint32
+//   [8-15]   version      uint64 (monotonic; incremented each sender init; 8-aligned)
+//   [16-19]  write_idx    uint32 (monotonic; 0 = no frames written yet)
+//   [20-23]  sender_pid   uint32 (sender process id; 0 = unknown)
+//   [24 + i*160 ...]      slot i: 64B mem handle, 64B event handle, 32B slot meta
+//   [24 + N*160]          shutdown_flag uint8
+//   [25 + N*160 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
+//   [45 + N*160 ...]      3B pad (total is a multiple of 8)
+//
+// Slot meta, relative to the slot base: +128 host_timestamp f64, +136 producer_frame u64,
+// +144 source_timestamp_us u64, +152 stream_id u32, +156 meta_flags u32 (reserved, 0).
 
 #pragma once
 
@@ -21,34 +25,39 @@
 
 namespace cudalink::core {
 
-constexpr uint32_t PROTOCOL_MAGIC = 0x43495044; // "CIPD"
+constexpr uint32_t PROTOCOL_MAGIC = 0x43495036;     // "CIP6"
+constexpr uint32_t PROTOCOL_MAGIC_V05 = 0x43495044; // "CIPD": v0.5 (cuda-link 1.x), only to name the mismatch
 
 constexpr uint32_t MAGIC_OFFSET = 0;
 constexpr uint32_t MAGIC_SIZE = 4;
-// Deliberately 4-byte-aligned (not 8), matching shm_protocol.py's packed layout exactly --
-// re-aligning this field would break golden-byte wire parity with the Python side. This
-// means ring_reader.cpp/ring_writer.cpp's std::atomic_ref<uint64_t> over this field runs
-// under 4-byte alignment, one short of atomic_ref<uint64_t>::required_alignment (8) --
-// formally UB per [atomics.ref.generic]. In practice this is benign on the x86-64 targets
-// this project ships for: bytes [4,12) sit entirely inside the first 64-byte cache line
-// (offsets 0-63), and the x86-64 SDM guarantees cacheable, naturally-contained unaligned
-// 8-byte loads/stores are atomic. See the static_assert next to each atomic_ref<uint64_t>
-// use for the accompanying lock-free/address-free compile-time guard.
-constexpr uint32_t VERSION_OFFSET = 4;
-constexpr uint32_t VERSION_SIZE = 8;
-constexpr uint32_t NUM_SLOTS_OFFSET = 12;
+constexpr uint32_t NUM_SLOTS_OFFSET = 4;
 constexpr uint32_t NUM_SLOTS_SIZE = 4;
+// 8-aligned, so the std::atomic_ref<uint64_t> in ring_reader.cpp/ring_writer.cpp meets
+// atomic_ref<uint64_t>::required_alignment (the mapping base is page-aligned).
+constexpr uint32_t VERSION_OFFSET = 8;
+constexpr uint32_t VERSION_SIZE = 8;
 constexpr uint32_t WRITE_IDX_OFFSET = 16;
 constexpr uint32_t WRITE_IDX_SIZE = 4;
-constexpr uint32_t SHM_HEADER_SIZE = 20; // 4B magic + 8B version + 4B num_slots + 4B write_idx
+constexpr uint32_t SENDER_PID_OFFSET = 20;
+constexpr uint32_t SENDER_PID_SIZE = 4;
+constexpr uint32_t SHM_HEADER_SIZE = 24; // magic + num_slots + version + write_idx + sender_pid
 
-constexpr uint32_t SLOT_SIZE = 128;      // 64B cudaIpcMemHandle_t + 64B cudaIpcEventHandle_t
-constexpr uint32_t IPC_HANDLE_SIZE = 64; // cudaIpc{Mem,Event}Handle_t are each 64 bytes
+constexpr uint32_t IPC_HANDLE_SIZE = 64;           // cudaIpc{Mem,Event}Handle_t are each 64 bytes
+constexpr uint32_t SLOT_META_OFFSET_IN_SLOT = 128; // after the two IPC handles
+constexpr uint32_t SLOT_META_SIZE = 32;
+constexpr uint32_t SLOT_SIZE = 160; // 64B mem handle + 64B event handle + 32B slot meta
+
+// Slot-meta field offsets, relative to the start of the slot meta.
+constexpr uint32_t SLOT_META_HOST_TIMESTAMP_OFFSET = 0;       // double
+constexpr uint32_t SLOT_META_PRODUCER_FRAME_OFFSET = 8;       // uint64
+constexpr uint32_t SLOT_META_SOURCE_TIMESTAMP_US_OFFSET = 16; // uint64
+constexpr uint32_t SLOT_META_STREAM_ID_OFFSET = 24;           // uint32
+constexpr uint32_t SLOT_META_FLAGS_OFFSET = 28;               // uint32, reserved (0)
 
 constexpr uint32_t SHUTDOWN_FLAG_SIZE = 1;
 constexpr uint32_t METADATA_SIZE =
     20; // 4B w + 4B h + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-constexpr uint32_t TIMESTAMP_SIZE = 8;
+constexpr uint32_t TRAILER_PAD_SIZE = 3; // pads the total to a multiple of 8
 
 // Names the `/ 8` in every bits_per_comp -> bytes-per-component conversion
 // (Metadata::expected_size below; CudaLinkOutTOP/InTOP's itemsize computations), rather
@@ -83,6 +92,10 @@ public:
         return slot_offset(slot) + IPC_HANDLE_SIZE;
     }
 
+    [[nodiscard]] constexpr uint32_t slot_meta_offset(uint32_t slot) const noexcept {
+        return slot_offset(slot) + SLOT_META_OFFSET_IN_SLOT;
+    }
+
     [[nodiscard]] constexpr uint32_t shutdown_offset() const noexcept {
         return SHM_HEADER_SIZE + num_slots_ * SLOT_SIZE;
     }
@@ -91,12 +104,8 @@ public:
         return shutdown_offset() + SHUTDOWN_FLAG_SIZE;
     }
 
-    [[nodiscard]] constexpr uint32_t timestamp_offset() const noexcept {
-        return metadata_offset() + METADATA_SIZE;
-    }
-
     [[nodiscard]] constexpr uint32_t total_size() const noexcept {
-        return timestamp_offset() + TIMESTAMP_SIZE;
+        return metadata_offset() + METADATA_SIZE + TRAILER_PAD_SIZE;
     }
 
 private:
@@ -148,6 +157,38 @@ struct Metadata {
     }
 };
 
+// Per-slot metadata the sender writes with each frame. Mirrors shm_protocol.py::SlotMeta.
+struct SlotMeta {
+    double host_timestamp = 0.0;      // sender steady_clock / perf_counter seconds at publish
+    uint64_t producer_frame = 0;      // sender frame number; 0 = not set
+    uint64_t source_timestamp_us = 0; // optional producer time, not interpreted
+    uint32_t stream_id = 0;           // user-set stream name
+    uint32_t meta_flags = 0;          // reserved, always 0
+
+    // Writes this slot meta at layout.slot_meta_offset(slot).
+    void pack_into(uint8_t* buf, const SHMLayout& layout, uint32_t slot) const noexcept {
+        uint8_t* p = buf + layout.slot_meta_offset(slot);
+        std::memcpy(p + SLOT_META_HOST_TIMESTAMP_OFFSET, &host_timestamp, 8);
+        std::memcpy(p + SLOT_META_PRODUCER_FRAME_OFFSET, &producer_frame, 8);
+        std::memcpy(p + SLOT_META_SOURCE_TIMESTAMP_US_OFFSET, &source_timestamp_us, 8);
+        std::memcpy(p + SLOT_META_STREAM_ID_OFFSET, &stream_id, 4);
+        std::memcpy(p + SLOT_META_FLAGS_OFFSET, &meta_flags, 4);
+    }
+
+    // Reads the slot meta at layout.slot_meta_offset(slot) (plain reads; call after the
+    // acquire load of write_idx).
+    static SlotMeta read_from(const uint8_t* buf, const SHMLayout& layout, uint32_t slot) noexcept {
+        const uint8_t* p = buf + layout.slot_meta_offset(slot);
+        SlotMeta m;
+        std::memcpy(&m.host_timestamp, p + SLOT_META_HOST_TIMESTAMP_OFFSET, 8);
+        std::memcpy(&m.producer_frame, p + SLOT_META_PRODUCER_FRAME_OFFSET, 8);
+        std::memcpy(&m.source_timestamp_us, p + SLOT_META_SOURCE_TIMESTAMP_US_OFFSET, 8);
+        std::memcpy(&m.stream_id, p + SLOT_META_STREAM_ID_OFFSET, 4);
+        std::memcpy(&m.meta_flags, p + SLOT_META_FLAGS_OFFSET, 4);
+        return m;
+    }
+};
+
 // Header field readers — plain (non-atomic) reads for fields other than write_idx.
 // write_idx itself must always be read via std::atomic_ref (see ring_reader.h) — never
 // through these helpers, to preserve the acquire/release ordering contract.
@@ -167,6 +208,12 @@ inline uint64_t read_version(const uint8_t* buf) noexcept {
 inline uint32_t read_num_slots(const uint8_t* buf) noexcept {
     uint32_t v;
     std::memcpy(&v, buf + NUM_SLOTS_OFFSET, 4);
+    return v;
+}
+
+inline uint32_t read_sender_pid(const uint8_t* buf) noexcept {
+    uint32_t v;
+    std::memcpy(&v, buf + SENDER_PID_OFFSET, 4);
     return v;
 }
 

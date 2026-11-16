@@ -34,7 +34,6 @@ def _make_conn(
         ipc_events=ipc_events if ipc_events is not None else [None] * num_slots,
         layout=layout,
         shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
         doorbell_handle=doorbell_handle,
     )
 
