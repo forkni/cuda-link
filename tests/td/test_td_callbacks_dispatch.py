@@ -26,18 +26,30 @@ handler must fire per parameter name, and unrecognized names must dispatch to no
 
 from __future__ import annotations
 
-import sys
 import types
-from pathlib import Path
 
+import parexecute_callbacks
 import pytest
+import script_top_callbacks
 
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-import parexecute_callbacks  # noqa: E402
-import script_top_callbacks  # noqa: E402
+class _TDAttributeError(RuntimeError):
+    """Stand-in for td.tdAttributeError (NOT an AttributeError subclass in real TD)."""
+
+
+class _RaisingExt:
+    """Simulates TD's actual failure mode: `ext.ext.CUDAIPCExtension` RAISES rather than
+    evaluating to None, e.g. when the extension failed to compile (td.tdAttributeError).
+
+    getattr(obj, name, default) only swallows AttributeError, so a bare
+    `getattr(parent().ext, "CUDAIPCExtension", None)` would NOT save a caller here.
+    These tests prove _extension()'s broad `except Exception` -- not getattr's default
+    -- is what actually fixes the reported per-frame crash."""
+
+    @property
+    def CUDAIPCExtension(self) -> object:
+        raise _TDAttributeError("'td.Ext' object has no attribute 'CUDAIPCExtension'")
+
 
 # ---------------------------------------------------------------------------
 # script_top_callbacks.onCook
@@ -118,6 +130,21 @@ def test_warning_emitter_no_message_emits_nothing() -> None:
 
 def test_import_buffer_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_global_parent(monkeypatch, None)
+    scriptOp = _StubScriptOp("ImportBuffer")
+    script_top_callbacks.onCook(scriptOp)  # must not raise
+    assert scriptOp.warnings == []
+
+
+def test_import_buffer_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduces the reported bug directly: parent().ext.CUDAIPCExtension raises
+    td.tdAttributeError (uncompiled extension) instead of returning None. Before the
+    _extension() fix, this propagated out of onCook on every single cook."""
+    monkeypatch.setattr(
+        script_top_callbacks,
+        "parent",
+        lambda: types.SimpleNamespace(ext=_RaisingExt()),
+        raising=False,
+    )
     scriptOp = _StubScriptOp("ImportBuffer")
     script_top_callbacks.onCook(scriptOp)  # must not raise
     assert scriptOp.warnings == []
@@ -228,10 +255,40 @@ def _patch_exec_parent(monkeypatch: pytest.MonkeyPatch, ext: object | None) -> N
     )
 
 
+def _record_handlers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace every handle_* function with a recorder; returns the names that fired."""
+    fired: list[str] = []
+    for _, handler_name in _HANDLER_NAMES:
+        monkeypatch.setattr(
+            parexecute_callbacks,
+            handler_name,
+            (lambda *a, _name=handler_name, **k: fired.append(_name)),  # noqa: ARG005
+        )
+    return fired
+
+
 def test_onvaluechange_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_exec_parent(monkeypatch, None)
+    fired = _record_handlers(monkeypatch)
     par = _StubPar("Active", True)
-    parexecute_callbacks.onValueChange(par, False)  # must not raise
+    parexecute_callbacks.onValueChange(par, False)
+    assert fired == []
+
+
+def test_onvaluechange_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduces the reported bug directly: parent().ext.CUDAIPCExtension raises
+    td.tdAttributeError instead of returning None."""
+    monkeypatch.setattr(
+        parexecute_callbacks,
+        "parent",
+        lambda: types.SimpleNamespace(ext=_RaisingExt()),
+        raising=False,
+    )
+    fired = _record_handlers(monkeypatch)
+    assert parexecute_callbacks._extension() is None
+    par = _StubPar("Active", True)
+    parexecute_callbacks.onValueChange(par, False)
+    assert fired == []
 
 
 @pytest.mark.parametrize("param_name,expected_handler", _HANDLER_NAMES)
@@ -241,13 +298,7 @@ def test_onvaluechange_dispatches_exactly_one_handler(
     ext = _StubExecExt()
     _patch_exec_parent(monkeypatch, ext)
 
-    fired: list[str] = []
-    for _, handler_name in _HANDLER_NAMES:
-        monkeypatch.setattr(
-            parexecute_callbacks,
-            handler_name,
-            (lambda *a, _name=handler_name, **k: fired.append(_name)),  # noqa: ARG005
-        )
+    fired = _record_handlers(monkeypatch)
 
     par = _StubPar(param_name, "new_value")
     parexecute_callbacks.onValueChange(par, "prev_value")
@@ -260,13 +311,7 @@ def test_onvaluechange_unrecognized_name_dispatches_nothing(monkeypatch: pytest.
     ext = _StubExecExt()
     _patch_exec_parent(monkeypatch, ext)
 
-    fired: list[str] = []
-    for _, handler_name in _HANDLER_NAMES:
-        monkeypatch.setattr(
-            parexecute_callbacks,
-            handler_name,
-            (lambda *a, _name=handler_name, **k: fired.append(_name)),  # noqa: ARG005
-        )
+    fired = _record_handlers(monkeypatch)
 
     par = _StubPar("SomeOtherParam", "value")
     parexecute_callbacks.onValueChange(par, "prev")

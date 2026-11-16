@@ -12,9 +12,9 @@ against a fixed-rate GPU producer:
             Falls back to 1 ms sleep only on the 2 s safety timeout.
 
   native    R5 opt-in: native (C++) notification-wait backend, engaged via
-            ImportPolicy(wait_backend="native"). Added only when
-            cuda-link-native is importable on this host (Windows + sidecar
-            installed). This is the authoritative venue for PLAN-002's accept
+            ImportPolicy(wait_backend="native"). Added only when the compiled
+            cuda_link._native_waiter extension is importable on this host
+            (Windows + built). This is the authoritative venue for PLAN-002's accept
             gate (p50<10us, p95<50us) because imp.last_latency here is real
             cross-process publish->detect latency -- unlike
             bench_r1_wait.py's get_frame() wall-clock time, which includes
@@ -30,8 +30,8 @@ consumer _begin_frame, in milliseconds.
 Every arm's ImportPolicy pins wait_backend explicitly (poll/doorbell -> "python",
 native -> "native") when the field exists. ImportPolicy()'s own default is
 wait_backend="auto", not "python" -- leaving it unset would let the poll/doorbell
-arms silently pick up the native backend on any host with cuda-link-native
-installed, contaminating the R2 poll-vs-doorbell comparison (same bug class
+arms silently pick up the native backend on any host with the native extension
+built, contaminating the R2 poll-vs-doorbell comparison (same bug class
 fixed for bench_r1_wait.py in commit 0942985).
 
 Usage
@@ -161,16 +161,16 @@ def _policy_has_wait_backend() -> bool:
 def _native_backend_available() -> bool:
     """Return True if the R5 native wait backend can actually be engaged here.
 
-    Requires: Windows (the native sidecar is Windows-only), ImportPolicy has the
-    'wait_backend' field (R5 implemented), and cuda_link_native is importable
-    (the sidecar package is installed on this host).
+    Requires: Windows (the native extension is Windows-only), ImportPolicy has
+    the 'wait_backend' field (R5 implemented), and cuda_link._native_waiter is
+    importable (the compiled extension was built for this host).
     """
     if os.name != "nt":
         return False
     if not _policy_has_wait_backend():
         return False
     try:
-        import cuda_link_native  # noqa: F401
+        from cuda_link import _native_waiter  # noqa: F401
     except ImportError:
         return False
     return True
@@ -265,8 +265,8 @@ def _worker_consumer(
         if _policy_has_wait_backend():
             # ImportPolicy()'s own default is wait_backend="auto", not "python" --
             # omitting this would let the poll/doorbell arms silently pick up the
-            # native backend via "auto" on any host with cuda-link-native
-            # installed, contaminating the R2 poll-vs-doorbell comparison (same
+            # native backend via "auto" on any host with the native extension
+            # built, contaminating the R2 poll-vs-doorbell comparison (same
             # bug class fixed for bench_r1_wait.py in 0942985). The native arm
             # passes wait_backend="native" explicitly instead.
             policy_kwargs["wait_backend"] = wait_backend
@@ -485,7 +485,7 @@ def main() -> int:
         if _native_backend_available():
             arms.append((True, "native", "native"))
         else:
-            print("  [native arm skipped -- cuda-link-native not importable on this host]")
+            print("  [native arm skipped -- cuda_link._native_waiter not built on this host]")
         for doorbell_on, arm_key, wait_backend in arms:
             label = f"{fps_label}/{arm_key}"
             r = _run_cell(label, fps, args.frames, doorbell_on, wait_backend, ctx)

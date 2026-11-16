@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link"
-version = "1.11.0"
+version = "1.14.1"
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,28 +38,50 @@ nvml = ["nvidia-ml-py>=12.535"]
 all = ["cuda-link[torch,numpy,cupy,nvml]"]
 dev = [
     "cuda-link[all]",
+    # Dev/CI pin only -- the published `torch` extra stays `>=2.0`. 2.11.0 is the newest
+    # release with a cu128 wheel (download.pytorch.org/whl/cu128); PyPI's Windows wheels
+    # are CPU-only, so a GPU box installs the CUDA build by hand and runs `uv run --no-sync`.
+    # Python 3.9 is excluded: torch 2.11 needs >=3.10, and the lock keeps 2.8.0 there.
+    "torch==2.11.0; python_version >= '3.10'",
     "pytest>=7.0",
     "pytest-randomly>=3.15",
     "pytest-cov>=5.0",
     "ruff",
     "pyrefly",
     "snoop>=0.4",
-    "py-heat>=0.0.6",
     "nvtx>=0.2",
     "scalene>=1.5",
+]
+quality = [
+    # py-heat pulls matplotlib -> pillow; nothing in the repo imports it, so it lives here
+    # (never installed by CI) instead of in the locked `dev` graph.
+    "py-heat>=0.0.6",
+    # Manual, local-only analysis tools -- never installed by CI. Kept out of `dev` so a
+    # resolver failure here can't break the Python 3.9 leg of ci.yml, which installs the
+    # locked `dev` extra (`uv sync --locked --extra dev`) and never sees this one.
+    "cosmic-ray>=8.4",
+    "radon>=6.0",
+    # crap4py's ONLY PyPI release is 0.1.1 and it requires Python >=3.10, while this project
+    # supports >=3.9 (requires-python above). The marker keeps `pip install -e .[quality]`
+    # resolvable on 3.9 (crap4py is simply skipped) instead of hard-failing the whole install.
+    # A prior >=0.3 pin here referenced a version that has never existed on PyPI.
+    "crap4py>=0.1.1; python_version >= '3.10'",
 ]
 
 [project.urls]
 Homepage = "https://github.com/forkni/cuda-link"
-Documentation = "https://github.com/forkni/cuda-link/tree/main/docs"
+Documentation = "https://github.com/forkni/cuda-link/tree/master/docs"
 Repository = "https://github.com/forkni/cuda-link"
 Issues = "https://github.com/forkni/cuda-link/issues"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.scikit-build]
+wheel.packages = ["src/cuda_link"]
+# _native_waiter (src/cuda_link/_cpp/native_waiter.cpp, see root CMakeLists.txt)
+# is Windows-only and needs no CUDA Toolkit/SDK at build time — cudaEventQuery
+# is handed in as a function pointer the caller already resolved. On other
+# platforms CMakeLists.txt returns early and this produces a pure-Python wheel;
+# the native backend then raises a clear RuntimeError only if actually used.
+cmake.version = ">=3.24"
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "td_exporter", "tests"]
@@ -71,15 +93,43 @@ addopts = "--strict-markers --strict-config --import-mode=importlib --randomly-d
 markers = [
     "requires_cuda: marks tests as requiring CUDA GPU (deselect with '-m \"not requires_cuda\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_native: test requires a real native _native_waiter build + GPU (deselect with -m 'not requires_native')",
+    "smoke: fast fail-fast check executed against the installed wheel (see references/build-once-promotion.md)",
+    "integration: touches multi-process or external resources; runs in integration stage (see references/commit-vs-acceptance-stage.md)",
+    "quarantine: known-flaky test tracked with reason, issue, and expiry date (see references/test-suite-drift.md)",
 ]
+filterwarnings = [
+    "error",
+    # Upstream deprecation in torch.cuda's pynvml import
+    "ignore:The pynvml package is deprecated.*:FutureWarning:torch.cuda.*",
+    # Deprecated CUDAIPCImporter shim retained for backward-compatibility until v1.8
+    "ignore:CUDAIPCImporter is deprecated and will be removed in v1.8.*:DeprecationWarning",
+]
+xfail_strict = true
+
+[tool.check_skipped_tests]
+max_ratio = 0.02
+
+[tool.scan_test_smells]
+baseline = ".smell-baseline.json"
 
 [tool.ruff]
 line-length = 120
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "C901"]
 ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.lint.mccabe]
+# Complexity ceiling, ratcheted downward only. 43 = today's worst offender
+# (src/cuda_link/exporter.py:534 export, mirrored at td_exporter/Exporter.py:535,
+# measured 2026-08-20). New code may not exceed the current worst; each refactor
+# of export/_do_cleanup (see the deferral table in TESTING_GUIDE.md) lowers this
+# number. Never raise it. 46 total functions exceed max-complexity=10 today
+# (11 shipping, 6 generated mirrors, 29 scripts/hooks/examples/test-helpers) --
+# none fixed by this ratchet; it only stops new code from adding a 47th.
+max-complexity = 43
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
@@ -89,7 +139,12 @@ ignore = ["E501"]  # Line length handled by formatter
 "src/cuda_link/cuda_ipc_wrapper.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, etc.)
 "src/cuda_link/cuda_runtime_types.py" = ["N801"]  # C-struct naming (cudaIpcMemHandle_t, cudaIpcEventHandle_t)
 ".claude/hooks/*" = ["N806", "F841", "F541"]  # Hook scripts may have different conventions
-"verification/*" = ["F821", "SIM105", "SIM210"]  # TD textport scripts: op/baseCOMP/scriptTOP etc. are TD built-in globals; probe patterns intentionally use try/except/pass
+"examples/*" = ["N999"]  # Numbered example scripts (01_..., 02_...) are run as files, never imported as modules
+"tests/td/test_tdsender_grow_safety.py" = ["F811"]  # fake_exporter_open (tests/fakes/__init__.py) is imported and reused as a parameter name across tests -- standard pytest fixture-import pattern, pyflakes false positive
+"tests/td/test_tdsender_h2_channel_inference.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_tdsender_pixelformat_override.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_td_status_emission.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
+"tests/td/test_tdsender_reopen_guard.py" = ["F811"]  # same fake_exporter_open fixture-import pattern
 
 [tool.ruff.format]
 quote-style = "double"
@@ -113,12 +168,13 @@ python-platform = "win32"
 # toolchain in CI; the runtime None-guards remain authoritative.
 # td is TouchDesigner's built-in module (COMP, TOP, CUDAMemoryShape, ui …);
 # it only exists inside the TD interpreter, so treat all td.* imports as Any.
-# cuda_link_native is the optional R5 sidecar package (native/) — imported only
-# inside Importer._resolve_wait_backend() (try/except ImportError/AttributeError)
-# and under TYPE_CHECKING for the WaitBackend annotation; never a core dep.
+# cuda_link._native_waiter is the compiled R5 pybind11 extension (built from
+# src/cuda_link/_cpp/native_waiter.cpp by root CMakeLists.txt) — imported only
+# inside _native_loader.load_native_backend() (try/except ImportError); pyrefly
+# has no stub for a compiled module, so treat it as Any.
 replace-imports-with-any = [
     "torch", "torch.*", "cupy", "cupy.*", "pynvml", "nvtx", "ml_dtypes",
-    "td", "td.*", "cuda_link_native", "cuda_link_native.*",
+    "td", "td.*", "cuda_link._native_waiter",
 ]
 # Add td_exporter/ to the import search path so flat-namespace sibling imports
 # (e.g. `from CUDAIPCWrapper import …`) resolve inside that tree.
@@ -156,9 +212,14 @@ project-excludes = [
 # pattern) but is always a plain int at runtime (ctypes restype=c_void_p
 # auto-converts); int()'s overload set doesn't statically accept `object`
 # (no-matching-overload), same shape as TDReceiver.py's frombuffer suppression.
+# bad-assignment: Importer.open()/from_connection() default `cuda` to
+# CTypesCUDAAdapter, which satisfies CudaPort/ImporterCudaPort only via
+# __getattr__ delegation (see _cuda_adapters.py) — a static checker cannot
+# verify structural Protocol conformance through a dynamic proxy, same root
+# cause already suppressed below for exporter.py.
 [[tool.pyrefly.sub-config]]
 matches = "src/cuda_link/importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry: pynvml bound to None when nvidia-ml-py is absent.
 [[tool.pyrefly.sub-config]]
@@ -199,7 +260,7 @@ errors = {bad-argument-type = false}
 # Consumer engine mirror (same idioms as src/cuda_link/importer.py).
 [[tool.pyrefly.sub-config]]
 matches = "td_exporter/Importer.py"
-errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false}
+errors = {missing-attribute = false, bad-argument-type = false, unsupported-operation = false, no-matching-overload = false, bad-assignment = false}
 
 # Optional NVML telemetry mirror (same as src/cuda_link/nvml_observer.py).
 [[tool.pyrefly.sub-config]]
@@ -251,19 +312,32 @@ omit = [
     "td_exporter/CUDAAdapters.py",
     "td_exporter/Exporter.py",
     "td_exporter/Importer.py",
+    # TouchDesigner demo/benchmark scripts: run only inside a live TD process,
+    # have no tests referencing them, and are not importable standalone.
+    # "Don't test" quadrant (TESTING_GUIDE.md F1 triage) — counting them
+    # understates real coverage of code that's actually exercised. Omitted for
+    # untestability, not double-counting (that's the block above) — kept
+    # separate deliberately. example_receiver_launcher.py, example_sender_launcher.py,
+    # parexecute_callbacks.py, and script_top_callbacks.py are NOT here: tests do
+    # exercise them (see TESTING_GUIDE.md F4/F5).
+    "td_exporter/example_receiver_python.py",
+    "td_exporter/example_sender_python.py",
+    "td_exporter/callbacks_template.py",
+    "td_exporter/benchmark_timestamp.py",
 ]
 
 [tool.coverage.report]
-# Soft regression gate: 58.73% measured 2026-07-06 (746 tests, -m "not requires_cuda",
-# branch=true), now that `source` includes td_exporter/ alongside cuda_link (see T1 in
-# the 2026-07-06 PR review). The prior 72% gate measured cuda_link/ only; auto-generated
-# td_exporter/*.py mirrors are omitted above to avoid double-counting already-tested
-# logic, but genuinely TD-only files (TDReceiver.py 44%, TDSender.py 48%, and several
-# untested example/glue scripts) are real, previously-invisible gaps — closing them is
-# tracked separately as T2 (TD integration-layer characterization tests).
-# fail_under = floor(58.73) - 3 = 55. Raise incrementally as coverage grows (T2 work);
-# never lower without a documented reason.
-fail_under = 55
+# Soft regression gate, re-measured 2026-10-22 (1490 tests, -m "not requires_cuda and
+# not requires_native and not integration and not quarantine", branch=true, bare `--cov`
+# so `source` above applies: cuda_link + TD-only td_exporter files): 93.39%. The
+# cuda_link package alone measures ~99% (`--cov=cuda_link`, CI's invocation); the gate is
+# set against the weaker combined run so both invocations pass. The remaining gap is the
+# TD integration layer (TDReceiver.py at 82% is the largest — see TESTING_GUIDE.md
+# deferral table).
+# fail_under = floor(93.39) - 1.5, rounded down = 91 (was 89 at 90.76%, and 85 at 87.10%,
+# 2026-08-20; Phase I3 added the initialize_receiver and par-exec handler tests). Raise
+# incrementally as coverage grows; never lower without a documented reason.
+fail_under = 91
 show_missing = true
 
 # ---- td_exporter/ TD-native engine files ------------------------------------

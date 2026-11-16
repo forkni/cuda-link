@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Shared Script TOP callbacks for CUDAIPCLink.
 
@@ -22,6 +24,18 @@ resolution or pixel-format updates.
 _STATUS_EMITTER_NAME = "warning_emitter"
 
 
+def _extension():
+    """Return the CUDAIPCExtension, or None if it is not available.
+
+    `parent().ext.CUDAIPCExtension` raises td.tdAttributeError when the extension did
+    not compile; a cook callback must never raise, so catch broadly.
+    """
+    try:
+        return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
+    except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
+        return None
+
+
 def onCook(scriptOp: object) -> None:
     """Called every time a Script TOP that references this DAT needs to cook."""
     # Status badge host: warning_emitter (force-cooked by RealTDHost on transitions)
@@ -32,7 +46,7 @@ def onCook(scriptOp: object) -> None:
         return
 
     # Receiver-mode frame import: ImportBuffer
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
     if ext is None:
         return
 

@@ -11,6 +11,7 @@ __pycache__/
 .Python
 build/
 build_ninja/
+_skbuild/
 develop-eggs/
 dist/
 downloads/
@@ -45,6 +46,7 @@ htmlcov/
 .coverage.*
 .cache
 nosetests.xml
+lcov.info
 coverage.xml
 *.cover
 *.py,cover
@@ -149,6 +151,12 @@ TOXES/CUDAIPCLink_v1.9.0.tox
 TOXES/CUDAIPCLink_v1.10.0.tox
 TOXES/CUDAIPCLink_v1.10.1.tox
 TOXES/CUDAIPCLink_v1.10.2.tox
+TOXES/CUDAIPCLink_v1.11.0.tox
+TOXES/CUDAIPCLink_v1.12.0.tox
+TOXES/CUDAIPCLink_v1.12.1.tox
+TOXES/CUDAIPCLink_v1.12.2.tox
+TOXES/CUDAIPCLink_v1.13.0.tox
+TOXES/CUDAIPCLink_v1.14.0.tox
 
 # Local-only tooling component (never distributed)
 TOXES/Semantic_Version_Control_v0.4.2.tox
@@ -174,17 +182,20 @@ stat_sender.txt
 stat_receiver.txt
 nul
 
-# Scalene profiling output (local-only; only .profiling/baseline.json is committed)
+# Scalene profiling output (local-only; only README.md and baseline.json are committed)
 .profiling/scalene_*.json
 .profiling/current.json
-# All other .profiling/ output is local-only (exp_*, d2h_*, ad-hoc runs)
-.profiling/
-
-# Verification probe outputs (timestamped JSON from probe_cook_context runs)
-verification/results/probe_cook_context_*.json
+# All other .profiling/ output is local-only (exp_*, d2h_*, current.json, ad-hoc runs)
+# except the two files checked in to document the directory.
+.profiling/*
+!.profiling/README.md
+!.profiling/baseline.json
 
 # Test artifacts
 test_timeout_manual.py
+
+# Cosmic-ray mutation-testing session databases (large, regenerated from cr-*.toml)
+cr-*.sqlite
 
 # Local-only project files
 CLAUDE.md
@@ -220,16 +231,20 @@ Sender_benchmark.*.toe
 Test_TD_Receiver1.toe
 Test_TD_Receiver1.*.toe
 
+# C++ Custom TOP test .toe files (local-only; tracked only on feat/cpp-custom-top)
+CUDA_Link_CPP_Test.toe
+CUDA_Link_CPP_Test.*.toe
+CUDA_Link_CPP_Receiver_Test.toe
+CUDA_Link_CPP_Receiver_Test.*.toe
+
+# C++ Custom TOP CMake build output (local-only; cpp_top/build/ already covered by the
+# generic build/ rule above, but the Ninja-generator build tree needs its own entry)
+cpp_top/build_ninja/
+
 # CUDA_Link_Example numbered snapshots (auto-created and moved to Backup/ by TD on save)
 # Only CUDA_Link_Example.toe (unnumbered main file) is always tracked.
 # To include a specific numbered snapshot at release time: git add -f CUDA_Link_Example.N.toe
 CUDA_Link_Example.*.toe
-
-# CUDA_Link_CPP test/receiver .toe files (local-only)
-CUDA_Link_CPP_Receiver_Test.toe
-CUDA_Link_CPP_Receiver_Test.*.toe
-CUDA_Link_CPP_Test.toe
-CUDA_Link_CPP_Test.*.toe
 
 
 # Local TD font assets
@@ -243,21 +258,10 @@ unnamed.png
 init_heatmap.png
 
 # Reference materials (local-only)
-References/
+/References/
 
 # Benchmarks are local-only artifacts; numbers immortalised in docs/BENCHMARKS.md
-# Use wildcard (not trailing slash) so nested exceptions can re-include specific files.
-benchmarks/**
-!benchmarks/results/
-benchmarks/results/**
-!benchmarks/results/td/
-benchmarks/results/td/**
-!benchmarks/results/td/cell_C_td/
-!benchmarks/results/td/cell_D_td/
-benchmarks/results/td/cell_C_td/**
-benchmarks/results/td/cell_D_td/**
-!benchmarks/results/td/cell_C_td/textport.txt
-!benchmarks/results/td/cell_D_td/textport.txt
+benchmarks/
 
 # Architecture vocabulary glossary (local-only; canonical terms in docs/ARCHITECTURE.md)
 CONTEXT.md
@@ -266,6 +270,7 @@ CONTEXT.md
 .claude/commands/
 .claude/skills/
 .claude/SLASH_COMMAND_TESTING_PROTOCOL.md
+.agents/
 
 # Implementation plan docs (local-only; plan files live in .claude/plans/)
 docs/plans/
@@ -290,5 +295,15 @@ scripts/git/
 cgw.conf.example
 
 # Local profiling artifacts and probe scripts
-scripts/probes/59.5
 scripts/profiling/benchmarks/
+
+# Local-only dev tooling (probes, shell lint helper). scripts/profiling/ and
+# scripts/probe/driver_api_ipc_probe.py stay tracked — referenced by
+# docs/BENCHMARKS.md, docs/PROFILING.md, docs/ARCHITECTURE.md, ADR-0004, and
+# a CI test (tests/cuda/test_probe_error_decode.py).
+scripts/probes/
+scripts/probe/ipc_event_in_graph_probe.py
+scripts/lint/
+
+# Local-only manual verification probes (not part of the pytest suite)
+verification/

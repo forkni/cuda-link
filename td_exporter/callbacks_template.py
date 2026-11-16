@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Execute DAT Callback for CUDAIPCExtension
 
@@ -10,6 +12,18 @@ Architecture:
 """
 
 
+def _extension():
+    """Return the CUDAIPCExtension, or None if it is not available.
+
+    `parent().ext.CUDAIPCExtension` raises td.tdAttributeError when the extension did
+    not compile; a frame callback must never raise, so catch broadly.
+    """
+    try:
+        return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
+    except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
+        return None
+
+
 def onFrameStart(frame: int) -> None:
     """Called at the start of every frame.
 
@@ -19,7 +33,7 @@ def onFrameStart(frame: int) -> None:
     Args:
         frame: Current frame number
     """
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
     if ext is None:
         return
 
@@ -57,7 +71,7 @@ def onFrameEnd(frame: int) -> None:
     Args:
         frame: Current frame number
     """
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
     if ext is None:
         return
 
@@ -67,7 +81,7 @@ def onFrameEnd(frame: int) -> None:
 
 def onExit() -> None:
     """Called when TouchDesigner exits or when this DAT is destroyed."""
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
     if ext is not None:
         ext.cleanup()
 

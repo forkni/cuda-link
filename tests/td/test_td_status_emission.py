@@ -22,22 +22,15 @@ built _FakeExporter double stands in for Exporter.open()).
 
 from __future__ import annotations
 
-import sys
 import types
 import uuid
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from Exporter import Exporter, FrameOutcome  # noqa: E402
-from fakes import FakeTDHost, FakeTOPHandle  # noqa: E402
-from SHMProtocol import DtypeCodec  # noqa: E402
-from TDConfig import TDSenderConfig  # noqa: E402
-from TDSender import TDSenderEngine  # noqa: E402
+from Exporter import Exporter, FrameOutcome
+from fakes import FakeTDHost, FakeTOPHandle, fake_exporter_open  # noqa: F401
+from SHMProtocol import DtypeCodec
+from TDConfig import TDSenderConfig
+from TDSender import TDSenderEngine
 
 
 class _FakeExporter:
@@ -65,14 +58,6 @@ class _FakeExporter:
         pass
 
 
-@pytest.fixture
-def fake_exporter_open(monkeypatch: pytest.MonkeyPatch):
-    def _patched_open(spec, *, policy=None, cuda=None, barrier=None):  # noqa: ANN001, ARG001
-        return _FakeExporter(spec)
-
-    monkeypatch.setattr(Exporter, "open", _patched_open)
-
-
 def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:
     config = TDSenderConfig(activation_barrier=False, use_graphs=False)
     return TDSenderEngine(
@@ -90,7 +75,8 @@ def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:
 def test_unsupported_format_emits_warning_then_clear(fake_exporter_open: None) -> None:
     top = FakeTOPHandle(
         pixel_format="16-bit float (RGBA)",  # matches _CUDA_UNSUPPORTED_PIXEL_FORMATS ("16float")
-        pixel_format_name="rgba16float",
+        # Unmapped name: the five float16 menu names are converted to float32 and never warn.
+        pixel_format_name="useinput",
         width=64,
         height=64,
         channels=4,

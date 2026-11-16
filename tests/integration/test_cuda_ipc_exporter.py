@@ -247,22 +247,23 @@ def test_is_ready_false_before_init() -> None:
     assert not exporter.is_ready()
 
 
-def test_log_helper() -> None:
-    """Test _log() helper method with verbosity control."""
+def test_log_helper(capsys: pytest.CaptureFixture[str]) -> None:
+    """_log() prints only when forced or when verbosity is on."""
     from CUDAIPCExtension import CUDAIPCExtension
 
     host = FakeTDHost(params={"Debug": False})
     exporter = CUDAIPCExtension(None, host=host)
+    capsys.readouterr()  # discard construction output
 
-    # Should not crash with verbosity off
     exporter._log("Test message")
+    assert capsys.readouterr().out == ""
 
-    # Force logging
     exporter._log("Force message", force=True)
+    assert "Force message" in capsys.readouterr().out
 
-    # Enable verbosity
     exporter.verbose_performance = True
     exporter._log("Verbose message")
+    assert "Verbose message" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -522,5 +523,6 @@ def test_float16_receiver_uses_gpu_path_when_cupy_available() -> None:
     assert result is True
     assert len(handle.copy_cuda_calls) == 1, "GPU path must call copy_cuda_memory once"
     assert len(handle.copy_numpy_calls) == 0, "GPU path must not call copy_numpy_array"
-    # ExternalStream context manager must be used
-    mock_cp.cuda.ExternalStream.assert_called_once()
+    # ExternalStream context manager must be used, wrapping the connection's
+    # stream handle (mock_stream.value = 0x1234, set in the helper above).
+    mock_cp.cuda.ExternalStream.assert_called_once_with(0x1234)

@@ -9,6 +9,9 @@ Also re-exports shared test doubles:
   - FakeTDHost, FakeTOPHandle, FakeCUDAMemoryRef, FakeCUDAMemoryShape (from td_exporter/_td_fakes.py)
   - FakeShmAdapter  (in-process fake for BarrierShmPort / HolderShmPort)
 
+Also provides the ``fake_exporter_open`` pytest fixture (patches ``Exporter.open`` for
+TDSender-engine tests) — see its docstring below.
+
 Import via ``from fakes import FakeShmAdapter, FakeTDHost, ...``
 (importlib-mode-safe — never ``from conftest import``).
 """
@@ -20,8 +23,11 @@ from ctypes import c_void_p
 from dataclasses import dataclass as _dataclass
 from unittest.mock import MagicMock
 
+import pytest
+
 # Re-export TD fake doubles (available via pythonpath = ["td_exporter"] in pyproject.toml)
 from _td_fakes import FakeCUDAMemoryRef, FakeCUDAMemoryShape, FakeTDHost, FakeTOPHandle  # noqa: F401
+from Exporter import Exporter
 
 from cuda_link.importer import IPCConnection
 from cuda_link.shm_protocol import SHMLayout
@@ -292,3 +298,27 @@ def make_bare_runtime_api(*, install_errcheck: bool = False, cudart: object | No
         api._setup_function_signatures()
         api._install_errcheck()
     return api
+
+
+# ---------------------------------------------------------------------------
+# fake_exporter_open — shared TDSender-engine fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_exporter_open(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch Exporter.open so every TDSender-internal open() returns a fake exporter.
+
+    Each ``tests/td/*.py`` module that uses this fixture defines its own local
+    ``_FakeExporter`` double (bodies are near-identical, but grow-safety tests need
+    an extra ``export_calls`` tracking list the others don't) — this fixture looks
+    that class up on the requesting test module via ``request.module._FakeExporter``
+    rather than hardcoding one, so the patching mechanics stay in one place while
+    each module keeps its own fake.
+    """
+    fake_exporter_cls = request.module._FakeExporter
+
+    def _patched_open(spec, *, policy=None, cuda=None, barrier=None):  # noqa: ANN001, ARG001
+        return fake_exporter_cls(spec)
+
+    monkeypatch.setattr(Exporter, "open", _patched_open)

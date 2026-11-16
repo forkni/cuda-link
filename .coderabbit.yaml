@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit: second-opinion PR reviewer next to claude-code-review.yml (replaces Charlie,
+# shut down 2026-10). Free on this public repo. Rules below are ported from the old
+# .charlie/instructions/code-style.md; CLAUDE.md is not tracked, so CodeRabbit can't read it.
+language: en-US
+
+reviews:
+  # Bugs-only layer on top of /code-review: no walkthrough extras, only important findings.
+  profile: quiet
+  request_changes_workflow: false # comment only, never approve or block
+  high_level_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  suggested_labels: false
+  suggested_reviewers: false
+  related_issues: false
+  related_prs: false
+  poem: false
+  in_progress_fortune: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*" # PRs land on development and feature branches, not only master
+  path_filters:
+    - "!**/*.toe"
+    - "!**/*.tox"
+    - "!build/**"
+    - "!dist/**"
+  path_instructions:
+    - path: "**"
+      instructions: |
+        Report bugs only: behaviour this PR breaks or makes reachable, such as wrong results,
+        crashes, races, resource or GPU-memory leaks, unhandled errors, and broken contracts or
+        invariants. Each finding needs a reachable trigger and a concrete consequence.
+        Do not comment on style, naming, docs, refactors, type hints, performance tuning,
+        optional hardening, pre-existing problems, or anything the linters already report.
+    - path: "td_exporter/**"
+      instructions: |
+        TouchDesigner naming is intentional here: PascalCase class names and camelCase method
+        names are not lint violations. Don't flag them.
+    - path: "tests/**"
+      instructions: |
+        Every CUDA-dependent test must carry `@pytest.mark.requires_cuda` and must not mock the
+        GPU. Flag a CUDA test that lacks the marker or mocks the device.
+
+chat:
+  auto_reply: true

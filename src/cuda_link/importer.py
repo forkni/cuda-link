@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Importer — deep consumer-side module for CUDA IPC GPU memory.
 
@@ -33,7 +35,13 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
-from .cuda_runtime_types import IPC_MEM_LAZY_ENABLE_PEER_ACCESS
+from .cuda_runtime_types import (
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+    CudaIpcError,
+    IPCEventOpenError,
+    ProducerTimeoutError,
+    ProtocolError,
+)
 from .shm_protocol import (
     IPC_HANDLE_SIZE,
     MAGIC_OFFSET,
@@ -52,8 +60,9 @@ from .shm_protocol import (
 )
 
 if TYPE_CHECKING:
-    from cuda_link_native import WaitBackend
+    from cuda_link._wait_backend import WaitBackend
 
+    from ._importer_port import ImporterCudaPort
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
@@ -271,7 +280,7 @@ class IPCConnection:
     _open_ipc_slots(), then nulled in-place by close_ipc_handles() / close().
     """
 
-    cuda: Any  # ImporterCudaPort
+    cuda: ImporterCudaPort
     shm_handle: object  # SharedMemory | None after close()
     ipc_version: int
     num_slots: int
@@ -411,6 +420,22 @@ class CupyBuffers:
         return cls(arrays=arrays)
 
 
+def _build_cupy_views(conn: IPCConnection, fmt: Format) -> CupyBuffers | None:
+    """CuPy views for fmt, or None when CuPy is absent or has no dtype for it (bfloat16).
+
+    A dtype CuPy cannot represent must not block torch/numpy consumers, so its
+    ValueError only drops the views; get_frame_cupy() then raises a clear RuntimeError.
+    Any other build failure propagates.
+    """
+    if not CUPY_AVAILABLE:
+        return None
+    try:
+        return CupyBuffers.build(conn, fmt)
+    except ValueError as e:
+        logger.warning("CuPy views dropped: %s", e)
+        return None
+
+
 @dataclass
 class NumpyBuffers:
     """Pinned host buffer + D2H streams for numpy frame consumption (built lazily).
@@ -419,7 +444,7 @@ class NumpyBuffers:
     close() tears them down idempotently.
     """
 
-    cuda: Any  # ImporterCudaPort
+    cuda: ImporterCudaPort
     fmt: Format
     buffer: object  # np.ndarray — reusable D2H destination
     pinned_ptr: object  # c_void_p | None
@@ -882,8 +907,13 @@ class _CupyBackend:
         self._imp = importer
         self._stream = stream
 
-    def prepare(self, importer: Importer) -> None:  # noqa: ARG002
-        pass
+    def prepare(self, importer: Importer) -> None:
+        if importer._cupy is None:
+            # Views are dropped when the current format has no CuPy dtype (bfloat16).
+            raise RuntimeError(
+                f"CuPy views are unavailable for {importer._format.dtype_str} frames. "
+                "Use get_frame() to retrieve a torch.Tensor instead."
+            )
 
     def wait(self, conn: IPCConnection, read_slot: int) -> float:
         evt = conn.ipc_events[read_slot]
@@ -929,7 +959,7 @@ class Importer:
         self,
         spec: ImportSpec,
         policy: ImportPolicy,
-        cuda: Any,  # ImporterCudaPort
+        cuda: ImporterCudaPort,
     ) -> None:
         """Internal constructor. Use Importer.open() instead."""
         self._spec = spec
@@ -944,6 +974,13 @@ class Importer:
         self._numpy: NumpyBuffers | None = None
         self._initialized = False
 
+        # A1 fix (metadata-race): True when self._format came from _resolve_format()'s
+        # hard-coded (512, 512, 4)/float32 fallback because SHM metadata wasn't written
+        # yet at connect time. The first NEW_FRAME after connect guarantees real
+        # metadata is present (see _try_acquire), so that's when we re-resolve and
+        # clear this flag -- never per-frame once resolved.
+        self._format_provisional = False
+
         # Cached backend instances — each holds only a back-ref to this Importer
         # plus (for torch/cupy) the per-call stream, refreshed in-place rather than
         # constructing a new object each frame.  Avoids one allocation per get_frame* call.
@@ -951,7 +988,8 @@ class Importer:
         self._torch_backend: _TorchBackend | None = None
         self._cupy_backend: _CupyBackend | None = None
 
-        # R5: resolved native wait backend (cuda-link-native, optional sidecar).
+        # R5: resolved native wait backend (compiled _native_waiter extension,
+        # built into this wheel on Windows; see _native_loader.py).
         # None until/unless _open_ipc_slots resolves one; re-resolved on every
         # (re)connect, including from _reinitialize(), so a producer restart
         # never leaves a stale backend/address behind. See _wait_for_slot().
@@ -969,6 +1007,13 @@ class Importer:
 
         # Frame tracking
         self._last_write_idx = 0
+        # _last_write_idx before the latest acquire; restored if that frame's wait times out
+        self._prev_write_idx = 0
+        # write_idx whose wait already timed out in full; while it is still the pending
+        # frame, later calls only re-check the event once instead of blocking again
+        self._timed_out_write_idx: int | None = None
+        # True once an event-open connect failure was logged at WARNING this streak
+        self._event_open_warned = False
         self.frame_count = 0
         self.last_latency = 0.0
 
@@ -1001,7 +1046,7 @@ class Importer:
         spec: ImportSpec,
         *,
         policy: ImportPolicy | None = None,
-        cuda: Any | None = None,
+        cuda: ImporterCudaPort | None = None,
     ) -> Importer:
         """Open a CUDA IPC channel and return a connected Importer.
 
@@ -1024,7 +1069,9 @@ class Importer:
             try:
                 imp._connect()
             except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-                logger.info("Producer not yet available (%s) — will retry on get_frame*()", e)
+                imp._log_connect_failure(
+                    e, logging.INFO, "Producer not yet available (%s) — will retry on get_frame*()"
+                )
         else:
             imp._connect()
         return imp
@@ -1037,7 +1084,7 @@ class Importer:
         conn: IPCConnection,
         fmt: Format,
         *,
-        cuda: Any | None = None,
+        cuda: ImporterCudaPort | None = None,
         torch: Any | None = None,
         cupy: Any | None = None,
         numpy: Any | None = None,
@@ -1089,6 +1136,7 @@ class Importer:
         cupy: Any | None = None,
         numpy: Any | None = None,
         last_write_idx: int = 0,
+        format_provisional: bool = False,
     ) -> None:
         """Wire an already-open IPCConnection into this Importer's connected state.
 
@@ -1103,6 +1151,10 @@ class Importer:
                             "no frames consumed yet"). The production path always uses 0;
                             ``from_connection`` forwards this to support tests that need
                             an importer that has already consumed some frames.
+            format_provisional: Forwarded from ``_resolve_format()`` (A1 fix) — True
+                            when ``fmt`` is the hard-coded fallback, not SHM-derived.
+                            ``from_connection`` (test path) never sets this — a
+                            test-supplied fmt is always treated as resolved.
         """
         self._conn = conn
         self._format = fmt
@@ -1110,33 +1162,52 @@ class Importer:
         self._cupy = cupy
         self._numpy = numpy
         self._last_write_idx = last_write_idx
+        self._format_provisional = format_provisional
         self._initialized = True
 
-    def _connect(self) -> None:
-        """Open SHM, read IPC handles, build buffer views. Called once by open()."""
-        shm, num_slots, ipc_version = self._open_and_validate_shm()
+    def _connect(self, *, quiet: bool = False) -> None:
+        """Open SHM, read IPC handles, build buffer views. Called once by open().
+
+        ``quiet=True`` is used by the reconnect driver, where a missing segment is
+        the expected state for a few frames and must not be logged as an error.
+        """
+        shm, num_slots, ipc_version = self._open_and_validate_shm(quiet=quiet)
+        conn = None
         try:
-            fmt = self._resolve_format(shm, num_slots)
+            fmt, provisional = self._resolve_format(shm, num_slots)
             conn = self._open_ipc_slots(shm, num_slots, ipc_version, fmt)
+            torch_bufs = TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None
+            cupy_bufs = _build_cupy_views(conn, fmt)
         except BaseException:
             # shm is still ours here — _open_ipc_slots only rolls back the
             # per-slot resources it opened, not the SharedMemory it was handed.
+            # A buffer-build failure after a successful open must also release
+            # the slots, or every reconnect retry leaks a full IPCConnection.
+            if conn is not None:
+                conn.close_ipc_handles()
             shm.close()
             raise
         self._adopt_connection(
             conn,
             fmt,
-            torch=TorchBuffers.build(conn, fmt) if TORCH_AVAILABLE else None,
-            cupy=CupyBuffers.build(conn, fmt) if CUPY_AVAILABLE else None,
+            torch=torch_bufs,
+            cupy=cupy_bufs,
+            format_provisional=provisional,
         )
+        self._event_open_warned = False
         logger.info("Importer ready — device %d, shm=%r", self._spec.device, self._spec.shm_name)
 
-    def _open_and_validate_shm(self) -> tuple[SharedMemory, int, int]:
-        """Open SharedMemory and validate protocol magic, version, num_slots, shutdown."""
+    def _open_and_validate_shm(self, *, quiet: bool = False) -> tuple[SharedMemory, int, int]:
+        """Open SharedMemory and validate protocol magic, version, num_slots, shutdown.
+
+        A missing segment is logged at ERROR on a first explicit open, but only at
+        DEBUG when ``quiet`` is set (reconnect polling — see _connect_silent()).
+        """
         try:
             shm = SharedMemory(name=self._spec.shm_name)
         except FileNotFoundError:
-            logger.error("SharedMemory %r not found — producer must be running first", self._spec.shm_name)
+            log = logger.debug if quiet else logger.error
+            log("SharedMemory %r not found — producer must be running first", self._spec.shm_name)
             raise
 
         logger.info("Opened SharedMemory: %s", self._spec.shm_name)
@@ -1149,7 +1220,7 @@ class Importer:
 
         if magic != PROTOCOL_MAGIC:
             shm.close()
-            raise RuntimeError(
+            raise ProtocolError(
                 f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
                 "Update both TD and Python sides to the same protocol version."
             )
@@ -1159,24 +1230,32 @@ class Importer:
 
         if num_slots == 0 or num_slots > 10:
             shm.close()
-            raise ValueError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
+            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
 
         shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
             shutdown_flag = shm.buf[shutdown_offset]
         except (OSError, BufferError, IndexError) as e:
             shm.close()
-            raise RuntimeError(f"Could not read shutdown flag: {e}") from e
+            raise CudaIpcError(f"Could not read shutdown flag: {e}") from e
 
         if shutdown_flag == 1:
             shm.close()
-            raise RuntimeError("Producer shutdown flag set — SharedMemory is stale")
+            raise ProtocolError("Producer shutdown flag set — SharedMemory is stale")
 
         logger.info("Ring buffer with %d slots (v%d)", num_slots, ipc_version)
         return shm, num_slots, ipc_version
 
-    def _resolve_format(self, shm: SharedMemory, num_slots: int) -> Format:
-        """Determine frame geometry from spec overrides + SHM metadata."""
+    def _resolve_format(self, shm: SharedMemory, num_slots: int) -> tuple[Format, bool]:
+        """Determine frame geometry from spec overrides + SHM metadata.
+
+        Returns:
+            (format, provisional). provisional=True means the sender hadn't written
+            real metadata yet (SHM metadata block was all-zero) at connect time, so
+            a hard-coded (512, 512, 4)/float32 fallback was used (A1 fix — this used
+            to be indistinguishable from a genuine detection; _try_acquire()'s first
+            NEW_FRAME now re-resolves via this same method when provisional is True).
+        """
         spec = self._spec
         if spec.shape is None or spec.dtype is None:
             fmt_from_shm = Format.from_shm(shm.buf, num_slots)
@@ -1191,14 +1270,16 @@ class Importer:
                     logger.info("Auto-detected shape: %s", fmt.shape)
                 if spec.dtype is None:
                     logger.info("Auto-detected dtype: %s", fmt.dtype_str)
+                return fmt, False
             else:
                 logger.warning("Could not detect metadata — using fallback (512, 512, 4) / float32")
                 shape = spec.shape or (512, 512, 4)
                 dtype_str = spec.dtype or "float32"
                 fmt = Format.from_overrides(shape, dtype_str)
+                return fmt, True
         else:
             fmt = Format.from_overrides(spec.shape, spec.dtype)
-        return fmt
+            return fmt, False
 
     def _open_ipc_slots(
         self,
@@ -1238,7 +1319,12 @@ class Importer:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        logger.debug("Failed to open IPC event for slot %d: %s", slot, e)
+                        # A published event that won't open leaves the wait with nothing to
+                        # order against the producer, so every frame would be read unsynced.
+                        # Fail the connect (rolled back below) instead of degrading silently.
+                        raise IPCEventOpenError(
+                            f"Failed to open IPC event for slot {slot}: {e}", code=getattr(e, "code", None)
+                        ) from e
 
                 logger.info(
                     "Slot %d: GPU ptr=0x%016x, event=%s",
@@ -1307,12 +1393,12 @@ class Importer:
         )
 
     def _resolve_wait_backend(self) -> WaitBackend | None:
-        """Best-effort resolve the native wait backend (cuda-link-native).
+        """Best-effort resolve the native wait backend (cuda_link._native_waiter).
 
-        Returns None on any failure (sidecar not installed, this CUDA adapter
-        can't supply a cudaEventQuery pointer, or the sidecar rejects it) —
-        callers must treat None as "use the existing Python spin/sleep path",
-        never as an error.
+        Returns None on any failure (extension not built for this platform,
+        this CUDA adapter can't supply a cudaEventQuery pointer, or the
+        extension rejects it) — callers must treat None as "use the existing
+        Python spin/sleep path", never as an error.
 
         The resolved function-pointer address is obtained from *this
         connection's own* CUDA adapter (`self._cuda`) and handed to the
@@ -1325,9 +1411,9 @@ class Importer:
         silently misreported a genuinely-pending CUDA event as complete.
         """
         try:
-            from cuda_link_native._native import load_native_backend  # noqa: PLC0415
+            from cuda_link._native_loader import load_native_backend  # noqa: PLC0415
         except ImportError:
-            logger.info("cuda-link-native not installed; using Python wait path")
+            logger.info("cuda_link._native_waiter not built for this platform; using Python wait path")
             return None
         try:
             fn_ptr = self._cuda.cudart_event_query_fn_ptr()
@@ -1338,23 +1424,44 @@ class Importer:
             logger.info("CUDA adapter has no cudart_event_query_fn_ptr(); using Python wait path")
             return None
         try:
-            return load_native_backend(fn_ptr)
+            backend = load_native_backend(fn_ptr)
         except RuntimeError as e:
             logger.info("Native wait backend unavailable (%s); using Python wait path", e)
             return None
+        logger.info("Native wait backend engaged")
+        return backend
 
     # ------------------------------------------------------------------
     # Reconnect helpers
     # ------------------------------------------------------------------
 
     def _connect_silent(self) -> bool:
-        """Attempt _connect(); return True on success, False on any connection failure."""
+        """Attempt _connect(); return True on success, False on any connection failure.
+
+        Runs _connect(quiet=True): while polling for a producer, "segment not found"
+        is the expected state and is logged at DEBUG, not ERROR.
+        """
         try:
-            self._connect()
+            self._connect(quiet=True)
             return True
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-            logger.debug("Connect attempt failed: %s", e)
+            self._log_connect_failure(e, logging.DEBUG, "Connect attempt failed: %s")
             return False
+
+    def _log_connect_failure(self, exc: Exception, level: int, msg: str) -> None:
+        """Log a failed connect at ``level``, except a failed IPC event open.
+
+        That one means the producer is up but this consumer cannot order against it,
+        which retrying quietly would hide: warn on the first failure of a streak, then
+        drop to DEBUG until a connect succeeds (``_connect`` clears the flag).
+        """
+        if isinstance(exc, IPCEventOpenError) and not self._event_open_warned:
+            self._event_open_warned = True
+            logger.warning("%s — will keep retrying", exc)
+        elif isinstance(exc, IPCEventOpenError):
+            logger.debug(msg, exc)
+        else:
+            logger.log(level, msg, exc)
 
     def _drive_retry(self) -> bool:
         """Advance the reconnect state machine by one frame. Returns True if just connected."""
@@ -1439,7 +1546,22 @@ class Importer:
         if result.state is SlotState.NO_FRAME:
             return None, ImportOutcome.NO_FRAME
 
+        self._prev_write_idx = self._last_write_idx
         self._last_write_idx = result.write_idx
+
+        # A1 fix: the first NEW_FRAME after a connect that had to guess geometry
+        # (_format_provisional, see _resolve_format) guarantees the producer has by
+        # now written real metadata under the SAME version — a case _reinitialize()
+        # never sees, since it only fires on VERSION_CHANGED. Re-resolve once here;
+        # no cost on subsequent frames once the flag is cleared.
+        if self._format_provisional:
+            resolved_fmt = Format.from_shm(self._conn.shm_handle.buf, self._conn.num_slots)
+            if resolved_fmt is not None:
+                self._apply_format_change(resolved_fmt)
+                self._format_provisional = False
+            # else: metadata still not visible (shouldn't happen once NEW_FRAME is
+            # reported) — keep the flag set and retry on the next NEW_FRAME.
+
         return result, ImportOutcome.NEW_FRAME
 
     def _adaptive_observe_wait(self, slept: bool) -> None:
@@ -1471,6 +1593,13 @@ class Importer:
         wait_start = time.perf_counter()
         deadline = wait_start + self._spec.timeout_ms / 1000
 
+        # This frame already burned a full timeout_ms: look at the event once instead of
+        # blocking again, so polling a stuck producer stays cheap.
+        if self._timed_out_write_idx == self._last_write_idx and conn.ipc_events[slot]:
+            if conn.cuda.query_event(conn.ipc_events[slot]):
+                return (time.perf_counter() - wait_start) * 1_000_000
+            raise ProducerTimeoutError(f"IPC event still not signaled (slot={slot})")
+
         # R5: native wait backend — only engaged when resolved AND this slot has
         # both an IPC event and an open doorbell (the backend needs both to reach
         # its <10us target). Everything below this block is the pre-R5 path,
@@ -1497,7 +1626,7 @@ class Importer:
             )
             status_name = result.status.name  # avoid importing WaitStatus in core
             if status_name == "TIMEOUT":
-                raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
             if status_name == "READY_SPIN":
                 self.total_wait_spin_us += result.waited_us
                 self.wait_spin_hits += 1
@@ -1529,7 +1658,9 @@ class Importer:
                         return spin_us
                 # If we exited because spin_deadline == deadline, we timed out.
                 if time.perf_counter() >= deadline:
-                    raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                    raise ProducerTimeoutError(
+                        f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
+                    )
 
             phase2_start = time.perf_counter()
             did_sleep = False
@@ -1538,7 +1669,9 @@ class Importer:
                     if query(evt):
                         break
                     if time.perf_counter() >= deadline:
-                        raise TimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+                        raise ProducerTimeoutError(
+                            f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
+                        )
                     time.sleep(0.0001)
                     did_sleep = True
             self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
@@ -1576,8 +1709,11 @@ class Importer:
         """
         conn = self._conn
         h = conn.doorbell_handle if conn is not None else None
-        if h is None:
-            return False  # disabled / not opened / non-Windows → caller polls
+        if h is None or not self._policy.doorbell:
+            # Disabled / not opened / non-Windows → caller polls.  The handle is
+            # also opened for the native wait backend, so policy.doorbell must be
+            # checked here or a disabled doorbell would still block.
+            return False
 
         # Early return: frame already arrived since last get_frame() call.
         cur = read_write_idx(conn.shm_handle.buf)
@@ -1605,29 +1741,54 @@ class Importer:
         self.last_latency = latency_ms
         conn = self._conn
 
-        backend.prepare(self)
+        pushed = False
+        try:
+            backend.prepare(self)
 
-        _nvtx.push_range(backend.nvtx_slot_names[read_slot], backend.nvtx_color)
-        with _nvtx.verbose_range("cudalink.importer.event_wait", backend.nvtx_color):
-            try:
-                wait_us = backend.wait(conn, read_slot)
+            _nvtx.push_range(backend.nvtx_slot_names[read_slot], backend.nvtx_color)
+            pushed = True
+            with _nvtx.verbose_range("cudalink.importer.event_wait", backend.nvtx_color):
+                try:
+                    wait_us = backend.wait(conn, read_slot)
+                except TimeoutError:
+                    return self._on_wait_timeout(read_slot)
                 if debug:
                     self.total_wait_event_time += wait_us
-            except TimeoutError:
-                logger.error("Producer timeout — slot %d", read_slot)
+
+            frame = backend.materialize(conn, read_slot)
+
+            self._timed_out_write_idx = None
+            self.frame_count += 1
+            if debug:
+                frame_time = (time.perf_counter() - frame_start) * 1_000_000
+                self.total_get_frame_time += frame_time
+                self._log_frame_stats(backend.backend_name, read_slot, conn)
+
+            return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=frame)
+        except Exception:
+            # The frame was never delivered: un-consume it so the next call re-evaluates.
+            self._last_write_idx = self._prev_write_idx
+            raise
+        finally:
+            if pushed:
                 _nvtx.pop_range()
-                return ImportResult(outcome=ImportOutcome.TIMEOUT)
 
-        frame = backend.materialize(conn, read_slot)
+    def _on_wait_timeout(self, read_slot: int) -> ImportResult:
+        """Un-consume a frame whose wait timed out and pick the outcome.
 
-        self.frame_count += 1
-        if debug:
-            frame_time = (time.perf_counter() - frame_start) * 1_000_000
-            self.total_get_frame_time += frame_time
-            self._log_frame_stats(backend.backend_name, read_slot, conn)
-
-        _nvtx.pop_range()
-        return ImportResult(outcome=ImportOutcome.NEW_FRAME, frame=frame)
+        The first timeout for a given write_idx reports TIMEOUT (and logs). While that
+        same frame stays pending, ``_wait_for_slot`` only re-checks the event, so a
+        repeat reports NO_FRAME without blocking or logging again.
+        """
+        timed_out_idx = self._last_write_idx
+        # Restore the pre-acquire cursor: next call re-evaluates write_idx (newest
+        # frame, or this slot again).
+        self._last_write_idx = self._prev_write_idx
+        if self._timed_out_write_idx == timed_out_idx:
+            return ImportResult(outcome=ImportOutcome.NO_FRAME)
+        logger.error("Producer timeout — slot %d", read_slot)
+        self._timed_out_write_idx = timed_out_idx
+        return ImportResult(outcome=ImportOutcome.TIMEOUT)
 
     def _begin_frame(self) -> tuple:
         """Common preamble for all get_frame* methods.
@@ -1740,6 +1901,41 @@ class Importer:
     # Re-initialization (producer restarted with new IPC handles)
     # ------------------------------------------------------------------
 
+    def _apply_format_change(self, new_fmt: Format) -> None:
+        """Update self._format and rebuild any already-materialized buffer views for it.
+
+        Shared tail for the two places a resolved geometry can supersede
+        self._format: ``_reinitialize()`` (after a full IPC handle reopen, producer
+        restart) and ``_try_acquire()``'s first-NEW_FRAME provisional re-resolve (A1
+        fix — same IPC memory, only the metadata was unavailable at connect time).
+        Callers differ in whether IPC handles were reopened; rebuilding torch/numpy
+        views for the new geometry is identical either way, so it lives here once.
+
+        Compares via layout_differs_from(), not Format.__eq__ — __eq__ would
+        false-positive when self._format is override-derived (kind=bits=flags=0
+        sentinels) against an SHM-derived new_fmt with real non-zero values.
+        """
+        if new_fmt.layout_differs_from(self._format):
+            logger.info(
+                "Format changed: %s %s → %s %s",
+                self._format.shape,
+                self._format.dtype_str,
+                new_fmt.shape,
+                new_fmt.dtype_str,
+            )
+            if self._numpy is not None:
+                self._numpy.close()
+                self._numpy = None
+
+        self._format = new_fmt
+        if self._torch is not None:
+            self._torch = TorchBuffers.build(self._conn, new_fmt)
+        # The old arrays wrap the previous dev_ptrs (unmapped after a reinitialize)
+        # and the previous geometry — rebuild them like the torch views above. Gated
+        # on CuPy, not on self._cupy, so views dropped for an unsupported dtype come
+        # back once the producer switches to a supported one.
+        self._cupy = _build_cupy_views(self._conn, new_fmt)
+
     def _reinitialize(self) -> None:
         """Reopen all IPC handles after producer restart. Internal; callers see RECONNECTING."""
         old_conn = self._conn
@@ -1763,35 +1959,29 @@ class Importer:
             new_ipc_version = read_version(shm.buf)
             new_num_slots = read_num_slots(shm.buf)
 
-            # Route through Format.from_shm — same decoder used at connect time.
-            # Falls back to current format if SHM metadata is absent or all-zeros.
-            new_fmt = Format.from_shm(shm.buf, new_num_slots) or self._format
+            # Route through _resolve_format — same resolution used at connect time, so
+            # ImportSpec shape/dtype overrides survive a producer restart. A provisional
+            # result (SHM metadata absent or all-zeros) keeps the current format rather
+            # than the hard-coded fallback.
+            resolved_fmt, provisional = self._resolve_format(shm, new_num_slots)
+            new_fmt = self._format if provisional else resolved_fmt
 
-            # Compare only the load-bearing layout fields via layout_differs_from —
-            # Format.__eq__ would false-positive when self._format is override-derived
-            # (kind=bits=flags=0 sentinels) vs an SHM-derived new_fmt with real values.
-            if new_fmt.layout_differs_from(self._format):
-                logger.info(
-                    "Format changed on reinit: %s %s → %s %s",
-                    self._format.shape,
-                    self._format.dtype_str,
-                    new_fmt.shape,
-                    new_fmt.dtype_str,
-                )
-                if self._numpy is not None:
-                    self._numpy.close()
-                    self._numpy = None
-
-            self._format = new_fmt
             new_conn = self._open_ipc_slots(shm, new_num_slots, new_ipc_version, new_fmt)
             self._conn = new_conn
+            # The restarted producer counts write_idx from scratch; a stale index from
+            # the old session would make its first frame read as already consumed.
+            self._last_write_idx = 0
+            self._timed_out_write_idx = None
 
-            if self._torch is not None:
-                self._torch = TorchBuffers.build(new_conn, new_fmt)
+            self._apply_format_change(new_fmt)
+            # A1: a genuine SHM read makes geometry authoritative, so _try_acquire() stops
+            # re-resolving; a provisional one (metadata not yet written by the restarted
+            # producer) must re-arm it, or the kept old format is never corrected.
+            self._format_provisional = provisional
 
             logger.debug("Reopened %d IPC handles v%d", new_num_slots, new_ipc_version)
         except (FileNotFoundError, RuntimeError, ValueError, OSError) as e:
-            logger.info("Reinitialize failed (%s) — waiting for producer restart", e)
+            self._log_connect_failure(e, logging.INFO, "Reinitialize failed (%s) — waiting for producer restart")
             self._partial_cleanup_for_reconnect()
 
     # ------------------------------------------------------------------
@@ -1872,6 +2062,16 @@ class Importer:
             return False
         return len(self._conn.dev_ptrs) > 0 and all(ptr is not None for ptr in self._conn.dev_ptrs)
 
+    @property
+    def wait_backend_name(self) -> str:
+        """Which wait path ``_wait_for_slot`` uses: ``"native"`` or ``"python"``.
+
+        Resolved per-connection (re-resolved on every reconnect, see
+        ``_open_ipc_slots``); reads ``"python"`` before the first successful
+        connect and whenever the native sidecar failed to resolve.
+        """
+        return "native" if self._wait_backend is not None else "python"
+
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
@@ -1898,6 +2098,7 @@ class Importer:
             "tensor_device": (
                 str(tensors[0].device) if TORCH_AVAILABLE and tensors and tensors[0] is not None else "N/A"
             ),
+            "wait_backend": self.wait_backend_name,
             "wait_spin_hits": self.wait_spin_hits,
             "wait_sleep_hits": self.wait_sleep_hits,
             "avg_spin_us": self.total_wait_spin_us / self.wait_spin_hits if self.wait_spin_hits > 0 else 0.0,

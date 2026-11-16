@@ -27,22 +27,14 @@ covered by tests/core/test_exporter_python.py).
 
 from __future__ import annotations
 
-import sys
 import types
 import uuid
-from pathlib import Path
 
-import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from Exporter import Exporter, FrameOutcome  # noqa: E402
-from fakes import FakeTDHost, FakeTOPHandle  # noqa: E402
-from SHMProtocol import DtypeCodec  # noqa: E402
-from TDConfig import TDSenderConfig  # noqa: E402
-from TDSender import TDSenderEngine  # noqa: E402
+from Exporter import FrameOutcome
+from fakes import FakeTDHost, FakeTOPHandle, fake_exporter_open  # noqa: F401
+from SHMProtocol import DtypeCodec
+from TDConfig import TDSenderConfig
+from TDSender import TDSenderEngine
 
 
 class _FakeExporter:
@@ -75,16 +67,6 @@ class _FakeExporter:
 
     def close(self) -> None:
         pass
-
-
-@pytest.fixture
-def fake_exporter_open(monkeypatch: pytest.MonkeyPatch):
-    """Patch Exporter.open so every TDSender-internal open() returns a _FakeExporter."""
-
-    def _patched_open(spec, *, policy=None, cuda=None, barrier=None):  # noqa: ANN001, ARG001
-        return _FakeExporter(spec)
-
-    monkeypatch.setattr(Exporter, "open", _patched_open)
 
 
 def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:

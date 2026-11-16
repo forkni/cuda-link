@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDReceiver - Receiver engine for CUDAIPCExtension.
 
@@ -34,22 +36,17 @@ from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
     FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
-    MAGIC_OFFSET,
-    MAGIC_SIZE,
     METADATA_SIZE,
-    NUM_SLOTS_OFFSET,
-    NUM_SLOTS_SIZE,
     PROTOCOL_MAGIC,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
-    VERSION_OFFSET,
-    VERSION_SIZE,
-    WRITE_IDX_OFFSET,
     Metadata,
     SHMLayout,
     SlotState,
     acquire_slot,
+    read_magic,
+    read_num_slots,
     read_version,
     read_write_idx,
 )
@@ -496,17 +493,21 @@ class TDReceiverEngine:
                     f32_size = f16_size * 2  # float32 = 2× bytes
 
                     cupy_f16 = self._cupy_f16_views[read_slot]
-                    # Run conversion on _connection.stream so copyCUDAMemory (also on _connection.stream)
-                    # automatically serializes after the elementwise cast kernel.
-                    with cp.cuda.ExternalStream(rx_stream_int):
-                        cp.copyto(self._cupy_f32_buf, cupy_f16, casting="same_kind")
+                    try:
+                        # Run conversion on _connection.stream so copyCUDAMemory (also on
+                        # _connection.stream) automatically serializes after the elementwise cast kernel.
+                        with cp.cuda.ExternalStream(rx_stream_int):
+                            cp.copyto(self._cupy_f32_buf, cupy_f16, casting="same_kind")
 
-                    handle.copy_cuda_memory(
-                        self._cupy_f32_buf.data.ptr,
-                        f32_size,
-                        self._cached_shape,  # dataType=float32 set during initialize_receiver()
-                        stream=rx_stream_int,
-                    )
+                        handle.copy_cuda_memory(
+                            self._cupy_f32_buf.data.ptr,
+                            f32_size,
+                            self._cached_shape,  # dataType=float32 set during initialize_receiver()
+                            stream=rx_stream_int,
+                        )
+                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError/RuntimeError (see :944) — keep broad so a GPU OOM here degrades this frame instead of escaping into onCook
+                        self._log(f"float16 GPU conversion failed ({_e}); dropping frame", force=True)
+                        return False
                 else:
                     # CPU fallback: D2H + numpy convert + copyNumpyArray.
                     # Used when CuPy is not installed or GPU buffer allocation failed.
@@ -644,6 +645,16 @@ class TDReceiverEngine:
         self._host.set_param_enabled("Numslots", False)
 
         _t0 = time.perf_counter()
+        # Tracks whether self._connection was overwritten with this attempt's handles below —
+        # the outer except uses this to decide whether a targeted teardown is needed (a raise
+        # after the commit must not leak the just-opened IPC/SHM handles into the next retry).
+        connection_committed = False
+        # Local shm_handle opened below (line ~663). Tracked here so the outer except can close
+        # it on a raise that lands after the validation guards but before slot-loop coverage
+        # (e.g. create_stream_with_priority) — that window is outside both the validation
+        # guards' shm_handle.close() calls and _cleanup_partial's coverage, so without this it
+        # leaks the SHM mapping on every failed attempt / backoff retry.
+        shm_handle = None
         try:
             self.cuda = get_cuda_runtime(device=self.device)
             if not getattr(self, "_runtime_load_logged", False):
@@ -659,10 +670,7 @@ class TDReceiverEngine:
 
             # Validate protocol magic number (new in this version)
             try:
-                magic = struct.unpack(
-                    "<I",
-                    bytes(shm_handle.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]),
-                )[0]
+                magic = read_magic(shm_handle.buf)
                 if magic != PROTOCOL_MAGIC:
                     self._log(
                         f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
@@ -680,14 +688,8 @@ class TDReceiverEngine:
                 return False
 
             # Read header
-            ipc_version = struct.unpack(
-                "<Q",
-                bytes(shm_handle.buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE]),
-            )[0]
-            num_slots = struct.unpack(
-                "<I",
-                bytes(shm_handle.buf[NUM_SLOTS_OFFSET : NUM_SLOTS_OFFSET + NUM_SLOTS_SIZE]),
-            )[0]
+            ipc_version = read_version(shm_handle.buf)
+            num_slots = read_num_slots(shm_handle.buf)
 
             if num_slots == 0 or num_slots > 10:
                 self._log(
@@ -765,7 +767,7 @@ class TDReceiverEngine:
 
             # Log write_idx for diagnostics (0 = no frames sent yet, handles still valid)
             try:
-                write_idx_diag = struct.unpack_from("<I", shm_handle.buf, WRITE_IDX_OFFSET)[0]
+                write_idx_diag = read_write_idx(shm_handle.buf)
                 self._log(f"Producer write_idx={write_idx_diag} (0 = no frames sent yet)", force=True)
             except (struct.error, ValueError):
                 pass
@@ -778,7 +780,8 @@ class TDReceiverEngine:
             # Create dedicated non-blocking stream for receiver IPC operations
             # MUST happen before ipc_open_mem_handle to establish CUDA context
             # Reuse existing stream on re-init to avoid leaks on reconnection cycles
-            if self._connection.stream is None:
+            stream_is_new = self._connection.stream is None
+            if stream_is_new:
                 stream = self.cuda.create_stream_with_priority(flags=0x01)
                 self._log(
                     f"Created receiver stream: 0x{int(stream.value):016x}",
@@ -805,7 +808,7 @@ class TDReceiverEngine:
                         force=True,
                     )
                     # Partial cleanup — slots 0..slot-1 already opened
-                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
+                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
                 self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
@@ -820,7 +823,7 @@ class TDReceiverEngine:
                         "or CUDA device mismatch. Will retry with backoff.",
                         force=True,
                     )
-                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, shm_handle)
+                    self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
                 # Read + open event handle
@@ -830,8 +833,15 @@ class TDReceiverEngine:
                         ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
                         ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
                     except (RuntimeError, OSError) as e:
-                        self._log(f"Failed to open IPC event for slot {slot}: {e}")
-                        ipc_events[slot] = None
+                        # Without the event the wait has nothing to order against the
+                        # sender, so every frame would be read unsynced: fail the init
+                        # (slot + 1 also releases this slot's just-opened mem handle).
+                        self._log(
+                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
+                            force=True,
+                        )
+                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -852,6 +862,7 @@ class TDReceiverEngine:
                 shutdown_offset=shutdown_offset,
                 last_write_idx=0,
             )
+            connection_committed = True
             self._format = Format.from_metadata(_md)
             self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
@@ -888,66 +899,7 @@ class TDReceiverEngine:
 
             # float16: allocate CPU buffers for D2H conversion (copyCUDAMemory doesn't support float16)
             if self._format.dtype_str == "float16":
-                n_elems = width * height * num_comps
-                f16_bytes = n_elems * 2
-                self._f16_pinned_ptr = None
-                try:
-                    import ctypes as _ctypes
-
-                    self._f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
-                    _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._f16_pinned_ptr.value)
-                    self._f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
-                    self._log("float16 receiver: allocated pinned CPU buffer for D2H (async path)", force=True)
-                except (RuntimeError, OSError) as _e:
-                    self._f16_pinned_ptr = None
-                    self._f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
-                    self._log(f"float16 receiver: pinned alloc failed ({_e}), using pageable buffer", force=True)
-                    # R3: page-lock the pageable fallback buffer so D2H runs at pinned bandwidth
-                    try:
-                        self.cuda.host_register(self._f16_cpu_buf.ctypes.data, self._f16_cpu_buf.nbytes)
-                        self._f16_host_registered = True
-                        self._log("float16 receiver: pageable buffer page-locked via cudaHostRegister", force=True)
-                    except (RuntimeError, OSError) as _re:
-                        self._f16_host_registered = False
-                        self._log(f"float16 receiver: host_register skipped ({_re})", force=True)
-                self._f32_cpu_buf = np_module.empty((height, width, num_comps), dtype=np_module.float32)
-
-                # GPU-side float32 staging buffer for CuPy conversion path
-                global CUPY_AVAILABLE, cp
-                if cp is None:
-                    try:
-                        import cupy as cp  # noqa: PLC0415
-
-                        CUPY_AVAILABLE = True
-                    except ImportError:
-                        CUPY_AVAILABLE = False
-
-                if CUPY_AVAILABLE:
-                    try:
-                        self._cupy_f32_buf = cp.empty((height, width, num_comps), dtype=cp.float32)
-                        self._log(
-                            "float16 receiver: CuPy GPU float32 buffer allocated (GPU-side conversion path)",
-                            force=True,
-                        )
-                        self._cupy_f16_views = []
-                        for _i in range(num_slots):
-                            _ptr = dev_ptrs[_i].value
-                            _mem = cp.cuda.UnownedMemory(_ptr, buffer_size, owner=self)
-                            _memptr = cp.cuda.MemoryPointer(_mem, 0)
-                            self._cupy_f16_views.append(
-                                cp.ndarray(
-                                    (height, width, num_comps),
-                                    dtype=cp.float16,
-                                    memptr=_memptr,
-                                )
-                            )
-                    except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError; keep broad so alloc failures always degrade to CPU fallback
-                        self._cupy_f32_buf = None
-                        self._cupy_f16_views = []
-                        self._log(
-                            f"float16 receiver: CuPy GPU buffer alloc failed ({_e}), CPU fallback active",
-                            force=True,
-                        )
+                self._build_f16_staging(width, height, num_comps, num_slots, dev_ptrs, buffer_size)
 
             self._cached_shape = self._host.make_cuda_shape(width, height, num_comps, np_dtype)
 
@@ -963,6 +915,21 @@ class TDReceiverEngine:
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Receiver initialization failed: {e}", force=True)
 
+            if connection_committed:
+                # Post-commit work (format/shape resolution, float16 buffer allocation) raised
+                # after self._connection above was already overwritten with this attempt's
+                # IPC/SHM handles. Without this, those handles are dropped unclosed and leak
+                # on every subsequent backoff retry. Release resources only — do NOT call the
+                # full cleanup() here, since it also resets self._retry's backoff counters,
+                # which would make the receiver retry every frame instead of backing off.
+                self._release_resources()
+            elif shm_handle is not None:
+                # Raised after shm_handle was opened but before any validation guard's
+                # shm_handle.close() or the slot loop's _cleanup_partial coverage began
+                # (e.g. create_stream_with_priority) — close it directly so it doesn't leak.
+                with contextlib.suppress(OSError, BufferError):
+                    shm_handle.close()
+
             traceback.print_exc()
             return False
 
@@ -972,6 +939,7 @@ class TDReceiverEngine:
         dev_ptrs: list,
         ipc_events: list,
         stream: object,
+        stream_is_new: bool,
         shm_handle: object,
     ) -> None:
         """Cleanup partially-opened resources when initialization fails mid-slot.
@@ -985,6 +953,8 @@ class TDReceiverEngine:
             dev_ptrs: In-progress dev_ptrs list from this init attempt.
             ipc_events: In-progress ipc_events list from this init attempt.
             stream: Stream created for this init attempt (only closed if freshly created).
+            stream_is_new: True when `stream` was created by this attempt (not reused from
+                self._connection.stream) — only then is it safe to destroy it here.
             shm_handle: SHM handle to close and clear.
         """
         for i in range(failed_slot):
@@ -1000,19 +970,117 @@ class TDReceiverEngine:
                     self.cuda.destroy_event(ipc_events[i])
                 ipc_events[i] = None
 
+        # Destroy the stream only if this attempt created it fresh — a stream reused from
+        # self._connection.stream must survive so the next retry can keep reusing it (a
+        # freshly-created stream left un-destroyed here was a latent leak on every failed
+        # per-slot open before the first successful connect).
+        if stream_is_new and stream is not None:
+            with contextlib.suppress(RuntimeError, OSError):
+                self.cuda.destroy_stream(stream)
+
         # Close SharedMemory so next retry re-opens fresh (avoids reading stale content)
         if shm_handle is not None:
             with contextlib.suppress(OSError, BufferError):
                 shm_handle.close()
 
-    def cleanup(self) -> None:
-        """Cleanup Receiver CUDA IPC resources."""
-        # Guard against double-cleanup (matches cleanup_sender() pattern)
-        if not self._initialized and self._connection.shm_handle is None:
-            return
+    def _release_resources(self) -> None:
+        """Close the active connection and free float16 D2H buffers (idempotent).
 
+        Resource-teardown only — does NOT touch self._retry backoff counters or
+        self._initialized. Shared by cleanup() (full teardown on deactivate) and
+        initialize_receiver()'s post-commit failure path, where resetting backoff state
+        would make the receiver retry every frame instead of backing off (see the
+        outer except in initialize_receiver()).
+        """
         self._connection.close(self.cuda, self._log)
+        self._release_f16_staging()
+        self._cached_shape = None
 
+    def _build_f16_staging(
+        self,
+        width: int,
+        height: int,
+        num_comps: int,
+        num_slots: int,
+        dev_ptrs: list,
+        buffer_size: int,
+    ) -> None:
+        """Allocate the float16 conversion scratch for the given geometry and slots.
+
+        copyCUDAMemory has no float16 input, so a float16 sender is converted either
+        on the GPU (CuPy views over each slot's dev_ptr + a float32 staging buffer) or
+        via a D2H copy into a pinned (or page-locked pageable) host buffer. The CuPy
+        views wrap ``dev_ptrs`` directly, so they must be rebuilt whenever the slot
+        handles are reopened — see _refresh_on_version_change().
+        """
+        if numpy is None:
+            import numpy as np_module
+        else:
+            np_module = numpy
+
+        n_elems = width * height * num_comps
+        f16_bytes = n_elems * 2
+        self._f16_pinned_ptr = None
+        try:
+            import ctypes as _ctypes
+
+            self._f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
+            _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._f16_pinned_ptr.value)
+            self._f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
+            self._log("float16 receiver: allocated pinned CPU buffer for D2H (async path)", force=True)
+        except (RuntimeError, OSError) as _e:
+            self._f16_pinned_ptr = None
+            self._f16_cpu_buf = np_module.empty(n_elems, dtype=np_module.float16)
+            self._log(f"float16 receiver: pinned alloc failed ({_e}), using pageable buffer", force=True)
+            # R3: page-lock the pageable fallback buffer so D2H runs at pinned bandwidth
+            try:
+                self.cuda.host_register(self._f16_cpu_buf.ctypes.data, self._f16_cpu_buf.nbytes)
+                self._f16_host_registered = True
+                self._log("float16 receiver: pageable buffer page-locked via cudaHostRegister", force=True)
+            except (RuntimeError, OSError) as _re:
+                self._f16_host_registered = False
+                self._log(f"float16 receiver: host_register skipped ({_re})", force=True)
+        self._f32_cpu_buf = np_module.empty((height, width, num_comps), dtype=np_module.float32)
+
+        # GPU-side float32 staging buffer for CuPy conversion path
+        global CUPY_AVAILABLE, cp
+        if cp is None:
+            try:
+                import cupy as cp  # noqa: PLC0415
+
+                CUPY_AVAILABLE = True
+            except ImportError:
+                CUPY_AVAILABLE = False
+
+        if CUPY_AVAILABLE:
+            try:
+                self._cupy_f32_buf = cp.empty((height, width, num_comps), dtype=cp.float32)
+                self._log(
+                    "float16 receiver: CuPy GPU float32 buffer allocated (GPU-side conversion path)",
+                    force=True,
+                )
+                self._cupy_f16_views = []
+                for _i in range(num_slots):
+                    _ptr = dev_ptrs[_i].value
+                    _mem = cp.cuda.UnownedMemory(_ptr, buffer_size, owner=self)
+                    _memptr = cp.cuda.MemoryPointer(_mem, 0)
+                    self._cupy_f16_views.append(
+                        cp.ndarray(
+                            (height, width, num_comps),
+                            dtype=cp.float16,
+                            memptr=_memptr,
+                        )
+                    )
+            except Exception as _e:  # noqa: BLE001  # CuPy OutOfMemoryError is not MemoryError; keep broad so alloc failures always degrade to CPU fallback
+                self._cupy_f32_buf = None
+                self._cupy_f16_views = []
+                self._log(
+                    f"float16 receiver: CuPy GPU buffer alloc failed ({_e}), CPU fallback active",
+                    force=True,
+                )
+
+    def _release_f16_staging(self) -> None:
+        """Free the float16 conversion scratch built by _build_f16_staging() (idempotent)."""
         # Free pinned float16 D2H buffer if allocated
         if self._f16_pinned_ptr is not None:
             try:
@@ -1031,11 +1099,20 @@ class TDReceiverEngine:
         self._f32_cpu_buf = None
         self._cupy_f32_buf = None  # CuPy memory pool handles GPU free on GC
         self._cupy_f16_views = []
-        self._cached_shape = None
+
+    def cleanup(self) -> None:
+        """Cleanup Receiver CUDA IPC resources."""
+        # Guard against double-cleanup (matches cleanup_sender() pattern)
+        if not self._initialized and self._connection.shm_handle is None:
+            return
+
+        self._release_resources()
 
         self._initialized = False
         self._retry.connect_attempts = 0
         self._retry.frames_since_last_retry = 0
+        # Drop the backoff from the last connect loop so the first retry after a drop is immediate
+        self._retry.retry_interval_frames = 1
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_window.reset()
 
@@ -1093,7 +1170,14 @@ class TDReceiverEngine:
                     break
 
         if handles_changed and self.cuda is not None:
-            # Genuine sender re-init: close old IPC imports, open new ones (keep SHM+stream).
+            # Genuine sender re-init: open the new IPC imports first (keep SHM+stream).
+            # The old ones stay open and owned by conn until every new slot opened, so a
+            # failure here leaves conn intact for the caller's cleanup() + full reinit.
+            opened = self._open_refresh_handles(shm, conn.num_slots)
+            if opened is None:
+                return False
+            new_dev_ptrs, new_ipc_handles, new_ipc_events = opened
+
             for dev_ptr in conn.dev_ptrs:
                 if dev_ptr:
                     with contextlib.suppress(RuntimeError, OSError):
@@ -1103,27 +1187,6 @@ class TDReceiverEngine:
                     with contextlib.suppress(RuntimeError, OSError):
                         self.cuda.destroy_event(event)
 
-            new_dev_ptrs = [None] * conn.num_slots
-            new_ipc_handles = [None] * conn.num_slots
-            new_ipc_events = [None] * conn.num_slots
-            for slot in range(conn.num_slots):
-                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-                mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
-                if not any(mem_handle_bytes):
-                    self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
-                    return False
-                new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-                try:
-                    new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
-                except RuntimeError as e:
-                    self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
-                    return False
-                event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
-                if any(event_handle_bytes):
-                    with contextlib.suppress(RuntimeError, OSError):
-                        ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
-
             conn.dev_ptrs = new_dev_ptrs
             conn.ipc_handles = new_ipc_handles
             conn.ipc_events = new_ipc_events
@@ -1132,6 +1195,14 @@ class TDReceiverEngine:
         prev_format = self._format
         self._format = Format.from_metadata(_md)
         self._last_fmt_status = ""  # force status string rebuild after version-change refresh
+
+        # The float16 CuPy views wrap the slot dev_ptrs and the staging buffers are
+        # sized for the old geometry: rebuild both when either changed (also covers a
+        # float32 <-> float16 switch, which allocates or frees the scratch).
+        if self.cuda is not None and (handles_changed or self._format.layout_differs_from(prev_format)):
+            self._release_f16_staging()
+            if self._format.dtype_str == "float16":
+                self._build_f16_staging(width, height, num_comps, conn.num_slots, conn.dev_ptrs, _md.data_size)
 
         # Rebuild _cached_shape via the TDHost seam (keeps CUDAMemoryShape behind the seam)
         if self._cached_shape is not None:
@@ -1151,9 +1222,18 @@ class TDReceiverEngine:
 
         # Advance version counter; signal resolution and/or pixel-format update if needed.
         conn.ipc_version = new_version
+        # The re-initialized sender counts write_idx from scratch; a stale index from the
+        # previous session would make its first frame read as already consumed.
+        conn.last_write_idx = 0
         if width != prev_format.width or height != prev_format.height:
             self._retry.needs_resolution_update = True
-        if bits_per_comp != prev_format.bits or format_kind != prev_format.kind or num_comps != prev_format.num_comps:
+        if (
+            bits_per_comp != prev_format.bits
+            or format_kind != prev_format.kind
+            or num_comps != prev_format.num_comps
+            or _md.flags != prev_format.flags
+        ):
+            # flags carries the channel layout (e.g. RG vs Mono+Alpha at the same comps).
             # Script TOP's par.format must be updated so the next copyCUDAMemory writes
             # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
             self._retry.needs_format_update = True
@@ -1165,3 +1245,49 @@ class TDReceiverEngine:
             force=True,
         )
         return True
+
+    def _open_refresh_handles(self, shm: object, num_slots: int) -> tuple[list, list, list] | None:
+        """Open every slot's new IPC mem/event handles for an in-place refresh.
+
+        Returns (dev_ptrs, ipc_handles, ipc_events), or None when a slot handle is
+        zero or fails to open — in which case only the handles opened by this call
+        are closed; the caller's existing connection is left untouched.
+        """
+        new_dev_ptrs: list = [None] * num_slots
+        new_ipc_handles: list = [None] * num_slots
+        new_ipc_events: list = [None] * num_slots
+        for slot in range(num_slots):
+            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
+            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+            if not any(mem_handle_bytes):
+                self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
+                self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                return None
+            new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+            try:
+                new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
+            except (RuntimeError, OSError) as e:
+                self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
+                self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                return None
+            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
+            if any(event_handle_bytes):
+                try:
+                    ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
+                    new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
+                except (RuntimeError, OSError) as e:
+                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
+                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                    return None
+        return new_dev_ptrs, new_ipc_handles, new_ipc_events
+
+    def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:
+        """Close the partially-opened handles of a failed _open_refresh_handles() call."""
+        for dev_ptr in dev_ptrs:
+            if dev_ptr:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.ipc_close_mem_handle(dev_ptr)
+        for event in ipc_events:
+            if event:
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.cuda.destroy_event(event)

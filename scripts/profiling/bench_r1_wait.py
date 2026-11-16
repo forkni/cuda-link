@@ -242,7 +242,7 @@ def _worker_consumer_torch(
         if _policy_has_wait_backend():
             # Always set explicitly (never omitted): ImportPolicy()'s own
             # default is wait_backend="auto", not "python" -- on a machine
-            # with cuda-link-native installed, omitting this would let every
+            # with the native extension built, omitting this would let every
             # non-R5 arm silently pick up the native backend via "auto",
             # contaminating the baseline/R1/cupy comparisons.
             policy_kwargs["wait_backend"] = wait_backend
@@ -342,7 +342,7 @@ def _worker_consumer_torch_adaptive(
         }
         if _policy_has_wait_backend():
             # Pin explicitly -- ImportPolicy()'s default is "auto", which would
-            # silently pick up cuda-link-native if installed (see the note in
+            # silently pick up the native extension if built (see the note in
             # _worker_consumer_torch above).
             policy_kwargs["wait_backend"] = "python"
         policy = ImportPolicy(**policy_kwargs)
@@ -772,7 +772,7 @@ def main() -> int:
         elif "torch_native" not in results and has_wait_backend:
             print("  [R5 native arm ran but produced no comparable result this scenario]")
         elif not has_wait_backend:
-            print("  [R5 comparison not available -- run again after installing cuda-link-native]")
+            print("  [R5 comparison not available -- run again on a host with the native extension built]")
 
     print()
     out = Path(args.outfile)

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 NVML Observability Hook for CUDA Link.
 
@@ -31,13 +33,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import threading
 import warnings
 
-try:
-    from cuda_link._env import env_bool
-except (ImportError, ModuleNotFoundError):
-    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+from ._env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,18 @@ class NVMLObserver:
     No background thread — caller controls cadence.
 
     Metrics returned by snapshot():
-        gpu_util_pct, mem_bw_util_pct  (from nvmlDeviceGetUtilizationRates)
+        gpu_util_pct, mem_bw_util_pct  (from nvmlDeviceGetUtilizationRates). gpu_util_pct is
+                                        device activity: the % of the sample period in which at
+                                        least one kernel was running, not SM occupancy or
+                                        throughput. A GPU running one tiny kernel back to back
+                                        reads 100%.
+        proc_sm_util_pct, proc_mem_util_pct,
+        other_sm_util_pct, other_mem_util_pct
+                                        (from nvmlDeviceGetProcessesUtilizationInfo, or the
+                                        legacy nvmlDeviceGetProcessUtilization). proc_* is this
+                                        process; other_* is the sum over every other process.
+                                        Absent when there is no usable sample (unsupported
+                                        driver, nothing sampled yet, or an NVML error).
         mem_used_mb, mem_total_mb       (from nvmlDeviceGetMemoryInfo)
         sm_clock_mhz, mem_clock_mhz    (from nvmlDeviceGetClockInfo)
         pcie_tx_kbps, pcie_rx_kbps     (from nvmlDeviceGetPcieThroughput)
@@ -136,6 +147,8 @@ class NVMLObserver:
         self._handle = None
         self._started = False
         self._driver_model: str | None = None
+        self._last_proc_ts: int = 0
+        self._last_proc_util: dict | None = None
 
     def start(self) -> bool:
         """Initialize NVML and open device handle.
@@ -147,8 +160,10 @@ class NVMLObserver:
             return False
         if self._started:
             return True
+        acquired = False
         try:
             _NVML_REFS.acquire()
+            acquired = True
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device)
             with contextlib.suppress(pynvml.NVMLError):
                 # Raises NVMLError_NotSupported on Linux (driver-model is Windows-only).
@@ -163,6 +178,11 @@ class NVMLObserver:
             self._started = True
             return True
         except (pynvml.NVMLError, RuntimeError, OSError) as e:
+            # Only release a ref we actually acquired — if nvmlInit() itself (inside
+            # acquire()) was what failed, release() would wrongly nvmlShutdown() an
+            # NVML that was never successfully initialized by this call.
+            if acquired:
+                _NVML_REFS.release()
             logger.warning("NVML start failed for device %d: %s", self.device, e)
             return False
 
@@ -172,6 +192,8 @@ class NVMLObserver:
             _NVML_REFS.release()
             self._handle = None
             self._started = False
+            self._last_proc_ts = 0
+            self._last_proc_util = None
 
     def __enter__(self) -> NVMLObserver:
         self.start()
@@ -234,7 +256,47 @@ class NVMLObserver:
         except pynvml.NVMLError:
             pass
 
+        out.update(self._process_utilization(h))
+
         if self._driver_model is not None:
             out["driver_model"] = self._driver_model
 
         return out
+
+    def _process_utilization(self, h: object) -> dict:
+        """Per-process SM/memory utilization: this process vs the sum of all others.
+
+        NVML returns only samples newer than the last timestamp seen, so a poll faster than
+        the driver's sample period raises NotFound; the last good values are re-emitted then
+        (they keep the keys from flickering). Any other NVML error yields no keys.
+        """
+        fn = getattr(pynvml, "nvmlDeviceGetProcessesUtilizationInfo", None) or getattr(
+            pynvml, "nvmlDeviceGetProcessUtilization", None
+        )
+        if fn is None:
+            return {}
+        try:
+            samples = fn(h, self._last_proc_ts)
+        except pynvml.NVMLError_NotFound:
+            return dict(self._last_proc_util) if self._last_proc_util else {}
+        except pynvml.NVMLError:
+            return {}
+        if not isinstance(samples, (list, tuple)):
+            return {}
+
+        newest: dict[int, object] = {}
+        for s in samples:
+            prev = newest.get(s.pid)
+            if prev is None or s.timeStamp > prev.timeStamp:
+                newest[s.pid] = s
+            self._last_proc_ts = max(self._last_proc_ts, s.timeStamp)
+
+        mine = newest.pop(os.getpid(), None)
+        util = {
+            "proc_sm_util_pct": mine.smUtil if mine is not None else 0,
+            "proc_mem_util_pct": mine.memUtil if mine is not None else 0,
+            "other_sm_util_pct": sum(s.smUtil for s in newest.values()),
+            "other_mem_util_pct": sum(s.memUtil for s in newest.values()),
+        }
+        self._last_proc_util = util
+        return dict(util)

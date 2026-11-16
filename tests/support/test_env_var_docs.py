@@ -1,10 +1,14 @@
 """Env-var documentation invariant (Arch item A).
 
 Every CUDALINK_* environment variable referenced by env_bool/env_int/env_str
-in src/cuda_link/*.py must appear in the Performance Tuning table in README.md.
+in src/cuda_link/*.py must appear in docs/ENV_VARS.md, the complete env-var
+reference. README.md's Performance Tuning section only carries a curated
+subset (the six variables most consumers reach for) with a pointer to
+docs/ENV_VARS.md for the rest — see the "De-duplicate install instructions" /
+env-var relocation change in the README structural trim.
 
-This makes the README env-var table a hard invariant, not a best-effort doc
-that silently drifts when new knobs are added.
+This makes docs/ENV_VARS.md a hard invariant, not a best-effort doc that
+silently drifts when new knobs are added.
 
 Precedent: tests/support/test_wrapper_sync.py (ADR-0002).
 """
@@ -16,14 +20,11 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SRC_DIR = _PROJECT_ROOT / "src" / "cuda_link"
-_README = _PROJECT_ROOT / "README.md"
+_ENV_VARS_DOC = _PROJECT_ROOT / "docs" / "ENV_VARS.md"
 
 # Regex that matches env_bool/env_int/env_str call sites.
 # Captures the first positional argument (the variable name string).
 _ENV_CALL_RE = re.compile(r'env_(?:bool|int|str)\(\s*"([A-Z0-9_]+)"')
-
-# Heading that marks the beginning of the performance tuning section.
-_SECTION_HEADING = "### Performance Tuning (env vars)"
 
 
 def _collect_env_vars() -> set[str]:
@@ -38,38 +39,18 @@ def _collect_env_vars() -> set[str]:
     return found
 
 
-def _extract_perf_tuning_section(readme: str) -> str:
-    """Return the README slice from the perf-tuning heading to the next real heading.
-
-    Fence-aware: a ``#`` at column 0 inside a fenced code block is NOT a heading.
-    """
-    lines = readme.splitlines()
-    starts = [i for i, ln in enumerate(lines) if ln.strip() == _SECTION_HEADING]
-    assert starts, f"Heading {_SECTION_HEADING!r} not found in README.md"
-    start = starts[0]
-    in_fence = False
-    for i in range(start + 1, len(lines)):
-        if lines[i].startswith("```"):
-            in_fence = not in_fence
-            continue
-        if not in_fence and re.match(r"#{1,3} ", lines[i]):
-            return "\n".join(lines[start:i])
-    return "\n".join(lines[start:])
-
-
 def test_all_env_vars_documented_in_readme() -> None:
-    """Every CUDALINK_* env var in src/ must appear in README's Performance Tuning section."""
-    readme_text = _README.read_text(encoding="utf-8")
-    perf_section = _extract_perf_tuning_section(readme_text)
+    """Every CUDALINK_* env var in src/ must appear in docs/ENV_VARS.md."""
+    doc_text = _ENV_VARS_DOC.read_text(encoding="utf-8")
 
     env_vars = _collect_env_vars()
     assert env_vars, "No CUDALINK_* env vars found in src/cuda_link — regex may be wrong"
 
-    missing = sorted(name for name in env_vars if name not in perf_section)
+    missing = sorted(name for name in env_vars if name not in doc_text)
 
     assert not missing, (
         "The following CUDALINK_* env vars are used in src/cuda_link/*.py but are NOT "
-        "documented in the '### Performance Tuning (env vars)' section of README.md:\n"
+        "documented in docs/ENV_VARS.md:\n"
         + "".join(f"  {name}\n" for name in missing)
-        + "\nAdd a row for each variable to the env-var table in README.md."
+        + "\nAdd a row for each variable to the table in docs/ENV_VARS.md."
     )

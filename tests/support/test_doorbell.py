@@ -10,8 +10,9 @@ Three groups:
 
 from __future__ import annotations
 
+import dataclasses
 import os
-import sys
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,7 +37,6 @@ def test_doorbell_event_name_format() -> None:
 
 def _make_importer(write_idx: int = 1, last_write_idx: int = 0) -> object:
     """Return a connected Importer via fakes.make_connected_importer()."""
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
     from fakes import make_connected_importer  # type: ignore[import]
 
     return make_connected_importer(write_idx=write_idx, last_write_idx=last_write_idx)
@@ -49,6 +49,23 @@ def test_wait_for_doorbell_returns_false_when_handle_none() -> None:
     assert imp._conn.doorbell_handle is None
     result = imp.wait_for_doorbell(2.0)
     assert result is False
+
+
+def test_wait_for_doorbell_returns_false_when_policy_disabled_even_with_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handle opened for the native wait backend must not make a disabled doorbell block."""
+    import cuda_link.importer as _imp_mod
+
+    imp = _make_importer(write_idx=1, last_write_idx=1)  # no frame waiting
+    imp._conn.doorbell_handle = 0xFEED
+    assert imp._policy.doorbell is False
+    waits: list = []
+    monkeypatch.setattr(_imp_mod._doorbell, "wait", lambda h, ms: waits.append((h, ms)) or True)
+    try:
+        result = imp.wait_for_doorbell(250.0)
+    finally:
+        imp._conn.doorbell_handle = None
+    assert result is False
+    assert waits == []
 
 
 def test_wait_for_doorbell_returns_true_on_advanced_write_idx() -> None:
@@ -65,6 +82,7 @@ def test_wait_for_doorbell_returns_true_on_advanced_write_idx() -> None:
     # object works as the handle here.
     sentinel = object()
     imp._conn.doorbell_handle = sentinel
+    imp._policy = dataclasses.replace(imp._policy, doorbell=True)
     try:
         result = imp.wait_for_doorbell(2.0)
     finally:
@@ -171,8 +189,12 @@ def test_doorbell_auto_reset_single_wake() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 named events require Windows")
-def test_doorbell_close_is_idempotent_none() -> None:
-    """close(None) must not raise — it is the non-Windows / disabled no-op path."""
-    from cuda_link._doorbell import close
+def test_doorbell_close_none_never_touches_closehandle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """close(None) is the non-Windows / disabled no-op path: it must short-circuit
+    before CloseHandle, which would otherwise be handed a NULL handle."""
+    import cuda_link._doorbell as db
 
-    close(None)  # should not raise
+    mock_close_handle = MagicMock()
+    monkeypatch.setattr(db._k32, "CloseHandle", mock_close_handle)
+    db.close(None)
+    mock_close_handle.assert_not_called()

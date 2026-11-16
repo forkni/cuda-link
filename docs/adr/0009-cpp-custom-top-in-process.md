@@ -3,14 +3,14 @@
 **Status**: Proposed (flips to Accepted when PLAN-001 Phase 0 spike validates)
 **Date**: 2026-07-04
 **Applies to**: the planned `cpp_top/` component (`CudaLinkOutTOP` / `CudaLinkInTOP`
-Custom Operator DLLs; see [PLAN-001](../plans/PLAN-001-cpp-custom-top.md)).
+Custom Operator DLLs; see PLAN-001).
 
 ---
 
 ## Context
 
-[ADR-0007](0007-spout-as-launcher-not-transport.md) rejected loading a native
-`.pyd` inside TD's embedded Python for the Spout bridge on **GPU-state blast-radius**
+ADR-0007 (Spout as launcher, not transport; lives on the `feat/spout-bridge` branch)
+rejected loading a native `.pyd` inside TD's embedded Python for the Spout bridge on **GPU-state blast-radius**
 grounds: a native module owning a D3D11 device + CUDA contexts inside TD has no
 recovery path short of restarting TD, while a sidecar contains failure to one console
 window.

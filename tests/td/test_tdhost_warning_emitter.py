@@ -9,15 +9,7 @@ every frame) from force-cooking the emitter repeatedly.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from TDHost import RealTDHost  # noqa: E402
+from TDHost import RealTDHost
 
 _WARNING_COLOR = (0.9137, 1.0, 0.0)
 _ERROR_COLOR = (0.7, 0.0, 0.0)
@@ -152,17 +144,24 @@ def test_double_clear_does_not_cook_twice() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_emitter_op_does_not_raise_on_warning() -> None:
-    host, _ = _make_host(emitter=None)
-    host.set_warning_status("bad format")  # must not raise
-
-
-def test_no_emitter_op_does_not_raise_on_clear() -> None:
-    host, _ = _make_host(emitter=None)
+def test_no_emitter_op_still_applies_warning_status() -> None:
+    host, comp = _make_host(emitter=None)
     host.set_warning_status("bad format")
-    host.clear_status()  # must not raise
+    assert comp.color == _WARNING_COLOR
+    assert comp._store["cuda_link_status_msg"] == "WARNING: bad format"
 
 
-def test_no_emitter_op_does_not_raise_on_error() -> None:
-    host, _ = _make_host(emitter=None)
-    host.set_error_status("init failed")  # must not raise
+def test_no_emitter_op_still_clears_status() -> None:
+    host, comp = _make_host(emitter=None)
+    original_color = comp.color
+    host.set_warning_status("bad format")
+    host.clear_status()
+    assert comp.color == original_color
+    assert "cuda_link_status_msg" not in comp._store
+
+
+def test_no_emitter_op_still_applies_error_status() -> None:
+    host, comp = _make_host(emitter=None)
+    host.set_error_status("init failed")
+    assert comp.color == _ERROR_COLOR
+    assert comp._store["cuda_link_status_msg"] == "ERROR: init failed"

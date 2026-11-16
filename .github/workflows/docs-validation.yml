@@ -2,45 +2,56 @@ name: Documentation Validation
 
 on:
   push:
-    branches: [development, main]
+    branches: [development, main, master]
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
+      - '.github/workflows/docs-validation.yml'
   pull_request:
     paths:
-      - 'docs/**'
-      - 'README.md'
+      - '**/*.md'
+      - '.github/workflows/docs-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs only: a cancelled push run leaves a mainline commit with no verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   markdown-lint:
     name: Markdown Linting
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Run markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@510b996878fc0d1a46c8a04ec86b06dbfba09de7  # v15
+        # v25.0.0 bundles markdownlint-cli2 0.24.0 -- keep CGW_MARKDOWNLINT_CMD
+        # in .cgw.conf pinned to the same version when bumping this SHA.
+        uses: DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34  # v25.0.0
         with:
           globs: |
             **/*.md
-            !node_modules
-            !.venv
-            !TD_RAG
-            !Backup
-        continue-on-error: true
 
   link-check:
     name: Link Validation
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Check documentation links
-        uses: lycheeverse/lychee-action@2b973e86fc7b1f6b36a93795fe2c9c6ae1118621  # v1
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
         with:
           args: |
             --verbose
@@ -49,20 +60,22 @@ jobs:
             --exclude-path Backup
             --exclude-path TOXES
             --exclude-path .venv
-            --exclude-mail
             '**/*.md'
         continue-on-error: true
 
   spelling:
     name: Spelling Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Check spelling
-        uses: crate-ci/typos@5e38bf262baaf477ca9f241b3a7cd3d277fd7df8  # master (2026-08-11)
+        uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85  # v1.52.0
         with:
           files: docs/ README.md
         continue-on-error: true

@@ -44,7 +44,7 @@ _ERRCHECK_EXEMPTIONS = frozenset(
         "cudaEventQuery",  # cudaErrorNotReady (600) is a valid non-error sentinel
         "cudaStreamQuery",  # cudaErrorNotReady (600) is a valid non-error sentinel
         "cudaPeekAtLastError",  # reads the sticky error; raising would defeat the purpose
-        # cudaGetLastError is intentionally NOT bound (see test_cudaGetLastError_not_bound).
+        "cudaGetLastError",  # returns the consumed error code to clear_last_error(); raising would defeat it
     }
 )
 
@@ -197,18 +197,18 @@ def test_every_errcheck_func_is_typed() -> None:
     )
 
 
-def test_cudaGetLastError_not_bound() -> None:
-    """cudaGetLastError must NOT be bound on cudart.
+def test_cudaGetLastError_bound_only_for_one_shot_recovery() -> None:
+    """cudaGetLastError is bound solely for clear_last_error().
 
-    It was intentionally removed as a dead binding: it destructively clears
-    the sticky CUDA error, making it unsafe to call in non-fatal poll paths.
-    cudaPeekAtLastError (non-destructive) is the correct API for sticky-error
-    reads.  If someone re-adds cudaGetLastError, the sticky-error check logic
-    in check_sticky_error / peek_last_error needs to be revisited.
+    It destructively clears the latched CUDA error, so it is unsafe in poll
+    paths: there it would swallow errors meant for check_sticky_error. It was
+    re-bound (2026-10-19 review item 1) so the exporter can consume the error a
+    failed graph launch latches after falling back to the legacy path. The
+    sticky-error reads must keep using cudaPeekAtLastError and never call it.
     """
     api = _make_api()
-    assert "cudaGetLastError" not in api.cudart._mock_children, (
-        "cudaGetLastError was re-bound on cudart.  It was intentionally removed as a "
-        "dead binding (never called).  Use cudaPeekAtLastError for non-destructive "
-        "sticky-error reads, or explicitly document why cudaGetLastError is needed."
-    )
+    assert "cudaGetLastError" in api.cudart._mock_children
+    api.cudart.cudaPeekAtLastError.return_value = 0
+    api.peek_last_error()
+    api.check_sticky_error("poll")
+    api.cudart.cudaGetLastError.assert_not_called()

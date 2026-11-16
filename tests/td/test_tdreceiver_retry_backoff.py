@@ -22,18 +22,10 @@ retry_interval_frames wait -- avoiding an actual multi-hundred-frame simulation 
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from fakes import FakeTDHost  # noqa: E402
-from TDConfig import TDReceiverConfig  # noqa: E402
-from TDReceiver import TDReceiverEngine  # noqa: E402
+from fakes import FakeTDHost
+from TDConfig import TDReceiverConfig
+from TDReceiver import TDReceiverEngine
 
 
 def _make_engine(log_calls: list[str]) -> TDReceiverEngine:

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA IPC Wrapper for Windows
 Based on vLLM cuda_wrapper.py pattern
@@ -14,15 +16,38 @@ Requirements:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import os
-from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
+from ctypes import POINTER, byref, c_char_p, c_float, c_int, c_size_t, c_uint, c_uint64, c_void_p
 
-try:
-    from cuda_link._env import env_bool
-except (ImportError, ModuleNotFoundError):
-    from Env import env_bool  # type: ignore[no-redef]  # noqa: F401  # td_exporter flat namespace
+# Relative imports only (ADR-0002): scripts/sync_td_wrapper.py rewrites them to the bare
+# TD names (Env, CUDARuntimeTypes, CUDAGraphs) in td_exporter/CUDAIPCWrapper.py, so each
+# deployment resolves every dependency against ONE installation -- never a mix of this
+# package and whichever cuda_link happens to be importable.  ctypes argtypes compare the
+# handle classes by identity, so two copies of cuda_runtime_types break every IPC call.
+from ._env import env_bool
+from .cuda_graphs import CUDAGraphsMixin
+from .cuda_runtime_types import (
+    CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
+    CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
+    HOST_ALLOC_PORTABLE,
+    IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+    CUDAError,
+    CUDAEvent_t,
+    CUDAGraph_t,
+    CUDAGraphExec_t,
+    CUDAGraphNode_t,
+    CudaIpcError,
+    CudaLinkError,
+    CUDAStream_t,
+    StreamFlags,
+    cudaIpcEventHandle_t,
+    cudaIpcMemHandle_t,
+    cudaMemcpy3DParms,
+    cudaPointerAttributes,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -43,60 +68,6 @@ if os.name == "nt":
     _kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
 else:
     _kernel32 = None
-
-try:
-    # Prefer the bare name so all callers (CUDAIPCWrapper Text DAT and TDReceiver) share
-    # the same cudaIpcMemHandle_t / cudaIpcEventHandle_t class objects — critical for ctypes
-    # argtypes checking which uses class identity, not structural equivalence.
-    # In library mode the bootstrap pre-sets sys.modules["CUDARuntimeTypes"] to
-    # cuda_link.cuda_runtime_types before this module is imported, so this succeeds.
-    # In classic mode the sibling CUDARuntimeTypes Text DAT is already in sys.modules.
-    from CUDARuntimeTypes import (  # type: ignore[no-redef]  # noqa: E402
-        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
-        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
-        HOST_ALLOC_PORTABLE,
-        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
-        CUDAError,
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CudaIpcError,
-        CudaLinkError,
-        CUDAStream_t,
-        StreamFlags,
-        cudaIpcEventHandle_t,
-        cudaIpcMemHandle_t,
-        cudaMemcpy3DParms,
-        cudaPointerAttributes,
-    )
-except (ImportError, ModuleNotFoundError):
-    # Fallback: pure package context where CUDARuntimeTypes is not yet in sys.modules
-    # (e.g. imported before the bootstrap runs, or in a standalone test environment).
-    from cuda_link.cuda_runtime_types import (  # noqa: E402
-        CUDA_DEV_ATTR_IPC_EVENT_SUPPORT,
-        CUDART_IPC_EVENT_SUPPORT_MIN_VERSION,
-        HOST_ALLOC_PORTABLE,
-        IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
-        CUDAError,
-        CUDAEvent_t,
-        CUDAGraph_t,
-        CUDAGraphExec_t,
-        CUDAGraphNode_t,
-        CudaIpcError,
-        CudaLinkError,
-        CUDAStream_t,
-        StreamFlags,
-        cudaIpcEventHandle_t,
-        cudaIpcMemHandle_t,
-        cudaMemcpy3DParms,
-        cudaPointerAttributes,
-    )
-
-try:
-    from cuda_link.cuda_graphs import CUDAGraphsMixin  # noqa: E402
-except ImportError:
-    from CUDAGraphs import CUDAGraphsMixin  # type: ignore[no-redef]  # noqa: E402
 
 
 class CUDARuntimeAPI(CUDAGraphsMixin):
@@ -135,9 +106,13 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                     use the same device or peer-access must be enabled.
         """
         self.device = device
-        # Device index retained by the in-flight set_device() call, released by the
-        # matching restore_context() — see both methods below.
-        self._retained_ctx_device: int | None = None
+        # Stack of devices with an outstanding cuDevicePrimaryCtxRetain() from set_device(),
+        # each released by the matching restore_context() — see both methods below. A stack
+        # (not a single scalar) is required because set_device()/restore_context() can nest
+        # (e.g. re-entrant calls on one thread); a scalar would let an inner
+        # set_device→set_device→restore→restore sequence overwrite the outer call's device,
+        # leaking one retain per nesting level.
+        self._retained_ctx_stack: list[int] = []
         self.cudart = self._load_cuda_runtime()
         self._setup_function_signatures()
         self._check_pointer_attributes_abi()
@@ -341,6 +316,8 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         drv.cuCtxGetCurrent.restype = c_int
         drv.cuCtxSetCurrent.argtypes = [c_void_p]
         drv.cuCtxSetCurrent.restype = c_int
+        drv.cuGetErrorString.argtypes = [c_int, POINTER(c_char_p)]
+        drv.cuGetErrorString.restype = c_int
 
         r = drv.cuInit(0)
         if r != 0:
@@ -439,10 +416,14 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         self.cudart.cudaDeviceSynchronize.restype = c_int
 
         # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
-        # cudaGetLastError() is intentionally NOT bound: it destructively clears the sticky
-        # error, making it unsafe to call in poll paths. Use cudaPeekAtLastError exclusively.
         self.cudart.cudaPeekAtLastError.argtypes = []
         self.cudart.cudaPeekAtLastError.restype = c_int
+
+        # cudaGetLastError() — destructive read: returns AND clears the latched error.
+        # Only for one-shot recovery after a caught failure (clear_last_error); never call it
+        # in poll paths, where it would swallow errors meant for check_sticky_error.
+        self.cudart.cudaGetLastError.argtypes = []
+        self.cudart.cudaGetLastError.restype = c_int
 
         # cudaHostRegister(void* ptr, size_t size, unsigned int flags) — page-lock existing host memory
         self.cudart.cudaHostRegister.argtypes = [c_void_p, c_size_t, c_uint]
@@ -692,7 +673,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
             cstr = self.cudart.cudaGetErrorString(result)
             error_str = cstr.decode("utf-8") if cstr is not None else f"unknown error {result}"
             error_name = CUDAError.get_name(result)
-            raise RuntimeError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})")
+            raise CudaIpcError(f"CUDA {operation} failed: {error_str} (error {result}: {error_name})", code=result)
 
     def peek_last_error(self) -> int:
         """Non-destructively read the thread-local sticky CUDA error.
@@ -702,6 +683,16 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         Unlike cudaGetLastError this does NOT clear the latched error state.
         """
         return int(self.cudart.cudaPeekAtLastError())
+
+    def clear_last_error(self) -> int:
+        """Consume the thread-local latched CUDA error via cudaGetLastError.
+
+        Returns the code that was cleared (0 if none). Call only after a caught,
+        recovered failure so a non-sticky error does not trip check_sticky_error()
+        on every later call; a truly sticky error (poisoned context) re-latches on
+        the next CUDA call and is still reported there.
+        """
+        return int(self.cudart.cudaGetLastError())
 
     def check_sticky_error(self, context: str) -> None:
         """Warn and raise if a sticky CUDA error is latched from a prior async op.
@@ -723,10 +714,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                 error_str,
                 code,
             )
-            raise RuntimeError(
+            raise CudaIpcError(
                 f"Sticky CUDA error after {context}: {error_str} (code {code}). "
                 "The CUDA context is poisoned. Restart the process or set "
-                "CUDALINK_STICKY_ERROR_CHECK=0 to disable this check."
+                "CUDALINK_STICKY_ERROR_CHECK=0 to disable this check.",
+                code=code,
             )
 
     def host_register(self, ptr: int, size: int, flags: int = 0) -> None:
@@ -782,6 +774,22 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         self.cudart.cudaFree(dev_ptr)
 
+    def _check_drv(self, result: int, operation: str) -> None:
+        """Check a driver-API (CUresult) return code and raise if non-zero.
+
+        Driver-API errors are a different code space than cudart's cudaError_t, so
+        they're decoded via the driver's own cuGetErrorString — cudart's errcheck
+        (installed only on cudart symbols; see _install_errcheck) never covers
+        these calls, and previously their return values were silently discarded.
+        """
+        if result == 0:  # CUDA_SUCCESS
+            return
+        assert self._drv is not None  # noqa: S101  # only called from branches already gated on _drv
+        pstr = c_char_p()
+        rc = self._drv.cuGetErrorString(c_int(result), byref(pstr))
+        error_str = pstr.value.decode("utf-8") if rc == 0 and pstr.value is not None else f"unknown error {result}"
+        raise CudaIpcError(f"CUDA driver {operation} failed: {error_str} (code {result})", code=result)
+
     def set_device(self, device: int) -> int:
         """Switch the calling thread to the device's CUDA primary context.
 
@@ -797,13 +805,24 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         """
         if self._drv is not None:
             cu_dev = c_int()
-            self._drv.cuDeviceGet(byref(cu_dev), device)
+            self._check_drv(self._drv.cuDeviceGet(byref(cu_dev), device), "cuDeviceGet")
             saved_ctx = c_void_p()
-            self._drv.cuCtxGetCurrent(byref(saved_ctx))
+            self._check_drv(self._drv.cuCtxGetCurrent(byref(saved_ctx)), "cuCtxGetCurrent")
             primary_ctx = c_void_p()
-            self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev)
-            self._drv.cuCtxSetCurrent(primary_ctx)
-            self._retained_ctx_device = device
+            self._check_drv(self._drv.cuDevicePrimaryCtxRetain(byref(primary_ctx), cu_dev), "cuDevicePrimaryCtxRetain")
+            # Only push once the retain has actually succeeded — a failed retain must never
+            # be released later, and a stack (rather than a scalar) lets nested
+            # set_device()/restore_context() pairs unwind in the correct LIFO order.
+            self._retained_ctx_stack.append(device)
+            try:
+                self._check_drv(self._drv.cuCtxSetCurrent(primary_ctx), "cuCtxSetCurrent")
+            except RuntimeError:
+                # Context install failed after a successful retain — release it now since
+                # restore_context() will never be called for this failed attempt.
+                self._retained_ctx_stack.pop()
+                with contextlib.suppress(RuntimeError, OSError):
+                    self._drv.cuDevicePrimaryCtxRelease(cu_dev)
+                raise
             return saved_ctx.value or 0
         # Fallback: runtime API only — effective when driver-API stack is empty
         self.cudart.cudaSetDevice(c_int(device))
@@ -816,10 +835,11 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         unavailable (token will be 0 and self._drv will be None).
         """
         if self._drv is not None:
-            self._drv.cuCtxSetCurrent(c_void_p(token if token else None))
-            if self._retained_ctx_device is not None:
-                self._drv.cuDevicePrimaryCtxRelease(c_int(self._retained_ctx_device))
-                self._retained_ctx_device = None
+            self._check_drv(self._drv.cuCtxSetCurrent(c_void_p(token if token else None)), "cuCtxSetCurrent")
+            if self._retained_ctx_stack:
+                # LIFO: release the device retained by the most recent unmatched set_device().
+                device = self._retained_ctx_stack.pop()
+                self._check_drv(self._drv.cuDevicePrimaryCtxRelease(c_int(device)), "cuDevicePrimaryCtxRelease")
 
     def malloc_host(self, size: int) -> c_void_p:
         """Allocate pinned (page-locked) host memory via cudaMallocHost.
@@ -1005,7 +1025,7 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
     def cudart_event_query_fn_ptr(self) -> int:
         """Raw address of the cudaEventQuery symbol this wrapper resolved, as an int.
 
-        Lets other in-process code (e.g. cuda-link-native, R5) call the SAME
+        Lets other in-process code (e.g. the native wait-backend extension, R5) call the SAME
         loaded cudart instance directly, instead of independently rediscovering
         it via a bare-name GetModuleHandle. That rediscovery is unsafe: this
         process can have more than one same-named cudart DLL loaded from
@@ -1479,7 +1499,7 @@ def get_cuda_runtime(device: int = 0) -> CUDARuntimeAPI:
     if _cuda_runtime is None:
         _cuda_runtime = CUDARuntimeAPI(device=device)
     elif _cuda_runtime.device != device:
-        raise RuntimeError(
+        raise CudaLinkError(
             f"CUDA runtime singleton was initialized for device {_cuda_runtime.device}, "
             f"but caller requested device {device}. A single process can only bind to "
             "one device via the shared-cudart singleton. Create a separate "

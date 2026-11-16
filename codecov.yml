@@ -1,0 +1,22 @@
+# Codecov posture: patch coverage (new/changed lines) is the gate that matters —
+# "test what you write". Project-wide coverage is informational only here because
+# the hard project floor is already enforced inside CI itself by
+# [tool.coverage.report] fail_under in pyproject.toml (ratcheted; see the comment
+# there for the measured baseline and the T2 ratchet plan).
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false

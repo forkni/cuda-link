@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Typed helpers for CUDALINK_* environment variable reads.
 
 Each helper reads os.environ at call time so monkeypatch.setenv works reliably
@@ -17,7 +19,9 @@ def env_bool(name: str, *, default: bool) -> bool:
     return val == "1"
 
 
-def env_bool_opt(name: str) -> bool | None:
+# The `bool | None` return annotation is never evaluated (`from __future__ import annotations`),
+# so operator mutants on it are equivalent.
+def env_bool_opt(name: str) -> bool | None:  # pragma: no mutate
     """Return the env var as bool, or None if absent.
 
     "1" → True, "0"/"" → False, absent → None.

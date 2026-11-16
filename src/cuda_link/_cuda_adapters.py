@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 CUDA adapters — concrete implementations of CudaPort and ImporterCudaPort.
 
@@ -187,6 +189,10 @@ class FakeCUDAAdapter:
 
     def peek_last_error(self) -> int:
         return self._sticky_error
+
+    def clear_last_error(self) -> int:
+        code, self._sticky_error = self._sticky_error, 0
+        return code
 
     # --- Memory (device) ---------------------------------------------------
 

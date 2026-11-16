@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Cross-process SHM activation barrier for cuda-link.
 
 Coordinates Python producer <-> TD-side Sender activation windows.
@@ -40,11 +42,24 @@ VERSION = 1
 #         barrier_skips(u32) last_writer_pid(u32) reserved(32s)
 _STRUCT = struct.Struct("<IIIIQII32s")
 
-assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {SHM_SIZE}"
+# EQUIVALENT(Eq_LtE/Eq_Is/Eq_GtE): struct size is fixed at 64 == SHM_SIZE
+# always, so ==, <=, >= are all identically True here; `is` also holds via
+# CPython small-int interning of 64.
+assert _STRUCT.size == SHM_SIZE, f"Layout error: struct size {_STRUCT.size} != {SHM_SIZE}"  # pragma: no mutate
 
 # Hot-path struct: reads only the fields returned by read_state, skipping reserved(32s).
 # unpack_from() reads directly from the memoryview — no intermediate bytes() copy.
 _ST_STATE = struct.Struct("<IIIIQI")  # magic version active_count pad last_change_ns barrier_skips
+
+# Per-field writers: each mutator touches only the fields it owns, so a
+# producer bump_skip() can never write back a stale active_count snapshot
+# taken before a Sender's concurrent increment()/decrement().
+_U32 = struct.Struct("<I")
+_U64 = struct.Struct("<Q")
+_OFF_ACTIVE_COUNT = 8
+_OFF_LAST_CHANGE_NS = 16
+_OFF_BARRIER_SKIPS = 24
+_OFF_LAST_WRITER_PID = 28
 
 
 def open_or_create(*, create: bool) -> SharedMemory:
@@ -64,8 +79,29 @@ def open_or_create(*, create: bool) -> SharedMemory:
         if not create:
             raise
         shm = SharedMemory(name=SHM_NAME, create=True, size=SHM_SIZE)
-        _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)
+        # EQUIVALENT(NumberReplacer on `* 32`, e.g. `* 31`/`* 33`): struct.pack's
+        # `Ns` field silently truncates/zero-pads; for all-zero-byte content the
+        # packed 32s output is byte-identical regardless of a 31/32/33 length
+        # mismatch (empirically verified). NOTE: this line also carries 3
+        # genuine-killable mutants (pad/last_change_ns/last_writer_pid indices)
+        # independently verified killed by
+        # test_open_or_create_initializes_full_header_to_zero before this
+        # pragma was added; the pragma necessarily suppresses all mutants on
+        # this line, not just the equivalent ones.
+        _STRUCT.pack_into(shm.buf, 0, MAGIC, VERSION, 0, 0, 0, 0, 0, b"\x00" * 32)  # pragma: no mutate
         return shm
+
+
+class BarrierHeaderError(RuntimeError):
+    """The segment's magic/version is not this protocol's (foreign or incompatible writer).
+
+    ``uninitialised`` is True for an all-zero header: a Sender created the segment
+    but has not yet written the header, which is transient rather than a mismatch.
+    """
+
+    def __init__(self, message: str, *, uninitialised: bool = False) -> None:
+        super().__init__(message)
+        self.uninitialised = uninitialised
 
 
 def read_state(shm: SharedMemory) -> tuple[int, int, int]:
@@ -74,48 +110,81 @@ def read_state(shm: SharedMemory) -> tuple[int, int, int]:
     Uses _ST_STATE.unpack_from() on the raw memoryview — no intermediate bytes()
     copy per call.  Snapshot semantics are equivalent: reads the same 24 bytes in
     one pass (fields 0-5; skips the 32-byte reserved tail).
+
+    Raises:
+        BarrierHeaderError: magic/version do not match this protocol, so the
+            counters cannot be trusted.
     """
     fields = _ST_STATE.unpack_from(shm.buf, 0)
     # (magic, version, active_count, pad, last_change_ns, barrier_skips)
+    if (
+        fields[0] != MAGIC
+        # EQUIVALENT(NotEq_IsNot): fields[1] is a u32 and VERSION is 1, a CPython-interned small int,
+        # so `is not` and `!=` agree.
+        or fields[1] != VERSION  # pragma: no mutate
+    ):
+        raise BarrierHeaderError(
+            f"activation barrier header mismatch: magic=0x{fields[0]:08X} version={fields[1]} "
+            f"(expected 0x{MAGIC:08X} v{VERSION})",
+            # EQUIVALENT(Eq_LtE): fields are unsigned u32, never negative, so `== 0` and `<= 0` agree. The
+            # pragma also covers And_Or on this line, which test_read_state_rejects_mismatched_header kills.
+            uninitialised=fields[0] == 0 and fields[1] == 0,  # pragma: no mutate
+        )
     return fields[2], fields[4], fields[5]
+
+
+def _read_u32(shm: SharedMemory, offset: int) -> int:
+    """Read one little-endian u32 at ``offset``."""
+    return _U32.unpack_from(shm.buf, offset)[0]  # pragma: no mutate  # 1-field unpack: [0] == [-1]
 
 
 def increment(shm: SharedMemory, pid: int) -> int:
     """Increment active_count, refresh last_change_ns and last_writer_pid.
 
-    Best-effort: no OS-level atomic. Race window is microseconds; the
-    producer-side stale-timeout absorbs any stuck state.
+    Best-effort: no OS-level atomic. Two Senders racing on the same
+    read-modify-write of active_count can still lose one update (microsecond
+    window); the producer-side stale-timeout absorbs any stuck state. Only the
+    owned fields are written, so the producer's bump_skip() cannot clobber it.
 
     Returns:
         New active_count value.
     """
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[2] += 1  # active_count
-    fields[4] = time.monotonic_ns()  # last_change_ns
-    fields[6] = pid  # last_writer_pid
-    _STRUCT.pack_into(shm.buf, 0, *fields)
-    return fields[2]
+    count = _read_u32(shm, _OFF_ACTIVE_COUNT) + 1
+    _write_holder_fields(shm, count, pid)
+    return count
 
 
 def decrement(shm: SharedMemory, pid: int) -> int:
     """Decrement active_count (clamps at zero), refresh timestamps.
 
+    Same best-effort, owned-fields-only semantics as increment().
+
     Returns:
         New active_count value.
     """
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[2] = max(0, fields[2] - 1)  # active_count, no underflow
-    fields[4] = time.monotonic_ns()  # last_change_ns
-    fields[6] = pid  # last_writer_pid
-    _STRUCT.pack_into(shm.buf, 0, *fields)
-    return fields[2]
+    count = max(0, _read_u32(shm, _OFF_ACTIVE_COUNT) - 1)  # no underflow
+    _write_holder_fields(shm, count, pid)
+    return count
+
+
+def _write_holder_fields(shm: SharedMemory, count: int, pid: int) -> None:
+    """Write active_count, last_change_ns and last_writer_pid; nothing else.
+
+    active_count goes last: a producer that sees the new count also sees its fresh
+    timestamp, never a stale one that would read as SKIP_STALE.
+    """
+    _U64.pack_into(shm.buf, _OFF_LAST_CHANGE_NS, time.monotonic_ns())
+    _U32.pack_into(shm.buf, _OFF_LAST_WRITER_PID, pid)
+    _U32.pack_into(shm.buf, _OFF_ACTIVE_COUNT, count)
 
 
 def bump_skip(shm: SharedMemory) -> None:
-    """Increment barrier_skips counter (producer-only diagnostic)."""
-    fields = list(_STRUCT.unpack(bytes(shm.buf[:SHM_SIZE])))
-    fields[5] += 1  # barrier_skips
-    _STRUCT.pack_into(shm.buf, 0, *fields)
+    """Increment barrier_skips counter (producer-only diagnostic).
+
+    Touches only the barrier_skips field, never active_count.
+    """
+    skips = _read_u32(shm, _OFF_BARRIER_SKIPS)
+    _U32.pack_into(shm.buf, _OFF_BARRIER_SKIPS, (skips + 1) & 0xFFFFFFFF)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +203,10 @@ class CheckerOutcome(Enum):
 
     @property
     def should_skip(self) -> bool:
-        return self is CheckerOutcome.SKIP_ACTIVE
+        # EQUIVALENT(Is_Eq): CheckerOutcome has no __eq__ override, so Enum
+        # singleton identity (`is`) and equality (`==`) are behaviorally
+        # identical for its members.
+        return self is CheckerOutcome.SKIP_ACTIVE  # pragma: no mutate
 
 
 @runtime_checkable
@@ -148,10 +220,16 @@ class BarrierShmPort(Protocol):
     RuntimeError / struct.error; CheckerBarrier swallows them.
     """
 
-    @property
+    # EQUIVALENT(RemoveDecorator): Protocol stub body is `...`, never
+    # executed; runtime_checkable isinstance() only checks attribute-name
+    # presence via hasattr(), never decoration.
+    @property  # pragma: no mutate
     def is_attached(self) -> bool: ...
 
-    def attach(self, *, create: bool) -> None: ...
+    # EQUIVALENT(Mul_Div): Protocol stub body is `...`, never executed;
+    # runtime_checkable isinstance() only checks attribute-name presence via
+    # hasattr(), never a method's parameter-kind separators.
+    def attach(self, *, create: bool) -> None: ...  # pragma: no mutate
 
     def read_state(self) -> tuple[int, int, int]: ...  # (active_count, last_change_ns, barrier_skips)
 
@@ -245,6 +323,7 @@ class CheckerBarrier:
     shm: BarrierShmPort = field(default_factory=RealShmAdapter)
     _skip_log_last_ns: int = field(init=False, default=0, repr=False)
     _stale_log_last_ns: int = field(init=False, default=0, repr=False)
+    _header_warned: bool = field(init=False, default=False, repr=False)
 
     def evaluate(self) -> CheckerOutcome:
         """Return the current barrier state. Hot path."""
@@ -259,8 +338,16 @@ class CheckerBarrier:
                 return CheckerOutcome.SHM_ABSENT
         try:
             active_count, last_change_ns, _ = self.shm.read_state()
+        except BarrierHeaderError as exc:
+            # Fail open: a foreign segment must not block publishing. Warn once per
+            # mismatch streak; an uninitialised header is a transient creation race.
+            if not exc.uninitialised and not self._header_warned:
+                logger.warning("[ACTIVATION_BARRIER] %s — barrier ignored", exc)
+                self._header_warned = True
+            return CheckerOutcome.SHM_ABSENT
         except (OSError, RuntimeError, struct.error):
             return CheckerOutcome.SHM_ABSENT
+        self._header_warned = False
         if active_count <= 0:
             return CheckerOutcome.NO_SKIP
         now_ns = time.monotonic_ns()
@@ -310,8 +397,12 @@ class HolderBarrier:
     port: HolderShmPort = field(default_factory=RealShmAdapter)
 
     def acquire(self, pid: int, *, log_fn: Callable) -> None:
-        """Open-or-create the segment, increment, set held=True. Log+swallow failures."""
-        if not self.enabled:
+        """Open-or-create the segment, increment, set held=True. Log+swallow failures.
+
+        No-op while already held: a re-run of initialize() (failed init retried
+        on the next cook) must not stack a second increment it never releases.
+        """
+        if not self.enabled or self.held:
             return
         try:
             count = self.port.open_and_increment(pid)
@@ -333,7 +424,10 @@ class HolderBarrier:
         if self.settle_remaining <= 0:
             return False
         self.settle_remaining -= 1
-        if self.settle_remaining == 0 and self.held:
+        # EQUIVALENT(Eq_LtE): line 333's guard (`<= 0: return False`) guarantees
+        # settle_remaining is always >= 0 here (decremented by exactly 1 from a
+        # value > 0), and for x >= 0, `x == 0` is equivalent to `x <= 0`.
+        if self.settle_remaining == 0 and self.held:  # pragma: no mutate
             try:
                 count = self.port.decrement(pid)
                 log_fn(

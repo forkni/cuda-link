@@ -7,10 +7,16 @@ Complete workflows for common CUDA IPC use cases.
 > before reading `result.frame`.  Producer side — `from cuda_link import Exporter, FrameSpec, GpuFrame`;
 > call `Exporter.open(FrameSpec(...))` and `exporter.export(GpuFrame(...))`.
 > The TouchDesigner COMP facade is `CUDAIPCExtension` (Sender or Receiver mode).
+>
+> **▶ Runnable versions:** every workflow below has a standalone, heavily-commented script in
+> [`examples/`](../examples/README.md) that spawns its own demo producer — no TouchDesigner
+> needed to run them. Each example heading links to its script.
 
 ---
 
 ## Example 1: TouchDesigner → PyTorch AI Pipeline (Zero-Copy)
+
+> ▶ Runnable: [examples/03_td_to_pytorch_pipeline.py](../examples/03_td_to_pytorch_pipeline.py)
 
 ### Use Case
 
@@ -20,12 +26,12 @@ Real-time AI inference (style transfer, object detection, etc.) on TouchDesigner
 
 1. **Network Layout**:
 
-```
+```text
 Movie File In TOP → CUDAIPCExtension (Mode=Sender)
                     (Ipcmemname="ai_input")
 ```
 
-2. **Parameters**:
+1. **Parameters**:
    - `Mode`: `Sender`
    - `Ipcmemname`: `"ai_input"`
    - `Active`: ON
@@ -39,19 +45,21 @@ import torch
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # Initialize importer — waits up to 5 s for the TD sender to appear
-with Importer.open(ImportSpec(
-    shm_name="ai_input",
-    shape=(512, 512, 4),   # RGBA; None to auto-detect
-    dtype="float32",
-    timeout_ms=5000.0,
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="ai_input",
+        shape=(512, 512, 4),  # RGBA; None to auto-detect
+        dtype="float32",
+        timeout_ms=5000.0,
+    )
+) as importer:
     # Load your AI model
     model = torch.jit.load("style_transfer_model.pt").cuda()
     model.eval()
 
     fps_counter = 0
     import time
+
     start_time = time.time()
 
     while True:
@@ -67,8 +75,8 @@ with Importer.open(ImportSpec(
         input_tensor = result.frame  # torch.Tensor on GPU, shape (512, 512, 4)
 
         # Preprocess (convert RGBA → RGB, normalize)
-        rgb = input_tensor[:, :, :3]           # Drop alpha
-        normalized = (rgb - 0.5) / 0.5        # [-1, 1] range
+        rgb = input_tensor[:, :, :3]  # Drop alpha
+        normalized = (rgb - 0.5) / 0.5  # [-1, 1] range
 
         # Run inference
         with torch.no_grad():
@@ -93,6 +101,8 @@ with Importer.open(ImportSpec(
 
 ## Example 2: TouchDesigner → OpenCV Processing (Numpy)
 
+> ▶ Runnable: [examples/04_td_to_opencv_numpy.py](../examples/04_td_to_opencv_numpy.py)
+
 ### Use Case
 
 Traditional computer vision (edge detection, feature tracking, etc.) on TouchDesigner feed.
@@ -101,7 +111,7 @@ Traditional computer vision (edge detection, feature tracking, etc.) on TouchDes
 
 Same as Example 1, but use a different `Ipcmemname`:
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender)
              (Ipcmemname="cv_input")
 ```
@@ -112,12 +122,13 @@ Camera TOP → CUDAIPCExtension (Mode=Sender)
 import cv2
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="cv_input",
-    shape=(720, 1280, 4),  # 720p RGBA
-    dtype="uint8",         # OpenCV expects uint8
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="cv_input",
+        shape=(720, 1280, 4),  # 720p RGBA
+        dtype="uint8",  # OpenCV expects uint8
+    )
+) as importer:
     while True:
         result = importer.get_frame_numpy()
 
@@ -136,7 +147,7 @@ with Importer.open(ImportSpec(
 
         # Display
         cv2.imshow("Edges", edges)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
 cv2.destroyAllWindows()
@@ -148,13 +159,15 @@ cv2.destroyAllWindows()
 
 ## Example 3: Multiple Texture Streams (Main + ControlNet)
 
+> ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part a`
+
 ### Use Case
 
 AI pipeline with two inputs: main image + control signal (depth map, edges, etc.).
 
 ### TouchDesigner Setup
 
-```
+```text
 Camera TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="main_input")
 
 Edge Detection TOP → CUDAIPCExtension (Mode=Sender, Ipcmemname="controlnet_input")
@@ -167,19 +180,24 @@ import torch
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # Initialize both importers
-main_importer = Importer.open(ImportSpec(
-    shm_name="main_input",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
-cn_importer = Importer.open(ImportSpec(
-    shm_name="controlnet_input",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
+main_importer = Importer.open(
+    ImportSpec(
+        shm_name="main_input",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
+cn_importer = Importer.open(
+    ImportSpec(
+        shm_name="controlnet_input",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
 
 # Load ControlNet model
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+
 controlnet = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_canny").to("cuda")
 pipe = StableDiffusionControlNetPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
@@ -191,11 +209,9 @@ try:
         main_result = main_importer.get_frame()
         cn_result = cn_importer.get_frame()
 
-        if (main_result.outcome is ImportOutcome.SHUTDOWN
-                or cn_result.outcome is ImportOutcome.SHUTDOWN):
+        if main_result.outcome is ImportOutcome.SHUTDOWN or cn_result.outcome is ImportOutcome.SHUTDOWN:
             break
-        if (main_result.outcome is not ImportOutcome.NEW_FRAME
-                or cn_result.outcome is not ImportOutcome.NEW_FRAME):
+        if main_result.outcome is not ImportOutcome.NEW_FRAME or cn_result.outcome is not ImportOutcome.NEW_FRAME:
             continue  # one stream idle or reconnecting
 
         main_frame = main_result.frame  # torch.Tensor on GPU
@@ -226,13 +242,15 @@ finally:
 
 ## Example 4: Dynamic Resolution Handling
 
+> ▶ Runnable: [examples/05_multi_stream_and_dynamic_resolution.py](../examples/05_multi_stream_and_dynamic_resolution.py) `--part b`
+
 ### Use Case
 
 Source TOP resolution changes at runtime (user resizes window, switches camera, etc.).
 
 ### TouchDesigner Setup
 
-```
+```text
 Select TOP → CUDAIPCExtension (Mode=Sender)
 (Resolution changes dynamically based on Select TOP input)
 ```
@@ -244,7 +262,6 @@ from cuda_link import Importer, ImportSpec, ImportOutcome
 
 # shape=None lets the importer auto-detect resolution from the sender's SHM
 with Importer.open(ImportSpec(shm_name="dynamic_input")) as importer:
-
     frame_count = 0
 
     while True:
@@ -272,6 +289,8 @@ steady-state resumes at `NEW_FRAME` with the new shape automatically.
 
 ## Example 5: Graceful Shutdown Handling
 
+> ▶ Runnable: [examples/06_graceful_shutdown_and_reconnect.py](../examples/06_graceful_shutdown_and_reconnect.py)
+
 ### Use Case
 
 Cleanly shut down Python process when TouchDesigner exits.
@@ -288,17 +307,21 @@ import signal
 import sys
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-importer = Importer.open(ImportSpec(
-    shm_name="clean_shutdown",
-    shape=(512, 512, 4),
-    dtype="float32",
-))
+importer = Importer.open(
+    ImportSpec(
+        shm_name="clean_shutdown",
+        shape=(512, 512, 4),
+        dtype="float32",
+    )
+)
+
 
 # Register Ctrl+C handler
 def signal_handler(sig, frame):
     print("Ctrl+C detected, cleaning up...")
     importer.close()
     sys.exit(0)
+
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -329,14 +352,17 @@ print("Clean shutdown complete")
 
 ## Example 6: Benchmarking IPC Performance
 
+> ▶ Runnable: [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py) (producer-side percentiles)
+
 ### Use Case
 
 Measure IPC overhead for your specific hardware.
 
-> **Recommended**: For a full IPC roundtrip sweep with statistical rigor (avg, p50, p95, p99,
-> CSV + JSON export), run `python benchmarks/bench_sweep.py` (full 16-cell, ~12 min) or
-> `python benchmarks/bench_sweep.py --quick` (1 cell, ~1 min). See
-> [docs/BENCHMARKS.md](BENCHMARKS.md) for pre-measured results.
+> **Availability**: The historical `benchmarks/bench_sweep.py` script is not included in this
+> repository, so the full IPC roundtrip sweep commands from older versions are not runnable from
+> a fresh checkout. Use the linked producer-side benchmark for a tracked runnable example, or
+> follow the manual consumer-side profiling script below. See [docs/BENCHMARKS.md](BENCHMARKS.md)
+> for pre-measured results.
 
 The manual script below is useful for quick ad-hoc profiling of the consumer side against a
 live TD sender.
@@ -348,12 +374,13 @@ import time
 import statistics
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="benchmark",
-    shape=(1080, 1920, 4),
-    dtype="float32",
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="benchmark",
+        shape=(1080, 1920, 4),
+        dtype="float32",
+    )
+) as importer:
     # Warmup
     for _ in range(30):
         importer.get_frame()
@@ -371,8 +398,8 @@ with Importer.open(ImportSpec(
     print(f"IPC get_frame() overhead ({len(frame_times)} frames):")
     print(f"  Mean:   {statistics.mean(frame_times):.1f} µs")
     print(f"  Median: {statistics.median(frame_times):.1f} µs")
-    print(f"  P95:    {sorted(frame_times)[int(len(frame_times)*0.95)]:.1f} µs")
-    print(f"  P99:    {sorted(frame_times)[int(len(frame_times)*0.99)]:.1f} µs")
+    print(f"  P95:    {sorted(frame_times)[int(len(frame_times) * 0.95)]:.1f} µs")
+    print(f"  P99:    {sorted(frame_times)[int(len(frame_times) * 0.99)]:.1f} µs")
 ```
 
 **Expected output** (PyTorch zero-copy mode, `get_frame()`, 1080p):
@@ -386,6 +413,8 @@ Dominated by GPU-to-CPU D2H transfer. `get_frame_numpy()` p50 ~5000 µs at 1080p
 ---
 
 ## Example 7: Python → TouchDesigner (AI Output Display)
+
+> ▶ Runnable: [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py)
 
 ### Use Case
 
@@ -407,9 +436,9 @@ exporter = Exporter.open(
         shm_name="ai_output_ipc",  # Must match TD Receiver's Ipcmemname parameter
         height=HEIGHT,
         width=WIDTH,
-        channels=4,                # BGRA/RGBA
-        dtype="uint8",             # uint8 is typical for display
-        num_slots=2,               # Double-buffer (default)
+        channels=4,  # BGRA/RGBA
+        dtype="uint8",  # uint8 is typical for display
+        num_slots=2,  # Double-buffer (default)
     )
 )
 
@@ -422,11 +451,13 @@ while running:
     # Export to TD.
     # producer_stream arms ordering on the non-blocking IPC stream —
     # omitting it risks torn/gray frames when kernels run on a different stream.
-    exporter.export(GpuFrame(
-        ptr=output_tensor.data_ptr(),
-        size=output_tensor.nelement() * output_tensor.element_size(),
-        producer_stream=torch.cuda.current_stream().cuda_stream,
-    ))
+    exporter.export(
+        GpuFrame(
+            ptr=output_tensor.data_ptr(),
+            size=output_tensor.nelement() * output_tensor.element_size(),
+            producer_stream=torch.cuda.current_stream().cuda_stream,
+        )
+    )
 
 exporter.close()
 ```
@@ -436,11 +467,13 @@ Or use it as a context manager for automatic cleanup:
 ```python
 with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) as exporter:
     while running:
-        exporter.export(GpuFrame(
-            ptr=tensor.data_ptr(),
-            size=tensor.nbytes,
-            producer_stream=torch.cuda.current_stream().cuda_stream,
-        ))
+        exporter.export(
+            GpuFrame(
+                ptr=tensor.data_ptr(),
+                size=tensor.nbytes,
+                producer_stream=torch.cuda.current_stream().cuda_stream,
+            )
+        )
 ```
 
 > **Python `Exporter` export-sync default:** The Python `Exporter` API defaults to **async** export
@@ -450,7 +483,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v1.11.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v1.14.1.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Add a Script TOP** as the import target
@@ -465,7 +498,7 @@ def onCook(scriptOp):
 
 **TouchDesigner Network**:
 
-```
+```text
 Script TOP (receives AI frames via IPC)
     → Composite TOP
     → Out TOP
@@ -493,6 +526,8 @@ Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENC
 
 ## Example 8: Low-CPU Doorbell Consumer (R2)
 
+> ▶ Runnable: [examples/08_low_cpu_doorbell_consumer.py](../examples/08_low_cpu_doorbell_consumer.py)
+
 ### Use Case
 
 High-frequency TD → Python channel where the Python consumer must stay idle without burning CPU
@@ -514,16 +549,18 @@ or add it to TD's own `CUDALINK_*` env block so it propagates to child processes
 
 ```python
 import os
+
 os.environ["CUDALINK_DOORBELL"] = "1"  # must be set before importing cuda_link
 
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-with Importer.open(ImportSpec(
-    shm_name="td_input",
-    shape=(1080, 1920, 4),
-    dtype="uint8",
-)) as importer:
-
+with Importer.open(
+    ImportSpec(
+        shm_name="td_input",
+        shape=(1080, 1920, 4),
+        dtype="uint8",
+    )
+) as importer:
     while True:
         result = importer.get_frame()
 
@@ -534,7 +571,7 @@ with Importer.open(ImportSpec(
             # Block until the producer fires SetEvent — replaces poll-sleep.
             # Returns immediately if a new frame arrived between get_frame() and this call
             # (lost-wakeup guard: re-checks write_idx before blocking).
-            importer.wait_for_doorbell(timeout_secs=2.0)
+            importer.wait_for_doorbell(2000.0)  # timeout in MILLISECONDS
             continue
 
         if result.outcome is ImportOutcome.RECONNECTING:
@@ -563,8 +600,10 @@ with Importer.open(ImportSpec(
 import time
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
+
 def make_importer():
     return Importer.open(ImportSpec(shm_name="my_channel", timeout_ms=5000.0))
+
 
 importer = make_importer()
 
@@ -661,5 +700,5 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 ---
 
-**Last Updated**: 2026-06-12
-**Version**: 1.11.0
+**Last Updated**: 2026-09-26
+**Version**: 1.14.1

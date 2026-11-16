@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 Parameter Execute DAT Callback for CUDAIPCExtension
 
@@ -10,6 +12,18 @@ Handles parameter changes with debug logging and triggers appropriate re-initial
 import contextlib
 
 
+def _extension():
+    """Return the CUDAIPCExtension, or None if it is not available.
+
+    `parent().ext.CUDAIPCExtension` raises td.tdAttributeError when the extension did
+    not compile; a callback must never raise, so catch broadly.
+    """
+    try:
+        return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
+    except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
+        return None
+
+
 def onValueChange(par: object, prev: object) -> None:
     """Called when any monitored parameter changes.
 
@@ -17,7 +31,7 @@ def onValueChange(par: object, prev: object) -> None:
         par: The parameter that changed
         prev: The previous value of the parameter
     """
-    ext = parent().ext.CUDAIPCExtension
+    ext = _extension()
 
     if ext is None:
         return
@@ -127,8 +141,19 @@ def handle_numslots_change(ext: object, new_value: object, prev: object) -> None
         ext._log("Numslots change ignored while Active (deactivate first)", force=True)
         return
 
-    # Validate slot count (2-5 slots supported)
-    if new_value < 2 or new_value > 5:
+    # Hard bounds: below 2 there's no double-buffering; above 10 overflows both the
+    # receiver's protocol guard (TDReceiver.py num_slots > 10 check) and the fixed
+    # 10-entry _NVTX_SENDER_SLOT_NAMES tuple indexed by write_idx % num_slots in
+    # export_frame() — letting it through produces an IndexError inside onFrameEnd.
+    if new_value < 2 or new_value > 10:
+        ext._log(
+            f"WARNING: Numslots={new_value} outside supported range (2-10); change rejected",
+            force=True,
+        )
+        return
+
+    # 2-5 slots is the recommended/tested range; 6-10 works but is less exercised.
+    if new_value > 5:
         ext._log(f"WARNING: Numslots={new_value} outside recommended range (2-5)", force=True)
 
     ext.reconfigure_and_reinit("num_slots", new_value)

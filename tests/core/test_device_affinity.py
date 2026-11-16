@@ -8,6 +8,7 @@ Exporter.open(spec, policy=ExportPolicy(...), cuda=FakeCUDAAdapter(device=device
 
 from __future__ import annotations
 
+import ctypes
 import uuid
 from unittest.mock import patch
 
@@ -95,8 +96,11 @@ def test_record_source_sync_wrong_device_logs_error_by_default() -> None:
             patch("cuda_link.exporter.logger") as mock_logger,
         ):
             exp.record_source_sync(12345)
-        mock_logger.error.assert_called_once()
-        assert "ExportPolicy(strict_device=True)" in mock_logger.error.call_args[0][0]
+        mock_logger.error.assert_called_once_with(
+            "record_source_sync: current CUDA device (1) does not match exporter device (0). "
+            "Call cudaSetDevice(device) before creating your producer stream. "
+            "Set ExportPolicy(strict_device=True) to raise instead of warn."
+        )
         assert exp._source_sync_device_warned is True
     finally:
         exp.close()
@@ -150,6 +154,61 @@ def test_export_valid_device_ptr_no_warning() -> None:
         exp.close()
 
 
+def test_export_non_int_ptr_raises_clear_value_error() -> None:
+    """A ptr that cannot be coerced to int raises ValueError, not a bare TypeError."""
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match="frame.ptr must be an int device pointer"):
+            exp.export(GpuFrame(ptr=None, size=_DATA_SIZE))  # type: ignore[arg-type]
+    finally:
+        exp.close()
+
+
+def test_export_index_ptr_is_accepted() -> None:
+    """A non-int ptr that is a true integer (supports __index__, like numpy ints) still exports."""
+    from cuda_link import FrameOutcome
+
+    class _IndexLike:
+        def __index__(self) -> int:
+            return 0xDEAD0000
+
+    exp, _fake = _make_exporter(device=0)
+    try:
+        outcome = exp.export(GpuFrame(ptr=_IndexLike(), size=_DATA_SIZE))  # type: ignore[arg-type]
+        assert outcome != FrameOutcome.FAILED
+    finally:
+        exp.close()
+
+
+class _IntOnly:
+    def __int__(self) -> int:
+        return 0xDEAD0000
+
+
+@pytest.mark.parametrize(
+    "bad_ptr",
+    [3735879680.5, "0xdead0000", ctypes.c_void_p(0xDEAD0000), _IntOnly()],
+    ids=["float", "str", "c_void_p", "int-only"],
+)
+def test_export_rejects_non_integer_ptr(bad_ptr: object) -> None:
+    """int() would truncate a float or parse a str; only true integers are device pointers."""
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match="frame.ptr must be an int device pointer"):
+            exp.export(GpuFrame(ptr=bad_ptr, size=_DATA_SIZE))  # type: ignore[arg-type]
+    finally:
+        exp.close()
+
+
+def test_export_c_void_p_ptr_error_says_pass_value() -> None:
+    exp, _fake = _make_exporter(device=0)
+    try:
+        with pytest.raises(ValueError, match=r"pass \.value"):
+            exp.export(GpuFrame(ptr=ctypes.c_void_p(0xDEAD0000), size=_DATA_SIZE))  # type: ignore[arg-type]
+    finally:
+        exp.close()
+
+
 def test_export_managed_ptr_no_warning() -> None:
     """Managed memory (type=3) is treated as valid for D2D."""
     exp, fake = _make_exporter(device=0)
@@ -179,7 +238,9 @@ def test_export_host_ptr_logs_error() -> None:
         from cuda_link import FrameOutcome
 
         assert outcome != FrameOutcome.FAILED  # continues in non-strict mode
-        mock_logger.error.assert_called_once()
+        mock_logger.error.assert_called_once_with(
+            "export: gpu_ptr 0x00000000dead0000 is not device/managed memory (type=1). Pass a GPU-resident pointer."
+        )
     finally:
         exp.close()
 
@@ -209,8 +270,9 @@ def test_export_wrong_device_ptr_logs_error() -> None:
         from cuda_link import FrameOutcome
 
         assert outcome != FrameOutcome.FAILED
-        mock_logger.error.assert_called_once()
-        assert "belongs to device" in mock_logger.error.call_args[0][0]
+        mock_logger.error.assert_called_once_with(
+            "export: gpu_ptr 0x00000000dead0000 belongs to device 1, but exporter is bound to device 0."
+        )
     finally:
         exp.close()
 

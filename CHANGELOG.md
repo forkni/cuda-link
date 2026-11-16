@@ -14,72 +14,425 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cudaRuntimeGetVersion()` is queried once at construction and compared against the
   compile-time `CUDART_VERSION`; a major-version mismatch latches a fatal error before
   either TOP proceeds, refusing to cook rather than risk mixing CUDA runtime *major*
-  versions (only supported statically linked, which this plugin deliberately never does).
-  Previously unimplemented (`git grep cudaRuntimeGetVersion cpp_top` returned nothing).
-  Also added a non-fatal `note` field on `CudaDeviceSession` for skipped/failed IPC
-  capability probes and a WDDM/TCC support-envelope diagnostic (see Fixed, below, and
+  versions. Also added a non-fatal `note` field on `CudaDeviceSession` for skipped/failed
+  IPC capability probes and a WDDM/TCC support-envelope diagnostic (see
   [ADR-0004](docs/adr/0004-legacy-cuda-ipc-over-vmm.md)), surfaced via `debugLog()` on the
   first cook and a new `init_note` Info DAT row in both `CudaLinkInTOP` and
   `CudaLinkOutTOP`.
 
-- **R5: native notification-wait accelerator for `Importer._wait_for_slot`**
-  (opt-in via the `cuda-link-native` sidecar; `ImportPolicy.wait_backend`:
-  `"auto"` default | `"python"` | `"native"`, env `CUDALINK_WAIT_BACKEND`).
-  Replaces the Python spin/sleep poll with one native (C++/pybind11) call that
-  spins on `cudaEventQuery` then blocks on the R2 doorbell's Win32 event;
-  activating native forces the doorbell open even if `CUDALINK_DOORBELL` is
-  unset, since the native block phase has nothing faster to wait on
-  otherwise. Ships as a **default** installer-driven component on Windows
-  (`install_td_library.py --native`, default on) rather than an opt-in `pip
-  install` — see [PLAN-002](docs/plans/PLAN-002-native-waiter.md) and the
-  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md) consequences
-  amendment. Measured 2026-07-04 (`bench_doorbell.py`, 512×512 float32, 300
-  frames/arm, 30+60 fps): native's own re-check-after-wake latency
-  (`avg_spin_us`) is genuinely fast (~0.02–6.5 µs), but the accept gate
-  (p50<10µs, p95<50µs, measured as cross-process publish→detect latency via
-  `imp.last_latency`) **MISSes at both fps** — native (p50≈66–67µs,
-  p95≈139–140µs) is not measurably faster than plain doorbell here, likely
-  because the dominant cost is the Windows kernel's own
-  `WaitForSingleObject` wake/scheduling floor, which neither backend
-  controls. Recorded honestly per PLAN-002's own accept-gate framing; R5
-  still ships because it never regresses relative to doorbell-only and the
-  seam is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
+- **`NVMLObserver` per-process utilization**: `snapshot()` now adds `proc_sm_util_pct`,
+  `proc_mem_util_pct` (this process) and `other_sm_util_pct`, `other_mem_util_pct` (sum over every
+  other process), from `nvmlDeviceGetProcessesUtilizationInfo` with the legacy
+  `nvmlDeviceGetProcessUtilization` as a fallback. The keys are absent when NVML returns no usable
+  sample; the last good values are re-emitted when NVML has no newer sample. This tells a caller
+  whether TouchDesigner or the consumer owns the GPU's time in a slow round trip.
 
 ### Fixed
 
-- **Ported a CUDA-docs verification pass (`fix/cuda-ipc-verification-findings`, merged to
-  `development` as PR #30) to this branch, in both Python and C++:**
-  - `cudaPointerAttributes`' ctypes layout was missing CUDA 13.x's added `reserved[8]`
-    field (24 bytes vs. the real 56-byte 13.x struct), silently handing an undersized
-    out-param to a 13.x `cudart` on the per-frame device-affinity path
-    (`src/cuda_link/cuda_runtime_types.py`); the `reserved` field is `ctypes.c_int32 * 8`,
-    not `ctypes.c_long` (which is host-platform-width and would inflate the struct further
-    on Linux). Also fixed `cudaDevAttrAsyncEngineCount` (was the wrong enum value, `4`
-    instead of `40`) and added `CUDARuntimeAPI.check_ipc_capability()`, version-gated below
-    CUDA 12.0 (`cudaDevAttrIpcEventSupport` is a 12.0+ attribute) so it degrades to a
-    logged note instead of aborting `Exporter.open()` on a CUDA 11.x runtime.
-  - **C++ `cudalink::common::CudaDeviceSession`'s own IPC capability probe had the same
-    class of defect**, independently discovered while porting the above: an unconditional
-    reference to `cudaDevAttrIpcEventSupport` (absent from CUDA 11.x's `driver_types.h`,
-    so a build against an 11.8 toolkit — a documented target leg, see PLAN-001 D3/D8 —
-    would not have compiled at all), no runtime gate for a pre-12 `cudart` loaded by a
-    12-built plugin (`cudaErrorInvalidValue`), and a query failure left silently
-    unhandled with the error still latched in the per-thread last-error slot for TD's own
-    CUDA code to trip over. Fixed with the same compile-time (`#if CUDART_VERSION >=
-    12000`) and runtime gates as the Python side, plus a `cudaGetLastError()` clear and a
-    diagnostic `note` on any query failure (see Added, above).
+- **C++ `cudalink::common::CudaDeviceSession` IPC capability probe** (the C++ port of the
+  Python fixes from PR #30): the reference to `cudaDevAttrIpcEventSupport` is now behind
+  `#if CUDART_VERSION >= 12000` (the attribute is absent from CUDA 11.x `driver_types.h`),
+  a runtime gate covers a pre-12 `cudart` loaded by a 12-built plugin, and a failed query
+  clears the per-thread last error (`cudaGetLastError()`) and records a diagnostic `note`
+  instead of leaving the error latched for TD's own CUDA calls.
+- **`CUDAError` code 201 renamed `DEVICE_UNINITIALIZED`** (the CUDA Runtime API name in
+  `driver_types.h`); `INVALID_CONTEXT` stays as a deprecated alias.
 
-- **`bench_r1_wait.py` R5 accept-gate measured the wrong metric.** The
+### Changed
+
+- **NVML docs**: `CUDALINK_NVML` only sets the default `enabled` of an `NVMLObserver`; the observer
+  is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old
+  "97-frame stats line" wording was wrong. `gpu_util_pct` is documented as device activity, not SM
+  occupancy.
+
+## [1.14.1] - 2026-10-24
+
+### Added
+
+- **LICENSE Text DAT in the .tox**: the component now carries the MIT license, the
+  credits, a note that no third-party code is bundled, and the NVIDIA/CUDA/TouchDesigner
+  trademark notice. The text is embedded, not file-synced, so it travels with the binary.
+  `docs/TOX_BUILD_GUIDE.md` documents it as Step 7b.
+
+### Fixed
+
+- **Exporter input validation** (#80): `FrameSpec` rejects a height or width of zero or
+  less up front instead of failing at allocation. `frame.ptr` must be a true integer
+  (`operator.index`): a float, str or `ctypes.c_void_p` raises `ValueError` (the last with
+  a "pass .value" hint) instead of being truncated or escaping as a raw `TypeError`.
+- **Consumers fail on an unopenable IPC event** (#81): a non-zero event handle that won't
+  open used to be ignored, so frames were read with no ordering against the producer. The
+  Importer and TDReceiver now fail the connect or refresh, release what they opened, and
+  raise `IPCEventOpenError`; reconnect logs it at WARNING once per failure streak.
+- **Wait timeout no longer blocks every call** (#81): after a `TIMEOUT` the frame cursor is
+  rolled back, and later calls give the same pending frame one non-blocking check
+  (`NEW_FRAME` if it fired, else `NO_FRAME`), so a stuck producer no longer stalls each
+  `get_frame*()` for `timeout_ms`. The cursor is also restored on any exception.
+- **Exporter size-checks a reused SHM segment** (#82): a leftover segment that is too small
+  is not reused, and the protocol version is published last.
+- **Activation barrier ignores a foreign segment** (#83): a segment whose magic or version
+  don't match is treated as a mismatch, half-zero headers included.
+- **TD status tint lifecycle** (#84): unchanged status writes are skipped, a stale error
+  badge is replaced, a failed write is retried, and the status is stored before the badge
+  is added, so a retry can't stack a second badge. Script errors from other code are kept.
+- **`wait_for_doorbell` honours `doorbell=False`** (#86): it could block on a handle that
+  was only opened for the native wait backend.
+
+### Changed
+
+- TDReceiver reads the SHM header through the `SHMProtocol` helpers (#85).
+- Removed never-read config: `Exporter._ts_offset` and the `TDSenderConfig` fields
+  `init_pace`, `persist_stream` and `nvml`. `CUDALINK_TD_PERSIST_STREAM` and
+  `CUDALINK_TD_INIT_PACE` are gone from `docs/ENV_VARS.md` (#86).
+- Licensing (#88): the copyright holder is Alexander Korneev (2026), the MIT text is unchanged,
+  SPDX headers are on the shipped sources, and the README has a license, provenance and
+  trademarks section.
+- Release workflows run `sync_td_wrapper.py --check`, so mirror drift fails the release.
+  Dependabot now uses the uv ecosystem, and dev torch is pinned to 2.11.0 (cu128) (#87, #92).
+
+## [1.14.0] - 2026-10-19
+
+### Added
+
+- **Float16 source TOPs export as float32**: TDSender requests the matching `*32float`
+  format through `cudaMemory(pixelFormat=...)`, so TD converts on the GPU instead of the
+  Sender rejecting the frame. Lossless. At 1280x720 the call takes a median 0.89 ms vs
+  0.86 ms for a native float32 source (a CPU readback takes 3.4 ms); the shared frame is
+  2x the bytes of the float16 source.
+- **Native waiter reports CUDA errors**: `cudaEventQuery` results are tri-state (ready,
+  not ready, error), and a new `WaitStatus.CUDA_ERROR` (5) carries the error code. The
+  Python loader raises `RuntimeError` on it, the same contract as the pure-Python wait path.
+
+### Fixed
+
+- **TDSender sets `FLAGS_BGRA` for 8-bit RGBA frames**: TD's `cudaMemory()` returns
+  `rgba8fixed` textures in B,G,R,A order. The flag existed in the SHM protocol but no
+  producer set it, so Python consumers received BGRA bytes with no marker. The flag is
+  also set when the source format name is unmapped, so the first frame no longer forces a
+  reopen.
+- **Exporter recovers after a failed CUDA graph launch** (#65): the fallback to the
+  legacy path now clears the error the failure latched. Before, every later `export()`
+  re-raised it from `check_sticky_error`.
+- **Native waiter no longer hides CUDA faults as timeouts** (#65): a hard
+  `cudaEventQuery` error used to count as "not ready" until the deadline. A call with
+  `timeout_ms=0` now polls once instead of never, and an unknown native status raises
+  `RuntimeError` instead of `KeyError`.
+- **TDSender geometry reopen** (#65): a failing `Exporter.open` during a resolution or
+  format change no longer escapes the cook callback; the Sender drops the exporter and
+  re-initializes on the next cook. An rg↔monoalpha switch at the same size now reopens,
+  so `FLAGS_MONO_ALPHA` is republished.
+- **Activation barrier holds** (#66): `increment`, `decrement` and `bump_skip` write only
+  their own fields, so the producer's `bump_skip` can't overwrite a Sender's concurrent
+  increment. `HolderBarrier.acquire` is a no-op while held, so a retried `initialize()`
+  can't stack a hold that is never released. A failed `TDSender.initialize` force-releases
+  the barrier instead of pausing the producer until the 5 s stale timeout.
+- **Importer reconnect and restart** (#67): `_reinitialize` keeps `ImportSpec` shape and
+  dtype overrides and resets the write index, so the first frame from a restarted sender
+  isn't dropped. A format change rebuilds the CuPy views. `_connect` closes its IPC handles
+  and SharedMemory if a buffer build fails.
+- **TDReceiver in-place refresh** (#67): new IPC handles are opened before the old ones
+  are closed, so a partial failure leaves the existing connection intact. The float16
+  staging buffers are rebuilt over the new device pointers, the write index is reset, and
+  a flags-only change counts as a format update.
+- **bfloat16 producers connect with CuPy installed** (#68): CuPy has no bfloat16 dtype, so
+  the Importer now skips only the CuPy views and logs a warning. Torch and NumPy consumers
+  connect normally; `get_frame_cupy()` raises a clear `RuntimeError`.
+- **Receiver reconnects promptly after a sender drop** (#74): `cleanup()` resets the retry
+  backoff interval as well as the attempt counter. Before, the first reconnect could wait
+  up to 120 frames.
+
+### Changed
+
+- **CI pipeline rebuilt** (a8b3ac0, #70): one `ci.yml` gate workflow replaces `tests.yml`,
+  `typecheck.yml` and `branch-protection.yml`. The wheel is built once and the same wheel is
+  tested on Ubuntu and Windows, plus Python 3.9 and 3.10 legs on Ubuntu. Dependencies install from
+  the committed `uv.lock`. A weekly `nightly.yml` runs the full matrix plus a lock-refresh
+  canary, and `wheels.yml` builds the Windows native wheel. Superseded runs are cancelled on
+  PRs only, every job has a `timeout-minutes`, and actionlint and zizmor lint the workflows.
+- **Tests fail on warnings** (`filterwarnings = ["error"]`, `xfail_strict = true`), and
+  the skipped/xfail ratio is capped by `scripts/check_skipped_tests.py`.
+- **Test-smell ratchet** (#72): `scripts/scan_test_smells.py` compares `tests/` against
+  `.smell-baseline.json` in pre-commit and CI; smells were triaged from 73 to 19.
+- **Roundtrip tests are hermetic and event-driven** (#69): producer and consumer run in
+  lockstep instead of sleeping, every frame must arrive, and each test uses its own
+  activation-barrier segment, so a live TD sender can't make them skip. The four roundtrip
+  tests dropped from 55.9 s to about 8 s.
+- **`claude.yml` token** reduced to `contents: read`; checkouts in both Claude workflows use
+  `persist-credentials: false` (#70).
+- **Windows wheel build** no longer runs `ilammy/msvc-dev-cmd`, the last Node 20 action;
+  CMake's Visual Studio generator finds MSVC on its own (#76). Actions bumped by Dependabot
+  (#58, #61, #63, #64).
+- **CodeRabbit** added as a bugs-only second PR reviewer (`.coderabbit.yaml`).
+
+### Removed
+
+- **Charlie** CI config, daemons and the vendored `.claude/Charlie_DOC.md` (the service
+  ended).
+- **`cc-block-dangerous-git` Claude Code hook** (#71); the user-level guard covers it.
+
+### Docs
+
+- ARCHITECTURE.md / TOX_BUILD_GUIDE.md: record the TD 2025.33230 float16 re-probe. TD's
+  `cudaMemory()` still rejects float16 TOPs, but `cudaMemory(pixelFormat='rgba32float')`
+  returns a float32 buffer that is bit-exact with `numpyArray()` (lossless, unclamped). The
+  dead link to a removed probe-results JSON is dropped.
+- ARCHITECTURE.md: replace the pixel-format table with a full 22×23 `cudaMemory(pixelFormat=)`
+  matrix probe on TD 2025.33230. 10-bit and 11-bit packed sources are now rejected outright. Any
+  float16 source converts to float32 losslessly, or to 16/8-bit fixed clamped to [0, 1]. 8-bit RGBA
+  buffers come back in BGRA order. `cm.size` can report a stale
+  larger allocation after a dtype shrink, so it is not the payload size.
+- `docs/reviews/2026-10-19-block-review.md`: block-by-block dual code review of
+  `development`; items 1–9 are fixed in #65–#68 (#71).
+- TESTING_GUIDE.md: new baseline and records of the test-suite hardening phases H1 and H2
+  (#69, #72).
+- examples/README.md: the examples use an editable install from a checkout; `cuda-link` is
+  not on PyPI, and prebuilt wheels install through `scripts/install_td_library.py` (#59).
+- TOX_BUILD_GUIDE.md: Library mode explains project-relative discovery (#60), and the
+  `Numslots` menu lists the full 2–10 range, with 2–5 the tested range (#62).
+
+## [1.13.0] - 2026-09-26
+
+### Added
+
+- **ADR-0014 project-anchored install resolution**: `td_exporter/CUDALinkBootstrap.py`
+  now probes, in order, an explicit `folder` argument → the project folder
+  (`<project.folder>/cuda_link`, `/StreamDiffusion`, `/src` for a repo checkout, the
+  project folder itself) → `CUDALINK_LIB_PATH` → `sys.path`, activating only an
+  install whose on-disk `__version__` strictly matches the component's
+  `MIRROR_VERSION` stamp. There is no per-COMP parameter to set. A rival
+  already-loaded install or a shadowing import hook hard-stops resolution instead of
+  silently mixing versions. See `docs/adr/0014-project-anchored-install-resolution.md`.
+- **Degraded mode always compiles**: `CUDAIPCExtension` now constructs and every
+  public method stays callable even when `cuda_link` fails to import or resolve —
+  Execute DAT callbacks never raise `td.tdAttributeError`, they just report `False`/
+  no-ops until a matching install is found.
+
+### Fixed
+
+- **Installer reused a wrong-version `dist/` wheel**: `_find_wheel()` matched any
+  `cuda_link-*.whl` sharing the target's ABI tag, picking the newest by mtime with no
+  regard for version — a leftover wheel from an earlier release could be silently
+  reinstalled, and the "verify" line printed the source checkout's version rather than
+  the wheel actually installed. `_find_wheel()` now matches the exact
+  `cuda_link-<version>-<tag>.whl` filename for the source checkout's version, and the
+  verify line prints the resolved wheel's own version.
+- **Stale warning/error tint never cleared in real TD**: `RealTDHost._reset_stale_tint()` /
+  `_capture_default_color()` compared `comp.color` against `_WARNING_COLOR`/`_ERROR_COLOR`
+  with exact tuple equality, but TD stores `comp.color` internally as float32 — a value
+  set from a float64 literal (e.g. `0.7`) reads back as `0.699999988...`, so the
+  comparison never matched on a live TD instance (only the unit tests' float64 fakes
+  passed). COMPs saved mid-warning during 1.13.0 resolver testing stayed permanently
+  yellow even after `cuda_link` loaded cleanly. Both comparisons now use
+  `math.isclose(..., abs_tol=1e-3)`.
+- Relative-import mirrors for `cuda_graphs`/`cuda_ipc_wrapper`/`nvml_observer`,
+  fixing a mixed-version ctypes handle class-identity bug.
+- SHM reconnect polling now logs at DEBUG instead of ERROR during a producer restart.
+- Receiver-launcher Python fallback, an activation-barrier flake, and the `quality`
+  extra / crap4py pin.
+- **Rival cuda_link aliases could serve a real engine**: if this COMP's own
+  `CUDALinkBootstrap` did not activate (rival, mismatch, missing or broken) but a
+  *different* COMP had already aliased another cuda_link install in this TD process,
+  `CUDAIPCExtension`'s bare-name imports still resolved to that other install and built a
+  real engine on possibly wrong-version protocol code. It now detects a foreign,
+  file-backed `SHMProtocol` alias and forces degraded mode instead.
+- **Reuse shortcut re-read a stale disk version**: `CUDALinkBootstrap._bootstrap()`'s
+  already-loaded-elsewhere shortcut compared a fresh disk read of `__init__.py` against
+  `MIRROR_VERSION`, instead of the loaded module's own `__version__` — the two can
+  diverge (the file on disk edited or replaced after import). It now compares the loaded
+  module's `__version__` directly.
+- **A broken matching-version install was reported as "not found"**: a candidate whose
+  version matched but that raised while importing was previously folded into the generic
+  "missing" status. `failure_kind` now has a distinct `"broken"` value, and the Status
+  line says the install was found but failed to import (see Textport).
+- **No visibility into the native-wait-backend fallback**: a `src`-layout checkout has no
+  compiled `_native_waiter*.pyd` (gitignored), so the CUDA wait path silently fell back to
+  pure Python with no indication. `CUDALinkBootstrap` now prints a one-line note when a
+  `src`-resolved install has no native backend; the `src`-over-project-folder resolution
+  order itself is unchanged.
+- **Process-wide install-notice dedup swallowed a second, different reason**: the
+  Textport/Status-bar notice was deduped by process id, so once any COMP printed a
+  notice, no sibling COMP could ever print a *different* failure reason in the same TD
+  session. It is now deduped on the message content itself.
+- **`install_td_library.py --build` re-downloaded instead of rebuilding a stale wheel**:
+  when a local `dist/` wheel predated `src/cuda_link` changes, `resolve_wheel()` cleared
+  it and fell through to `_download_release_wheel()`, silently reinstalling whatever the
+  last GitHub Release published. With `--build`, a stale wheel now goes straight to a
+  local rebuild.
+- **`_wheel_version()` only recognized two hardcoded tags**: any other wheel tag (e.g. a
+  future `cp312` build) parsed as `None`. It now parses the version as the PEP 427
+  filename's second `-`-delimited field, matching any tag.
+- **"No wheel available" error named a glob nothing resolves by anymore**: the error text
+  said `dist\cuda_link-*-{tag}.whl`, but resolution matches an exact filename. It now
+  names the exact `dist\cuda_link-<version>-<tag>.whl` it looked for.
+
+### Changed
+
+- **Markdown lint is now enforced**: `.markdownlint.json` synced to the CGW baseline,
+  the local and CI engines both pinned to `markdownlint-cli2` 0.23.2, and the
+  `markdown-lint` CI job in `docs-validation.yml` no longer carries
+  `continue-on-error`. The `paths:` filter widened from `docs/** + README.md` to
+  `**/*.md`, matching the action's `globs:`.
+
+### Removed
+
+- **Vestigial merge-driver configuration**: ten `docs/*.md merge=ours` rules in
+  `.gitattributes` whose target paths never existed in this repository's history,
+  plus an inert `merge=diff3` block (`diff3` is a conflict *display style*, set via
+  `merge.conflictStyle` in `scripts/git/merge_with_validation.sh`, not a registered
+  merge driver). Only `CHANGELOG.md merge=union` remains active. The promotion
+  workflow was renamed `merge-development-to-main.yml` →
+  `merge-development-to-master.yml` and no longer registers the now-unreferenced
+  `merge.ours.driver`. See `docs/BRANCHING.md` for how promotion actually runs.
+
+### Docs
+
+- Swept the stale `1.12.2` version reference across `README.md`,
+  `docs/TOX_BUILD_GUIDE.md`, `docs/INTEGRATION_EXAMPLES.md`,
+  `docs/ARCHITECTURE.md` and `td_exporter/HELP_DOC.md`, and amended
+  `docs/adr/0014-project-anchored-install-resolution.md` with the TD
+  `__builtins__` binding and the status-vs-Textport split.
+
+## [1.12.2] - 2026-08-11
+
+### Fixed
+
+- **`cudaPointerAttributes` undersized against CUDA 13.x** (`cuda_runtime_types.py`) — the
+  struct grew a `long reserved[8]` field in CUDA 13.x driver_types.h (56 bytes vs. 24 in
+  12.x), but the ctypes binding still declared the 24-byte 12.x layout and the ABI guard
+  hard-checked that literal. The loader probes 13.3 before 12.x, so `pointer_get_attributes()`
+  — on the per-frame device-affinity path — was passing an undersized out-parameter to a
+  13.x cudart. Extended the struct with the `reserved` field and raised the guard to 56;
+  over-sizing is safe against both runtime generations, so no version branching is needed.
+  The field is typed `c_int32` rather than `ctypes.c_long`, whose width tracks the host
+  platform (8 bytes on LP64) instead of the MSVC cudart ABI this struct models.
+- **`cudaDevAttrAsyncEngineCount` documented as attribute 4** (`cuda_ipc_wrapper.py`) — the
+  real value is 40; 4 is `cudaDevAttrMaxBlockDimZ`. Latent (no production caller queried it
+  yet), but corrected before it could be relied on.
+- **IPC capability probe aborted initialization on CUDA 11.x** (`cuda_ipc_wrapper.py`) —
+  `check_ipc_capability()`, added earlier in this release and called unconditionally from
+  `Exporter.open()`, queries `cudaDevAttrIpcEventSupport` (125), which CUDA 12.0 introduced.
+  An 11.x runtime — still probed by the loader, and what TouchDesigner ships as
+  `cudart64_110.dll` — returns an invalid-attribute error that the strict `errcheck` turned
+  into a hard failure. The probe is now version-gated and its query is non-fatal, so a failed
+  probe degrades to a logged diagnostic; only an explicit `cudaDevAttrIpcEventSupport == 0`
+  still raises.
+
+### Added
+
+- **`check_ipc_capability()`** on the `CudaPort` protocol, `CTypesCUDAAdapter`, and
+  `FakeCUDAAdapter`, called once from `Exporter.open()` before any IPC handle is minted.
+  Queries `cudaDevAttrIpcEventSupport` and logs an informational note about the
+  Windows-WDDM-vs-NVIDIA-documented-support gap (see ADR-0004) rather than hard-failing,
+  since this project's whole premise is that legacy CUDA IPC works there in practice; raises
+  only when the driver reports IPC flatly unsupported (`cudaDevAttrIpcEventSupport == 0`).
+
+### Documentation
+
+- Corrected the inverted CUDA-IPC platform-support claim in `README.md` and
+  `td_exporter/HELP_DOC.md` — NVIDIA documents the legacy IPC API as Linux/Windows-TCC only;
+  this project runs it on Windows WDDM, which is validated in practice (ADR-0004) but
+  outside NVIDIA's documented support envelope.
+- Fixed the stale 14-mirror-DAT count (actual: 15) across `README.md`, `ARCHITECTURE.md`,
+  the ADRs, and `TOX_BUILD_GUIDE.md` — the latter previously instructed builders to add "14
+  mirror DATs," silently omitting `Doorbell`.
+
+### Tests
+
+- Added coverage for the CUDA 11.x IPC-probe fallback and the ABI version warning path in
+  `tests/cuda/test_wrapper_cov_methods.py` and `tests/support/test_cuda_adapters_cov.py`
+  (~145 lines).
+
+## [1.12.1] - 2026-07-12
+
+### Fixed
+
+- **NVML ref-count leak on failed `start()`** (`nvml_observer.py`) — a failure after
+  `acquire()` (e.g. `nvmlDeviceGetHandleByIndex` raising) never released the ref, so
+  `nvmlInit()` was never paired with `nvmlShutdown()` and repeated failures compounded
+  the leak. `start()` now only releases a ref it actually acquired — calling `release()`
+  unconditionally would have wrongly `nvmlShutdown()`'d an NVML that was never
+  successfully initialized by this call.
+- **`TDReceiverEngine.initialize_receiver()` leaked its locally-opened `shm_handle`**
+  when a raise (e.g. from `create_stream_with_priority`) landed after the validation
+  guards but before `connection_committed` was set — a window outside both the guards'
+  own `close()` calls and `_cleanup_partial`'s coverage. Leaked on every failed attempt
+  and every backoff retry; `shm_handle` is now tracked independently and closed in the
+  outer `except` whenever the connection was never committed.
+- **ABI/size guards used bare `assert`** (`cuda_runtime_types.py`), stripped under
+  `python -O` — a ctypes struct-layout drift would import silently instead of failing
+  loudly. Replaced with an explicit `_abi_guard()` helper that raises `RuntimeError`
+  unconditionally, regardless of `-O`.
+- **`example_sender_launcher.py` spawned a bare `"python"` subprocess**, relying on
+  `PATH` order — inside a TouchDesigner Execute DAT this risks silently launching TD's
+  own bundled interpreter instead of the sender's env. Now reuses the receiver
+  launcher's resolver pattern (`CUDALINK_SENDER_PYTHON_EXE` env var → Windows `py -3`
+  → `shutil.which("python")`), hardened further: if nothing resolves, `onStart()`
+  prints a clear error and does not spawn, instead of risking an opaque `ImportError`
+  in the wrong interpreter. (The resolver itself is Python 3.9-safe via
+  `from __future__ import annotations`.)
+- **`TDHost.param_value`/`is_active` caught only `AttributeError`**, unlike the sibling
+  `find_top()` — broadened both to `(AttributeError, RuntimeError)` so a TD param in an
+  error state fails safe instead of propagating on the per-frame path.
+
+Two other findings from the same audit (partial-connect CUDA IPC handle leak; a
+doorbell default disagreement) were investigated and confirmed to be false positives /
+already handled — no code change needed.
+
+## [1.12.0] - 2026-07-06
+
+### Added
+
+- **Runnable `examples/` directory.** 8 standalone, heavily-commented scripts
+  (`examples/01_fake_adapter_tour.py` through `examples/08_low_cpu_doorbell_consumer.py`,
+  plus shared `_common.py`) that each spawn their own demo producer process, so they run
+  end-to-end on a single machine without TouchDesigner. These are the runnable counterparts
+  of the embedded-code workflows in [docs/INTEGRATION_EXAMPLES.md](docs/INTEGRATION_EXAMPLES.md);
+  see [examples/README.md](examples/README.md) for the reading order.
+- **CUDA 13 runtime support in the cudart loader.**  `CUDARuntimeAPI._load_cuda_runtime()`
+  now probes for `cudart64_13*.dll` alongside the existing CUDA 12.x candidates, with the
+  Windows `winerror 126` ("module not found") hint message reordered so CUDA 13 is checked
+  first — matching the actual probe order and avoiding a misleading hint on CUDA 13-only
+  systems.
+- **Native notification-wait backend for the consumer wait loop**
+  (`ImportPolicy.wait_backend`: `"auto"` default | `"python"` | `"native"`; env
+  `CUDALINK_WAIT_BACKEND`). Replaces the pure-Python spin/sleep poll in
+  `Importer._wait_for_slot` with a native C++/pybind11 call that spins on `cudaEventQuery`
+  then blocks on the doorbell's Win32 event; enabling it forces the doorbell open even when
+  `CUDALINK_DOORBELL` is unset. Compiled into the core `cuda-link` wheel on Windows (via
+  `scikit-build-core`), degrading to pure Python off Windows or without an MSVC toolchain — see
+  [ADR-0006](docs/adr/0006-stay-pure-python-no-rust.md) and
+  [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md). In benchmarking it did not
+  measurably beat the plain doorbell (the dominant cost is the Windows kernel's own
+  `WaitForSingleObject` wake floor), so it ships as an opt-in that never regresses against
+  doorbell-only and is fully reversible (`CUDALINK_WAIT_BACKEND=python`).
+
+### CI / Test hardening
+
+- **Coverage gate**: `--cov` enforced in CI (`fail_under = 72`, branch-coverage-aware,
+  baseline 74.65% measured 2026-06-29), with XML report upload to Codecov and a
+  `coverage-main-*` artifact per Python version.
+- **Randomized test ordering** (`pytest-randomly`) to catch order-dependent test bugs;
+  verified order-independent across repeated randomized seeds.
+- **Test suite reorg**: `--import-mode=importlib`, consolidated shared fakes under
+  `tests/fakes/`, dropped `sys.path` hacks and from-conftest imports in favor of
+  `pythonpath` (`pyproject.toml`) and `strict-markers`.
+- **CI infra**: bumped `actions/setup-python`/`actions/upload-artifact` to their Node-24
+  releases (v5→v6); removed the Gemini CI workflows entirely; refreshed the
+  branch-protection `ALLOWED_DOCS` allowlist.
+
+### Fixed
+
+- **`bench_r1_wait.py`'s accept-gate measured the wrong metric.** The
   PASS/MISS check compared `get_frame()` total wall-clock time (spin + tensor
-  materialization + Python overhead) against PLAN-002's gate, which is
+  materialization + Python overhead) against the native-waiter accept gate, which is
   defined on publish→detect notification latency — a metric this script
   never measures. Replaced the gate line with a detection-profile line
   (`avg_spin_us`/pacing-block breakdown) and a pointer to
   `bench_doorbell.py`'s new native arm as the authoritative venue.
 - **`bench_doorbell.py`'s poll/doorbell arms did not pin `wait_backend`**,
-  defaulting to `ImportPolicy`'s own `"auto"` — with `cuda-link-native`
-  installed, the "doorbell" arm would silently engage the native backend,
-  contaminating the R2 poll-vs-doorbell comparison (same bug class as the
+  defaulting to `ImportPolicy`'s own `"auto"` — with the native extension
+  available, the "doorbell" arm would silently engage the native backend,
+  contaminating the poll-vs-doorbell comparison (same bug class as the
   `bench_r1_wait.py` fix above). Every arm now pins `wait_backend`
   explicitly.
 - **`bench_r1_wait.py`'s per-arm frame budget was still insufficient after
@@ -88,7 +441,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer's budget before its turn — real per-arm overhead (subprocess
   spawn + import + CUDA context init + SHM discovery) runs closer to 4–5s.
   Bumped to `overhead_frames=400`.
-- **R5 native waiter: torn-frame race in the block phase's `write_idx`
+- **Native waiter: torn-frame race in the block phase's `write_idx`
   pre-check.** `native_waiter.cpp`'s block phase pre-checked the SHM
   `write_idx` before `cudaEventQuery` and returned success (`READY_LATE`,
   bucketed as a success by `importer.py`) as soon as `write_idx` advanced
@@ -106,10 +459,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Added `READY_POLL` alongside (block phase caught it with no doorbell
   available, vs. `READY_DOORBELL` genuinely having one in play) — a related
   telemetry-accuracy fix bundled in since it's the same code region. New
-  `native/tests/test_state_machine.py` drives the real C++ state machine
+  `tests/core/test_native_state_machine.py` drives the real C++ state machine
   with injected Python fakes (via a new test-only `wait_slot_test()` pybind
   entry point) to regression-test this, including the specific "`write_idx`
   advances while this slot's event stays not-ready" scenario the bug needed.
+- **Prebuilt wheel distribution — end-user machines no longer need MSVC.** The
+  ADR-0012 fold (earlier in this release) turned `cuda-link` into a compiled
+  wheel but left an install-time gap: `install_td_library.py` silently
+  auto-built via `utils\build_wheel.cmd` whenever no matching wheel was
+  cached, and `CMakeLists.txt`'s `project(cuda_link LANGUAGES CXX)` forced
+  compiler detection even for the `BUILD_NATIVE_WAITER=OFF` fallback — both
+  defeating the "works everywhere" intent for StreamDiffusionTD artists'
+  machines, which almost never have Visual Studio installed. Fixed: CI
+  (`release.yml`, new `windows-latest` job) now builds and publishes both a
+  native `cp311-cp311-win_amd64` wheel and a compiler-free `py3-none-any`
+  fallback as GitHub Release assets; `install_td_library.py` resolves a wheel
+  per install target (probing that target's own Python version, not the
+  installer's) and only falls back to a local build behind an explicit
+  `--build` flag; `CMakeLists.txt` now defers compiler detection to inside
+  the `BUILD_NATIVE_WAITER` branch (`project(... LANGUAGES NONE)` +
+  `enable_language(CXX)`), so the fallback build is genuinely compiler-free.
+  Mode 5 (installing into TouchDesigner's own bundled Python) is now marked
+  deprecated in the installer's menu, steering to mode 2 (venv) or mode 4
+  (system Python) instead. See
+  [ADR-0013](docs/adr/0013-prebuilt-wheel-distribution.md). This also
+  corrects the `e57d1fc` fold commit's message, which implied no further
+  MSVC-toolchain work was needed for end users — that assumption was wrong,
+  and this entry is the correction of record (the pushed commit itself is
+  not being rewritten).
 
 ## [1.11.0] - 2026-06-12
 
@@ -449,7 +826,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emits a full per-frame timing line to the Textport when **Debug** is ON, every 150 frames
   (configurable via `CUDALINK_RECEIVER_REPORT_EVERY`). Example output:
 
-  ```
+  ```text
   [CUDAIPCExtension:Receiver] Frame  150 |  60.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | latency=10.09 ms | copy=129.2 µs avg (slot=2, write_idx=231)
   ```
 
@@ -899,7 +1276,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   editing the script:
 
   | Variable | Default | Effect |
-  |---|---|---|
+  | --- | --- | --- |
   | `CUDALINK_RECEIVER_SHM_NAME` | `cudalink_input_ipc` | IPC channel name |
   | `CUDALINK_RECEIVER_DEVICE` | `0` | GPU device index |
   | `CUDALINK_RECEIVER_TIMEOUT_MS` | `5000` | Frame-wait timeout ms |
@@ -1571,13 +1948,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.5.1]: https://github.com/forkni/cuda-link/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/forkni/cuda-link/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/forkni/cuda-link/compare/v1.4.1...v1.4.2
-[1.4.1]: https://github.com/forkni/cuda-link/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/forkni/cuda-link/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/forkni/cuda-link/compare/v1.2.1...v1.3.0
-[1.2.1]: https://github.com/forkni/cuda-link/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/forkni/cuda-link/compare/v1.1.0...v1.2.0
+[1.4.1]: https://github.com/forkni/cuda-link/releases/tag/v1.4.1
 [1.1.0]: https://github.com/forkni/cuda-link/compare/v1.0.1...v1.1.0
-[1.0.1]: https://github.com/forkni/cuda-link/compare/v1.0.0...v1.0.1
+[1.0.1]: https://github.com/forkni/cuda-link/releases/tag/v1.0.1
 
 ## [1.0.0] — 2026-05-02
 
@@ -1699,5 +2072,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explanatory comment at `src/cuda_link/cuda_ipc_importer.py` documenting the `getattr`
   fallback pattern in `cleanup()` for `__del__`-time partial-init safety.
 - `docs/OPT_1_implementation_PLAN.md` moved to local-only (untracked).
-
-[0.8.0]: https://github.com/forkni/cuda-link/compare/v0.7.3...v0.8.0

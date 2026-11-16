@@ -1,0 +1,17 @@
+{
+  "counts": {
+    "abs-path": 0,
+    "bitwise-assert": 2,
+    "commented-test": 0,
+    "early-exit": 0,
+    "multi-mock-assert": 2,
+    "no-assert": 0,
+    "overprotective": 11,
+    "parametrize-no-ids": 0,
+    "persistent-temp": 0,
+    "platform-check": 4,
+    "sleep": 0,
+    "suboptimal-assert": 0
+  },
+  "total": 19
+}

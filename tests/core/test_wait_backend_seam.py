@@ -1,9 +1,9 @@
 """
 Tests for the R5 native-wait-backend seam in Importer._wait_for_slot.
 
-Deliberately does NOT import cuda_link_native — core tests must stay
-independent of the optional sidecar package (it may not be installed in this
-environment at all). Instead, a tiny local duck-typed fake exercises the seam
+Deliberately does NOT import cuda_link._native_waiter — core tests must stay
+independent of the compiled extension (it may not be built on this host or
+platform at all). Instead, a tiny local duck-typed fake exercises the seam
 structurally: anything with a matching `.wait_slot(...)` method and a result
 carrying `.status.name` / `.waited_us` satisfies what `_wait_for_slot` needs.
 """
@@ -11,13 +11,16 @@ carrying `.status.name` / `.waited_us` satisfies what `_wait_for_slot` needs.
 from __future__ import annotations
 
 import ctypes
+import struct
 from dataclasses import dataclass
 from enum import Enum, auto
 
 import pytest
 from fakes import make_connected_importer
 
+from cuda_link import importer as importer_mod
 from cuda_link._importer_port import ImportOutcome, ImportPolicy
+from cuda_link.shm_protocol import WRITE_IDX_OFFSET
 
 
 class _FakeStatus(Enum):
@@ -35,7 +38,7 @@ class _FakeResult:
 
 
 class _LocalFakeWaitBackend:
-    """Local stand-in for cuda_link_native.FakeWaitBackend — records calls, scripts results."""
+    """Local stand-in for cuda_link._wait_backend.FakeWaitBackend — records calls, scripts results."""
 
     def __init__(self, status: _FakeStatus = _FakeStatus.READY_SPIN, waited_us: float = 1.5) -> None:
         self.calls: list[dict] = []
@@ -68,9 +71,31 @@ def _engage_native_seam(imp, backend, *, doorbell_handle: int = 0xDEAD_BEEF, eve
     imp._conn.doorbell_handle = doorbell_handle
 
 
-def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
+@pytest.fixture
+def managed_importer():
+    """Fixture that tracks and tears down Importer instances cleanly.
+
+    Ensures doorbell_handle is cleared and the importer is closed before
+    test teardown, preventing leaked instances from invoking _doorbell.close()
+    during subsequent tests when Python garbage collection runs.
+    """
+    importers: list = []
+
+    def _factory(*args, **kwargs):
+        imp = make_connected_importer(*args, **kwargs)
+        importers.append(imp)
+        return imp
+
+    yield _factory
+    for imp in importers:
+        if getattr(imp, "_conn", None) is not None:
+            imp._conn.doorbell_handle = None
+        imp.close()
+
+
+def test_ready_spin_updates_spin_counters_and_returns_waited_us(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=3.3)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -90,9 +115,9 @@ def test_ready_spin_updates_spin_counters_and_returns_waited_us() -> None:
     assert imp.total_wait_spin_us == pytest.approx(3.3)
 
 
-def test_ready_doorbell_updates_sleep_counters() -> None:
+def test_ready_doorbell_updates_sleep_counters(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_DOORBELL, waited_us=42.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -103,9 +128,9 @@ def test_ready_doorbell_updates_sleep_counters() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(42.0)
 
 
-def test_ready_late_also_counts_as_sleep_bucket() -> None:
+def test_ready_late_also_counts_as_sleep_bucket(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_LATE, waited_us=7.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -115,9 +140,9 @@ def test_ready_late_also_counts_as_sleep_bucket() -> None:
     assert imp.total_wait_sleep_us == pytest.approx(7.0)
 
 
-def test_timeout_status_raises_timeout_error_same_as_python_path() -> None:
+def test_timeout_status_raises_timeout_error_same_as_python_path(managed_importer) -> None:
     backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
-    imp = make_connected_importer(write_idx=1, timeout_ms=1.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
     _engage_native_seam(imp, backend)
 
     result = imp.get_frame_numpy()
@@ -129,10 +154,108 @@ def test_timeout_status_raises_timeout_error_same_as_python_path() -> None:
     assert result.frame is None
 
 
-def test_backend_not_engaged_without_doorbell_handle() -> None:
+def test_timeout_leaves_frame_unconsumed_for_next_call(managed_importer) -> None:
+    """A frame whose wait timed out was never delivered: the cursor must not advance past it."""
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    before = imp._last_write_idx
+
+    result = imp.get_frame_numpy()
+    assert result.outcome is ImportOutcome.TIMEOUT
+    assert imp._last_write_idx == before
+
+    # Same slot is still pending: the next call re-acquires it but only re-checks the
+    # event once (still unsignaled), so it reports NO_FRAME without waiting again.
+    imp._conn.cuda.query_event.return_value = False
+    again = imp.get_frame_numpy()
+    assert again.outcome is ImportOutcome.NO_FRAME
+    assert len(backend.calls) == 1
+    assert imp._last_write_idx == before
+
+
+def test_recheck_after_timeout_delivers_frame_once_event_fires(managed_importer) -> None:
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    assert imp.get_frame_numpy().outcome is ImportOutcome.TIMEOUT
+
+    imp._conn.cuda.query_event.return_value = True  # producer resumed: event signaled
+    result = imp.get_frame_numpy()
+
+    assert result.outcome is ImportOutcome.NEW_FRAME
+    assert len(backend.calls) == 1  # the re-check never re-entered the blocking backend
+    assert imp._timed_out_write_idx is None
+    assert imp.frame_count == 1
+
+
+def test_newer_frame_after_timeout_gets_a_full_wait(managed_importer) -> None:
+    backend = _LocalFakeWaitBackend(status=_FakeStatus.TIMEOUT, waited_us=5000.0)
+    imp = managed_importer(write_idx=1, timeout_ms=1.0)
+    _engage_native_seam(imp, backend)
+    assert imp.get_frame_numpy().outcome is ImportOutcome.TIMEOUT
+
+    struct.pack_into("<I", imp._conn.shm_handle.buf, WRITE_IDX_OFFSET, 2)  # producer published again
+    result = imp.get_frame_numpy()
+
+    assert result.outcome is ImportOutcome.TIMEOUT  # a new frame is waited on in full, not re-checked
+    assert len(backend.calls) == 2
+    assert imp._timed_out_write_idx == 2
+
+
+def test_failure_after_acquire_restores_cursor_and_balances_nvtx(managed_importer, monkeypatch) -> None:
+    """An exception past the wait must not consume the frame or leak the NVTX range."""
+    imp = managed_importer(write_idx=1)
+    imp._conn.cuda.query_event.return_value = True
+    imp._conn.ipc_events[0] = ctypes.c_uint64(0x1)
+    depth = {"n": 0}
+    real_push, real_pop = importer_mod._nvtx.push_range, importer_mod._nvtx.pop_range
+
+    def push(*a, **kw):
+        depth["n"] += 1
+        return real_push(*a, **kw)
+
+    def pop(*a, **kw):
+        depth["n"] -= 1
+        return real_pop(*a, **kw)
+
+    def boom(self, conn, slot):
+        raise RuntimeError("materialize failed")
+
+    monkeypatch.setattr(importer_mod._nvtx, "push_range", push)
+    monkeypatch.setattr(importer_mod._nvtx, "pop_range", pop)
+    monkeypatch.setattr(importer_mod._NumpyBackend, "materialize", boom)
+    before = imp._last_write_idx
+
+    with pytest.raises(RuntimeError, match="materialize failed"):
+        imp.get_frame_numpy()
+
+    assert imp._last_write_idx == before
+    assert imp.frame_count == 0
+    assert depth["n"] == 0
+
+
+def test_cuda_error_raises_runtime_error_not_timeout(managed_importer) -> None:
+    """A hard cudaEventQuery error must surface as RuntimeError (like the python
+    path's query_event), never be reported as a TIMEOUT outcome."""
+    from cuda_link._wait_backend import FakeWaitBackend, WaitStatus  # noqa: PLC0415
+
+    backend = FakeWaitBackend()
+    backend.force_status = WaitStatus.CUDA_ERROR
+    backend.force_method = 700
+    imp = managed_importer(write_idx=1)
+    _engage_native_seam(imp, backend)
+
+    with pytest.raises(RuntimeError, match="cudaEventQuery failed: 700"):
+        imp.get_frame_numpy()
+    assert imp.wait_sleep_hits == 0
+    assert imp.wait_spin_hits == 0
+
+
+def test_backend_not_engaged_without_doorbell_handle(managed_importer) -> None:
     """Even with a resolved backend, no doorbell handle means the python path runs."""
     backend = _LocalFakeWaitBackend(status=_FakeStatus.READY_SPIN, waited_us=1.0)
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     imp._wait_backend = backend
     imp._conn.ipc_events[0] = ctypes.c_uint64(0x1)
     imp._conn.doorbell_handle = None  # not opened
@@ -144,9 +267,9 @@ def test_backend_not_engaged_without_doorbell_handle() -> None:
     assert backend.calls == []  # never called — python path took over
 
 
-def test_wait_backend_defaults_to_none_and_python_path_is_unaffected() -> None:
+def test_wait_backend_defaults_to_none_and_python_path_is_unaffected(managed_importer) -> None:
     """Importer.from_connection() never resolves a backend — pre-R5 behavior exactly."""
-    imp = make_connected_importer(write_idx=1)
+    imp = managed_importer(write_idx=1)
     assert imp._wait_backend is None
 
     imp._conn.ipc_events[0] = None  # no-event path

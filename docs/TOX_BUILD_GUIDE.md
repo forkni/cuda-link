@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.8.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v1.14.1.tox` component in TouchDesigner.
 
-> **Previous release**: `TOXES/CUDAIPCLink_v1.7.2.tox` is available as a GitHub Release asset.
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.12.2`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each shipped build.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -14,11 +14,14 @@ There are two assembly modes. Choose one:
 
 ### Library mode (recommended — fewer DATs)
 
-Requires `cuda_link` installed externally (`install_td_library.cmd`) and `CUDALINK_LIB_PATH`
-set before launching TouchDesigner. The bootstrap module loads the package and registers the
-15 mirror names in `sys.modules` — so those mirror Text DATs are not needed.
+Requires `cuda_link` installed externally (for example, via `install_td_library.cmd`) where the
+bootstrap can discover it. It first checks project-relative locations next to the `.toe` (including
+a venv, a `pip install --target` folder, or a repository `src` layout), then
+`CUDALINK_LIB_PATH`, and finally TouchDesigner Preferences → Python 32/64 bit Module Path. No
+per-COMP path is required. The bootstrap module loads the package and registers the 15 mirror names
+in `sys.modules` — so those mirror Text DATs are not needed.
 
-```
+```text
 CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
@@ -32,15 +35,18 @@ CUDAIPCExporter (Base COMP)
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
 ### Classic / fallback mode (no install required — all mirror DATs included)
 
-All 15 mirror Text DATs must be present. The bootstrap still silently no-ops if
-`CUDALINK_LIB_PATH` is unset — sibling import resolution works as before.
+All 15 mirror Text DATs must be present. If `cuda_link` is not importable, the bootstrap
+no-ops — sibling import resolution works as before, silently: with all 15 mirrors present,
+the extension does not print a Textport notice or set the yellow status, since classic mode
+is working as intended.
 
-```
+```text
 CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── Env               (Text DAT)     ← Copy from td_exporter/Env.py  (mirror: src/cuda_link/_env.py)
@@ -69,6 +75,7 @@ CUDAIPCExporter (Base COMP)
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -97,14 +104,14 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
-| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3, 4 |
+| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2–10 (2–5 recommended/tested; 6–10 supported but less exercised) |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
 **For `Numslots` menu parameter**:
 
 - Menu Source: **Constant**
-- Menu Names: `2 3 4`
-- Menu Labels: `2 Slots 3 Slots 4 Slots`
+- Menu Names: `2 3 4 5 6 7 8 9 10`
+- Menu Labels: `2 Slots 3 Slots 4 Slots 5 Slots 6 Slots 7 Slots 8 Slots 9 Slots 10 Slots`
 
 **For `Mode` menu parameter**:
 
@@ -119,7 +126,7 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 **Library mode** (with `cuda_link` installed via `install_td_library.cmd`): create the 6 DATs
 in section 3a–3f only — the 15 mirror DATs (3g+) are resolved from the installed package.
 
-**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3q.
+**Classic/fallback mode** (no install): create ALL DATs in sections 3a–3i.
 
 Inside the `CUDAIPCExporter` COMP, create Text DATs in the order shown below. Imports between
 them resolve automatically because all Text DATs in the same COMP share a module namespace.
@@ -133,13 +140,32 @@ them resolve automatically because all Text DATs in the same COMP share a module
 2. Paste the entire contents of `td_exporter/CUDALinkBootstrap.py`
 
 This DAT **must load before all other Text DATs** (TouchDesigner loads them in the order they
-appear in the COMP editor). It injects `CUDALINK_LIB_PATH` onto `sys.path` and registers
-`sys.modules` aliases. If `CUDALINK_LIB_PATH` is unset, it silently no-ops and fallback mode
-takes effect automatically.
+appear in the COMP editor). It looks for an installed `cuda_link` in this order — an explicit
+folder argument (host integrations only), `<project.folder>` (`/cuda_link`, `/StreamDiffusion`,
+`/src`, or the folder itself), `CUDALINK_LIB_PATH`, then the paths already visible to
+TouchDesigner — and imports the first candidate whose `__version__` matches the
+`MIRROR_VERSION` stamp at the top of the DAT (written by `scripts/sync_td_wrapper.py`; never
+edit it by hand). There is no per-COMP parameter to set: install `cuda_link` next to the
+`.toe` (a venv, or a `pip install --target` folder — see Step 3 Library mode above) and the
+project-folder layer finds it on its own. A mismatching install is skipped without being
+imported; a different `cuda_link` already loaded in the process stops resolution with a
+"Restart TouchDesigner" message. If nothing resolves, it no-ops (printing the reason to the
+Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link submodules aliased as bare module names.`
-> **Fallback mode**: `[CUDALinkBootstrap] Fallback mode — using sibling Text DAT mirrors.`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 1.14.1 from <folder>`
+>
+> **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
+> siblings does the extension additionally print a cause-specific line, e.g.
+> `[CUDAIPCExtension] cuda_link 1.14.1 not found - install it next to this .toe or set
+> CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
+> layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
+> CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
+> the component's 1.14.1`). The short line names the specific cause — not found, wrong
+> version, a rival install already loaded, or this extension's own glue import failing — and
+> the COMP's Status par mirrors that same short line; the full per-layer reason is
+> Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
+> back silently.
 
 #### 3b. TDHost Text DAT
 
@@ -176,12 +202,13 @@ This module provides `TDReceiverEngine` — the Receiver-mode engine that owns S
 3. Confirm the import block reads:
 
    ```python
-   with contextlib.suppress(ImportError):
+   with contextlib.suppress(Exception):
        import CUDALinkBootstrap  # noqa: F401
    ```
 
-   The `contextlib.suppress` guard ensures the extension loads cleanly in classic mode
-   (no bootstrap DAT present).
+   The broad `contextlib.suppress` guard ensures the extension still loads when the
+   bootstrap DAT is absent or cannot resolve a library candidate; inspect the bootstrap's
+   Textport message and yellow status for the resolution reason.
 
 ---
 
@@ -230,7 +257,7 @@ For each, create a **Text DAT** with the name shown and paste the matching file:
 **Verification**: Open the **Textport** (Alt+T) and type:
 
 ```python
-op('/project1/CUDAIPCExporter').ext.CUDAIPCExtension
+op("/project1/CUDAIPCExporter").ext.CUDAIPCExtension
 ```
 
 You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
@@ -258,11 +285,11 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 | State | Visual | Cause |
 |---|---|---|
-| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — all float16 variants, 10-bit RGB / 2-bit Alpha, 11-bit float RGB |
+| **Warning** | COMP node body tints **yellow** + `warning_emitter` yellow badge (inside COMP) | Unsupported pixel format — 10-bit RGB / 2-bit Alpha, 11-bit float RGB, or a float16 source with an unmapped format name |
 | **Error** | COMP node body tints **red** + red `addScriptError` badge + `warning_emitter` badge (inside COMP) | Engine-fatal error (IPC/GPU init failure) |
 | **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
-On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
+On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. Float16 sources whose format name is one of the five float16 menu entries do not warn: the Sender asks `cudaMemory(pixelFormat=...)` for the matching 32-bit float format and shares that (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
@@ -301,24 +328,49 @@ force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-bo
 
 Create a **Text DAT** named `info` with version/author information:
 
-```
-CUDA IPC Exporter v1.8.0
+```text
+CUDA IPC Exporter v1.14.1
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-05-29
+Date: 2026-08-11
 License: MIT
 ```
+
+### Step 7b: LICENSE DAT (required for releases)
+
+Create a **Text DAT** named `LICENSE`. Its text is embedded in the DAT, with no `file` or
+`syncfile`, because a file path would not exist on a user's machine. It holds:
+
+- the repo `LICENSE` file, word for word (MIT, Copyright (c) 2026 Alexander Korneev)
+- the Credits from `README.md` (original implementation by Forkni, extracted from StreamDiffusionTD)
+- a note that no third-party code is bundled; the optional packages (torch, numpy, cupy,
+  nvidia-ml-py) are installed separately under their own licenses
+- the Trademarks paragraph from `README.md`
+
+No code reads this DAT. It only travels with the .tox so the license ships with the binary.
 
 ---
 
 ## Step 8: Save as .tox
 
+**Release checklist** (before saving a release build):
+
+- [x] Embed a `LICENSE` Text DAT (MIT text + third-party credits) inside the .tox before export (Step 7b).
+
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.8.0.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v1.14.1.tox` inside the project root
 
-**Naming convention**: Use `CUDAIPCLink_v1.8.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v1.14.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+
+**Release manifest**: `TOXES/RELEASES.tsv` records the current release only — one row for the tracked `.tox`
+with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+saved from. To verify a download matches the manifest:
+
+```bash
+sha256sum TOXES/CUDAIPCLink_v1.14.1.tox   # compare with the sha256 column
+```
 
 ---
 
@@ -326,7 +378,7 @@ License: MIT
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.8.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v1.14.1.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -350,7 +402,7 @@ License: MIT
 
 Open the **Textport** (Alt+T) and look for:
 
-```
+```text
 [CUDAIPCExporter] Extension initialized on <CUDAIPCExporter>
 [CUDAIPCExporter] Loaded CUDA runtime
 [CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
@@ -390,8 +442,8 @@ from cuda_link import Importer, ImportSpec, ImportOutcome
 importer = Importer.open(
     ImportSpec(
         shm_name="my_project_ipc",  # ← MUST MATCH TD parameter
-        shape=(1080, 1920, 4),       # height, width, channels (match your source TOP resolution)
-        dtype="float32",             # or "float16", "uint8"
+        shape=(1080, 1920, 4),  # height, width, channels (match your source TOP resolution)
+        dtype="float32",  # or "float16", "uint8"
         timeout_ms=5000.0,
     )
 )
@@ -411,13 +463,66 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 **Error**: `AttributeError: 'NoneType' object has no attribute 'ext'`
 
-**Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the correct Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExporter`
+**Solution**: Verify Step 4 (Register Extension) was completed correctly. The **Object** field must reference the extension class in the Text DAT: `op('CUDAIPCExporter').module.CUDAIPCExtension`
+
+This error means the extension registration itself is missing. A missing or unresolved
+`cuda_link` library is handled differently:
+
+### cuda_link not ready
+
+**Symptom**: The extension accessor exists, but no frames are transferred, and — only when
+none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
+cause-specific line, e.g. `cuda_link 1.14.1 not found - install it next to this .toe or set
+CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
+mismatch, a rival install already loaded, or this extension's own glue import failing after
+a successful bootstrap.
+
+`CUDAIPCExtension` is designed to compile even when its `cuda_link` imports cannot be resolved.
+In that degraded state, `library_ready` is `False`, `initialize()`, `export_frame()`, and
+`import_frame()` return `False`, and the callback templates return without raising. This keeps
+an unavailable library from failing once per frame while TouchDesigner is starting up.
+
+The Status line is deliberately short — it only names the specific cause and, where relevant,
+where to install a fix. The full reason goes to the Textport instead, in two places, both
+printed on every COMP load regardless of whether the mirrors are present:
+
+- The `[CUDALinkBootstrap]` line: `Library mode active — cuda_link <ver> from <folder>` on
+  success, or `Library mode off — COMP uses its mirror Text DATs if present (reason in
+  CUDALinkBootstrap.last_error)` on failure. Check `CUDALinkBootstrap.last_error` in the
+  Textport for the full per-layer reason — a version that does not match the component's
+  `MIRROR_VERSION`, a folder with no `cuda_link` in it, a different `cuda_link` already loaded
+  (see 3a under [Step 3](#step-3-create-text-dats)).
+- Only when none of the 15 mirrors are present: a one-time `[CUDAIPCExtension]` line with the
+  same cause-specific short text followed by the full detail, printed once per TD process
+  across all sibling COMPs (not once per COMP, and not suppressed across a later relaunch).
+  When the mirrors ARE present, this second line never prints — classic mode falls back
+  silently.
+
+Then check the state of the registered extension in the Textport:
+
+```python
+ext = op("/project1/CUDAIPCExporter").ext.CUDAIPCExtension
+print(ext.library_ready)
+```
+
+If it prints `False`:
+
+1. In **Library mode**, verify that an installed `cuda_link` whose `__version__` matches the
+   component sits in one of the places the resolver probes, in order: `<project.folder>`
+   (`/cuda_link`, `/StreamDiffusion`, `/src`, or the folder itself), `CUDALINK_LIB_PATH`, then
+   TouchDesigner's Python Module Path (see 3a under [Step 3](#step-3-create-text-dats) and
+   ADR-0014). There is no per-COMP parameter to set — put the install next to the `.toe` (a
+   venv, or a `pip install --target` folder), or point `CUDALINK_LIB_PATH` at it.
+2. In **Classic/fallback mode**, verify that the required mirror Text DATs are present; see
+   the mirror DAT sections under [Step 3](#step-3-create-text-dats).
+
+After the component compiles with the library available, `ext.library_ready` should be `True`.
 
 ### CUDA runtime DLL not found
 
 **Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
 
-**Solution**: The extension probes full CUDA Toolkit install paths (`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin\cudart64_12.dll`) first, then falls back to bare DLL names already loaded in the process. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit 12.x installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
+**Solution**: The extension probes full CUDA Toolkit 13.x and 12.x install paths first, then falls back to bare DLL names already loaded in the process, including legacy 11.x names. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
 ### SharedMemory already exists
 
@@ -446,7 +551,7 @@ if result.outcome is ImportOutcome.NEW_FRAME:
 
 You can use multiple `CUDAIPCExporter` components in one project:
 
-```
+```text
 /project1
   ├─ MainExporter      (Ipcmemname="main_camera")
   │    └─ input  ←─  Camera TOP
@@ -518,7 +623,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.8.0.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v1.14.1.tox` | `TOXES/` | Final built .tox component |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
 
@@ -533,5 +639,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 ---
 
 **Build Date**: 2026-05-29
-**Component Version**: 1.8.0
+**Component Version**: 1.14.1
 **TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)

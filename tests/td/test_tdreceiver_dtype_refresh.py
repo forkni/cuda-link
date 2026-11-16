@@ -14,17 +14,10 @@ in-place refresh seam independently of the sender bug.
 from __future__ import annotations
 
 import contextlib
-import sys
 import uuid
 from multiprocessing.shared_memory import SharedMemory
-from pathlib import Path
 
 import pytest
-
-_REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "td_exporter"))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def _make_receiver(shm_name: str):
@@ -587,6 +580,7 @@ def test_receiver_refresh_invalid_invariant_returns_false(shm_cleanup: SharedMem
         (1, 16, 2, "rg16fixed"),  # uint16 RG
         (2, 32, 2, "rg32float"),  # float32 RG
     ],
+    ids=["rgba32float", "r32float", "rgba16fixed", "r16fixed", "rgba8fixed", "r8fixed", "rg16fixed", "rg32float"],
 )
 def test_to_td_pixel_format(format_kind, bits, num_comps, expected):
     """td_format_string must produce the correct par.format string for every dtype/channel combo."""

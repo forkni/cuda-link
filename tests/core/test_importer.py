@@ -8,6 +8,7 @@ full open→get_frame→close lifecycle without a real CUDA device.
 from __future__ import annotations
 
 import struct
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -168,7 +169,7 @@ def test_release_connection_state_shared_teardown_path() -> None:
     imp_reconnect = _make_connected_importer()
     with patch.object(imp_reconnect._retry, "request_immediate_reconnect") as mock_reconnect:
         imp_reconnect._partial_cleanup_for_reconnect()
-        mock_reconnect.assert_called_once()
+        mock_reconnect.assert_called_once_with()
     assert imp_reconnect._conn is None
     assert imp_reconnect._numpy is None
     assert not imp_reconnect._initialized
@@ -364,7 +365,7 @@ def test_reconnect_request_immediate_skips_backoff() -> None:
     # After immediate reconnect, frames_since_last_retry == retry_interval_frames
     assert imp._retry.frames_since_last_retry == imp._retry.retry_interval_frames
     # And it changed from the value before
-    assert imp._retry.frames_since_last_retry != frames_before or imp._retry.retry_interval_frames == 1
+    assert imp._retry.frames_since_last_retry != frames_before
 
 
 def test_reconnect_for_testing_policy_has_reconnect_disabled() -> None:
@@ -454,10 +455,13 @@ def test_cupy_buffers_bfloat16_raises_clear_error() -> None:
 
 
 def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_reinitialize routes through Format.from_shm, not a hand-written decoder."""
+    """_reinitialize resolves geometry like _connect: SHM metadata via Format.from_shm,
+    with ImportSpec overrides layered on top, and restarts frame tracking at 0."""
+    import dataclasses
     import struct as _struct
 
     from cuda_link.importer import Format
+    from cuda_link.shm_protocol import DtypeCodec, Metadata
 
     original_from_shm = Format.from_shm
     calls: list = []
@@ -468,9 +472,22 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(Format, "from_shm", staticmethod(spy_from_shm))
 
-    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=1)
-    # Trigger a reinitialize by bumping the SHM version
+    imp = _make_connected_importer(shape=(4, 4, 4), dtype="float32", num_slots=1, write_idx=5, last_write_idx=5)
+    # Shape stays a spec override; dtype is auto-detected from SHM.
+    imp._spec = dataclasses.replace(imp._spec, dtype=None)
+
+    # The restarted producer publishes different geometry and dtype.
     shm_buf = imp._conn.shm_handle.buf
+    kind, bits, flags = DtypeCodec.encode("uint8")
+    Metadata(
+        width=2,
+        height=2,
+        num_comps=4,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=2 * 2 * 4,
+    ).pack_into(shm_buf, imp._conn.layout)
     # Bump version to trigger VERSION_CHANGED
     current_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
     _struct.pack_into("<Q", shm_buf, 4, current_ver + 1)
@@ -479,6 +496,10 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
     imp._reinitialize()
 
     assert len(calls) >= 1, "_reinitialize must call Format.from_shm"
+    assert imp._initialized
+    assert imp._format.shape == (4, 4, 4), "spec shape override must survive a restart"
+    assert imp._format.dtype_str == "uint8", "auto-detected dtype must follow the SHM"
+    assert imp._last_write_idx == 0, "frame tracking must restart for the new producer session"
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +590,9 @@ def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest
     # Call _reinitialize directly
     imp._reinitialize()
 
-    mock_numpy.close.assert_not_called(), "NumpyBuffers must NOT be torn down — shape+dtype unchanged"
+    # Trailing message dropped: `assert_not_called(), "msg"` builds a dead tuple, never
+    # surfaces "msg" — the check itself (assert_not_called) still enforces correctly.
+    mock_numpy.close.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +707,11 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
     mock_numpy = MagicMock()
     mock_numpy.needs_rebuild.return_value = False
     imp = _make_connected_importer(shape=old_shape, dtype=dtype, num_slots=1, write_idx=1, numpy=mock_numpy)
+    # Auto-detecting consumer: with spec overrides set, _reinitialize keeps them and
+    # the SHM shape below would not count as a change.
+    import dataclasses
+
+    imp._spec = dataclasses.replace(imp._spec, shape=None, dtype=None)
 
     # Write SHM metadata with a DIFFERENT shape (8×8 instead of 4×4)
     shm_buf = imp._conn.shm_handle.buf
@@ -705,7 +733,89 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
 
     imp._reinitialize()
 
-    mock_numpy.close.assert_called_once(), "NumpyBuffers MUST be torn down when shape changes"
+    mock_numpy.close.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# A1 fix — provisional-format re-resolve on first NEW_FRAME (metadata race)
+# ---------------------------------------------------------------------------
+
+
+def test_try_acquire_reresolves_provisional_format_on_first_new_frame() -> None:
+    """A1 fix: a connect-time fallback format re-resolves on the first NEW_FRAME.
+
+    Reproduces the metadata race: the importer connected before the producer had
+    written real metadata (SHM metadata block all-zero → _resolve_format() fell back
+    to a guessed format and set _format_provisional). The producer then writes real
+    metadata and its first frame *under the same version* — this never raises
+    VERSION_CHANGED, so _reinitialize() is never invoked. _try_acquire()'s NEW_FRAME
+    branch must re-resolve directly instead of leaving the bogus fallback format
+    stuck for the life of the connection.
+    """
+    from cuda_link.shm_protocol import WRITE_IDX_OFFSET, DtypeCodec, Metadata, SHMLayout
+
+    real_shape = (1080, 1920, 4)  # (H, W, C)
+    real_dtype = "float32"
+
+    # Connect as _resolve_format's fallback branch would: guessed (512, 512, 4)
+    # format, no frame written yet (write_idx=0), and the provisional marker set.
+    imp = _make_connected_importer(shape=(512, 512, 4), dtype="float32", num_slots=1, write_idx=0, last_write_idx=0)
+    imp._format_provisional = True
+
+    # Producer now writes real metadata + its first frame, SAME version (no reinit).
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode(real_dtype)
+    h, w, c = real_shape
+    Metadata(
+        width=w,
+        height=h,
+        num_comps=c,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=w * h * c * DtypeCodec.itemsize(real_dtype),
+    ).pack_into(shm_buf, layout)
+    struct.pack_into("<I", shm_buf, WRITE_IDX_OFFSET, 1)
+
+    slot_result, outcome = imp._try_acquire()
+
+    assert outcome is ImportOutcome.NEW_FRAME
+    assert slot_result is not None
+    assert not imp._format_provisional, "provisional flag must clear once real metadata is seen"
+    assert imp._format.shape == real_shape
+    assert imp._format.dtype_str == real_dtype
+
+
+def test_try_acquire_leaves_non_provisional_format_alone_on_new_frame() -> None:
+    """A non-provisional connect (real detection, or explicit spec overrides) must
+    not pay any re-resolve cost on NEW_FRAME — _format_provisional stays False and
+    the format is untouched even though SHM metadata differs from self._format."""
+    from cuda_link.shm_protocol import WRITE_IDX_OFFSET, DtypeCodec, Metadata, SHMLayout
+
+    imp = _make_connected_importer(shape=(8, 8, 4), dtype="uint8", num_slots=1, write_idx=0, last_write_idx=0)
+    assert not imp._format_provisional
+
+    # Write SHM metadata for a *different* shape — must be ignored since not provisional.
+    shm_buf = imp._conn.shm_handle.buf
+    layout = SHMLayout(1)
+    kind, bits, flags = DtypeCodec.encode("float32")
+    Metadata(
+        width=1920,
+        height=1080,
+        num_comps=4,
+        format_kind=kind,
+        bits_per_comp=bits,
+        flags=flags,
+        data_size=1920 * 1080 * 4 * DtypeCodec.itemsize("float32"),
+    ).pack_into(shm_buf, layout)
+    struct.pack_into("<I", shm_buf, WRITE_IDX_OFFSET, 1)
+
+    slot_result, outcome = imp._try_acquire()
+
+    assert outcome is ImportOutcome.NEW_FRAME
+    assert slot_result is not None
+    assert imp._format.shape == (8, 8, 4), "non-provisional format must not be silently overwritten"
 
 
 # ---------------------------------------------------------------------------
@@ -836,20 +946,59 @@ def test_adaptive_stays_latched_after_trigger() -> None:
     assert imp._gpu_wait_latched_frame == latched_at
 
 
-def test_adaptive_torch_backend_uses_gpu_wait_when_latched() -> None:
-    """_TorchBackend takes the stream_wait_event branch when _gpu_wait_active=True.
+def test_adaptive_torch_backend_uses_gpu_wait_when_latched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_TorchBackend.wait() takes the stream_wait_event branch when _gpu_wait_active=True.
 
     Confirms that policy.torch_gpu_wait=False but _gpu_wait_active=True still
-    routes through the GPU-side wait — i.e. the latch is consulted.
-    """
+    routes through the GPU-side wait — drives a real _TorchBackend.wait() call
+    and asserts conn.cuda.stream_wait_event is actually invoked, rather than
+    just re-evaluating the same boolean expression the SUT itself checks.
 
-    # Build importer with gpu_wait disabled in policy but latch already set
-    imp = _make_connected_importer()
+    wait() imports torch lazily and only touches torch.cuda.is_available() and
+    current_stream(), so a stand-in module in sys.modules covers that boundary and
+    the test runs on hosts without torch instead of skipping there.
+    """
+    from cuda_link.importer import _TorchBackend
+
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = True
+    fake_torch.cuda.current_stream.return_value = MagicMock(cuda_stream=123)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    # Build importer with gpu_wait disabled in policy but latch already set.
+    # with_events=True is required: _TorchBackend.wait() only takes the
+    # GPU-side branch when the slot has an IPC event (evt truthy).
+    imp = make_connected_importer(with_events=True)
     assert imp._policy.torch_gpu_wait is False
     imp._gpu_wait_active = True  # simulate a latched state
 
-    # Confirm the latch condition is recognised in the torch backend
-    assert imp._policy.torch_gpu_wait or imp._gpu_wait_active  # the OR that matters
+    backend = _TorchBackend(imp, stream=None)  # no explicit stream -> latch path
+    assert backend.wait(imp._conn, read_slot=0) == 0.0
+    # The stream handle is cached after the first call, so a later current_stream()
+    # change must not reach the second wait.
+    fake_torch.cuda.current_stream.return_value = MagicMock(cuda_stream=456)
+    backend.wait(imp._conn, read_slot=0)
+
+    evt = imp._conn.ipc_events[0]
+    assert [c.args for c in imp._conn.cuda.stream_wait_event.call_args_list] == [(123, evt, 0), (123, evt, 0)]
+
+
+def test_torch_backend_uses_cpu_wait_when_not_latched() -> None:
+    """_TorchBackend.wait() falls through to the CPU poll when the latch is unset.
+
+    Companion to the latched case above — confirms stream_wait_event is NOT
+    called when neither policy.torch_gpu_wait nor _gpu_wait_active is set.
+    """
+    from cuda_link.importer import _TorchBackend
+
+    imp = make_connected_importer(with_events=True)
+    assert imp._policy.torch_gpu_wait is False
+    assert imp._gpu_wait_active is False
+
+    backend = _TorchBackend(imp, stream=None)
+    backend.wait(imp._conn, read_slot=0)  # resolves via conn.cuda.query_event (pre-wired True)
+
+    imp._conn.cuda.stream_wait_event.assert_not_called()
 
 
 def test_adaptive_stats_visible_in_get_stats() -> None:

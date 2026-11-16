@@ -1,0 +1,11 @@
+# Mutation-testing config for src/cuda_link/_profile.py (cosmic-ray 8.4.x).
+[cosmic-ray]
+module-path = "src/cuda_link/_profile.py"
+timeout = 30.0
+excluded-modules = []
+# Absolute interpreter path: bare "python" resolves through the Windows App Paths
+# registry to a potentially different environment. One run ≈ 4.3 s (torch import).
+test-command = "C:/Users/INTER/AppData/Local/Programs/Python/Python311/python.exe -m pytest tests/support/test_profile_cov.py tests/td/test_report_window.py -x -q --tb=no -p no:cacheprovider"
+
+[cosmic-ray.distributor]
+name = "local"

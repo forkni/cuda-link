@@ -1,6 +1,7 @@
 # cuda-link Benchmarks
 
-All results measured on **RTX 4090 / PCIe 4.0 x16 / Windows 11 / NVIDIA driver 596.36**.
+All results measured on **RTX 4090 / PCIe 4.0 x16 / Windows 11 / NVIDIA driver 596.36**
+unless a section names another GPU.
 RGBA (4-channel) frames unless noted. Numbers produced by scripts in the local-only
 `benchmarks/` folder (gitignored). See [README](../README.md) for a summary view and
 [ARCHITECTURE.md](ARCHITECTURE.md#comparison-cuda-ipc-vs-cpu-sharedmemory) for
@@ -41,7 +42,7 @@ methodology and hardware caveats.
 **2×2 matrix** at 1080p uint8 RGBA, 2000 frames, single-process standalone.
 Measured 2026-06-10 via `scripts/profiling/profile_export.py --frames 2000 --export-profile`.
 
-```
+```text
 Cell   EXPORT_SYNC   USE_GRAPHS   median µs   p95 µs   p99 µs   sync region µs   WDDM subs/frame
 ----   -----------   ----------   ---------   ------   ------   ---------------   ---------------
 A      1 (blocking)  0 (off)         45.2      51.2    106.3         17.91               3
@@ -59,16 +60,21 @@ async as its default (Cell D / Cell B). Coexistence safety comes from explicit p
 streams and producer-stream ordering (`record_source_sync` / `require_source_sync`), not from
 blocking export.
 
+> **Caveat:** these export timings re-export the same source buffer in a tight loop, so the
+> frame stays in L2 (the 4090's 72 MB holds a 1080p float32 frame). See
+> [Hot vs cold L2](#hot-vs-cold-l2-rtx-4060-laptop) for how L2 temperature and GPU idle time move
+> an export timing on another GPU.
+
 **P3 graph gain (B→D): −4.0 µs p50 (22%)** — `cudaStreamWaitEvent` + `cudaEventRecord`
 are folded into the CUDA graph; only `cudaGraphLaunch` fires per frame. nsys confirms:
 graphs OFF → 3 submissions/frame (waitEvent + memcpyAsync + eventRecord = 550 calls each);
 graphs ON → 1 submission/frame (`cudaGraphLaunch`, 550 calls; waitEvent/eventRecord absent).
 
-**Full P1+P3 (A→D): −31.3 µs p50 (69%)**
+### Full P1+P3 (A→D): −31.3 µs p50 (69%)
 
 `per_region_avg_us` breakdown for reference:
 
-```
+```text
 Region            Cell A (µs)   Cell D (µs)   Notes
 --------------    -----------   -----------   ----------------------------------------
 stream_wait            1.26          0.00     folded into CUDA graph (P3)
@@ -100,7 +106,7 @@ Historical baseline pre-P1/P3 (v1.4.1 era). Updated blocking-arm numbers via
 1080p f32 → **106 µs**, 4K f32 → **357 µs** (see Summary table above; graphs ON,
 driver 596.36). Historical table retained for the graphs ON vs OFF comparison.
 
-```
+```text
 Resolution    Graphs off (p50 µs)   Graphs on (p50 µs)
 ----------    -------------------   ------------------
 512x512                      22.4                 19.4
@@ -113,11 +119,8 @@ With EXPORT_SYNC=1 the GPU D2D copy dominates; CUDA Graphs saves WDDM submission
 transitions but the net wall-clock difference is small (<5%). See the P1/P3 section above
 for the full breakdown including async mode (the large win).
 
-Reproduce with:
-
-```bash
-python benchmarks/bench_graphs.py --frames 2000 --sizes 512 1280 1920 3840
-```
+The historical `bench_graphs.py` script used for this table is not included in the repository,
+so this comparison is reference data rather than a command that can be run from a fresh checkout.
 
 ---
 
@@ -135,7 +138,7 @@ event (same priming contract as initial open).
 Measured 2026-06-10 via `scripts/profiling/bench_d2h_pipelined.py`, 5 ms synthetic CPU
 workload, 150 measurement frames (30 warmup), spawn-process IPC pair.
 
-```
+```text
 Resolution   non-pipe d2h µs   non-pipe cycle µs   pipe d2h µs   pipe cycle µs   gain µs   gain %   priming NO_FRAME
 ----------   ---------------   -----------------   -----------   -------------   -------   ------   ----------------
 512x512                  97              5099              89            5091         8       0%      YES
@@ -165,7 +168,7 @@ python scripts/profiling/bench_d2h_pipelined.py --resolution all --work-ms 5 --f
 
 Standalone D2H copy, no IPC overhead, 2000 frames.
 
-```
+```text
 Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 ----------    -----------------   ------------------   -------------
 512x512                    0.18                 0.19            22.2
@@ -177,11 +180,8 @@ Resolution    1 stream p50 (ms)   2 streams p50 (ms)   1 stream GB/s
 PCIe 4.0 saturates at ~23–24 GB/s. Single stream is sufficient; `CUDALINK_D2H_STREAMS=1`
 (default) is optimal for this platform.
 
-Reproduce with:
-
-```bash
-python benchmarks/bench_d2h_streams.py --frames 2000 --streams 1 2 --sizes 512 1280 1920 3840
-```
+The historical `bench_d2h_streams.py` script used for this table is not included in the repository,
+so this comparison is reference data rather than a command that can be run from a fresh checkout.
 
 ---
 
@@ -192,7 +192,7 @@ at 60 FPS. `export p50` and `get_numpy p50` are inflated vs standalone because b
 processes share PCIe bandwidth concurrently. `IPC notify p50` measures
 producer-publish → consumer-detects-write_idx (signaling latency, resolution-independent).
 
-```
+```text
 Resolution    dtype     Graphs   export p50 (µs)   get_numpy p50 (ms)   IPC notify p50 (µs)
 ----------    -------   ------   ---------------   ------------------   -------------------
 512x512       float32   off                898                 1.33                     172
@@ -212,12 +212,39 @@ Full 16-cell results (CSV + JSON) live in the local `benchmarks/results/` folder
 > lower than in pre-v1.10.2 measurements. Sweep figures above use a 60 FPS active producer
 > and are unaffected.
 
-Reproduce with:
+The historical `bench_sweep.py` script used for this table is not included in the repository, so
+these results are reference data rather than commands that can be run from a fresh checkout. For
+a tracked runnable benchmark, see [examples/07_python_to_td_exporter_and_benchmark.py](../examples/07_python_to_td_exporter_and_benchmark.py).
 
-```bash
-python benchmarks/bench_sweep.py          # full 16-cell sweep (~12 min)
-python benchmarks/bench_sweep.py --quick  # smoke test, 1 cell (~1 min)
+### Hot vs cold L2 (RTX 4060 Laptop)
+
+The sweep above exports the same source buffer on every frame and lets the GPU idle between
+frames at 60 FPS, so its `export p50` mixes two conditions a real pipeline may not share: a hot
+L2 and an idle (possibly downclocked) GPU. A local run of the sweep script on an **RTX 4060 Laptop
+(32 MB L2, PCIe 4.0 x8, driver 617.42)** separated them with two options that run a synchronous
+device-to-device copy before each timed export (not timed): `--wake` copies 4 KB (GPU awake, L2
+untouched) and `--cold` copies a buffer the size of L2 (GPU awake, L2 flushed). Float32 RGBA,
+graphs on, 200 warmup + 1000 frames at 60 FPS, one run per cell.
+
+```text
+Resolution   Frame     default p50 (µs)   --wake p50 (µs)   --cold p50 (µs)   cold − wake
+----------   -------   ----------------   ---------------   ---------------   -----------
+512x512        4 MB               234.2             115.5              97.8         −17.7
+1920x1080     33 MB               425.6             336.0             349.4         +13.4
+3840x2160    133 MB              1298.1            1209.3            1216.0          +6.7
 ```
+
+- **Cache temperature is not the lever.** `cold − wake` stays within ±5% at every size. The
+  512x512 difference is run-to-run noise: repeat runs gave 107–119 µs cold and 108–112 µs with the
+  4 KB copy. Only frames that fit in L2 could show a gap, and 1080p float32 (33 MB) is the
+  borderline case here; the 133 MB frame is cold either way.
+- **Idle time is.** Letting the GPU idle between frames adds about 90–120 µs (`default − wake`).
+  This is consistent with the GPU waking from a low-power state; the clocks were not sampled, so
+  the mechanism is not confirmed.
+- **Reading the tables.** The default numbers include that wake cost, so they are an upper bound
+  for a producer that has just run GPU work (StreamDiffusionTD exports right after its diffusion
+  step), where `--wake` is the closer reference. The 4090 numbers above were produced in default
+  mode and were not re-measured.
 
 ---
 
@@ -230,7 +257,7 @@ RTX 4090 / driver 596.36, 1920×1080 RGBA uint8, 60 FPS target, windowed (~97–
 averages. **TD→TD uses two separate TD instances** (same topology as the C++ TOPs' own
 cross-process design), not an in-process loopback.
 
-```
+```text
 Direction      Metric                    Original (TOX)              C++ Custom TOP
 -----------    ----------------------    -------------------------   ------------------------
 TD -> Python   FPS                       59.7                        60.0
@@ -290,7 +317,7 @@ on the In TOP) and cadence counters (`noframe_ratio`, `rescued`). Numbers below 
 windowed (~97-frame) averages from an interactive TD→TD session (format switches mid-run),
 **not** controlled p50 runs — directionally solid, tighter methodology pending.
 
-```
+```text
 Format (TD->TD, 60 FPS)   Out cook/gpu_ipc/gpu_pass (µs)   In cook/event_wait/gpu_copy (µs)   noframe_ratio
 -----------------------   ------------------------------   --------------------------------   -------------
 1080p uint8   (8 MB)          320 /  60 / 109                  282 /  30 / 146                 0.007
@@ -346,7 +373,7 @@ see above). C++ TD→TD end-to-end latency remains open — the planned `frame_a
 End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU
 SharedMemory baseline (PCIe 4.0):
 
-```
+```text
 Resolution    Method              Producer write   Consumer read   E2E
 ----------    ----------------    --------------   -------------   ---------
 1920x1080     CPU SharedMemory          2.60 ms         2.48 ms     5.37 ms
@@ -367,10 +394,11 @@ full hardware caveats and source data.
 
 ## R5: Native notification-wait accelerator (`Importer._wait_for_slot`)
 
-**Opt-in** via the `cuda-link-native` sidecar (installer default-on on Windows via
-`--native`; `--no-native` reverts to pure-Python). `ImportPolicy.wait_backend` selects
+Compiled into the core wheel on Windows (see
+[ADR-0012](adr/0012-native-extension-in-core-wheel.md) for the fold from a separate
+`cuda-link-native` sidecar into the single wheel). `ImportPolicy.wait_backend` selects
 `"auto"` (default) | `"python"` | `"native"`. See
-[PLAN-002](plans/PLAN-002-native-waiter.md) for the full design and
+PLAN-002 for the full design and
 [ADR-0006](adr/0006-stay-pure-python-no-rust.md) for why this narrow native escape hatch
 was taken instead of a broader Rust/C++ rewrite.
 
@@ -379,7 +407,7 @@ Measured 2026-07-04 via `scripts/profiling/bench_doorbell.py` (this script, not
 float32, 300 measurement frames + 40 warmup, single producer/consumer process pair,
 30 and 60 fps:
 
-```
+```text
 fps   Arm         CPU%   latency p50   latency p95
 ---   --------    ----   -----------   -----------
 30    doorbell    1.1%      69.3 us       141.4 us

@@ -87,14 +87,20 @@ def test_get_frame_on_unconnected_importer_returns_none() -> None:
     assert importer.get_frame() is None
 
 
-def test_get_frame_numpy_without_numpy() -> None:
-    """Test get_frame_numpy() raises when numpy not available."""
-    from cuda_link.cuda_ipc_importer import NUMPY_AVAILABLE, CUDAIPCImporter
+def test_get_frame_numpy_without_numpy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connected facade surfaces the missing-numpy RuntimeError instead of returning None.
 
-    if NUMPY_AVAILABLE:
-        pytest.skip("numpy is available, cannot test error case")
+    The flag is read by cuda_link.importer.Importer.get_frame_numpy(), so that is the
+    module patched. An unconnected facade returns None before it reaches the check.
+    """
+    from fakes import make_connected_importer
 
+    import cuda_link.importer as importer_mod
+    from cuda_link.cuda_ipc_importer import CUDAIPCImporter
+
+    monkeypatch.setattr(importer_mod, "NUMPY_AVAILABLE", False)
     importer = CUDAIPCImporter(shm_name="test", shape=(64, 64, 4))
+    importer._importer = make_connected_importer()
 
     with pytest.raises(RuntimeError, match="numpy is required"):
         importer.get_frame_numpy()

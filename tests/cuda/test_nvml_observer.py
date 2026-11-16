@@ -285,3 +285,54 @@ def test_ref_count_multiple_observers() -> None:
 
         obs2.stop()
         assert mock_pynvml.nvmlShutdown.call_count == 1  # final ref released
+
+
+def test_ref_count_released_when_start_fails_after_acquire() -> None:
+    """A failure after acquire() (e.g. nvmlDeviceGetHandleByIndex raises) must not leak the ref.
+
+    Regression test for: start() called _NVML_REFS.acquire() (which calls nvmlInit()) then
+    nvmlDeviceGetHandleByIndex() raised. Before the fix, the except block returned False
+    without releasing the ref — _NVML_REFS._count stayed at 1 forever and nvmlShutdown() was
+    never called, even though _started stayed False (so stop() could never release it either).
+    """
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = _NVMLError("device not found")
+
+    with patch("cuda_link.nvml_observer.pynvml", mock_pynvml), patch("cuda_link.nvml_observer.NVML_AVAILABLE", True):
+        import cuda_link.nvml_observer as nvml_mod
+        from cuda_link.nvml_observer import NVMLObserver
+
+        nvml_mod._NVML_REFS._count = 0
+
+        obs = NVMLObserver(device=0, enabled=True)
+        assert obs.start() is False
+        assert obs._started is False
+
+        # The failed attempt must not leave a dangling ref.
+        assert nvml_mod._NVML_REFS._count == 0
+        assert mock_pynvml.nvmlInit.call_count == 1  # acquire() did call nvmlInit()
+        assert mock_pynvml.nvmlShutdown.call_count == 1  # ...and it was released on failure
+
+
+def test_repeated_failed_start_does_not_compound_ref_count() -> None:
+    """A persistently-failing NVML init must not compound the ref count across retries.
+
+    start() sits on the export/import hot path (callers: __enter__, export_frame,
+    import_frame) — since _started stays False after a failure, a caller may legitimately
+    call start() again on the next frame. Each failed attempt must net to zero.
+    """
+    mock_pynvml = _make_mock_pynvml()
+    mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = _NVMLError("still not found")
+
+    with patch("cuda_link.nvml_observer.pynvml", mock_pynvml), patch("cuda_link.nvml_observer.NVML_AVAILABLE", True):
+        import cuda_link.nvml_observer as nvml_mod
+        from cuda_link.nvml_observer import NVMLObserver
+
+        nvml_mod._NVML_REFS._count = 0
+
+        obs = NVMLObserver(device=0, enabled=True)
+        for _ in range(3):
+            assert obs.start() is False
+
+        assert nvml_mod._NVML_REFS._count == 0
+        assert mock_pynvml.nvmlInit.call_count == mock_pynvml.nvmlShutdown.call_count == 3

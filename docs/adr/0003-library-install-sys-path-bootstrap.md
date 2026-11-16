@@ -1,6 +1,9 @@
 # ADR-0003: Library-install sys.path bootstrap (adopt alternative 1C)
 
-**Status**: Accepted (implemented 2026-05-29)
+**Status**: Accepted (implemented 2026-05-29); amended by ADR-0014 (2026-09-23) — the
+bootstrap now resolves the install through a layered lookup (an explicit folder, the project
+folder, `CUDALINK_LIB_PATH`, `sys.path`), rejects installs whose `__version__` differs from
+the mirrors' stamp, and refuses a rival copy that is already loaded.
 **Date**: 2026-05-29
 **Supersedes**: The "1C — TD path-shim" rejected alternative in ADR-0002 (now adopted).
 **Applies to**: `td_exporter/CUDALinkBootstrap.py`, `td_exporter/CUDAIPCExtension.py`,
@@ -10,7 +13,7 @@
 
 ## Context
 
-ADR-0002 (`byte-identical-td-mirror`) introduced `scripts/sync_td_wrapper.py` to keep 14
+ADR-0002 (`byte-identical-td-mirror`) introduced `scripts/sync_td_wrapper.py` to keep 15
 PascalCase mirror modules in `td_exporter/` in sync with their canonical `src/cuda_link/`
 counterparts. These mirrors exist because TouchDesigner loads sibling Text DATs by **bare
 module name** from a flat COMP namespace, not from a package on `sys.path`.
@@ -24,7 +27,7 @@ ADR-0002 explicitly evaluated and deferred **alternative 1C**:
 
 The library-install deployment story has now been established as the primary path. Users can
 install `cuda_link` into a stable external folder using `install_td_library.cmd`, point
-`CUDALINK_LIB_PATH` at it, and omit the 14 mirror Text DATs from the `.tox` entirely.
+`CUDALINK_LIB_PATH` at it, and omit the 15 mirror Text DATs from the `.tox` entirely.
 
 ## Decision
 
@@ -36,15 +39,25 @@ mode (ADR-0002 mirrors retained):
 3. At COMP init it:
    a. Reads `CUDALINK_LIB_PATH` from the environment and injects it onto `sys.path`.
    b. Imports `cuda_link` from the installed package.
-   c. Registers each of the 14 mirror module names (`Env`, `SHMProtocol`, `Exporter`, …) in
+   c. Registers each of the 15 mirror module names (including `Doorbell`) in
       `sys.modules` as aliases to the corresponding installed submodule
       (`cuda_link._env`, `cuda_link.shm_protocol`, `cuda_link.exporter`, …).
    d. If any step fails (package not installed, import error), silently no-ops — the existing
       sibling mirror Text DATs handle all bare-name imports as before.
 
-4. The 14 mirror modules in `td_exporter/` and `scripts/sync_td_wrapper.py` are kept
+4. The 15 mirror modules in `td_exporter/` and `scripts/sync_td_wrapper.py` are kept
    **unchanged**. The fallback / classic deployment (all DATs in the COMP, no install) remains
    fully functional without any modifications.
+
+   > **Amended (2026-09-23, ADR-0014, commit `be95662`):** `cuda_ipc_wrapper`,
+   > `nvml_observer` and `cuda_graphs` moved from `byte_identical` to `rewrite_relative` in
+   > `PAIRS`. Their canonical copies now use package-relative imports (`from ._env import …`),
+   > so the mirrors say `from Env import …` and never import the bare `cuda_link` name. The
+   > earlier `try: from cuda_link._env … except ImportError: from Env …` fallback let a
+   > classic-mode mirror pull its dependencies from whichever `cuda_link` happened to be on
+   > `sys.path`, which is the mixed-version failure ADR-0014 closes. The fallback deployment
+   > is unaffected: `rewrite_relative` is a mode ADR-0002 already defines, and the mirrors
+   > still resolve every dependency from sibling Text DATs.
 
 ### Why sys.modules aliasing rather than editing the glue files
 
@@ -57,6 +70,12 @@ issue: `TDReceiver.py` imports 15+ symbols from `SHMProtocol` (including the pri
 `sys.modules` aliasing keeps the 4 glue files byte-for-byte identical to today. The bootstrap
 is a single 80-line module that centralises all dual-mode logic. The alias map is explicitly
 cross-referenced against `PAIRS` by `tests/td/test_td_bootstrap.py::test_alias_map_covers_all_pairs`.
+
+> **Superseded (2026-09-14):** the byte-for-byte invariant above no longer holds for
+> `CUDAIPCExtension.py`. PR #44 rewrites it to compile unconditionally and never raise from TD
+> callbacks (degraded-mode import handling) — see the Consequences section below.
+> `TDSender.py`, `TDReceiver.py`, and `TDConfig.py` are unaffected and remain byte-for-byte
+> unchanged.
 
 ### Why this is safe for TD's embedded Python
 
@@ -96,21 +115,27 @@ out-of-process design is architecturally incompatible with these operations.
 ## Consequences
 
 **Positive:**
-- Primary `.tox` drops 14 mirror Text DATs (from ~24 to ~10). `.tox` size shrinks significantly.
+
+- Primary `.tox` drops 15 mirror Text DATs (from ~24 to ~10). `.tox` size shrinks significantly.
 - `CUDAIPCExtension.py`, `TDSender.py`, `TDReceiver.py`, `TDConfig.py` are byte-for-byte
-  unchanged — zero regression risk in the glue layer.
+  unchanged — zero regression risk in the glue layer. **Superseded (2026-09-14) for
+  `CUDAIPCExtension.py`** — see the note under "Why sys.modules aliasing rather than editing
+  the glue files" above; the other three glue files remain unchanged.
 - `install_td_library.cmd` gives users a one-step, no-venv install path.
 - The fallback is transparent and automatic: unset `CUDALINK_LIB_PATH` and the classic
   deployment just works.
 
 **Negative / trade-offs:**
+
 - One new file in the COMP (`CUDALinkBootstrap`) and one new import line in
   `CUDAIPCExtension.py`.
 - The bootstrap's alias map must be kept in sync with `PAIRS`; the drift-guard test enforces
   this.
-- If `CUDALINK_LIB_PATH` is set but points to a stale install (wrong version), library mode
+- ~~If `CUDALINK_LIB_PATH` is set but points to a stale install (wrong version), library mode
   activates with the wrong submodule versions. Users should re-run `install_td_library.cmd`
-  after upgrading. Future work could add version checks.
-- The 14 mirror Text DATs remain in the repo (needed for fallback and for the `.tox` assembly
+  after upgrading. Future work could add version checks.~~ Closed by ADR-0014: a candidate
+  whose `__version__` differs from the bootstrap's `MIRROR_VERSION` stamp is skipped without
+  being imported, and the COMP stays on its mirrors.
+- The 15 mirror Text DATs remain in the repo (needed for fallback and for the `.tox` assembly
   guide). They continue to be auto-generated by `sync_td_wrapper.py` — the fallback cost is
   maintenance of the sync script, which is unchanged.

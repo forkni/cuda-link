@@ -10,7 +10,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction A: TouchDesigner → Python (TD is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   TouchDesigner Process (Producer)     │
 │                                         │
@@ -55,7 +55,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 
 ### Direction B: Python → TouchDesigner (Python is Producer)
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │   Python Process (Producer)            │
 │                                         │
@@ -99,7 +99,7 @@ Both directions share the **same v0.5.0 binary protocol** — the consumer is sy
 
 The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
 
-```
+```text
 CUDAIPCExtension  (~300 LOC facade)
 ├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
 ├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
@@ -117,8 +117,8 @@ CUDAIPCExtension  (~300 LOC facade)
 
 **Two deployment modes** — `CUDALinkBootstrap` (a new Text DAT, the first import in `CUDAIPCExtension.py`) enables a choice at COMP init:
 
-- **Library mode** (recommended): install `cuda_link` into an external folder with `install_td_library.cmd`; set `CUDALINK_LIB_PATH` to that folder before launching TD. The bootstrap injects the folder onto `sys.path` and registers all 15 mirror module names as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
-- **Fallback / classic mode**: if `CUDALINK_LIB_PATH` is unset or the import fails, the bootstrap silently no-ops. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged). See ADR-0003 for rationale.
+- **Library mode** (recommended): install `cuda_link` once with `install_td_library.cmd`. The bootstrap resolves the install through a layered lookup — an explicit `basefolder` argument, then `<project.folder>` (`/cuda_link`, `/StreamDiffusion`, `/src`, or the folder itself), then `CUDALINK_LIB_PATH`, then whatever `sys.path` already provides (TD Preferences → Python 64-bit Module Path). Each root is probed as a venv (`venv/`, `.venv/`) or a `pip --target` folder; there is no per-COMP parameter to set. Only a candidate whose `__version__` equals the `MIRROR_VERSION` stamp written by `sync_td_wrapper.py` is imported; a mismatching install is skipped without being imported, and a different `cuda_link` that is already loaded in the process aborts resolution with a "restart TouchDesigner" message. On success all 15 mirror module names are registered as `sys.modules` aliases to the installed `cuda_link.*` submodules — so the 15 mirror Text DATs can be removed from the `.tox` entirely.
+- **Fallback / classic mode**: if no layer resolves, the bootstrap records why in `last_error` and falls back to the sibling Text DAT mirrors. All 15 mirror Text DATs must be present in the COMP (the original deployment story, unchanged); when they are, the fallback is silent. Only when none of the 15 mirrors are present as COMP siblings does the extension additionally print a cause-specific line to the Textport and tint the COMP's Status yellow. See ADR-0003 and ADR-0014 for rationale.
 
 ---
 
@@ -126,7 +126,7 @@ CUDAIPCExtension  (~300 LOC facade)
 
 ### Binary Layout (433 bytes for 3 slots)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │ HEADER (20 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
@@ -178,7 +178,9 @@ CUDAIPCExtension  (~300 LOC facade)
 │             [418]       bits_per_comp (uint8) — 8/16/32/64  │
 │             [419-420]   flags (uint16 LE)                   │
 │                         bit 0: bfloat16 (kind=Float,bits=16)│
-│                         bits 1-15: reserved=0               │
+│                         bit 1: mono+alpha (2ch, not RG)     │
+│                         bit 2: BGRA order (4ch uint8)       │
+│                         bits 3-15: reserved=0               │
 │             [421-424]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
 │ [425-432]   timestamp (float64)                             │
@@ -192,7 +194,7 @@ Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
 
 For `N` slots:
 
-```
+```text
 Total Size = 20 + (N × 128) + 1 + 20 + 8 bytes
 
 shutdown_offset = 20 + (N × 128)
@@ -216,7 +218,7 @@ A single-buffer approach would require producer and consumer to synchronize on e
 
 ### 3-Slot Pipeline Flow
 
-```
+```text
 Time →
 
 Frame 0:
@@ -312,7 +314,7 @@ relationship with any other stream, including the producer's default or compute 
 
 #### The Race — What Happens Without Ordering
 
-```
+```text
 Producer stream:   [kernel writes to src_buffer] ...
 IPC stream:                                        [D2D memcpy src→ring_slot]  ← reads before write!
 ```
@@ -327,7 +329,7 @@ not before it.
 **Option A — GpuFrame.producer_stream (per-frame):**
 
 ```python
-stream_handle = torch.cuda.current_stream().cuda_stream   # PyTorch
+stream_handle = torch.cuda.current_stream().cuda_stream  # PyTorch
 # stream_handle = cupy.cuda.get_current_stream().ptr       # CuPy
 exporter.export(GpuFrame(ptr=..., size=..., producer_stream=stream_handle))
 ```
@@ -388,7 +390,7 @@ outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDA
 Three distinct stream hazards are each addressed by the correct mechanism:
 
 - **Receiver teardown TDR** (fixed v1.4.1) — eliminated by dedicated, persistent per-engine
-  streams (`CUDALINK_TD_PERSIST_STREAM=1`, default). No sender-side sync needed.
+  streams (the former `CUDALINK_TD_PERSIST_STREAM=1`, no longer a switch). No sender-side sync needed.
 - **Producer-side cross-stream race** (fixed v1.9.0) — eliminated by `record_source_sync` /
   `require_source_sync` (see above). These ordering primitives guarantee the source is fully
   written before the copy *starts* — they do not keep the source alive past the queued D2D read.
@@ -449,7 +451,7 @@ When `CUDALINK_TORCH_GPU_WAIT=1`, the torch consumer path replaces the host-side
 `cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
 batches into a multi-hundred-microsecond stall.
 
-```
+```text
 Default (CUDALINK_TORCH_GPU_WAIT=0):
   cudaEventSynchronize(ipc_event[slot])              <- CPU blocks until GPU signal, ~50-200 us WDDM-batched
 
@@ -478,7 +480,7 @@ call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between 
 
 **Flow**:
 
-```
+```text
 Producer (after advancing write_idx):
   SetEvent(doorbell_handle)                      <- ~0.02-0.10 ms, cook-thread safe, no FPS dip
 
@@ -529,19 +531,35 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
    - Open event with `cuda.ipc_open_event_handle()` → event
 4. Create zero-copy tensor views (if torch available)
 
-**Note on pixel format compatibility** (empirically probed, TD 2025.32820 — see `verification/results/cuda_memory_probe_20260510_090919.json`):
+**Note on pixel format compatibility.** These results come from a full matrix probe on TD 2025.33230 (2026-10-19). Each of the 22 Noise TOP `format` menu entries was a source, at 1280×720 with values roughly −0.24 to 1.24. Each source was tried with default `cudaMemory()` and with `cudaMemory(pixelFormat=<each of the 22 names>)`, 506 calls in all. Every buffer that came back was copied D2H and compared with `numpyArray()`.
 
 | Category | Formats | `cudaMemory()` behaviour |
 |---|---|---|
-| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in R/RG/RGBA/A variants | Returns correct `uint8` / `uint16` / `float32` buffer |
-| **Rejected outright** | All 4 float16 variants (R/RG/RGBA/A); 10-bit RGB / 2-bit Alpha fixed | Raises exception; Sender skips frame + tints component **yellow** via `parent().color`; resumes when upstream format is corrected |
-| **Silent corruption** | 11-bit float (RGB) | `cudaMemory()` "succeeds" but returns `dataType=uint8, numComps=4` (raw byte layout of the 32-bit packed word, NOT the 11:11:10 float semantic); treated as unsupported — same skip + yellow-tint policy |
+| **Supported** (no conversion) | 8/16-bit fixed and 32-bit float in RGBA/RG/Mono/A/Mono+Alpha variants (14 formats) | Returns a `uint8` / `uint16` / `float32` buffer that matches `numpyArray()` exactly. Row order is the same, with no vertical flip. 8-bit RGBA is the exception: it comes back **BGRA** (see below). |
+| **Rejected: float16** | All 5 float16 variants (RGBA/RG/Mono/A/Mono+Alpha) | `tdError: Texture is invalid pixel format to be shared with CUDA.` The Sender avoids it by requesting the matching `*32float` target (see "Float16 sources are converted" below). |
+| **Rejected: packed** | 10-bit RGB / 2-bit Alpha fixed; 11-bit float (RGB) | `Source TOP has unsupported pixel format.` They are also refused as `pixelFormat=` targets ("no native dtype"). Same skip + yellow-tint policy. |
 
-The Sender extension (`_is_unsupported_format`) detects all six problematic formats by substring match on the pixel-format string. On detection each bad frame:
+On TD 2025.32820 (2026-05-10 probe), the 11-bit float format did not raise an error. It returned `dataType=uint8, numComps=4`, which is the raw bytes of the packed 32-bit word, not the 11:11:10 floats. The Sender still treats it as unsupported.
+
+**The `pixelFormat` kwarg (format conversion).** `cudaMemory(pixelFormat=<menu name>)` takes the same string `.pixelFormatName` returns. The live docstring documents it, but the bundled offline docs do not. TD converts on the GPU before sharing. In the matrix it behaved as follows:
+
+- **Every supported source converts to every one of the 14 supported targets.** Each converted channel matched `numpyArray()` within the target's quantization: exact for `float32`, ≤ 2e-5 for 16-bit fixed, ≤ 4e-3 for 8-bit fixed. Fixed targets clamp to [0, 1], and float targets keep out-of-range values.
+- Narrowing follows the layout. Mono widens to RGB = R and A = 1. A widens to RGB = 0 and A = A. Mono+Alpha maps to R and A.
+- **Float16 sources convert too, and it is the only way to share them.** `pixelFormat='rgba32float'` (or `mono32float`, `rg32float`, `a32float`, `monoalpha32float`) returns `float32` that matches `numpyArray()` bit-exactly and keeps the full range, so it is lossless. `pixelFormat='rgba16fixed'` keeps 8 bytes per pixel but clamps to [0, 1]. Requesting a float16 target, including the source's own format, raises the same "invalid pixel format" error.
+
+**`cm.size` can be the allocation, not the payload.** Every buffer in the matrix reported `size = 14,745,600`, i.e. W×H×16, whatever the source or target format. The probe's TOP started as `rgba32float` (16 B/px), and TD keeps the larger CUDA allocation after a dtype shrink. So this shows that `cm.size` lags on a shrink. It does not show that `cm.size` is always W×H×16. The bytes past `shape` (H×W×numComps×itemsize) hold stale data, 11 MB of non-zero bytes in the 8-bit RGBA case. Size host buffers by `cm.size`, or copy only the `shape` byte count. Copying `cm.size` bytes into a buffer sized from `shape` overruns it. A first version of this probe did exactly that and crashed TouchDesigner. The Sender already handles this in `export_frame`. It resolves the dtype from `pixelFormatName` before it trusts `cm.size`. It also copies only `Exporter.data_size` bytes, the front region of a stale allocation.
+
+**8-bit RGBA is BGRA.** For an `rgba8fixed` source with default `cudaMemory()`, and for any source converted with `pixelFormat='rgba8fixed'`, the four channels come back in **B, G, R, A** order. 16-bit and 32-bit RGBA come back in R, G, B, A order. The Sender sets `FLAGS_BGRA` (bit 2) in the SHM header for `rgba8fixed` sources, on both the init and reopen paths, so Python consumers can tell BGRA bytes from RGBA. A TD→TD round trip is unaffected.
+
+`RealTOPHandle.cuda_memory(stream, pixel_format)` forwards `pixelFormat`; TDSender uses it for float16 sources (see "Float16 sources are converted" below).
+
+The Sender extension (`_is_unsupported_format`) detects all seven problematic formats (five float16, 10-bit, 11-bit) by substring match on the pixel-format string. On detection each bad frame:
 
 1. Calls `set_warning_status(msg)` (sets `parent().color` to amber-yellow — visible on the COMP node body, idempotent).
 
-The frame is skipped, and `clear_status()` is called as soon as the upstream format is corrected (restoring the original COMP color). Engine-fatal errors (init failure, IPC handle failure, GPU alloc failure) instead call `set_error_status(msg)`, which tints the COMP red and emits a red `addScriptError` badge. No auto-conversion is performed; fix the upstream source TOP instead. Supported formats: `uint8`, `uint16` (fixed), `float32` in R/RG/RGBA/A channel configurations.
+The frame is skipped, and `clear_status()` is called as soon as the upstream format is corrected (restoring the original COMP color). Engine-fatal errors (init failure, IPC handle failure, GPU alloc failure) instead call `set_error_status(msg)`, which tints the COMP red and emits a red `addScriptError` badge. Supported formats: `uint8`, `uint16` (fixed), `float32` in R/RG/RGBA/A channel configurations.
+
+**Float16 sources are converted, not rejected.** When `pixelFormatName` is one of the five float16 names (`rgba16float`, `rg16float`, `mono16float`, `a16float`, `monoalpha16float`), the Sender calls `cudaMemory(pixelFormat=<matching *32float name>)` on every frame. TD converts the texture on the GPU before sharing it, and the result matches `numpyArray()` bit-exactly with the full range kept (pixel-format matrix probe, TD 2025.33230). The published spec is `float32`, so receivers see an ordinary float32 stream, and switching the upstream TOP between float16 and float32 does not reopen the Exporter. Measured cost (1280×720 RGBA, TD 2025.33230, 55 forced-cook samples each): `cudaMemory()` takes a median 0.89 ms with conversion against 0.86 ms for a native `rgba32float` source, while a `numpyArray()` CPU readback of the same TOP takes 3.4 ms. The conversion therefore stays on the GPU and adds no measurable CPU-side time; the remaining cost is twice the bytes of a float16 frame (14.7 MB vs 7.4 MB at 720p) in the D2D copy and on the receiver. These are CPU wall-clock timings of the call, so GPU-side work queued asynchronously is not included. A float16 source with an unmapped name (e.g. `useinput`) still takes the skip + yellow-tint path above.
 
 > **Why tint-only (empirically confirmed):** TD has no anytime-yellow-badge API — `addScriptWarning` does not exist; `addWarning` raises `tdError: Cannot set warning outside of cook` when called from `onFrameEnd` (a post-cook lifecycle callback, confirmed via `verification/results/probe_addwarning_*`); `addScriptError` is always red. A child Script TOP's `onCook` IS a valid cook context where `addWarning` succeeds, but TD does not propagate the child warning to the parent COMP boundary tile — neither via `comp.warnings()` nor as a visual badge (confirmed via `verification/results/probe_cook_context_*`). The COMP body tint is therefore the only COMP-local warning surface available.
 
@@ -549,7 +567,7 @@ The frame is skipped, and `clear_status()` is called as soon as the upstream for
 
 **Producer** (~2-5µs IPC overhead, plus GPU D2D copy):
 
-```
+```text
 get TOP's cudaMemory() → src_ptr
 slot = write_idx % NUM_SLOTS
 cudaMemcpy D2D (src_ptr → gpu_buffer[slot])  ← GPU work, scales with frame size
@@ -560,7 +578,7 @@ shm.buf[12:16] = struct.pack("<I", write_idx) ← ~0.5µs
 
 **Consumer** (~1-3µs overhead):
 
-```
+```text
 write_idx = struct.unpack("<I", shm.buf[12:16])  ← ~0.5µs
 read_slot = (write_idx - 1) % NUM_SLOTS
 cudaStreamWaitEvent(ipc_event[read_slot])       ← ~0.5-2µs (GPU-side)
@@ -628,9 +646,26 @@ users report resize hitches in practice.
 
 **Scenario**: TD crashes after `cudaMemcpy` but before `cudaEventRecord`.
 
-**Impact**: Consumer waits indefinitely on IPC event.
+**Impact**: On the default CPU-side wait paths, the consumer waits until
+`ImportSpec.timeout_ms` (5 seconds by default) and then returns
+`ImportOutcome.TIMEOUT`; it does not wait indefinitely. The timed-out frame is
+not consumed: the next `get_frame*()` call sees it pending again, but only
+re-checks its event once instead of blocking for another `timeout_ms`. It returns
+`ImportOutcome.NEW_FRAME` if the event has fired by then, otherwise
+`ImportOutcome.NO_FRAME`, until the event fires or a newer frame is published
+(which gets a full wait of its own).
 
-**Mitigation**: Consumer uses timeout on `wait_event` (future enhancement). Currently, consumer will hang - restart required.
+**Mitigation**: Handle `ImportOutcome.TIMEOUT` and inspect the producer's logs.
+The opt-in torch GPU-side wait (`CUDALINK_TORCH_GPU_WAIT=1`, or an explicit
+consumer stream) and the CuPy path enqueue the event wait on the GPU instead;
+those paths intentionally do not report `TIMEOUT`, so a hung producer can
+stall the consumer stream. Exception: if a ring slot carries no IPC event at
+all, both GPU-side paths fall back to the CPU wait so the read stays ordered —
+in that case `TIMEOUT` is still reachable.
+
+`TIMEOUT` means the event stayed "not ready". A hard `cudaEventQuery` error (for
+example a sticky fault in the consumer's context) raises `RuntimeError` instead,
+on both the native waiter (status `CUDA_ERROR`, 5) and the pure-Python wait path.
 
 ### Consumer Crashes
 
@@ -694,7 +729,7 @@ RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. Full tables and per-resolu
 
 **Theoretical max FPS** (ignoring application logic; isolated export, EXPORT_SYNC=1):
 
-```
+```text
 FPS_max = 1 / export_frame_p50
         = 1 / 106 us   (1080p f32)  ~= 9,400 FPS
         = 1 / 357 us   (4K f32)     ~= 2,800 FPS
@@ -702,7 +737,7 @@ FPS_max = 1 / export_frame_p50
 
 **Practical limit** (with 60 FPS TD cook + 16ms AI model inference):
 
-```
+```text
 FPS_actual = min(TD_FPS, 1 / inference_time)
            = min(60, 1 / 0.016)
            = 60 FPS
@@ -710,7 +745,7 @@ FPS_actual = min(TD_FPS, 1 / inference_time)
 
 **Latency** (producer write -> consumer read, bench_sweep + bench_d2h_streams, 1080p f32):
 
-```
+```text
 Latency ~= IPC_notify + D2H_copy
         ~= 136 us + 1,320 us
         ~= 1.5 ms
@@ -847,7 +882,6 @@ See the dedicated subsections in **GPU Synchronization → R1** and **GPU Synchr
 - **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing host-side `cudaEventSynchronize` with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
 - **R2** (`CUDALINK_DOORBELL=1`): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
 - **R3**: pinned-memory f16 fallback in CuPy wait path — prevents dtype mismatch on f16 producers.
-- **R4** (`CUDALINK_TD_GRAPHS_DEFERRED=1`): defers CUDA graph capture to the second cook, avoiding capture on the first cook when TD state may be incomplete.
 
 ---
 
@@ -860,12 +894,15 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0003** — Library-mode bootstrap via `sys.path` injection
 - **ADR-0004** — Legacy CUDA IPC over VMM driver API
 - **ADR-0005** — Static typing hardening (per-file suppression policy, no category blankets)
-- **ADR-0006** — Stay pure-Python (Rust `cuda-oxide`/`cudarc` evaluated and deferred)
+- **ADR-0006** — Stay pure-Python (Rust `cuda-oxide`/`cudarc` evaluated and deferred; packaging conclusion superseded by ADR-0012)
 - **ADR-0007** — Spout as a sidecar-launcher COMP, not an embedded transport
 - **ADR-0008** — No native work on the D2H readback path
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
 - **ADR-0010** — Park the Out TOP CUDA-Graphs path (array-source node update rejected)
 - **ADR-0011** — Port CUDA Graphs to the In TOP via a keyed graph-exec cache
+- **ADR-0012** — Fold the native extension into the core wheel (supersedes ADR-0006's packaging conclusion)
+- **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
+- **ADR-0014** — Project-anchored install resolution: layered lookup (explicit folder → project folder → `CUDALINK_LIB_PATH` → `sys.path`), `MIRROR_VERSION` stamp checked before import, rival install refused (amends ADR-0003)
 
 ---
 
@@ -877,5 +914,5 @@ See `docs/adr/` for the full Architecture Decision Record index:
 
 ---
 
-**Last Updated**: 2026-06-12
-**Version**: 1.11.0
+**Last Updated**: 2026-09-26
+**Version**: 1.14.1

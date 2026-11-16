@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """
 TDHost adapter — isolates all TouchDesigner runtime access behind a Protocol seam.
 
@@ -10,6 +12,7 @@ textDAT name: TDHost  (must match the importable module name inside the COMP nam
 from __future__ import annotations
 
 import contextlib
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -247,6 +250,18 @@ _WARNING_COLOR: tuple[float, float, float] = (0.9137, 1.0, 0.0)
 _ERROR_COLOR: tuple[float, float, float] = (0.7, 0.0, 0.0)
 _DEFAULT_NODE_COLOR: tuple[float, float, float] = (0.55, 0.55, 0.55)
 _MANAGED_COLORS = (_WARNING_COLOR, _ERROR_COLOR)
+# comp.color round-trips through TD's internal float32 storage, so a value we set as a
+# float64 literal (e.g. 0.7) reads back as 0.699999988... -- an exact `in` membership
+# check against _MANAGED_COLORS then never matches and the stale-tint reset silently
+# no-ops. float32 rounding error is ~1e-7; 1e-3 is comfortably above that and well below
+# the distance between any two colours we use here.
+_COLOR_MATCH_TOL = 1e-3
+
+
+def _is_managed_color(rgb: tuple[float, float, float]) -> bool:
+    return any(
+        all(math.isclose(a, b, abs_tol=_COLOR_MATCH_TOL) for a, b in zip(rgb, managed)) for managed in _MANAGED_COLORS
+    )
 
 
 class RealTDHost(TDHost):
@@ -275,7 +290,7 @@ class RealTDHost(TDHost):
     def param_value(self, name: str) -> Any:
         try:
             return getattr(self._comp.par, name).eval()
-        except AttributeError:
+        except (AttributeError, RuntimeError):
             return None
 
     def set_param_value(self, name: str, value: Any) -> None:
@@ -295,7 +310,7 @@ class RealTDHost(TDHost):
             return True  # no Active par → always active (backward compat)
         try:
             return bool(self._active_par.eval())
-        except AttributeError:
+        except (AttributeError, RuntimeError):
             return True
 
     def find_top(self, name: str) -> RealTOPHandle | None:
@@ -341,7 +356,7 @@ class RealTDHost(TDHost):
         with contextlib.suppress(AttributeError, RuntimeError):
             c = self._comp.color
             current = (float(c[0]), float(c[1]), float(c[2]))
-            if current in _MANAGED_COLORS:
+            if _is_managed_color(current):
                 self._comp.color = _DEFAULT_NODE_COLOR
                 self._comp.clearScriptErrors(error="*")
                 self._comp.unstore("cuda_link_status_msg")
@@ -352,7 +367,7 @@ class RealTDHost(TDHost):
         with contextlib.suppress(AttributeError, RuntimeError):
             c = self._comp.color
             current = (float(c[0]), float(c[1]), float(c[2]))
-            if current not in _MANAGED_COLORS:
+            if not _is_managed_color(current):
                 self._default_color = current
                 return
         # Fallback: current color is managed (stale tint from prior session) or
@@ -364,27 +379,35 @@ class RealTDHost(TDHost):
     def set_warning_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"WARNING: {msg}"
-        needs_cook = self._status_msg != full_msg
-        self._status_msg = full_msg
+        if self._status_msg == full_msg:
+            # Called every cook while the condition lasts. The COMP is already marked; only the
+            # Status par can have moved on (set_info_status), and the write dedups when it has not.
+            self._write_status_par(full_msg)
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _WARNING_COLOR
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # drop the badge the earlier error left
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def set_error_status(self, msg: str) -> None:
         self._capture_default_color()
         full_msg = f"ERROR: {msg}"
-        needs_cook = self._status_msg != full_msg
-        self._status_msg = full_msg
+        if self._status_msg == full_msg:
+            self._write_status_par(full_msg)  # see set_warning_status
+            return
         with contextlib.suppress(AttributeError, RuntimeError):
             self._comp.color = _ERROR_COLOR
-            self._comp.addScriptError(msg)
+            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
+                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
             self._comp.store("cuda_link_status_msg", full_msg)
+            self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
+            self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
-        if needs_cook:
-            self._cook_warning_emitter()
+        self._cook_warning_emitter()
 
     def clear_status(self) -> None:
         needs_cook = self._status_msg is not None

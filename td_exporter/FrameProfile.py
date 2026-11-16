@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Alexander Korneev
+# SPDX-License-Identifier: MIT
 """Per-frame profiling accumulator for cuda-link hot paths."""
 
 from __future__ import annotations
