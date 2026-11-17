@@ -358,6 +358,23 @@ Notes:
 - An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
   frame (see "Topology"). The dev-box scenes load the DLLs through the Plugin Path parameter.
 
+### Framewaitms guard (2026-11-17)
+
+A Python `Exporter` at 30 FPS sent to TD B at 60 FPS for 60 s, into an In TOP with
+`Framewaitms` 3. One run used a DLL built from e23a09a (with the guard). The control run used
+the 00d7406 DLL (no guard). Each In TOP was alone on its channel name. Cook time is the In TOP
+`cpuCookTime`, which includes the wait. New and duplicate frames come from `producer_frame`.
+
+| In TOP | Cook time p50 / p95 / p99 / max | New / duplicate | Gaps | `frame_wait_skipped` |
+|---|---|---|---|---|
+| With guard (e23a09a) | 0.12 / 2.56 / 3.71 / 4.92 ms | 1781 / 1818 (50.5 %) | 0 | +1785 |
+| No guard (00d7406) | 3.13 / 4.67 / 5.02 / 7.23 ms | 1782 / 1816 (50.5 %) | 0 | n/a |
+
+The guard skips the wait on about one cook in two, when the next publish cannot arrive in the
+budget. The frames shown are the same. About 50 % duplicates is correct for 30 FPS into 60 FPS.
+Without the guard, 2088 of 3599 cooks took more than 1 ms. The `.tox` Receiver gave the same
+result in the same test: `onFrameStart` p50 3.12 -> 0.22 ms.
+
 ## Same-process limitation
 
 CUDA IPC cannot open a handle in the process that exported it. A `CudaLinkInTOP` that
