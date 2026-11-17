@@ -405,10 +405,13 @@ Findings:
 
 - Correctness: `.tox` Sender → `.tox` Receiver, `.tox` → Python and Python → `.tox` work on
   v0.6. Gaps and duplicates come from the two frame clocks, not from lost or reordered frames.
-- Sender export cost: the 2.0 `.tox` Sender export is about 25 % cheaper than 1.14.1
-  (p50 372-451 µs against 524-671 µs, 6 and 4 cells). This is with the 2.0 producer signalling
-  the doorbell on every frame. Caveat: the two versions ran in different modes (classic and
-  library); a same-mode rerun is not done.
+- Sender export cost: not attributed. The 2.0 cells had a lower p50 (372-451 µs against
+  524-671 µs), but the send path since `v1.14.1` only adds work (slot meta, `Streamid`, the
+  doorbell signal, the `slot_meta` CHOP cook). Both versions show two cost levels (about
+  400 µs and about 550-650 µs), and most of the time is `top.cudaMemory()`, not `export()`
+  (14-45 µs in the library benchmarks). The versions also ran in different modes and in
+  sequence (all 2.0 cells first). Open: a same-mode, interleaved run that times
+  `cudaMemory()` and `export()` apart.
 - Import cost: the same in both versions (`ImportBuffer` p50 0.14-0.23 ms).
 - TD → TD duplicate %: one 60 s run does not rank versions. 2.0 gave 0.08-10.4 % over four runs,
   with no relation to the env. The `.tox` Receiver polls `write_idx` once per frame start and
@@ -417,13 +420,46 @@ Findings:
   against about 0.7-0.8 ms with poll-sleep, in both versions. In 2.0 the producer makes the
   event by default, so a consumer with the variable unset gets the native wait backend (1.14.1:
   python). The consumer still has to set `=1` to wait on the event.
-- Python → TD: the identical sender script ran closer to 60 fps with 2.0 (59.3-59.9) than with
-  1.14.1 (58.6) in this test. With the sender rate near the receiver rate, phase jitter gives
-  more gaps (80-110 against 8-18); duplicates are about the same (3.0-3.4 % against 2.5-2.8 %).
-  The cause of the higher 2.0 send rate is not measured.
+- Python → TD: the sender rate is a property of the test, not of the library. The example
+  sender paces with a relative `time.sleep`, so its rate is 1/60 s plus the Windows sleep
+  overshoot; export cost is absorbed. The stamp-derived rate was 59.3-59.9 fps in the 2.0
+  runs and 58.6 fps in the 1.14.1 runs (the sender's own last status line read 58.5-58.8 in
+  all runs). A 58.6 fps sender gives a duplicate floor of (60 - 58.6) / 60 = 2.3 %, so most
+  T3 duplicates come from the pacing. A rate near 60 fps gives more phase gaps (80-110
+  against 8-18).
 - Install: the 1.14.1 release `.tox` has no mirror DATs. With only `cuda_link` 1.13.0 on TD's
   path it stays inert (Status warning "found but not version 1.14.1"); it needs a matching
   `cuda_link` next to the `.toe` or on `CUDALINK_LIB_PATH`.
+
+### `.tox` Receiver `Framewaitms` (prototype, 2026-11-17)
+
+The `.tox` Receiver got the In TOP's doorbell wait (`TDReceiver.wait_for_new_frame()`): when
+`onFrameStart` finds no new frame, it waits on the doorbell in 1 ms slices up to `Framewaitms`
+(default 3 ms, 0 = off) and polls `write_idx` after each slice. Measured with the change
+loaded into the dev scene, not yet committed. Same setup as above, 2.0 only, doorbell `=1`,
+fw0 and fw3 runs alternated. "Sweep": TD B at 59.9 fps, so the phase crosses a full frame
+every 10 s (6 cycles per 60 s run); this gives a repeatable TD → TD duplicate number.
+"`onFrameStart`" is B's Execute DAT `onFrameStart` time, which holds the wait.
+
+| Case | Framewaitms | Dup % | Latency p50 / p95 ms | `onFrameStart` p50 / p95 ms | Waits that got a frame |
+|---|---|---|---|---|---|
+| T1 `.tox` → `.tox`, sweep | 3 | 0.17 | 7.2 / 15.2 | 0.22 / 0.47 | 334 |
+| | 0 | 1.06 | 8.2 / 15.6 | 0.21 / 0.32 | 0 |
+| T1 `.tox` → `.tox`, both 60 fps | 3 | 0.50 | 14.1 / 14.6 | 0.24 / 2.65 | 904 |
+| | 0 | 0.81 | 14.2 / 14.9 | 0.22 / 0.42 | 0 |
+| T3 Python → `.tox` | 3 | 2.53 | 5.0 / 12.6 | 0.26 / 3.43 | 772 |
+| | 0 | 2.23 | 8.6 / 15.9 | 0.22 / 0.35 | 0 |
+
+- Gain: with drifting clocks the wait cuts duplicates about 6x (1.06 % to 0.17 %); at equal
+  rates 0.81 % to 0.50 %. T3 latency p50 goes from 8.6 to 5.0 ms. T3 duplicates stay at the
+  sender's pacing floor.
+- Cost: TD B's main thread waits up to the budget on a frame with no new frame:
+  `onFrameStart` p95 2.65-3.43 ms at fw3 against 0.32-0.42 ms at fw0. At equal rates nearly
+  every wait got its frame (904 waits, 18 duplicates left). The 10-17 ms maxima also occur at
+  fw0 (TD hitches), so they are not from the wait.
+- A sender slower than the receiver (a 30 fps camera into 60 fps TD) or a paused sender would
+  wait the full budget for nothing. Decided 2026-11-17: a predictive guard in both receivers
+  (wait only when the next expected publish is within the budget); not measured yet.
 
 ## vs CPU SharedMemory
 
