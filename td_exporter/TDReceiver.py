@@ -281,6 +281,9 @@ class TDReceiverEngine:
         # session-lifetime gap counters the In TOP shows as frame_gap_count /
         # producer_skip_count.
         self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
+        # write_idx of the last frame that reached the output; 0 = none on this connection.
+        # Not _connection.last_write_idx: that one also advances for a frame the copy drops.
+        self._shown_write_idx: int = 0
         self.last_latency_us: float = 0.0
         self.frame_gap_count: int = 0
         self.producer_skip_count: int = 0
@@ -403,19 +406,16 @@ class TDReceiverEngine:
         2^24 (exact in float32); ``last_slot_meta.producer_frame`` has the full value.
         """
         meta = self.last_slot_meta
-        return dict(
-            zip(
-                SLOT_META_CHANNELS,
-                (
-                    float(meta.producer_frame % INFO_CHOP_FRAME_MOD),
-                    float(meta.stream_id),
-                    float(self.last_latency_us),
-                    float(self.frame_gap_count),
-                    float(self.producer_skip_count),
-                ),
-                strict=True,
-            )
+        # No zip(strict=True): it needs Python 3.10 and this file runs on 3.9. The test
+        # suite checks that the result has exactly SLOT_META_CHANNELS, in order.
+        values = (
+            float(meta.producer_frame % INFO_CHOP_FRAME_MOD),
+            float(meta.stream_id),
+            float(self.last_latency_us),
+            float(self.frame_gap_count),
+            float(self.producer_skip_count),
         )
+        return dict(zip(SLOT_META_CHANNELS, values))
 
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
@@ -500,7 +500,9 @@ class TDReceiverEngine:
             if result.state is SlotState.NO_FRAME:
                 return False
 
-            _prev_write_idx = self._connection.last_write_idx  # for the slot meta step below
+            if self._connection.last_write_idx == 0:
+                # New connection or sender re-init: no previous shown frame to step from.
+                self._shown_write_idx = 0
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
@@ -603,7 +605,8 @@ class TDReceiverEngine:
 
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
-            self._record_slot_meta(_prev_write_idx, write_idx, result.slot_meta)
+            self._record_slot_meta(self._shown_write_idx, write_idx, result.slot_meta)
+            self._shown_write_idx = write_idx
 
             if not self._last_fmt_status:
                 # Rebuild only when format changed (initialize_receiver and update_receiver_format

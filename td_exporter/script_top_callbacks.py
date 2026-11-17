@@ -81,9 +81,9 @@ def onCook(scriptOp: object) -> None:
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not set ImportBuffer resolution: {e}", force=True)
 
-    ext.import_frame(scriptOp)
-
-    _cook_slot_meta(scriptOp)
+    # The CHOP values change only when a frame was imported.
+    if ext.import_frame(scriptOp):
+        _cook_slot_meta(scriptOp)
 
     # Handle pixel-format update (mirrors the resolution block above).
     # _refresh_on_version_change sets needs_format_update = True when dtype/channels change.

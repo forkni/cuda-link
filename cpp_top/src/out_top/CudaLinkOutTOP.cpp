@@ -15,6 +15,7 @@
 #include "../common/raii_handles.h"
 #include "../common/clock.h"
 #include "../common/win_util.h"
+#include "../core/frame_step.h"
 
 using cudalink::common::asHandle;
 using cudalink::common::now_seconds;
@@ -24,6 +25,7 @@ using cudalink::core::SHMLayout;
 using cudalink::core::SlotMeta;
 using cudalink::core::clear_shutdown;
 using cudalink::core::commit_version;
+using cudalink::core::kInfoChopFrameMod;
 using cudalink::core::publish;
 using cudalink::core::read_version;
 using cudalink::core::set_shutdown;
@@ -44,11 +46,6 @@ constexpr DWORD kIpcCloseGracePeriodMs = 100;
 // copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us, graph_hits,
 // graph_builds, producer_frame, stream_id).
 constexpr int32_t kNumInfoCHOPChans = 13;
-
-// Info CHOP values are float32, exact for integers only below 2^24. producer_frame is shown
-// mod 2^24 so it stays exact; compare two values with (a - b) mod 2^24. The Info DAT row
-// carries the full 64-bit value.
-constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,

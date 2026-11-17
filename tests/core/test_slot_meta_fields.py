@@ -83,6 +83,27 @@ def test_gpuframe_rejects_out_of_range_slot_meta(kwargs: dict, field: str) -> No
         GpuFrame(ptr=0, size=4, **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"producer_frame": 12.0}, "producer_frame"),  # TD's absTime.frame is a float
+        ({"source_timestamp_us": 1.5e6}, "source_timestamp_us"),
+        ({"stream_id": "3"}, "stream_id"),
+        ({"stream_id": None}, "stream_id"),
+    ],
+)
+def test_gpuframe_rejects_non_integer_slot_meta(kwargs: dict, field: str) -> None:
+    """A non-integer must fail here, not as struct.error inside Exporter.export()."""
+    with pytest.raises(TypeError, match=field):
+        GpuFrame(ptr=0, size=4, **kwargs)
+
+
+def test_gpuframe_accepts_integer_like_slot_meta() -> None:
+    np = pytest.importorskip("numpy")
+    frame = GpuFrame(ptr=0, size=4, producer_frame=np.int64(7), stream_id=np.uint32(2))
+    assert int(frame.producer_frame) == 7
+
+
 def test_gpuframe_accepts_range_limits() -> None:
     frame = GpuFrame(
         ptr=0, size=4, producer_frame=(1 << 64) - 1, source_timestamp_us=(1 << 64) - 1, stream_id=(1 << 32) - 1
@@ -223,7 +244,8 @@ def test_in_top_info_chop_names_match_slot_meta_channels() -> None:
 
 
 def test_info_chop_frame_mod_matches_cpp() -> None:
-    for rel in ("cpp_top/src/in_top/CudaLinkInTOP.cpp", "cpp_top/src/out_top/CudaLinkOutTOP.cpp"):
-        src = (_REPO / rel).read_text(encoding="utf-8")
-        assert "constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;" in src, rel
-    assert INFO_CHOP_FRAME_MOD == 1 << 24
+    # One C++ definition, in the core header both TOPs include.
+    src = (_REPO / "cpp_top" / "src" / "core" / "frame_step.h").read_text(encoding="utf-8")
+    m = re.search(r"constexpr uint64_t kInfoChopFrameMod = uint64_t\{1\} << (\d+);", src)
+    assert m is not None
+    assert INFO_CHOP_FRAME_MOD == 1 << int(m.group(1)) == 1 << 24

@@ -29,6 +29,7 @@ using cudalink::core::PROTOCOL_MAGIC_V05;
 using cudalink::core::SHMLayout;
 using cudalink::core::SlotState;
 using cudalink::core::acquire_slot;
+using cudalink::core::kInfoChopFrameMod;
 using cudalink::core::read_magic;
 using cudalink::core::read_num_slots;
 using cudalink::core::read_sender_pid;
@@ -45,11 +46,6 @@ constexpr int32_t kNumInfoCHOPChans = 20; // frames, cook_us, copy_us, begin_us,
                                           // producer_skip_count
 constexpr int32_t kNumInfoDATRows = 7;    // ipc_version, status, last_error, last_error_frame, init_note,
                                           // producer_frame, source_timestamp_us
-
-// Info CHOP values are float32, exact for integers only below 2^24. producer_frame is shown
-// mod 2^24 so it stays exact; compare two streams with (a - b) mod 2^24. The Info DAT rows
-// carry the full 64-bit producer_frame and source_timestamp_us.
-constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;
 
 // CUDA IPC cannot open a handle in the process that exported it. Probed 2026-11-16 (runtime
 // 12.8, driver 13.05, RTX 4090): cudaIpcOpenMemHandle and cudaIpcOpenEventHandle on own-process

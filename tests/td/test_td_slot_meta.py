@@ -244,13 +244,37 @@ def test_execute_dat_cooks_slot_meta_after_export(monkeypatch: pytest.MonkeyPatc
     import callbacks_template as cb
 
     calls: list[str] = []
-    ext = types.SimpleNamespace(mode="Sender", export_frame=lambda: calls.append("export"))
+    published = [True]
+
+    def _export() -> bool:
+        calls.append("export")
+        return published[0]
+
+    ext = types.SimpleNamespace(mode="Sender", export_frame=_export)
     chop = types.SimpleNamespace(cook=lambda force=False: calls.append(f"cook:{force}"))
     owner = types.SimpleNamespace(op=lambda name: chop if name == "slot_meta" else None)
     monkeypatch.setattr(cb, "_extension", lambda: ext)
     monkeypatch.setattr(cb, "parent", lambda: owner, raising=False)
     cb.onFrameEnd(1)
     assert calls == ["export", "cook:True"]
+
+    # Nothing published (inactive, backpressure): the CHOP values did not change, no cook.
+    calls.clear()
+    published[0] = False
+    cb.onFrameEnd(2)
+    assert calls == ["export"]
+
+
+def test_receiver_dropped_frame_counts_as_gap_not_producer_skip() -> None:
+    """A frame the copy drops never reaches the output: the next step is from the last shown frame."""
+    rx = _receiver()
+    rx._record_slot_meta(rx._shown_write_idx, 1, _meta(100))
+    rx._shown_write_idx = 1
+    # write_idx 2 (producer_frame 101) was acquired but its copy failed: import_frame
+    # returned before _record_slot_meta, so _shown_write_idx is still 1.
+    rx._record_slot_meta(rx._shown_write_idx, 3, _meta(102))
+    assert rx.frame_gap_count == 1
+    assert rx.producer_skip_count == 0
 
 
 def test_script_top_slot_meta_cook_never_raises() -> None:

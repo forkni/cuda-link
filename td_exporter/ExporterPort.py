@@ -15,6 +15,7 @@ as a structural type, plus the four value objects that form the public interface
 
 from __future__ import annotations
 
+import operator
 from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -142,6 +143,21 @@ _U64_LIMIT = 1 << 64
 _U32_LIMIT = 1 << 32
 
 
+def _check_uint(name: str, value: object, limit: int, bits: int) -> None:
+    """Raise unless *value* is an integer in 0..limit-1.
+
+    publish_frame packs these fields as unsigned integers after the frame is already
+    copied; a float would fail there with struct.error, so it is rejected here.
+    """
+    if type(value) is not int:
+        try:
+            value = operator.index(value)  # integer-like types (numpy ints) pass
+        except TypeError:
+            raise TypeError(f"GpuFrame.{name} must be an integer, got {type(value).__name__}") from None
+    if not 0 <= value < limit:
+        raise ValueError(f"GpuFrame.{name} must be in 0..2^{bits}-1, got {value!r}")
+
+
 @dataclass(frozen=True)
 class GpuFrame:
     """A single GPU frame ready for export.
@@ -161,6 +177,7 @@ class GpuFrame:
     - stream_id: user-set integer naming the stream. Range 0..2^32-1.
 
     Raises:
+        TypeError: if a slot meta field is not an integer.
         ValueError: if a slot meta field is out of range.
     """
 
@@ -172,12 +189,10 @@ class GpuFrame:
     stream_id: int = 0
 
     def __post_init__(self) -> None:
-        if self.producer_frame is not None and not 0 <= self.producer_frame < _U64_LIMIT:
-            raise ValueError(f"GpuFrame.producer_frame must be in 0..2^64-1, got {self.producer_frame!r}")
-        if not 0 <= self.source_timestamp_us < _U64_LIMIT:
-            raise ValueError(f"GpuFrame.source_timestamp_us must be in 0..2^64-1, got {self.source_timestamp_us!r}")
-        if not 0 <= self.stream_id < _U32_LIMIT:
-            raise ValueError(f"GpuFrame.stream_id must be in 0..2^32-1, got {self.stream_id!r}")
+        if self.producer_frame is not None:
+            _check_uint("producer_frame", self.producer_frame, _U64_LIMIT, 64)
+        _check_uint("source_timestamp_us", self.source_timestamp_us, _U64_LIMIT, 64)
+        _check_uint("stream_id", self.stream_id, _U32_LIMIT, 32)
 
 
 class FrameOutcome(Enum):

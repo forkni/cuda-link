@@ -89,8 +89,8 @@ def onFrameEnd(frame: int) -> None:
     if ext is None:
         return
 
-    if ext.mode == "Sender":
-        ext.export_frame()
+    # The CHOP values change only when a frame was published.
+    if ext.mode == "Sender" and ext.export_frame():
         _cook_slot_meta()
 
 

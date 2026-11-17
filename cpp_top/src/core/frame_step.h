@@ -8,6 +8,11 @@
 
 namespace cudalink::core {
 
+// Info CHOP values are float32, exact for integers only below 2^24. Both TOPs show
+// producer_frame mod 2^24 so it stays exact; compare two values with (a - b) mod 2^24. The
+// Info DAT rows carry the full 64-bit value. Python twin: shm_protocol.INFO_CHOP_FRAME_MOD.
+constexpr uint64_t kInfoChopFrameMod = uint64_t{1} << 24;
+
 enum class FrameStep : uint8_t {
     First,        // no previous frame on this connection (prev_write_idx == 0)
     Next,         // write_idx step 1 and producer_frame step <= 1 (or not set)
