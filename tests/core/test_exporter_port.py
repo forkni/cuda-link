@@ -117,7 +117,7 @@ _EXPORT_DEFAULTS = {
     "barrier_stale_ns": 5_000_000_000,
     "high_priority_stream": True,
     "export_profile": False,
-    "doorbell": False,
+    "doorbell": True,  # 2.0.0: producer doorbell on by default
 }
 
 # env var -> policy field, for the plain "1"/"0" booleans

@@ -539,10 +539,10 @@ class TDSenderEngine:
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier
                 # so it does not create a conflicting parallel check on the same SHM segment.
                 barrier_enabled=False,
-                # R2: Win32 named-event doorbell — opt-in via CUDALINK_DOORBELL=1.
-                # Parity with ImportPolicy.from_env() on the receiver side.
-                # Default OFF; single-consumer, Windows-only.
-                doorbell=env_bool("CUDALINK_DOORBELL", default=False),
+                # R2: Win32 named-event doorbell. Default ON (2.0.0), same as
+                # ExportPolicy.from_env(): a C++ In TOP with Framewaitms > 0 waits on it.
+                # CUDALINK_DOORBELL=0 turns it off. One waiter per signal; Windows-only.
+                doorbell=env_bool("CUDALINK_DOORBELL", default=True),
             )
 
             # Exporter.open() with cuda=None creates CTypesCUDAAdapter.for_device(spec.device).

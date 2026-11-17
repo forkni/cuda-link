@@ -505,8 +505,8 @@ session lifetime.
 
 ### R2: Win32 Named-Event Doorbell (v1.11.0)
 
-Opt-in consumer-idle signaling primitive (`CUDALINK_DOORBELL=1`, must be set on **both** producer
-and consumer).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
+Consumer-idle signaling primitive. Since 2.0.0 the producer signals it by default
+(`CUDALINK_DOORBELL=0` turns it off); a Python consumer waits on it only with `CUDALINK_DOORBELL=1`.  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
 call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between frames.
 
 **Flow**:

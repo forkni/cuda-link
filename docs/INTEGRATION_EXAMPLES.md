@@ -537,13 +537,14 @@ wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.
 ### Requirements
 
 - Windows only (Win32 `CreateEventW`)
-- `CUDALINK_DOORBELL=1` set on **both** TD Sender and Python consumer before either process starts
+- `CUDALINK_DOORBELL=1` set on the Python consumer before it starts. Since 2.0.0 the TD Sender
+  signals the doorbell by default; do not set `CUDALINK_DOORBELL=0` for TD
 - Single consumer per channel only
 
 ### TouchDesigner Setup
 
-Set `CUDALINK_DOORBELL=1` in the environment before launching TD (system env or a launch wrapper),
-or add it to TD's own `CUDALINK_*` env block so it propagates to child processes.
+Nothing to set on TD since 2.0.0: the Sender signals the doorbell by default. With 1.x, set
+`CUDALINK_DOORBELL=1` in the environment before launching TD (system env or a launch wrapper).
 
 ### Python Script (Doorbell Consumer)
 

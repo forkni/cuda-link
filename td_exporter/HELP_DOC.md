@@ -353,7 +353,7 @@ variables for consumer-side wait behavior. The headline ones:
 | Variable | Purpose |
 |----------|---------|
 | `CUDALINK_WAIT_BACKEND` | Native notification-wait backend (`auto` / `python` / `native`). Target p50 < 10 µs vs the ~136–286 µs poll-sleep baseline. Honest caveat: benchmarked as **not measurably faster** than the doorbell in practice — it ships because it never regresses, not because it's proven faster. |
-| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (single consumer, Windows-only). Sub-300 µs notify latency, ~zero idle CPU while waiting. Must be set on both producer and consumer. |
+| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (one waiter per signal, Windows-only). The Sender signals it by default (2.0.0; `0` turns it off). A Python consumer waits on it only with `1`. Sub-300 µs notify latency, ~zero idle CPU while waiting. |
 | `CUDALINK_TORCH_GPU_WAIT` | GPU-side wait for `get_frame()` (torch backend) — issues `cudaStreamWaitEvent` instead of CPU spin/sleep. Trade-off: `ImportOutcome.TIMEOUT` becomes unreachable on this path. |
 
 This is not the full list — CUDA-Link exposes roughly 40 `CUDALINK_*` tuning variables in

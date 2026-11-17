@@ -63,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Producer doorbell on by default**: `ExportPolicy.doorbell` and the `.tox` Sender's policy now
+  default to `True`, so the producer creates the Win32 doorbell event and signals it after each
+  publish. A C++ In TOP with `Framewaitms` > 0 can then wait for a Python-side sender (live test:
+  duplicates 3.95 % -> 2.67 %, gaps 78 -> 15 per 60 s). `CUDALINK_DOORBELL=0` turns it off. The
+  consumer side (`ImportPolicy.doorbell`) stays off by default. `ExportPolicy.for_testing()` keeps
+  it off.
+
 - **NVML docs**: `CUDALINK_NVML` only sets the default `enabled` of an `NVMLObserver`; the observer
   is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old
   "97-frame stats line" wording was wrong. `gpu_util_pct` is documented as device activity, not SM
