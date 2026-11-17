@@ -152,6 +152,11 @@ About `Framewaitms`:
 - The wait is in steps of 1 ms. After each step, the TOP reads `write_idx` again. Thus two
   consumers of one segment (two In TOPs, or an In TOP and a Python receiver with
   `CUDALINK_DOORBELL`) can both use the wait. The sender signal wakes only one waiter.
+- One doorbell waiter per `Ipcmemname` is best. With an In TOP and a Python receiver on one
+  name, the In TOP is not affected. The Python receiver misses the signal on about 3 % of
+  frames and then waits its full `wait_for_doorbell()` timeout (2 ms in the examples).
+  Measured: Python p99 latency 0.09 ms alone, 2.7 ms shared; no lost frames ("Live matrix
+  v0.6", P2).
 - The wait can be up to about 1.5 ms longer than the value. The wait blocks the TD main
   thread, so increase the value only if the duplicates stay high.
 - Before 2026-11-17 the default was 0, and each value waited about 1 ms less than set.
@@ -279,6 +284,8 @@ colors, 30 frames each, and stamps `write_idx`. B checks each color against `pro
 | C5 | Python `Exporter`, `CUDALINK_DOORBELL=1` | In TOP, Framewaitms 3 | 118 color runs, 0 wrong | 2.67 | 15 | 4.8 / 12.5 ms |
 | P1 | `.tox` Sender, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 3597/3597 | 0.89 | 34 | 0.15 / 15.7 ms |
 | P1 | Python `Exporter`, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 2.67 | 31 | 5.3 / 12.8 ms |
+| P2 | Out TOP | In TOP, Framewaitms 3, shared with a Python `Importer` (doorbell on) | 3596/3596 | 0.33 | 12 | 0.93 / 3.6 ms |
+| P2 | Out TOP | Python `Importer` (doorbell on), shared with the In TOP above | 3718 frames, 0 bad | n/a | 4 | 0.019 / 0.070 ms, p99 2.7 ms |
 | F16 | Out TOP, rgba16float | In TOP, Framewaitms 3 | 1199/1199 (20 s) | 0.83 | 10 | 0.10 / 15.1 ms |
 
 Duplicate % is the number of B cooks that show the same `producer_frame` as the cook before,
@@ -299,6 +306,9 @@ Notes:
   the higher duplicate and gap counts. The doorbell (C5) lowers duplicates, gaps and latency.
 - `noframe_count` and `rescued_count` in the In TOP Info CHOP advance only while Debug is on.
   With Debug off they stay 0, also when the In TOP shows a repeat frame.
+- P2: the same Python receiver alone on the name had p99 latency 0.088 ms and 23 waits that
+  timed out while a frame was ready. Shared with the In TOP, it had 118. The Importer used the
+  native wait backend in both runs.
 - An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
   frame (see "Topology").
 
