@@ -187,3 +187,27 @@ def test_logger_session_counters_sum_streams_and_tolerate_missing_channels() -> 
         "gap_sum": 3.0,
         "skip_sum": 1.0,
     }
+
+
+def test_logger_kick_plugins_cooks_each_cplusplus_top_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sink Out TOP never loads its DLL after a project opens until something cooks it."""
+    cooks: list[str] = []
+
+    class _Top:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def cook(self, force: bool = False) -> None:
+            assert force
+            cooks.append(self.name)
+
+    marker = object()  # stands in for TD's cplusplusTOP type
+
+    class _Comp:
+        def findChildren(self, type: object, depth: int) -> list[_Top]:  # noqa: A002, N802 (TD API)
+            assert type is marker and depth == 1
+            return [_Top("out0"), _Top("out1")]
+
+    monkeypatch.setattr(run_logger, "cplusplusTOP", marker, raising=False)
+    assert run_logger.kick_plugins(_Comp()) == 2
+    assert cooks == ["out0", "out1"]

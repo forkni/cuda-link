@@ -22,6 +22,11 @@ each row, to <project.folder>/cudalink_run_<role>_<start>.csv. Interval: custom 
 `Interval` (seconds) on the COMP if present, else 60. Stream count for B: the `sync` CHOP's
 `Streams` par.
 
+On start the logger cooks each C++ TOP of its COMP once (`kick_plugins`). TD loads a C++
+TOP's DLL only on the op's first cook, so an Out TOP that nothing pulls (a sink, as in A)
+never loads and never publishes after the project opens. One cook loads it, and then its
+own cookEveryFrame keeps it cooking (measured on TD 2025.33230).
+
 The A-side drop count uses absTime.step: TD sets it above 1 when a frame is skipped to
 keep real time (Realtime On). Run A and B at the same root FPS (Decisions precondition).
 """
@@ -111,8 +116,17 @@ def _log_row(owner: object, row: dict) -> None:
     table.save(_run["path"])  # DAT.write() would append to the DAT itself
 
 
+def kick_plugins(owner: object) -> int:
+    """Cook each C++ TOP that is a direct child of `owner` once; return how many."""
+    tops = owner.findChildren(type=cplusplusTOP, depth=1)  # noqa: F821
+    for top in tops:
+        top.cook(force=True)
+    return len(tops)
+
+
 def onStart() -> None:
     _run.clear()
+    kick_plugins(parent())  # noqa: F821
 
 
 def onFrameStart(frame: int) -> None:

@@ -20,6 +20,12 @@ Orbbec TOP -> Select TOP -> Out TOP  ==SHM==> In TOP -> Info CHOP -> sync rule -
 - A and B must be different processes (see "Same-process limitation"). A Python sender or
   receiver (the `.tox`, or `cuda_link` in a script) can be either side.
 - A and B must use the same GPU.
+- An Out TOP that nothing pulls does not start after the project opens. TD loads a C++
+  TOP's DLL only on the op's first cook, and `cookOnStart` / `cookEveryFrame` take effect
+  only after that load. Cook each Out TOP once when the project starts, for example
+  `op('out0').cook(force=True)` in an Execute DAT `onStart`. The sync kit's run logger
+  does this for every C++ TOP in its COMP. After one cook the Out TOP cooks every frame.
+  The In TOP is not affected when the network reads it (the sync rule does).
 
 ## Install: one project's Plugins folder
 

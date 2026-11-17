@@ -162,4 +162,5 @@ def build_sender_logger(sender_comp: object, kit_dir: str) -> object:
     ex.par.frameend = True
     ex.par.start = True
     ex.nodeX, ex.nodeY = 1200, -400
+    ex.module.kick_plugins(sender_comp)  # onStart does this when the project opens
     return ex
