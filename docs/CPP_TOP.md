@@ -1,8 +1,37 @@
 # C++ Custom TOPs (cpp_top)
 
-> Status: stub. This page holds the user-facing reference for the `CudaLinkOutTOP` and
-> `CudaLinkInTOP` Custom Operator DLLs. Sections marked "to be written" are filled in when
-> the work they describe lands.
+This page is the user reference for the `CudaLinkOutTOP` and `CudaLinkInTOP` Custom
+Operator DLLs (protocol v0.6, cuda-link 2.0.0.dev0).
+
+## Topology
+
+One TouchDesigner (TD) instance sends, and a different TD instance receives:
+
+```text
+TD instance A                                TD instance B
+Orbbec TOP -> Select TOP -> Out TOP  ==SHM==> In TOP -> Info CHOP -> sync rule -> Switch TOP
+             (one Out TOP per stream)         (one In TOP per stream)
+```
+
+- Each stream has its own Out TOP in A and its own In TOP in B, with the same `Ipcmemname`
+  on both sides and a different `Streamid` for each stream.
+- The texture stays on the GPU. The named shared memory (SHM) segment holds only the ring
+  header, the CUDA IPC handles and the slot meta.
+- A and B must be different processes (see "Same-process limitation"). A Python sender or
+  receiver (the `.tox`, or `cuda_link` in a script) can be either side.
+- A and B must use the same GPU.
+
+## Install: one project's Plugins folder
+
+- Put `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` in the `Plugins/` folder of the test
+  project only. Do not put them in `Documents/Derivative/Plugins`.
+- Remove any older build (protocol v0.5) from `Documents/Derivative/Plugins` first. Both
+  builds register the op types `Cudalinkout` and `Cudalinkin`, and two DLLs with the same op
+  type collide.
+- TD locks a loaded DLL. Close TD before you replace it.
+- Keep cuda-link 1.14.1 off TD's Python module path while you test 2.0.0.dev0.
+- Give each stream its own `Ipcmemname`. The default names are the same in 1.x and 2.x. A
+  v0.5 segment is refused with a magic error; the two protocols do not mix.
 
 ## Build
 
@@ -220,10 +249,84 @@ process ID before it opens any handle, and gives the error above without a CUDA 
   runs only on `cpp_top/src/`. The vendored TD headers in `cpp_top/vendor/` are a
   primary source and are never linted or reformatted.
 
-## To be written
+## Cook order on the receiver
 
-- Topology: one sender TD instance, one receiver TD instance.
-- Windows display driver model (WDDM) IPC caveat (ADR-0004).
-- Teardown grace period (the 100 ms hitch on Active off or a format change).
-- Trust model for named shared memory.
-- Debug-log file locations.
+Read `producer_frame` through an Info CHOP with Passive Off, and make it an input of the
+expression that uses it. With Passive Off, TD cooks the In TOP before the Info CHOP reads
+it, so the value belongs to the frame that the In TOP shows in this cook. With Passive On,
+the value can be one frame late. A Python read of `op.info` or a CHOP Execute DAT does not
+have this order.
+
+The sync kit (`examples/td_multistream_sync/`) does this: each Info CHOP has Passive Off,
+the Execute DAT force-cooks the `sync` CHOP once at frame start, and the Cache TOP and
+Switch TOP read `op('sync')` in their expressions.
+
+To check the order: pause A, step A one frame, and look at B in the Performance Monitor.
+The Switch TOP index and the shown texture must change in the same B frame.
+
+## Orbbec wiring
+
+- A: one Orbbec TOP for each camera, with device timer sync on. A Select TOP takes the
+  color (RGBA8) and the depth (Mono32Float, meters) to two Out TOPs. Three cameras give six
+  streams, `Streamid` 0 to 5, for example `Ipcmemname` `cam0_color` to `cam2_depth`.
+- Keep depth at native resolution in Mono32Float. Mono16Float has steps of 2 to 4 mm, and
+  the camera gives 1 mm.
+- B: build the receiver with `build_receiver()` from `examples/td_multistream_sync/`. Its
+  README has the steps, the sync rule and the run logger.
+
+## WDDM caveat (ADR-0004)
+
+Windows runs the GPU in the Windows display driver model (WDDM) by default. NVIDIA documents
+legacy CUDA IPC (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`) as Linux-only, or Windows in
+TCC mode. cuda-link uses it on WDDM. It works in practice, and the tests have shown no error
+801, but this is outside NVIDIA's support statement.
+
+- Test again after each driver or CUDA update.
+- The `init_note` row of each TOP's Info DAT shows the result of the IPC capability probe
+  (`CudaDeviceSession`), with the same WDDM/TCC note as the Python
+  `CUDARuntimeAPI.check_ipc_capability()`.
+- If the probe or the open of a handle fails after an update, read `last_error` in the Info
+  DAT and the debug log.
+
+## Teardown grace period
+
+When the Out TOP frees its GPU buffers, a receiver can still hold imported handles to them.
+A use of such a handle is undefined behavior. So the Out TOP does these steps first:
+
+1. It sets the shutdown flag and rings the doorbell event.
+2. It writes zeros over the IPC handles in the segment.
+3. It waits 100 ms (`kIpcCloseGracePeriodMs`) so that the receiver can close its handles.
+
+The wait is on TD's main thread. Thus TD drops about 6 frames at 60 FPS when:
+
+- you set `Active` Off, or you remove or close the Out TOP;
+- the input changes resolution or pixel format (the ring is made again, and the old buffers
+  are freed after the wait).
+
+The first allocation does not wait: there are no old handles. Change the format before a
+show, not during it.
+
+## Trust model
+
+- The Out TOP makes the segment with `CreateFileMappingW` and the default security. The name
+  has no `Global\` prefix, so the segment is in the user's session. Other processes of the
+  same user in that session can open it, read it and write to it if they know the name.
+- cuda-link does not authenticate the sender. Use it on a machine whose processes you trust.
+- The In TOP reads the segment as untrusted input. It refuses a wrong magic, a `num_slots` of
+  0 or more than 64, a layout larger than the mapped size, and metadata with a zero size or a
+  `data_size` that does not agree with the width, height and format. It shows the reason in
+  `last_error`.
+
+## Debug log
+
+With `Debug` on, each TOP appends lines to its own file in the Windows temp folder
+(`GetTempPath`, normally `%TEMP%`, that is `C:\Users\<user>\AppData\Local\Temp`):
+
+| TOP | File |
+|---|---|
+| Out TOP | `%TEMP%\cudalink_out_top_debug.log` |
+| In TOP | `%TEMP%\cudalink_in_top_debug.log` |
+
+The file grows while `Debug` is on; delete it when you no longer need it. Every 97 frames the
+log has a `bench:` line with the mean cook times. With `Debug` off, no file is written and
+the GPU timing channels show 0.
