@@ -200,6 +200,9 @@ class _NullEngine:
     def has_new_frame(self) -> bool:
         return False  # receiver loop does nothing
 
+    def wait_for_new_frame(self, *a, **k) -> bool:
+        return False
+
     def is_ready(self) -> bool:
         return False
 
@@ -506,6 +509,16 @@ class CUDAIPCExtension:
         if self._mode != "Receiver":
             return True
         return self._engine.has_new_frame()
+
+    def wait_for_new_frame(self) -> bool:
+        """Receiver: wait up to the Framewaitms par for the sender's doorbell.
+
+        Call after has_new_frame() returned False. True means a frame (or a version
+        change / shutdown) came within the budget and ImportBuffer must cook.
+        """
+        if self._mode != "Receiver":
+            return False
+        return self._engine.wait_for_new_frame()
 
     def initialize_receiver(self) -> bool:
         """Delegate to receiver engine's initialize_receiver() (backward compat)."""

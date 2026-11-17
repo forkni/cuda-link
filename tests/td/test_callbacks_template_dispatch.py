@@ -172,6 +172,29 @@ def test_onframestart_receiver_skips_cook_without_new_frame(monkeypatch: pytest.
     assert ext.update_receiver_format_calls == []
 
 
+@pytest.mark.parametrize(("rescued", "expected_cooks"), [(True, [True]), (False, [])])
+def test_onframestart_receiver_frame_wait_decides_the_cook(
+    monkeypatch: pytest.MonkeyPatch, rescued: bool, expected_cooks: list[bool]
+) -> None:
+    """No new frame at the poll: ImportBuffer cooks only when the Framewaitms wait got one."""
+    ext = _StubExt(mode="Receiver", has_new_frame=False)
+    wait_calls: list[None] = []
+
+    def wait_for_new_frame() -> bool:
+        wait_calls.append(None)
+        return rescued
+
+    ext.wait_for_new_frame = wait_for_new_frame
+    _patch_parent(monkeypatch, ext)
+    import_buffer = _StubImportBuffer()
+    monkeypatch.setattr(callbacks_template, "op", lambda name: import_buffer, raising=False)
+
+    callbacks_template.onFrameStart(1)
+
+    assert len(wait_calls) == 1
+    assert import_buffer.cook_calls == expected_cooks
+
+
 def test_onframestart_receiver_force_cooks_import_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     ext = _StubExt(mode="Receiver", has_new_frame=True)
     _patch_parent(monkeypatch, ext)

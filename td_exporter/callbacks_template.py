@@ -65,7 +65,11 @@ def onFrameStart(frame: int) -> None:
         # version change, shutdown, or a new write_idx. Returns False only when the
         # sender's write_idx matches our cursor (no new data this frame).
         if not ext.has_new_frame():
-            return
+            # Framewaitms (default 3 ms): wait for the sender's doorbell before this
+            # frame is a repeat. An extension without the method (1.x) keeps poll-once.
+            wait = getattr(ext, "wait_for_new_frame", None)
+            if wait is None or not wait():
+                return
 
         # Force-cook ImportBuffer: triggers Script TOP onCook, which calls import_frame()
         # and consume_pending_format(). update_receiver_format() afterwards is belt-and-suspenders:
