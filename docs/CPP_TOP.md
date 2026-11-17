@@ -119,6 +119,12 @@ All parameters are on the page "CUDA Link".
 | `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
 | `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
 
+The Out TOP also copies its input to its own output (the pass-through copy), so that it
+shows the image in the network. On the dev box (RTX 4090) this copy costs about 14 µs CPU
+(`cudaMemcpy2DToArrayAsync`) and 8 µs GPU for each stream and frame. A parameter to skip
+the copy was considered and rejected (2026-11-17). Reopen it only if a show stream, for
+example 4K float32, makes the copy expensive.
+
 ## Slot meta from the Out TOP
 
 Each publish writes these slot meta fields:
@@ -339,3 +345,19 @@ With `Debug` on, each TOP appends lines to its own file in the Windows temp fold
 The file grows while `Debug` is on; delete it when you no longer need it. Every 97 frames the
 log has a `bench:` line with the mean cook times. With `Debug` off, no file is written and
 the GPU timing channels show 0.
+
+### Measuring cost
+
+Measure the cost of a TOP with `Debug` off:
+
+- Sample `copy_us`, `begin_us` and `end_us` from the Info CHOP over many frames, and
+  compare medians.
+- On the In TOP, do not use `cook_us` for a cost: it includes the `Framewaitms` wait for
+  the producer.
+- `Debug` adds GPU timer events to each cook. They make Out TOP `copy_us` about 3.5 times
+  larger (67 µs to about 230 µs on the dev box), and the CUDA graph path and the legacy
+  path do not carry the same number of them. Compare `bench:` lines only between runs
+  on the same path, both with `Debug` on.
+
+With `Debug` off, the CUDA graph path (`CUDALINK_CPP_USE_GRAPHS`) gives no gain on either
+TOP. Keep the variable unset (ADR-0010, ADR-0011).

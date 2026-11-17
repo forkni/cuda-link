@@ -1,7 +1,8 @@
 # ADR-0011: Port CUDA Graphs to the In TOP via a keyed graph-exec cache
 
 **Status**: Accepted (implementation merged, default OFF; live-validated 2026-07-06 — see
-"Live-test results")
+"Live-test results"; re-measured 2026-11-17 with Debug off: no gain, kept default off and
+not recommended — see "Re-measure 2026-11-17")
 **Date**: 2026-07-06
 **Applies to**: the env-gated CUDA-Graphs submission collapse in the In TOP
 (`CudaLinkInTOP::tryGraphedCopy`, PLAN-005 §2.1 receiver half, `CUDALINK_CPP_USE_GRAPHS`).
@@ -180,6 +181,34 @@ and each happened to include one benign TD-side SHM reconnect (leg A frame 1089,
 **Verdict: the port works and is safe. Default stays OFF** per the decision above — the win
 is real (−14.5 % CPU cook, confirmed under a controlled producer) but modest, and the path
 remains opt-in diagnostics/perf tooling.
+
+The section "Re-measure 2026-11-17" below replaces the −14.5 % figure.
+
+## Re-measure 2026-11-17 (Debug off)
+
+Both legs of the controlled A/B above ran with `Debug` on. `Debug` adds GPU timer events
+to each cook, and the graph path and the legacy path do not carry the same number of
+them. So the −14.5 % includes timer overhead that is not the same in the two legs.
+
+Dev box (RTX 4090, driver 621.24, TD 2025.33230), the sync-kit receiver (six In TOPs fed
+by a TD sender), `Debug` off on every TOP. Medians of 30 Info CHOP samples for each leg:
+
+| In TOP metric | Graphs | Legacy |
+|---|---|---|
+| `copy_us` | 27.8 µs | 28.2 µs |
+| `begin_us` | 56 µs | 61 µs |
+| `end_us` | 9 µs | 12 µs |
+
+`cook_us` is not in the table: it includes the `Framewaitms` wait for the producer, so it
+measures the producer cadence and not the submission.
+
+Result: the graph path gives no measurable gain on the In TOP. The `copy_us` difference
+(0.4 µs) is smaller than the spread of the samples.
+
+**Decision**: kept, default off, not recommended. The code stays because it is safe and
+costs nothing with the variable unset. Do not set `CUDALINK_CPP_USE_GRAPHS` on the dev box
+or on the show machine. Measure later changes with `Debug` off (see "Measuring cost" in
+`docs/CPP_TOP.md`).
 
 ## Reopen / re-park conditions
 
