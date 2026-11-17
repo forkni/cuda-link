@@ -368,6 +368,63 @@ see above). C++ TD→TD end-to-end latency remains open — the planned `frame_a
 
 ---
 
+## `.tox` 2.0.0.dev0 (protocol v0.6) vs 1.14.1 (v0.5), live
+
+Date 2026-11-17. Dev box: RTX 4090, driver 621.24, TD 2025.33230 Non-Commercial, two TD processes
+(A sends, B receives), 1280x720 rgba8 at 60 fps, Debug off, 60 s per cell. Each version talks
+only to itself (v0.6 cannot talk to v0.5). The 2.0 COMPs ran classic mode (mirror DATs). The
+1.14.1 COMPs ran library mode with `cuda_link` 1.14.1 from the main checkout
+(`CUDALINK_LIB_PATH`). Each cell ran with `CUDALINK_DOORBELL` unset and with `=1`.
+
+Method: A stamps R = `absFrame % 256` into a 4x4 patch; B reads it back per frame (TOP to CHOP)
+and counts new, duplicate, gap (skipped stamps) and backward steps. A Python sender stamps byte 0,
+which the `.tox` Receiver shows as B (BGRA). "Send" is the CPU time of the Sender COMP's
+`execute1.onFrameEnd` (the export). "Import" is the `ImportBuffer` Script TOP CPU cook time.
+
+| Cell | Version | Env | Send p50 / p95 µs | Receiver dup % | gaps | Other |
+|---|---|---|---|---|---|---|
+| T1 `.tox` → `.tox` | 2.0 | unset | 378 / 620 | 1.03 | 33 | import p50 0.23 ms |
+| | 2.0 | unset (run 2) | 427 / 676 | 4.95 | 185 | import p50 0.15 ms |
+| | 2.0 | =1 | 426 / 677 | 10.41 | 380 | import p50 0.20 ms |
+| | 2.0 | =1 (run 2) | 413 / 477 | 0.08 | 3 | import p50 0.14 ms |
+| | 1.14.1 | unset | 524 / 600 | 0.53 | 7 | import p50 0.14 ms |
+| | 1.14.1 | =1 | 534 / 662 | 0.06 | 2 | import p50 0.15 ms |
+| T2 `.tox` → Python | 2.0 | unset | 451 / 488 | 0 same | 0 | latency p50/p99 0.71 / 1.67 ms, backend native |
+| | 2.0 | =1 | 372 / 530 | 0 same | 1 | latency p50/p99 0.048 / 1.64 ms, 3486 wakes |
+| | 1.14.1 | unset | 580 / 670 | 0 same | 0 | latency p50/p99 0.78 / 1.71 ms, backend python |
+| | 1.14.1 | =1 | 671 / 1057 | 0 same | 0 | latency p50/p99 0.036 / 1.65 ms, 3487 wakes |
+| T3 Python → `.tox` | 2.0 | unset (2 runs) | - | 3.00, 3.14 | 102, 110 | sender ≈ 59.8 fps |
+| | 2.0 | =1 | - | 3.39 | 80 | sender ≈ 59.3 fps |
+| | 1.14.1 | unset (2 runs) | - | 2.83, 2.50 | 18, 8 | sender ≈ 58.6 fps |
+| | 1.14.1 | =1 | - | 2.81 | 16 | sender ≈ 58.6 fps |
+
+T3 sender fps = (new + gaps) / 60 s from the stamps. No cell had a backward step or a wrong
+stamp. Project errors stayed at 0.
+
+Findings:
+
+- Correctness: `.tox` Sender → `.tox` Receiver, `.tox` → Python and Python → `.tox` work on
+  v0.6. Gaps and duplicates come from the two frame clocks, not from lost or reordered frames.
+- Sender export cost: the 2.0 `.tox` Sender export is about 25 % cheaper than 1.14.1
+  (p50 372-451 µs against 524-671 µs, 6 and 4 cells). This is with the 2.0 producer signalling
+  the doorbell on every frame. Caveat: the two versions ran in different modes (classic and
+  library); a same-mode rerun is not done.
+- Import cost: the same in both versions (`ImportBuffer` p50 0.14-0.23 ms).
+- TD → TD duplicate %: one 60 s run does not rank versions. 2.0 gave 0.08-10.4 % over four runs,
+  with no relation to the env. The `.tox` Receiver polls `write_idx` once per frame start and
+  never waits on the doorbell, so `CUDALINK_DOORBELL` does not change it.
+- TD → Python latency: a Python consumer with `CUDALINK_DOORBELL=1` gets about 0.04 ms p50
+  against about 0.7-0.8 ms with poll-sleep, in both versions. In 2.0 the producer makes the
+  event by default, so a consumer with the variable unset gets the native wait backend (1.14.1:
+  python). The consumer still has to set `=1` to wait on the event.
+- Python → TD: the identical sender script ran closer to 60 fps with 2.0 (59.3-59.9) than with
+  1.14.1 (58.6) in this test. With the sender rate near the receiver rate, phase jitter gives
+  more gaps (80-110 against 8-18); duplicates are about the same (3.0-3.4 % against 2.5-2.8 %).
+  The cause of the higher 2.0 send rate is not measured.
+- Install: the 1.14.1 release `.tox` has no mirror DATs. With only `cuda_link` 1.13.0 on TD's
+  path it stays inert (Status warning "found but not version 1.14.1"); it needs a matching
+  `cuda_link` next to the `.toe` or on `CUDALINK_LIB_PATH`.
+
 ## vs CPU SharedMemory
 
 End-to-end at typical resolutions (float32 RGBA), CUDA-Link vs UT_SharedMem-class CPU
