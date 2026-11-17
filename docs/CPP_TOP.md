@@ -258,6 +258,46 @@ On B, compare the `producer_frame` channels of the In TOPs:
 `frame_gap_count` tells you that B was too slow to read every frame. `producer_skip_count`
 tells you that A did not publish in every TD frame.
 
+## Live matrix v0.6 (2026-11-17)
+
+Dev box: RTX 4090, TD 2025.33230 Non-Commercial, two TD instances (A sends, B receives),
+60 FPS, 1280×720 rgba8 Noise source, Debug off, 60 s per cell. DLLs built from 00d7406.
+
+Pixel check: A writes a 4×4 patch at the bottom-left with R = `absFrame % 256`. Both TD
+senders stamp the same `absFrame` as `producer_frame`. B reads one pixel of the patch per cook
+and compares it with `producer_frame % 256`. The Python sender has no patch. It sends solid
+colors, 30 frames each, and stamps `write_idx`. B checks each color against `producer_frame`.
+
+| Cell | Sender (A) | Receiver (B) | Pixel check | Duplicate % | Gaps | Latency p50 / p95 |
+|---|---|---|---|---|---|---|
+| C0 | Out TOP | In TOP, Framewaitms 3 | 3593/3593 | 0.42 | 17 | 0.09 / 3.0 ms |
+| C1 | `.tox` Sender | In TOP, Framewaitms 0 | 3595/3595 | 2.87 | 101 | 15.4 / 16.4 ms |
+| C1 | `.tox` Sender | In TOP, Framewaitms 3 | 3595/3595 | 1.03 | 29 | 0.14 / 15.7 ms |
+| C2 | Out TOP | `.tox` Receiver | 3598/3598 | 5.25 | 188 | 16.3 / 16.8 ms |
+| C3 | Out TOP | Python `Importer` | 3588/3589, rerun 3596/3596 | n/a | 13, rerun 6 | 0.83 / 1.45 ms |
+| C4 | Python `Exporter`, doorbell off | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 3.95 | 78 | 8.0 / 15.8 ms |
+| C5 | Python `Exporter`, `CUDALINK_DOORBELL=1` | In TOP, Framewaitms 3 | 118 color runs, 0 wrong | 2.67 | 15 | 4.8 / 12.5 ms |
+| F16 | Out TOP, rgba16float | In TOP, Framewaitms 3 | 1199/1199 (20 s) | 0.83 | 10 | 0.10 / 15.1 ms |
+
+Duplicate % is the number of B cooks that show the same `producer_frame` as the cook before,
+divided by all B cooks. Gaps are `frame_gap_count` (TD receivers) or the steps in
+`producer_frame` above 1 (Python receiver). `last_error` was empty in all cells.
+
+Notes:
+
+- C3: the first run had one frame whose pixels and `producer_frame` did not agree (delta 9).
+  The script did not log which frame it was. A rerun with logging had no mismatch. The cause
+  is not known. The 30-minute show-machine run (consolidated plan Phase 5) will show if it
+  comes back.
+- An 8-bit frame from the Out TOP arrives in Python in BGRA byte order: the R value is at
+  channel index 2. Row 0 of the tensor is the bottom row of the TD image.
+- In C4 and C5 the Python sender runs on its own 60 FPS clock, not locked to TD. This causes
+  the higher duplicate and gap counts. The doorbell (C5) lowers duplicates, gaps and latency.
+- `noframe_count` and `rescued_count` in the In TOP Info CHOP advance only while Debug is on.
+  With Debug off they stay 0, also when the In TOP shows a repeat frame.
+- An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
+  frame (see "Topology").
+
 ## Same-process limitation
 
 CUDA IPC cannot open a handle in the process that exported it. A `CudaLinkInTOP` that
