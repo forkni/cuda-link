@@ -68,12 +68,12 @@ private:
     // producer") if the mapping doesn't exist yet -- normal, retried every cook.
     bool openSHM(const char* name);
 
-    // C4 stutter fix (opt-in via Framewaitms > 0): bounded wait on the producer's publish
-    // doorbell when acquire_slot() classified this cook as NoFrame. Re-polls acquire_slot()
-    // after every doorbell wake and returns the latest classification -- NewFrame if the
-    // producer published within the budget (a "rescued" frame that would otherwise have
-    // been a visible repeat), or the original NoFrame on timeout. See the .cpp definition
-    // for the auto-reset/stale-signal and single-waiter caveats.
+    // C4 stutter fix (Framewaitms > 0, default 3): bounded wait on the producer's publish
+    // doorbell when acquire_slot() classified this cook as NoFrame. Waits in 1 ms slices,
+    // re-polls acquire_slot() after each wake or slice, and returns the latest
+    // classification -- NewFrame if the producer published within the budget (a "rescued"
+    // frame that would otherwise have been a visible repeat), or NoFrame on timeout. See the
+    // .cpp definition for the auto-reset/stale-signal and second-consumer caveats.
     cudalink::core::AcquireResult waitForFreshFrame(cudalink::core::AcquireResult result, int waitMs);
     // Stores result.slot_meta for the Info CHOP/DAT and counts write_idx / producer_frame
     // gaps against the previous shown frame. Call after a successful copy, before

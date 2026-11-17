@@ -33,12 +33,14 @@ constexpr static char DebugLabel[] = "Debug";
 constexpr static char FramewaitName[] = "Framewaitms";
 constexpr static char FramewaitLabel[] = "Frame Wait (ms)";
 
-// Framewaitms bounds: 0 disables the doorbell wait entirely (default -- the classic
-// return-a-repeat-frame path is untouched); 8 ms is roughly half a 60 fps frame, a hard
+// Framewaitms bounds: 0 disables the doorbell wait entirely (the classic
+// return-a-repeat-frame path is untouched); 3 ms is the default (2026-11-17 sweep, see
+// CudaLinkInTOP::waitForFreshFrame()); 8 ms is roughly half a 60 fps frame, a hard
 // ceiling on how long a NoFrame cook may block TD's cook thread waiting for the producer's
 // publish doorbell. Values are clamped at both the UI and eval level.
 constexpr static int kFramewaitMin = 0;
 constexpr static int kFramewaitMax = 8;
+constexpr static int kFramewaitDefault = 3;
 
 class Parameters {
 public:

@@ -123,8 +123,9 @@ Also record:
 - the driver version
 - Hardware-accelerated GPU scheduling (on or off)
 
-If `gap_sum` grows fast, set `Framewaitms` on the receiver COMP (try 2, then 4). This
-makes each In TOP wait for a new frame on a cook that has none. See the dev-box results
+`Framewaitms` on the receiver COMP is 3 by default, which is also the In TOP default.
+This makes each In TOP wait for a new frame on a cook that has none. If B drops frames,
+use 2. See the dev-box results
 below.
 
 ## Dev-box results (RTX 4090, Noise TOPs in place of cameras)
@@ -155,4 +156,6 @@ Results:
 - Without `Framewaitms`, B often cooks before A has published, then skips one frame. The
   sync rule cannot repair these skips, so they become mismatches.
 - With `Framewaitms` = 4, the mismatch rate is near the 0.1 % limit, and B stays at 60 FPS.
-- Start the show-machine run with `Framewaitms` = 4. If B drops frames, use 2.
+- These trials used the older wait code, which waited about 1 ms less than the value.
+  The new default 3 waits as long as the old 4 did.
+- Start the show-machine run with `Framewaitms` = 3. If B drops frames, use 2.

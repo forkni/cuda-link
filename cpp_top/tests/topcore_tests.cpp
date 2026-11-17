@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "frame_step.h"
+#include "frame_wait.h"
 #include "ring_reader.h"
 #include "ring_writer.h"
 #include "shm_layout.h"
@@ -478,6 +479,30 @@ void test_frame_step_classification() {
     CHECK(classify_frame_step(5, 100, 5, 100) == FrameStep::Next);
 }
 
+// The In TOP's Framewaitms wait: timeout of the next doorbell wait from the time left.
+void test_frame_wait_slice() {
+    // Budget spent (or overrun): no wait.
+    CHECK(next_wait_slice_ms(0) == 0);
+    CHECK(next_wait_slice_ms(-1) == 0);
+    CHECK(next_wait_slice_ms(-5000) == 0);
+    // Regression: a remainder under 1 ms still waits (truncation made Framewaitms=1 a no-op).
+    CHECK(next_wait_slice_ms(1) == 1);
+    CHECK(next_wait_slice_ms(999) == 1);
+    CHECK(next_wait_slice_ms(1000) == 1);
+    // Default 1 ms slice caps every wait (a lost auto-reset signal costs one slice).
+    CHECK(kFrameWaitSliceMs == 1);
+    CHECK(next_wait_slice_ms(1001) == 1);
+    CHECK(next_wait_slice_ms(4000) == 1);
+    CHECK(next_wait_slice_ms(8000) == 1);
+    // Wider slice: rounds up, then caps.
+    CHECK(next_wait_slice_ms(1001, 8) == 2);
+    CHECK(next_wait_slice_ms(4000, 8) == 4);
+    CHECK(next_wait_slice_ms(7999, 8) == 8);
+    CHECK(next_wait_slice_ms(100000, 8) == 8);
+    // A zero slice never waits (no busy wait of 0 ms timeouts).
+    CHECK(next_wait_slice_ms(4000, 0) == 0);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -506,6 +531,7 @@ int main(int argc, char** argv) {
     test_regression_version_commits_last();
     test_publish_footprint();
     test_frame_step_classification();
+    test_frame_wait_slice();
 
     std::printf("topcore_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -26,7 +26,7 @@ build_receiver() again instead of a new exec() of this file. `_apply_in_pars` qu
 again until every In TOP plugin has loaded (up to _PARAM_RETRIES times).
 
 The receiver COMP gets custom pars: `Interval` (logger seconds, default 60) and
-`Framewaitms` (copied to every In TOP; 0 = off).
+`Framewaitms` (copied to every In TOP; default 3 ms, the In TOP default; 0 = off).
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def build_receiver(
     names: list[str],
     kit_dir: str,
     comp_name: str = "sync_receiver_B",
-    framewait_ms: int = 0,
+    framewait_ms: int = 3,
 ) -> object:
     """Create (or refresh) the receiver kit COMP and return it."""
     if len(names) != streams:

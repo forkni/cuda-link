@@ -18,6 +18,7 @@
 #include "../common/clock.h"
 #include "../common/win_util.h"
 #include "../core/frame_step.h"
+#include "../core/frame_wait.h"
 
 using cudalink::common::asHandle;
 using cudalink::common::now_seconds;
@@ -479,7 +480,7 @@ bool CudaLinkInTOP::openSHM(const char* name) {
 }
 
 // ---------------------------------------------------------------------------
-// C4 stutter fix: bounded doorbell wait on NoFrame cooks (opt-in via Framewaitms).
+// C4 stutter fix: bounded doorbell wait on NoFrame cooks (Framewaitms, default 3 ms).
 //
 // Root cause being addressed: producer and receiver TD processes both cook vsync-locked at
 // the same rate, so the publish-vs-read phase offset inside each display frame is
@@ -494,10 +495,14 @@ bool CudaLinkInTOP::openSHM(const char* name) {
 // - The doorbell is an auto-reset event, so a stale signal from a publish this side already
 //   consumed can wake the wait spuriously; the loop re-polls acquire_slot() after every
 //   wake and re-waits with the remaining budget.
-// - Auto-reset also wakes exactly ONE waiter: if a Python consumer waits on the same
-//   doorbell, this TOP can consume signals that consumer was counting on (and vice versa).
-//   That is why the wait is opt-in (Framewaitms defaults to 0) -- enable it only when this
-//   TOP is the doorbell's sole waiter.
+// - Auto-reset also wakes exactly ONE waiter: a second consumer of the same Ipcmemname (a
+//   second In TOP, or a Python consumer with CUDALINK_DOORBELL) can take the signal this TOP
+//   waits for. The wait therefore runs in slices of kFrameWaitSliceMs (1 ms) and re-polls
+//   acquire_slot() after each, so a lost signal costs at most one slice, not the budget.
+// - Default 3 ms: the real budget of the Phase 5 sync-kit setting (old "4", which truncated
+//   to ~3 ms; 0.19 % mismatches). 2026-11-17 dev-box sweeps, 1280x720: duplicates 4-6 % at 0
+//   -> about 1 % at 3. The cost depends on the A/B phase: a read just before the publish
+//   waits for it (mean cook 0.2-1.3 ms at 3-4 ms). 0 turns the wait off.
 // - This blocks TD's cook thread for up to waitMs (<= kFramewaitMax, 8 ms) -- the entire
 //   point of the fix: trade a bounded CPU wait for a fresh frame instead of a repeat.
 // ---------------------------------------------------------------------------
@@ -541,20 +546,21 @@ cudalink::core::AcquireResult CudaLinkInTOP::waitForFreshFrame(cudalink::core::A
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
     while (result.state == SlotState::NoFrame) {
-        const auto remainingMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+        const int64_t remainingUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now())
                 .count();
-        if (remainingMs <= 0) {
-            break; // budget exhausted -- this cook stays a repeat frame
+        const uint32_t sliceMs = cudalink::core::next_wait_slice_ms(remainingUs);
+        if (sliceMs == 0) {
+            break; // budget spent -- this cook stays a repeat frame
         }
-        const DWORD wake = WaitForSingleObject(asHandle(myDoorbellHandle), static_cast<DWORD>(remainingMs));
-        if (wake != WAIT_OBJECT_0) {
-            break; // WAIT_TIMEOUT (or FAILED/ABANDONED): give up until the next cook
+        const DWORD wake = WaitForSingleObject(asHandle(myDoorbellHandle), static_cast<DWORD>(sliceMs));
+        if (wake != WAIT_OBJECT_0 && wake != WAIT_TIMEOUT) {
+            break; // WAIT_FAILED / WAIT_ABANDONED: give up until the next cook
         }
-        // Doorbell rang -- could be the publish this cook is hoping for, or a stale signal
-        // from one already consumed (auto-reset semantics). Re-classify and either return a
-        // fresh state (NewFrame/VersionChanged/Shutdown, handled by execute()'s switch) or
-        // loop back into the wait with whatever budget is left.
+        // Doorbell rang (the publish this cook hopes for, or a stale signal from one already
+        // consumed) or the slice ran out (another consumer may have taken the signal).
+        // Re-classify and either return a fresh state (NewFrame/VersionChanged/Shutdown,
+        // handled by execute()'s switch) or wait again with whatever budget is left.
         result = acquire_slot(myShmView, myLayout, myLastWriteIdx, myLastVersion);
     }
     return result;
@@ -742,7 +748,7 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         // Step 2: classify SHM state.
         AcquireResult result = acquire_slot(myShmView, myLayout, myLastWriteIdx, myLastVersion);
 
-        // C4 stutter fix (opt-in, Framewaitms > 0): an initially-frameless cook gets one
+        // C4 stutter fix (Framewaitms > 0, default 3): an initially-frameless cook gets one
         // bounded chance to pick up a publish that is about to land, instead of instantly
         // committing to a repeat frame -- see waitForFreshFrame() for the full rationale
         // and caveats. 'rescued' only steers the cadence tally below; the rescued frame

@@ -125,6 +125,37 @@ shows the image in the network. On the dev box (RTX 4090) this copy costs about 
 the copy was considered and rejected (2026-11-17). Reopen it only if a show stream, for
 example 4K float32, makes the copy expensive.
 
+## In TOP parameters
+
+All parameters are on the page "CUDA Link".
+
+| Name | Label | Type | Default | Use |
+|---|---|---|---|---|
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_Python>>TD` | Name of the shared-memory segment. Use the name of the sender. |
+| `Active` | Active | Toggle | On | Off closes the segment. |
+| `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
+| `Framewaitms` | Frame Wait (ms) | Integer, 0 to 8 | `3` | On a cook with no new frame, wait for the sender publish for this time. 0 turns the wait off. |
+
+About `Framewaitms`:
+
+- The sender and the receiver both cook at the display rate. Their phase drifts. When the
+  receiver cooks just before the sender publishes, it shows the last frame again, and in
+  the next cook it skips one frame.
+- The wait turns these duplicate frames into new frames that come a little later. In
+  2026-11-17 sweeps on the dev box (1280×720 RGBA8, one stream), the duplicate frames
+  were 4 % to 6 % at 0 ms and about 1 % at 3 ms.
+- The cost depends on the phase. When the receiver cooks just before the publish, each
+  cook waits for it. The mean In TOP cook time was 0.2 ms to 1.3 ms at 3 ms and 4 ms,
+  against 0.2 ms at 0 ms.
+- The default 3 ms gives the same wait as the Phase 5 sync kit setting (0.19 %
+  mismatches). That setting was 4, but the older wait code waited about 1 ms less.
+- The wait is in steps of 1 ms. After each step, the TOP reads `write_idx` again. Thus two
+  consumers of one segment (two In TOPs, or an In TOP and a Python receiver with
+  `CUDALINK_DOORBELL`) can both use the wait. The sender signal wakes only one waiter.
+- The wait can be up to about 1.5 ms longer than the value. The wait blocks the TD main
+  thread, so increase the value only if the duplicates stay high.
+- Before 2026-11-17 the default was 0, and each value waited about 1 ms less than set.
+
 ## Slot meta from the Out TOP
 
 Each publish writes these slot meta fields:

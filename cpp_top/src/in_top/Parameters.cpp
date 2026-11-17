@@ -68,7 +68,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
     }
 
     {
-        // Opt-in doorbell wait (default 0 = off): on a cook where no new frame has been
+        // Doorbell wait (default 3 ms; 0 = off): on a cook where no new frame has been
         // published yet, block up to this many ms on the producer's publish doorbell
         // instead of instantly re-displaying the previous texture. Converts phase-aliasing
         // repeat frames (publish landing just after the read moment) into slightly-later
@@ -77,7 +77,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.name = FramewaitName;
         p.label = FramewaitLabel;
         p.page = "CUDA Link";
-        p.defaultValues[0] = 0.0;
+        p.defaultValues[0] = static_cast<double>(kFramewaitDefault);
         p.minValues[0] = static_cast<double>(kFramewaitMin);
         p.maxValues[0] = static_cast<double>(kFramewaitMax);
         p.clampMins[0] = true;

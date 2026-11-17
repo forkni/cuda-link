@@ -23,7 +23,7 @@ namespace cudalink::common {
 class CadenceCounters {
 public:
     // Rescued: a cook first classified NoFrame that the doorbell wait (CudaLinkInTOP::
-    // waitForFreshFrame, opt-in via Framewaitms) converted into a fresh frame within its
+    // waitForFreshFrame, Framewaitms > 0) converted into a fresh frame within its
     // budget -- displays like a NewFrame (excluded from noframe_ratio) but tracked
     // separately so the log shows how many repeats the wait is actually absorbing.
     enum class Kind : uint8_t { NewFrame, NoFrame, VersionChanged, Rescued };
