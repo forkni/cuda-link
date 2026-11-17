@@ -40,11 +40,11 @@ namespace {
 // Names the Info CHOP/DAT counts returned by getNumInfoCHOPChans()/getInfoDATSize() --
 // must stay in sync with the number of `case` labels / index branches in
 // getInfoCHOPChan()/getInfoDATEntries() below.
-constexpr int32_t kNumInfoCHOPChans = 20; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot,
+constexpr int32_t kNumInfoCHOPChans = 21; // frames, cook_us, copy_us, begin_us, end_us, write_idx, read_slot,
                                           // num_slots, event_wait_us, gpu_copy_us, noframe_count,
                                           // version_changed_count, rescued_count, graph_hits, graph_builds,
                                           // producer_frame, stream_id, latency_us, frame_gap_count,
-                                          // producer_skip_count
+                                          // producer_skip_count, frame_wait_skipped
 constexpr int32_t kNumInfoDATRows = 7;    // ipc_version, status, last_error, last_error_frame, init_note,
                                           // producer_frame, source_timestamp_us
 
@@ -262,6 +262,7 @@ void CudaLinkInTOP::teardown() {
     }
     myLastVersion = 0;
     myLastWriteIdx = 0;
+    myPublishCadence = {};
     myLayout = SHMLayout(0);
     myShmMappedSize = 0;
     myStatus = "Waiting for producer";
@@ -505,6 +506,9 @@ bool CudaLinkInTOP::openSHM(const char* name) {
 //   waits for it (mean cook 0.2-1.3 ms at 3-4 ms). 0 turns the wait off.
 // - This blocks TD's cook thread for up to waitMs (<= kFramewaitMax, 8 ms) -- the entire
 //   point of the fix: trade a bounded CPU wait for a fresh frame instead of a repeat.
+// - Guard (cadence_wait_useful, core/frame_wait.h): execute() skips the wait when the next
+//   publish is not expected within the budget (a sender slower than this TOP, for example a
+//   30 fps camera into 60 fps) or the sender is paused. Counted in frame_wait_skipped.
 // ---------------------------------------------------------------------------
 
 void CudaLinkInTOP::recordSlotMeta(const cudalink::core::AcquireResult& result) {
@@ -519,6 +523,12 @@ void CudaLinkInTOP::recordSlotMeta(const cudalink::core::AcquireResult& result) 
     } else if (step == FrameStep::ProducerSkip) {
         ++myProducerSkipCount;
     }
+    // A new connection or producer session (myLastWriteIdx reset to 0) starts the cadence over.
+    if (myLastWriteIdx == 0) {
+        myPublishCadence = {};
+    }
+    cudalink::core::cadence_add(myPublishCadence, meta.host_timestamp,
+                                static_cast<uint64_t>(result.write_idx - myLastWriteIdx));
     myProducerFrame = meta.producer_frame;
     mySourceTimestampUs = meta.source_timestamp_us;
     myStreamId = meta.stream_id;
@@ -757,8 +767,12 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         if (result.state == SlotState::NoFrame) {
             const int waitMs = Parameters::evalFramewaitms(inputs);
             if (waitMs > 0) {
-                result = waitForFreshFrame(result, waitMs);
-                rescued = (result.state == SlotState::NewFrame);
+                if (cudalink::core::cadence_wait_useful(myPublishCadence, now_seconds(), waitMs)) {
+                    result = waitForFreshFrame(result, waitMs);
+                    rescued = (result.state == SlotState::NewFrame);
+                } else {
+                    ++myFrameWaitSkipCount;
+                }
             }
         }
 
@@ -1099,6 +1113,12 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
                 // every cook). Not counted when the sender writes no producer_frame (0).
                 chan->name->setString("producer_skip_count");
                 chan->value = static_cast<float>(myProducerSkipCount);
+                break;
+            case 20:
+                // Session count of no-frame cooks that skipped the Framewaitms wait: the next
+                // publish was not expected within the budget, or the sender was paused.
+                chan->name->setString("frame_wait_skipped");
+                chan->value = static_cast<float>(myFrameWaitSkipCount);
                 break;
             default:
                 break;

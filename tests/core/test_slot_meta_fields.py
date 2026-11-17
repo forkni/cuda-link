@@ -234,13 +234,14 @@ def test_cpp_frame_step_cases_match_python_table() -> None:
 
 
 def test_in_top_info_chop_names_match_slot_meta_channels() -> None:
-    """The In TOP's last five Info CHOP channels are SLOT_META_CHANNELS, in order."""
+    """The In TOP's Info CHOP has SLOT_META_CHANNELS as one run, in order (frame_wait_skipped follows)."""
     src = (_REPO / "cpp_top" / "src" / "in_top" / "CudaLinkInTOP.cpp").read_text(encoding="utf-8")
     body = src[src.index("void CudaLinkInTOP::getInfoCHOPChan") : src.index("bool CudaLinkInTOP::getInfoDATSize")]
     names = re.findall(r'chan->name->setString\("(\w+)"\)', body)
     count = int(re.search(r"constexpr int32_t kNumInfoCHOPChans = (\d+);", src).group(1))
     assert len(names) == count
-    assert tuple(names[-len(SLOT_META_CHANNELS) :]) == SLOT_META_CHANNELS
+    start = names.index(SLOT_META_CHANNELS[0])
+    assert tuple(names[start : start + len(SLOT_META_CHANNELS)]) == SLOT_META_CHANNELS
 
 
 def test_info_chop_frame_mod_matches_cpp() -> None:

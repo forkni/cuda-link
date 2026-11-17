@@ -18,6 +18,7 @@
 #include "../common/debug_log.h"
 #include "../common/gpu_timer.h"
 #include "../common/raii_handles.h"
+#include "../core/frame_wait.h"
 #include "../core/ring_reader.h"
 #include "../core/shm_layout.h"
 
@@ -267,4 +268,9 @@ private:
     float myLatencyUs = 0.0f;
     uint64_t myFrameGapCount = 0;
     uint64_t myProducerSkipCount = 0;
+
+    // Framewaitms guard: the sender's publish cadence (from recordSlotMeta()) and the
+    // session count of no-frame cooks that skipped the wait because it could not succeed.
+    cudalink::core::PublishCadence myPublishCadence;
+    uint64_t myFrameWaitSkipCount = 0;
 };

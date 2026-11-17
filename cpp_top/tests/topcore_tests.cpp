@@ -503,6 +503,91 @@ void test_frame_wait_slice() {
     CHECK(next_wait_slice_ms(4000, 0) == 0);
 }
 
+// Feeds `n` frames at `period` seconds from t0; returns the time of the last one.
+double feed_cadence(PublishCadence& c, double t0, double period, int n) {
+    double t = t0;
+    for (int i = 0; i < n; ++i) {
+        t = t0 + period * i;
+        cadence_add(c, t, 1);
+    }
+    return t;
+}
+
+void test_frame_wait_cadence() {
+    constexpr double k60 = 1.0 / 60.0;
+    constexpr double k30 = 1.0 / 30.0;
+    // Unknown cadence (no samples, or fewer than kCadenceMinSamples) always waits.
+    PublishCadence empty;
+    CHECK(cadence_wait_useful(empty, 100.0, 3));
+    PublishCadence few;
+    feed_cadence(few, 100.0, k60, 3);
+    CHECK(few.samples == 2);
+    CHECK(cadence_wait_useful(few, 1000.0, 3));
+    // No timestamp (0) leaves the cadence unknown.
+    PublishCadence nots;
+    for (int i = 0; i < 10; ++i) {
+        cadence_add(nots, 0.0, 1);
+    }
+    CHECK(nots.samples == 0 && nots.last_ts == 0.0);
+
+    // 60 fps sender into a 60 fps receiver: the publish lands 2.7 ms after this cook.
+    PublishCadence c60;
+    const double last60 = feed_cadence(c60, 100.0, k60, 20);
+    CHECK(c60.samples == kCadenceMinSamples);
+    CHECK(c60.period_s > 0.0166 && c60.period_s < 0.0167);
+    CHECK(cadence_wait_useful(c60, last60 + k60 - 0.0027, 3));
+    // Next publish 5 ms away: a 3 ms budget cannot get it.
+    CHECK(!cadence_wait_useful(c60, last60 + k60 - 0.005, 3));
+    // Overdue publish (late sender, under two periods): wait.
+    CHECK(cadence_wait_useful(c60, last60 + 1.5 * k60, 3));
+    // Paused sender (newest frame older than two periods): no wait.
+    CHECK(!cadence_wait_useful(c60, last60 + 2.5 * k60, 3));
+    // Framewaitms 0 is handled by the caller; the guard alone still answers.
+    CHECK(!cadence_wait_useful(c60, last60 + k60 - 0.0027, 0));
+
+    // 30 fps sender into 60 fps: the repeat cook one receiver frame after a publish skips.
+    PublishCadence c30;
+    const double last30 = feed_cadence(c30, 100.0, k30, 20);
+    CHECK(c30.period_s > 0.0333 && c30.period_s < 0.0334);
+    CHECK(!cadence_wait_useful(c30, last30 + k60, 3));
+    // The cook just before the next publish waits.
+    CHECK(cadence_wait_useful(c30, last30 + k30 - 0.002, 3));
+
+    // Ring overwrote frames (write_idx step 2): the period stays per publish.
+    PublishCadence gap;
+    feed_cadence(gap, 100.0, k60, 10);
+    cadence_add(gap, gap.last_ts + 2 * k60, 2);
+    CHECK(gap.period_s > 0.0166 && gap.period_s < 0.0167);
+
+    // One pause (an outlier over 3 periods) keeps the period.
+    PublishCadence pause;
+    feed_cadence(pause, 100.0, k60, 10);
+    cadence_add(pause, pause.last_ts + 0.2, 1);
+    CHECK(pause.period_s > 0.0166 && pause.period_s < 0.0167);
+    CHECK(pause.outliers == 1);
+    cadence_add(pause, pause.last_ts + k60, 1);
+    CHECK(pause.outliers == 0);
+    // A gap of 1 s or more is never a sample.
+    cadence_add(pause, pause.last_ts + 5.0, 1);
+    CHECK(pause.period_s > 0.0166 && pause.period_s < 0.0167);
+
+    // A real rate change (60 -> 10 fps): after kCadenceMaxOutliers long samples the
+    // estimate starts over and then learns the new period.
+    PublishCadence slow;
+    double t = feed_cadence(slow, 100.0, k60, 10);
+    for (uint32_t i = 0; i < kCadenceMaxOutliers; ++i) {
+        t += 0.1;
+        cadence_add(slow, t, 1);
+    }
+    CHECK(slow.samples == 0);
+    for (int i = 0; i < 6; ++i) {
+        t += 0.1;
+        cadence_add(slow, t, 1);
+    }
+    CHECK(slow.samples == kCadenceMinSamples);
+    CHECK(slow.period_s > 0.099 && slow.period_s < 0.101);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -532,6 +617,7 @@ int main(int argc, char** argv) {
     test_publish_footprint();
     test_frame_step_classification();
     test_frame_wait_slice();
+    test_frame_wait_cadence();
 
     std::printf("topcore_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
