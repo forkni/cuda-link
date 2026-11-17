@@ -271,12 +271,14 @@ colors, 30 frames each, and stamps `write_idx`. B checks each color against `pro
 | Cell | Sender (A) | Receiver (B) | Pixel check | Duplicate % | Gaps | Latency p50 / p95 |
 |---|---|---|---|---|---|---|
 | C0 | Out TOP | In TOP, Framewaitms 3 | 3593/3593 | 0.42 | 17 | 0.09 / 3.0 ms |
-| C1 | `.tox` Sender | In TOP, Framewaitms 0 | 3595/3595 | 2.87 | 101 | 15.4 / 16.4 ms |
-| C1 | `.tox` Sender | In TOP, Framewaitms 3 | 3595/3595 | 1.03 | 29 | 0.14 / 15.7 ms |
+| C1 | `.tox` Sender (doorbell on, see notes) | In TOP, Framewaitms 0 | 3595/3595 | 2.87 | 101 | 15.4 / 16.4 ms |
+| C1 | `.tox` Sender (doorbell on, see notes) | In TOP, Framewaitms 3 | 3595/3595 | 1.03 | 29 | 0.14 / 15.7 ms |
 | C2 | Out TOP | `.tox` Receiver | 3598/3598 | 5.25 | 188 | 16.3 / 16.8 ms |
 | C3 | Out TOP | Python `Importer` | 3588/3589, rerun 3596/3596 | n/a | 13, rerun 6 | 0.83 / 1.45 ms |
 | C4 | Python `Exporter`, doorbell off | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 3.95 | 78 | 8.0 / 15.8 ms |
 | C5 | Python `Exporter`, `CUDALINK_DOORBELL=1` | In TOP, Framewaitms 3 | 118 color runs, 0 wrong | 2.67 | 15 | 4.8 / 12.5 ms |
+| P1 | `.tox` Sender, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 3597/3597 | 0.89 | 34 | 0.15 / 15.7 ms |
+| P1 | Python `Exporter`, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 2.67 | 31 | 5.3 / 12.8 ms |
 | F16 | Out TOP, rgba16float | In TOP, Framewaitms 3 | 1199/1199 (20 s) | 0.83 | 10 | 0.10 / 15.1 ms |
 
 Duplicate % is the number of B cooks that show the same `producer_frame` as the cook before,
@@ -285,6 +287,8 @@ divided by all B cooks. Gaps are `frame_gap_count` (TD receivers) or the steps i
 
 Notes:
 
+- C1: TD A had `CUDALINK_DOORBELL=1` in its environment, so the `.tox` Sender signaled the
+  doorbell. The P1 rows use the new default (producer doorbell on, variable unset).
 - C3: the first run had one frame whose pixels and `producer_frame` did not agree (delta 9).
   The script did not log which frame it was. A rerun with logging had no mismatch. The cause
   is not known. The 30-minute show-machine run (consolidated plan Phase 5) will show if it
