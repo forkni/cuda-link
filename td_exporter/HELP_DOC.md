@@ -129,12 +129,12 @@ Use different names to run multiple independent sender/receiver pairs simultaneo
 
 ### Numslots
 
-**Type:** Integer Menu | **Default:** 3 | **Supported range:** 2–10 (2–5 recommended/tested)
+**Type:** Menu | **Options:** 2, 3, 4 | **Default:** 3
 
-Number of ring buffer slots in the GPU pipeline.
+Number of ring buffer slots in the GPU pipeline. The C++ Out TOP has the same three options.
 
-- **Hard bounds:** values outside 2–10 are rejected outright (below 2 there is no double-buffering; above 10 overflows internal fixed-size tables). Values 6–10 work but are less exercised in testing than 2–5.
-- **Higher values** (e.g., 4–5) reduce the chance of producer/consumer contention when frame processing takes variable time. Each additional slot uses one full texture worth of GPU memory (`ceil(W × H × C × sizeof(dtype) / 2 MiB) × 2 MiB`).
+- **Library bounds:** a Python `Exporter` (`FrameSpec(num_slots=...)`) accepts 1–10. With 1 there is no double-buffering; above 10 overflows internal fixed-size tables. A receiver (the `.tox` in Receiver mode, or the In TOP) reads the slot count from the sender.
+- **Higher values** (e.g., 4) reduce the chance of producer/consumer contention when frame processing takes variable time. Each additional slot uses one full texture worth of GPU memory (`ceil(W × H × C × sizeof(dtype) / 2 MiB) × 2 MiB`).
 - **Lower values** (e.g., 2) reduce GPU memory usage at the cost of slightly increased contention risk.
 - **3 slots (default)** is sufficient for the vast majority of use cases.
 
