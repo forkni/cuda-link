@@ -5,7 +5,7 @@ Build the cuda-link multi-stream sync kit inside TouchDesigner (Phase 5).
 
 Run it from a Text DAT (right-click > Run Script) or the Textport, in each instance:
 
-    kit = mod('build_kit')                 # or: exec(open(r'<path>/build_kit.py').read())
+    kit = mod('build_kit')                 # or the exec() form in README.md (once per session)
     # Instance B (receiver): S In TOPs + Info CHOPs + Cache/Switch per stream + sync CHOP
     kit.build_receiver(op('/project1'), streams=6, in_dll=r'<path>/CudaLinkInTOP.dll',
                        names=['cam0_color', 'cam0_depth', ...], kit_dir=r'<this folder>')
@@ -19,6 +19,11 @@ builder reads them into Text DATs so the saved .toe does not depend on this fold
 The C++ plugin parameters appear one frame after the plugin loads, so the builder sets
 Ipcmemname / Active / Framewaitms through run(..., delayFrames=...).
 
+TD 2025.33230 keeps the code object of any new code that writes a parameter (forum report
+1026657, defect A). So every parameter write here is in a function that is compiled one
+time: run() gets the function `_apply_in_pars`, never a text of code, and a refresh calls
+build_receiver() again instead of a new exec() of this file.
+
 The receiver COMP gets custom pars: `Interval` (logger seconds, default 60) and
 `Framewaitms` (copied to every In TOP; 0 = off).
 """
@@ -26,6 +31,17 @@ The receiver COMP gets custom pars: `Interval` (logger seconds, default 60) and
 from __future__ import annotations
 
 _PARAM_DELAY_FRAMES = 5
+
+
+def _apply_in_pars(comp_path: str, streams: int, names: list[str]) -> None:
+    """Set the plugin pars of the In TOPs (run() calls it after the plugin has loaded)."""
+    c = op(comp_path)  # noqa: F821
+    c.op("sync").par.Streams = streams
+    for s, name in enumerate(names):
+        t = c.op(f"in{s}")
+        t.par.Ipcmemname = name
+        t.par.Framewaitms.expr = "parent().par.Framewaitms"
+        t.par.Active = True
 
 
 def _text_dat(comp: object, name: str, path: str, x: int, y: int) -> object:
@@ -93,14 +109,8 @@ def build_receiver(
         out.inputConnectors[0].connect(sw)
         out.nodeX, out.nodeY = 600, y
 
-    run(  # noqa: F821
-        "c = op(args[0])\n"
-        "c.op('sync').par.Streams = args[1]\n"
-        "for s, name in enumerate(args[2]):\n"
-        "    t = c.op('in%d' % s)\n"
-        "    t.par.Ipcmemname = name\n"
-        '    t.par.Framewaitms.expr = "parent().par.Framewaitms"\n'
-        "    t.par.Active = True\n",
+    run(  # noqa: F821  (a function, not a text: see the module docstring)
+        _apply_in_pars,
         comp.path,
         streams,
         list(names),

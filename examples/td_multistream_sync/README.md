@@ -65,6 +65,11 @@ g["build_receiver"](
 )
 ```
 
+Run the `exec()` line one time for each TD session. To refresh the kit, call
+`g["build_receiver"](...)` again with the same `g`. A new `exec()` compiles new code, and
+TD 2025.33230 keeps each new code object that writes a parameter (about 4 blocks each,
+[forum report](https://forum.derivative.ca/t/a-parameter-write-from-python-keeps-the-code-object-of-the-caller-and-three-related-leaks-2025-33230-windows-11/1026657)).
+
 This makes `/project1/sync_receiver_B`. For each stream s it holds these ops:
 
 - `in{s}`: the In TOP.
