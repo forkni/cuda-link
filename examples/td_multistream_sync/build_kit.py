@@ -22,7 +22,8 @@ Ipcmemname / Active / Framewaitms through run(..., delayFrames=...).
 TD 2025.33230 keeps the code object of any new code that writes a parameter (forum report
 1026657, defect A). So every parameter write here is in a function that is compiled one
 time: run() gets the function `_apply_in_pars`, never a text of code, and a refresh calls
-build_receiver() again instead of a new exec() of this file.
+build_receiver() again instead of a new exec() of this file. `_apply_in_pars` queues itself
+again until every In TOP plugin has loaded (up to _PARAM_RETRIES times).
 
 The receiver COMP gets custom pars: `Interval` (logger seconds, default 60) and
 `Framewaitms` (copied to every In TOP; 0 = off).
@@ -31,14 +32,33 @@ The receiver COMP gets custom pars: `Interval` (logger seconds, default 60) and
 from __future__ import annotations
 
 _PARAM_DELAY_FRAMES = 5
+_PARAM_RETRIES = 60  # 60 x 5 frames: about 5 s at 60 FPS for every In TOP plugin to load
 
 
-def _apply_in_pars(comp_path: str, streams: int, names: list[str]) -> None:
-    """Set the plugin pars of the In TOPs (run() calls it after the plugin has loaded)."""
+def _apply_in_pars(comp_path: str, streams: int, names: list[str], retries_left: int = _PARAM_RETRIES) -> None:
+    """Set the plugin pars of the In TOPs when every In TOP plugin has loaded.
+
+    The pars of a C++ TOP appear one frame after its DLL loads, and a load can take more than
+    _PARAM_DELAY_FRAMES. While an In TOP has no `Ipcmemname` par, write nothing and queue
+    this function again. The writes are idempotent, so a repeated call is safe.
+    """
     c = op(comp_path)  # noqa: F821
+    if c is None:
+        return  # the COMP was removed before this delayed call: nothing to set
+    ins = [c.op(f"in{s}") for s in range(len(names))]
+    waiting = [f"in{s}" for s, t in enumerate(ins) if t is None or not hasattr(t.par, "Ipcmemname")]
+    if waiting:
+        if retries_left <= 0:
+            raise RuntimeError(
+                f"{comp_path}: no plugin pars on {', '.join(waiting)} after "
+                f"{_PARAM_RETRIES * _PARAM_DELAY_FRAMES} frames; check the In TOP DLL path and its errors"
+            )
+        run(  # noqa: F821
+            _apply_in_pars, comp_path, streams, names, retries_left - 1, delayFrames=_PARAM_DELAY_FRAMES
+        )
+        return
     c.op("sync").par.Streams = streams
-    for s, name in enumerate(names):
-        t = c.op(f"in{s}")
+    for t, name in zip(ins, names, strict=True):
         t.par.Ipcmemname = name
         t.par.Framewaitms.expr = "parent().par.Framewaitms"
         t.par.Active = True
