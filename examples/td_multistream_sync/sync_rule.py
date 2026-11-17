@@ -109,8 +109,10 @@ _reset_state()
 def step(state: dict, pf: list[int], frames: list[int]) -> dict:
     """Advance the rule by one B cook and return the output channels (pure; testable).
 
-    frames[s] is the In TOP `frames` channel (copies so far) of stream s; an increase
-    means the stream got a new frame in this cook.
+    frames[s] is the In TOP `frames` channel (copies so far) of stream s. The stream got a
+    new frame in this cook when `frames` or the producer_frame changed. Both are checked:
+    `frames` is float32 and stops changing by 1 above 2^24 (about 78 hours at 60 FPS),
+    while producer_frame (mod 2^24) stays exact and differs for every publish.
     """
     n = len(pf)
     fresh = state["frames"] is None or len(state["frames"]) != n
@@ -118,7 +120,7 @@ def step(state: dict, pf: list[int], frames: list[int]) -> dict:
         state["last_pf"] = [None] * n
         state["prev"] = [None] * n
         state["frames"] = [None] * n
-    new = [frames[s] != state["frames"][s] for s in range(n)]
+    new = [frames[s] != state["frames"][s] or pf[s] != state["last_pf"][s] for s in range(n)]
     for s in range(n):
         if new[s]:
             # the frame that was live is now the stream's previous distinct frame (cache{s})
@@ -160,6 +162,16 @@ def onPulse(par: object) -> None:
         _reset_state()
 
 
+def _chan(chop: object, name: str) -> int:
+    """Channel value as int; 0 when the CHOP or the channel is missing.
+
+    The Info CHOP has no producer_frame / frames channels until the In TOP plugin has
+    loaded (or when its DLL path is wrong); the rule must not raise on those cooks.
+    """
+    chan = chop[name] if chop is not None else None
+    return int(chan.eval()) if chan is not None else 0
+
+
 def onCook(scriptOp: object) -> None:
     owner = scriptOp.parent()
     now = int(absTime.frame)  # noqa: F821 -- TD global; one rule step per TD frame
@@ -169,12 +181,8 @@ def onCook(scriptOp: object) -> None:
         frames: list[int] = []
         for s in range(n):
             info = owner.op(f"info{s}")
-            if info is None:
-                pf.append(0)
-                frames.append(0)
-                continue
-            pf.append(int(info["producer_frame"].eval()))
-            frames.append(int(info["frames"].eval()))
+            pf.append(_chan(info, "producer_frame"))
+            frames.append(_chan(info, "frames"))
         _state["frame"] = now
         _state["out"] = step(_state, pf, frames)
     scriptOp.clear()

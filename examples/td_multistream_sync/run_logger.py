@@ -10,11 +10,17 @@ Put this in an Execute DAT (Frame End On) inside the COMP that holds the network
   latency_us (mean and max over the interval), In TOP cook_us mean, and B's own drops.
   Frame Start must be On too: it force-cooks `sync` once per B frame.
 - Sender COMP (A, no `sync`): logs A frames and A's dropped frames (absTime.step > 1).
-  The Phase 5 gap threshold is net of these A drops.
+  A frame that A drops is not a B frame gap: A does not publish in it, so the In TOPs
+  count it as a producer skip. B `skip_sum` / streams is therefore near A `drops`.
 
-Rows go to a Table DAT `runlog` in the same COMP and, after each row, to
-<project.folder>/cudalink_run_<role>_<start>.csv. Interval: custom par `Interval` (seconds)
-on the COMP if present, else 60. Stream count for B: the `sync` CHOP's `Streams` par.
+The receiver counters (b_cooks, new_cooks, mismatches, gap_sum, skip_sum) are relative to
+the start of the logged run: the logger reads the session counters of `sync` and the In
+TOPs when it starts and subtracts them from every row.
+
+Rows go to a Table DAT `runlog` in the same COMP (cleared when a run starts) and, after
+each row, to <project.folder>/cudalink_run_<role>_<start>.csv. Interval: custom par
+`Interval` (seconds) on the COMP if present, else 60. Stream count for B: the `sync` CHOP's
+`Streams` par.
 
 The A-side drop count uses absTime.step: TD sets it above 1 when a frame is skipped to
 keep real time (Realtime On). Run A and B at the same root FPS (Decisions precondition).
@@ -26,13 +32,48 @@ import time
 
 _run: dict = {}
 
+_COUNTERS = ("b_cooks", "new_cooks", "mismatches", "gap_sum", "skip_sum")
+
+
+def _chan(chop: object, name: str) -> float:
+    """Channel value; 0.0 when the CHOP or the channel is missing (plugin not loaded yet)."""
+    chan = chop[name] if chop is not None else None
+    return float(chan.eval()) if chan is not None else 0.0
+
+
+def _session_counters(owner: object, sync: object) -> dict:
+    """Session counters of `sync` and the In TOPs, as they are now."""
+    gaps = skips = 0.0
+    for s in range(int(sync.par.Streams.eval())):
+        info = owner.op(f"info{s}")
+        gaps += _chan(info, "frame_gap_count")
+        skips += _chan(info, "producer_skip_count")
+    return {
+        "b_cooks": _chan(sync, "b_cooks"),
+        "new_cooks": _chan(sync, "new_cooks"),
+        "mismatches": _chan(sync, "mismatches"),
+        "gap_sum": gaps,
+        "skip_sum": skips,
+    }
+
+
+def since_start(now: dict, base: dict) -> dict:
+    """Counters relative to the run start (pure; testable).
+
+    A counter below its base was reset during the run (the `Reset` pulse on `sync`, or an
+    In TOP that was recreated); it then counts from 0, so its value is used as it is.
+    """
+    return {key: int(now[key] - base[key]) if now[key] >= base[key] else int(now[key]) for key in _COUNTERS}
+
 
 def _reset(owner: object) -> None:
+    sync = owner.op("sync")
     _run.clear()
     _run.update(
         start=time.time(),
         last=time.time(),
-        role="receiver" if owner.op("sync") is not None else "sender",
+        role="receiver" if sync is not None else "sender",
+        base=_session_counters(owner, sync) if sync is not None else None,
         frames=0,
         drops=0,
         lat_sum=0.0,
@@ -44,6 +85,9 @@ def _reset(owner: object) -> None:
     )
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(_run["start"]))
     _run["path"] = f"{project.folder}/cudalink_run_{_run['role']}_{stamp}.csv"  # noqa: F821
+    table = owner.op("runlog")
+    if table is not None:
+        table.clear()  # rows of an earlier run must not go into this run's CSV
 
 
 def _interval(owner: object) -> float:
@@ -90,18 +134,18 @@ def onFrameEnd(frame: int) -> None:
 
     sync = owner.op("sync")
     if sync is not None:
-        n = int(sync.par.Streams.eval())
-        for s in range(n):
+        for s in range(int(sync.par.Streams.eval())):
             info = owner.op(f"info{s}")
-            if info is None:
-                continue
-            lat = float(info["latency_us"].eval())
+            # cook_us is new on every cook (a cook with no frame can hold the Framewaitms wait).
+            _run["cook_sum"] += _chan(info, "cook_us")
+            _run["cook_n"] += 1
+            # latency_us changes only with a new frame: without one the channel still holds
+            # the previous frame's value, which must not be counted again.
+            lat = _chan(info, "latency_us") if _chan(sync, f"new{s}") > 0 else 0.0
             if lat > 0:
                 _run["lat_sum"] += lat
                 _run["lat_n"] += 1
                 _run["lat_max"] = max(_run["lat_max"], lat)
-            _run["cook_sum"] += float(info["cook_us"].eval())
-            _run["cook_n"] += 1
 
     now = time.time()
     if now - _run["last"] < _interval(owner):
@@ -109,22 +153,11 @@ def onFrameEnd(frame: int) -> None:
     _run["last"] = now
     row = {"elapsed_s": round(now - _run["start"], 1), "frames": _run["frames"], "drops": _run["drops"]}
     if sync is not None:
-        n = int(sync.par.Streams.eval())
-        new_cooks = float(sync["new_cooks"].eval())
-        mismatches = float(sync["mismatches"].eval())
-        gaps = skips = 0.0
-        for s in range(n):
-            info = owner.op(f"info{s}")
-            if info is not None:
-                gaps += float(info["frame_gap_count"].eval())
-                skips += float(info["producer_skip_count"].eval())
+        counters = since_start(_session_counters(owner, sync), _run["base"])
+        new_cooks = counters["new_cooks"]
+        row.update(counters)
         row.update(
-            b_cooks=int(float(sync["b_cooks"].eval())),
-            new_cooks=int(new_cooks),
-            mismatches=int(mismatches),
-            mismatch_pct=round(100.0 * mismatches / new_cooks, 4) if new_cooks else 0.0,
-            gap_sum=int(gaps),
-            skip_sum=int(skips),
+            mismatch_pct=round(100.0 * counters["mismatches"] / new_cooks, 4) if new_cooks else 0.0,
             latency_mean_us=round(_run["lat_sum"] / _run["lat_n"], 1) if _run["lat_n"] else 0.0,
             latency_max_us=round(_run["lat_max"], 1),
             in_cook_mean_us=round(_run["cook_sum"] / _run["cook_n"], 1) if _run["cook_n"] else 0.0,

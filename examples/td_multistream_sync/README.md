@@ -98,8 +98,13 @@ The run passes when both of these hold:
 
 - **mismatch_pct** (B CSV) is at or below 0.1 %. The denominator is the number of B cooks
   that got at least one new frame.
-- **Gap growth** is at or below 0.5 % of frames, after you remove A's own drops:
-  (B `gap_sum` / S - A `drops`) / A `frames`.
+- **Gap growth** is at or below 0.5 % of frames: (B `gap_sum` / S) / A `frames`.
+  `gap_sum` counts publishes that B did not read. A frame that A drops is not in it: A
+  does not publish in that frame, so the In TOP counts it as a producer skip (`skip_sum`).
+  Thus B `skip_sum` / S is near A `drops`.
+
+The B CSV counters (`b_cooks`, `new_cooks`, `mismatches`, `gap_sum`, `skip_sum`) start at 0
+when the logger starts. They do not include what happened before the run.
 
 Phase 6 starts if `mismatch_pct` > 1 %, or if the Cache TOPs use more than 1 GB of VRAM
 (2 × the size of one frame per stream).

@@ -103,3 +103,87 @@ def test_step_resets_when_stream_count_changes() -> None:
     out = sync_rule.step(state, [100, 100, 100], [1, 1, 1])
     assert out["new_frame"] == 1.0
     assert "sel2" in out
+
+
+def test_step_detects_new_frame_when_frames_channel_is_stuck() -> None:
+    """Above 2^24 the float32 `frames` channel repeats a value; producer_frame still changes."""
+    state = _fresh_state()
+    stuck = 1 << 24
+    sync_rule.step(state, [100, 100], [stuck, stuck])
+    out = sync_rule.step(state, [100, 101], [stuck, stuck])  # stream 1: new frame, same `frames`
+    assert (out["new0"], out["new1"]) == (0.0, 1.0)
+    assert (out["sel0"], out["sel1"], out["mismatch"]) == (0.0, 1.0, 0.0)  # its cache holds 100
+
+
+class _Chan:
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def eval(self) -> float:
+        return self._value
+
+
+class _Chop(dict):
+    """CHOP double: indexing a missing channel gives None, as in TouchDesigner."""
+
+    def __getitem__(self, name: str) -> _Chan | None:
+        return self.get(name)
+
+
+def test_chan_is_zero_for_missing_chop_or_channel() -> None:
+    assert sync_rule._chan(None, "producer_frame") == 0
+    assert sync_rule._chan(_Chop(), "producer_frame") == 0  # plugin not loaded: no such channel
+    assert sync_rule._chan(_Chop(producer_frame=_Chan(41.0)), "producer_frame") == 41
+
+
+# ---------------------------------------------------------------------------
+# run_logger.py (same kit): the pure counter arithmetic
+# ---------------------------------------------------------------------------
+
+_LOGGER_PATH = _PATH.with_name("run_logger.py")
+_logger_spec = importlib.util.spec_from_file_location("run_logger_example", _LOGGER_PATH)
+assert _logger_spec is not None and _logger_spec.loader is not None
+run_logger = importlib.util.module_from_spec(_logger_spec)
+_logger_spec.loader.exec_module(run_logger)
+
+
+def _counters(**values: float) -> dict:
+    return {**dict.fromkeys(run_logger._COUNTERS, 0.0), **values}
+
+
+def test_logger_counters_are_relative_to_run_start() -> None:
+    base = _counters(b_cooks=500.0, new_cooks=480.0, mismatches=30.0, gap_sum=12.0, skip_sum=2.0)
+    now = _counters(b_cooks=1500.0, new_cooks=1480.0, mismatches=31.0, gap_sum=15.0, skip_sum=2.0)
+    assert run_logger.since_start(now, base) == {
+        "b_cooks": 1000,
+        "new_cooks": 1000,
+        "mismatches": 1,
+        "gap_sum": 3,
+        "skip_sum": 0,
+    }
+
+
+def test_logger_counter_reset_during_run_counts_from_zero() -> None:
+    base = _counters(mismatches=30.0, new_cooks=480.0)
+    now = _counters(mismatches=4.0, new_cooks=90.0)  # `Reset` pulsed on sync during the run
+    out = run_logger.since_start(now, base)
+    assert (out["mismatches"], out["new_cooks"]) == (4, 90)
+
+
+def test_logger_session_counters_sum_streams_and_tolerate_missing_channels() -> None:
+    import types
+
+    infos = {
+        "info0": _Chop(frame_gap_count=_Chan(3.0), producer_skip_count=_Chan(1.0)),
+        "info1": _Chop(),  # plugin not loaded
+    }
+    owner = types.SimpleNamespace(op=infos.get)
+    sync = _Chop(b_cooks=_Chan(10.0), new_cooks=_Chan(8.0), mismatches=_Chan(2.0))
+    sync.par = types.SimpleNamespace(Streams=_Chan(3.0))  # info2 does not exist
+    assert run_logger._session_counters(owner, sync) == {
+        "b_cooks": 10.0,
+        "new_cooks": 8.0,
+        "mismatches": 2.0,
+        "gap_sum": 3.0,
+        "skip_sum": 1.0,
+    }
