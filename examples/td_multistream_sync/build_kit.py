@@ -109,7 +109,7 @@ def build_receiver(
         out.inputConnectors[0].connect(sw)
         out.nodeX, out.nodeY = 600, y
 
-    run(  # noqa: F821  (a function, not a text: see the module docstring)
+    run(  # noqa: F821
         _apply_in_pars,
         comp.path,
         streams,

@@ -269,8 +269,8 @@ The Switch TOP index and the shown texture must change in the same B frame.
 - A: one Orbbec TOP for each camera, with device timer sync on. A Select TOP takes the
   color (RGBA8) and the depth (Mono32Float, meters) to two Out TOPs. Three cameras give six
   streams, `Streamid` 0 to 5, for example `Ipcmemname` `cam0_color` to `cam2_depth`.
-- Keep depth at native resolution in Mono32Float. Mono16Float has steps of 2 to 4 mm, and
-  the camera gives 1 mm.
+- Keep depth at native resolution in Mono32Float. Mono16Float has steps of 2 mm from 2 to
+  4 m and 4 mm from 4 to 8 m, and the camera gives 1 mm.
 - B: build the receiver with `build_receiver()` from `examples/td_multistream_sync/`. Its
   README has the steps, the sync rule and the run logger.
 
@@ -300,17 +300,20 @@ A use of such a handle is undefined behavior. So the Out TOP does these steps fi
 The wait is on TD's main thread. Thus TD drops about 6 frames at 60 FPS when:
 
 - you set `Active` Off, or you remove or close the Out TOP;
-- the input changes resolution or pixel format (the ring is made again, and the old buffers
-  are freed after the wait).
+- you change `Ipcmemname` while the Out TOP is active (the old segment is closed);
+- you change `Numslots`, or the input changes resolution or pixel format (the ring is made
+  again, and the old buffers are freed after the wait).
 
-The first allocation does not wait: there are no old handles. Change the format before a
-show, not during it.
+The first allocation does not wait: there are no old handles. Change these parameters and
+the format before a show, not during it.
 
 ## Trust model
 
 - The Out TOP makes the segment with `CreateFileMappingW` and the default security. The name
   has no `Global\` prefix, so the segment is in the user's session. Other processes of the
   same user in that session can open it, read it and write to it if they know the name.
+  The default security also gives access to SYSTEM and to elevated administrator
+  processes.
 - cuda-link does not authenticate the sender. Use it on a machine whose processes you trust.
 - The In TOP reads the segment as untrusted input. It refuses a wrong magic, a `num_slots` of
   0 or more than 64, a layout larger than the mapped size, and metadata with a zero size or a
