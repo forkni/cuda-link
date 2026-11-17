@@ -277,6 +277,10 @@ class TDSenderEngine:
         # All timing is engine-local; does not depend on export_profile being enabled.
         self._tx_report_every: int = env_int("CUDALINK_SENDER_REPORT_EVERY", default=150)
         self._tx_window = ReportWindow()  # owns FPS window + per-frame export-time accumulator
+        # Per-window top.cuda_memory() time, apart from export(): cuda_memory() waits for TD's
+        # GPU work on the source texture, so a slow source pipeline shows here, not in export.
+        self._cm_acc_s: float = 0.0
+        self._cm_acc_n: int = 0
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -388,11 +392,13 @@ class TDSenderEngine:
         _now = now if now is not None else time.perf_counter()
         _fps = self._tx_window.fps(_now, n)
         _avg_export_us = self._tx_window.avg_and_reset() * 1e6
+        _cm = f"cuda_memory={self._cm_acc_s / self._cm_acc_n * 1e6:.1f} µs avg | " if self._cm_acc_n else ""
+        self._cm_acc_s, self._cm_acc_n = 0.0, 0
         spec = self._current_spec
         self._log(
             f"Frame {n:5d} | {_fps:5.1f} FPS | "
             f"shape=({spec.height}, {spec.width}, {spec.channels}) dtype={spec.dtype} | "
-            f"export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
+            f"{_cm}export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
         )
 
     def _reset_report_window(self) -> None:
@@ -407,6 +413,7 @@ class TDSenderEngine:
         lifetime-monotonic counter design.)
         """
         self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
+        self._cm_acc_s, self._cm_acc_n = 0.0, 0
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -686,7 +693,10 @@ class TDSenderEngine:
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
             try:
+                _t_cm = time.perf_counter()
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
+                self._cm_acc_s += time.perf_counter() - _t_cm
+                self._cm_acc_n += 1
             except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
                 return False
