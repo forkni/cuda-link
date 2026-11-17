@@ -19,7 +19,7 @@ import operator
 from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, SupportsIndex, cast, runtime_checkable
 
 from ._env import env_bool, env_int, env_str
 from .cuda_runtime_types import (
@@ -151,7 +151,7 @@ def _check_uint(name: str, value: object, limit: int, bits: int) -> None:
     """
     if type(value) is not int:
         try:
-            value = operator.index(value)  # integer-like types (numpy ints) pass
+            value = operator.index(cast(SupportsIndex, value))  # integer-like types (numpy ints) pass
         except TypeError:
             raise TypeError(f"GpuFrame.{name} must be an integer, got {type(value).__name__}") from None
     if not 0 <= value < limit:
