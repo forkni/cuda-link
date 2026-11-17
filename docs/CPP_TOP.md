@@ -20,17 +20,56 @@ Orbbec TOP -> Select TOP -> Out TOP  ==SHM==> In TOP -> Info CHOP -> sync rule -
 - A and B must be different processes (see "Same-process limitation"). A Python sender or
   receiver (the `.tox`, or `cuda_link` in a script) can be either side.
 - A and B must use the same GPU.
-- An Out TOP that nothing pulls does not start after the project opens. TD loads a C++
-  TOP's DLL only on the op's first cook, and `cookOnStart` / `cookEveryFrame` take effect
-  only after that load. Cook each Out TOP once when the project starts, for example
-  `op('out0').cook(force=True)` in an Execute DAT `onStart`. The sync kit's run logger
-  does this for every C++ TOP in its COMP. After one cook the Out TOP cooks every frame.
-  The In TOP is not affected when the network reads it (the sync rule does).
+- Start after the project opens depends on the install form:
+  - System Plugins folder (Custom OP, the main form): an Out TOP starts on its own, also
+    when nothing pulls it (test R6: publishing 12-14 s after TD started).
+  - CPlusPlus TOP with the Plugin Path parameter (project form): an Out TOP that nothing
+    pulls does not start. TD loads the DLL only on the op's first cook, and `cookOnStart` /
+    `cookEveryFrame` take effect only after that load. Cook each Out TOP once when the
+    project starts, for example `op('out0').cook(force=True)` in an Execute DAT `onStart`.
+    The sync kit's run logger does this for every C++ TOP in its COMP. After one cook the
+    Out TOP cooks every frame.
+  - The In TOP is not affected when the network reads it (the sync rule does).
 
-## Install: one project's Plugins folder
+## Install: system Plugins folder
 
-- Put `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` in the `Plugins/` folder of the test
-  project only. Do not put them in `Documents/Derivative/Plugins`.
+This is the main form. The ops then show in the OP Create dialog (Custom tab) as
+"CUDA Link Out" and "CUDA Link In".
+
+```text
+<Documents>\Derivative\Plugins\
+└── CudaLink\              one folder, nothing else in it
+    ├── CudaLinkOutTOP.dll  opType Cudalinkout
+    ├── CudaLinkInTOP.dll   opType Cudalinkin
+    └── VERSION.txt         cuda-link version, protocol, TD header API, CUDA toolkit, DLL hashes
+```
+
+- Install: close TouchDesigner, then run `install_cpp_top.cmd` (or
+  `python scripts\install_cpp_top.py install --dll-dir <folder with the two DLLs>`). The
+  script finds the real Documents folder, also when OneDrive moves it. It refuses while
+  TouchDesigner runs.
+- First start: TD asks to approve each DLL. It asks again after each DLL change. TD writes the
+  approvals to `Plugins.json` in the `Plugins` folder, so the folder must be writable.
+- Keep one copy on a machine. With a system copy and a copy in a project's `Plugins/` folder,
+  TD uses the system copy and shows a modal "Plugin Load Error" for the project copy. The start
+  waits until someone clicks OK (test R4).
+- Upgrade: close TD (TD locks a loaded DLL), install again, and approve the prompts.
+- Uninstall: `install_cpp_top.cmd uninstall` moves the folder to
+  `<Documents>\Derivative\CudaLink.removed-<time>`. Do not only rename the folder inside
+  `Plugins`: TD loads every subfolder (test R1). Saved projects keep their nodes and parameter
+  values; the nodes show an error until the DLLs are back.
+- `install_cpp_top.cmd status` shows the installed copy and its `VERSION.txt`, and warns about
+  other CUDA Link DLLs under `Plugins`.
+- Versions: TD 2025.33230 does not check the plugin major or minor version (test R2). A
+  breaking parameter or protocol change therefore needs a new opType. Parameter names and menu
+  tokens stay as they are.
+
+## Install: one project's Plugins folder (portable form)
+
+- Use this form only on a machine that has no system copy (see above).
+- Put `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` in the `Plugins/` folder next to the
+  `.toe`, or point a CPlusPlus TOP's Plugin Path at a DLL. An Out TOP in this form needs the
+  `onStart` cook (see "Topology").
 - Remove any older build (protocol v0.5) from `Documents/Derivative/Plugins` first. Both
   builds register the op types `Cudalinkout` and `Cudalinkin`, and two DLLs with the same op
   type collide.
@@ -310,7 +349,7 @@ Notes:
   timed out while a frame was ready. Shared with the In TOP, it had 118. The Importer used the
   native wait backend in both runs.
 - An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
-  frame (see "Topology").
+  frame (see "Topology"). The dev-box scenes load the DLLs through the Plugin Path parameter.
 
 ## Same-process limitation
 

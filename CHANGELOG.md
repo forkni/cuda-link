@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **C++ TOP installer** (`install_cpp_top.cmd`, `scripts/install_cpp_top.py`): copies
+  `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` into `<Documents>/Derivative/Plugins/CudaLink/`
+  with a `VERSION.txt`, shows the installed copy (`status`) and moves it out of `Plugins`
+  (`uninstall`). It refuses while TouchDesigner runs. `docs/CPP_TOP.md` now documents the
+  system Plugins folder as the main install form.
+
 - **PLAN-001 §D3 runtime-version guard, implemented in
   `cudalink::common::CudaDeviceSession`** (`cpp_top/src/common/cuda_device_session.h`):
   `cudaRuntimeGetVersion()` is queried once at construction and compared against the
