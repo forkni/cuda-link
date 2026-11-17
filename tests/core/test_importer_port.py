@@ -134,7 +134,7 @@ _IMPORT_DEFAULTS = {
     "reconnect_enabled": True,
     "reconnect_max_attempts": 20,
     "reconnect_backoff_frames": (1, 2, 4, 8, 16, 32, 64, 120),
-    "doorbell": False,
+    "doorbell": True,
     "wait_backend": "auto",
 }
 
@@ -226,6 +226,7 @@ def test_import_policy_for_testing_every_field() -> None:
         "allow_pageable_fallback": True,
         "debug": False,
         "reconnect_enabled": False,
+        "doorbell": False,
         "wait_backend": "python",
     }
 

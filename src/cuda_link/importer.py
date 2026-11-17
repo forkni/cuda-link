@@ -74,6 +74,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# wait_for_doorbell() slice: the longest single doorbell wait before write_idx is polled
+# again (same 1 ms as the In TOP's kFrameWaitSliceMs and the .tox Receiver).
+_DOORBELL_SLICE_MS = 1
+
 # The process id the same-process check compares with the segment's sender_pid. A module
 # attribute so tests that run an Exporter and an Importer in one process on fake CUDA can
 # replace it (real CUDA IPC cannot loop back within one process).
@@ -1713,13 +1717,14 @@ class Importer:
                     Caller should fall back to its poll-sleep path.
 
         Notes:
-            * This is a single-consumer primitive (auto-reset event).
-            * The 2 ms default cap in the example loop keeps the lost-wakeup
-              window bounded: worst-case latency is one timeout_ms slice, not
-              infinite.  Caller always re-checks with get_frame() after True.
-            * Returns False immediately when CUDALINK_DOORBELL=0 or on
-              non-Windows — existing behaviour is preserved without any guards
-              in the caller.
+            * The event is auto-reset and wakes ONE waiter. Another consumer of
+              the same name (an In TOP, a `.tox` Receiver, a second Importer) can
+              take a signal, so the wait runs in slices of _DOORBELL_SLICE_MS and
+              polls write_idx after each: a taken signal costs one slice, not the
+              whole timeout. Caller always re-checks with get_frame() after True.
+            * Returns False immediately when CUDALINK_DOORBELL=0, on non-Windows,
+              or when the producer made no event (1.x, doorbell off) — the caller
+              falls back to its poll-sleep path without any guards.
         """
         conn = self._conn
         h = conn.doorbell_handle if conn is not None else None
@@ -1734,8 +1739,22 @@ class Importer:
         if cur != 0 and cur != self._last_write_idx:
             return True
 
-        # Block until signaled; auto-reset clears the event on wake.
-        return _doorbell.wait(h, int(timeout_ms))
+        if timeout_ms <= 0:
+            return _doorbell.wait(h, 0)
+        # Block in slices; auto-reset clears the event on wake. A slice that times out
+        # polls write_idx (the signal may have gone to another consumer). The iteration
+        # cap stops a failed wait (returns False at once) from spinning to the deadline.
+        deadline = time.perf_counter() + timeout_ms / 1000.0
+        for _ in range(int(timeout_ms / _DOORBELL_SLICE_MS) + 2):
+            remaining_ms = (deadline - time.perf_counter()) * 1000.0
+            if remaining_ms <= 0:
+                break
+            if _doorbell.wait(h, max(1, min(_DOORBELL_SLICE_MS, int(remaining_ms + 0.999)))):
+                return True
+            cur = read_write_idx(conn.shm_handle.buf)
+            if cur != 0 and cur != self._last_write_idx:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Frame consumers

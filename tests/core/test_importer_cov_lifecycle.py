@@ -168,8 +168,10 @@ def test_wait_for_doorbell_delegates_to_doorbell_wait_when_no_frame_yet(monkeypa
 
     result = imp.wait_for_doorbell(250.0)
 
+    # The wait runs in 1 ms slices (a signal another consumer takes costs one slice); the
+    # first slice is signaled here, so one call.
     assert result is True
-    assert calls == [(0xFEED, 250)]
+    assert calls == [(0xFEED, 1)]
 
 
 # ---------------------------------------------------------------------------

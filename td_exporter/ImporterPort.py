@@ -91,10 +91,13 @@ class ImportPolicy:
     reconnect_max_attempts: int = 20
     reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
     # R2: Win32 named-event doorbell. When True the consumer opens the named
-    # event published by the producer and blocks on it instead of poll-sleeping
-    # on NO_FRAME. Set the same env var on both sides. Single-consumer only
-    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
-    doorbell: bool = False
+    # event the producer creates and wait_for_doorbell() blocks on it instead of
+    # returning False. On by default since 2.0.0 (the producer signals by default
+    # too); CUDALINK_DOORBELL=0 turns it off. Auto-reset wakes ONE waiter: with
+    # several consumers on one name the wait runs in 1 ms slices and polls
+    # write_idx after each, so a taken signal costs one slice. Windows-only; when
+    # the event does not exist (a 1.x or doorbell-off producer) the consumer polls.
+    doorbell: bool = True
     # R5: native notification-wait backend (compiled _native_waiter extension,
     # built into this wheel on Windows). "auto" (default) uses the native
     # backend when the extension is built, os.name=="nt", and a cudart instance
@@ -126,7 +129,7 @@ class ImportPolicy:
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
-            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
             wait_backend=env_str("CUDALINK_WAIT_BACKEND", default="auto"),
         )
 
@@ -149,6 +152,7 @@ class ImportPolicy:
             allow_pageable_fallback=True,
             debug=False,
             reconnect_enabled=False,
+            doorbell=False,
             wait_backend="python",
         )
 

@@ -104,6 +104,97 @@ def test_wait_for_doorbell_returns_false_when_conn_none() -> None:
     assert result is False
 
 
+def _armed_importer(monkeypatch: pytest.MonkeyPatch, waits: list, wait_result=None, write_idx_seq=None):
+    """Connected Importer with no frame waiting, a fake doorbell handle and doorbell on.
+
+    _doorbell.wait records each timeout and returns wait_result(call_number) (default
+    False: a slice that times out). write_idx_seq, if given, is what read_write_idx returns
+    on successive polls (the early check first).
+    """
+    import cuda_link.importer as _imp_mod
+
+    imp = _make_importer(write_idx=1, last_write_idx=1)
+    imp._conn.doorbell_handle = 0xFEED
+    imp._policy = dataclasses.replace(imp._policy, doorbell=True)
+
+    def fake_wait(h, ms):
+        waits.append(ms)
+        return bool(wait_result(len(waits))) if wait_result else False
+
+    monkeypatch.setattr(_imp_mod._doorbell, "wait", fake_wait)
+    if write_idx_seq is not None:
+        seq = iter(write_idx_seq)
+        monkeypatch.setattr(_imp_mod, "read_write_idx", lambda buf: next(seq))
+    return imp
+
+
+def test_wait_for_doorbell_runs_in_one_ms_slices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No signal and no frame: 1 ms slices until the timeout, then False."""
+    waits: list = []
+    imp = _armed_importer(monkeypatch, waits)
+    try:
+        assert imp.wait_for_doorbell(5.0) is False
+    finally:
+        imp._conn.doorbell_handle = None
+    assert waits, "must wait at least one slice"
+    assert all(ms == 1 for ms in waits)
+    assert len(waits) <= 5 + 2  # iteration cap: timeout / slice + 2
+
+
+def test_wait_for_doorbell_signal_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list = []
+    imp = _armed_importer(monkeypatch, waits, wait_result=lambda n: n == 2)
+    try:
+        assert imp.wait_for_doorbell(50.0) is True
+    finally:
+        imp._conn.doorbell_handle = None
+    assert len(waits) == 2
+
+
+def test_wait_for_doorbell_taken_signal_costs_one_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another consumer took the signal: the slice times out, write_idx moved -> True."""
+    waits: list = []
+    # Early check: 1 (no frame). After slice 1: 1. After slice 2: 2 (a frame landed).
+    imp = _armed_importer(monkeypatch, waits, write_idx_seq=[1, 1, 2])
+    try:
+        assert imp.wait_for_doorbell(2000.0) is True
+    finally:
+        imp._conn.doorbell_handle = None
+    assert waits == [1, 1]
+
+
+def test_wait_for_doorbell_failed_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead handle (wait returns False at once) stops at the iteration cap."""
+    waits: list = []
+    imp = _armed_importer(monkeypatch, waits)
+    try:
+        assert imp.wait_for_doorbell(20.0) is False
+    finally:
+        imp._conn.doorbell_handle = None
+    assert len(waits) <= 20 + 2
+
+
+def test_wait_for_doorbell_zero_timeout_polls_the_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list = []
+    imp = _armed_importer(monkeypatch, waits, wait_result=lambda n: True)
+    try:
+        assert imp.wait_for_doorbell(0) is True
+    finally:
+        imp._conn.doorbell_handle = None
+    assert waits == [0]
+
+
+def test_import_policy_doorbell_default_on_and_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cuda_link._importer_port import ImportPolicy
+
+    monkeypatch.delenv("CUDALINK_DOORBELL", raising=False)
+    assert ImportPolicy().doorbell is True
+    assert ImportPolicy.from_env().doorbell is True
+    assert ImportPolicy.for_testing().doorbell is False
+    monkeypatch.setenv("CUDALINK_DOORBELL", "0")
+    assert ImportPolicy.from_env().doorbell is False
+
+
 # ---------------------------------------------------------------------------
 # 3. Real kernel32 round-trip — Windows-only, no GPU
 # ---------------------------------------------------------------------------

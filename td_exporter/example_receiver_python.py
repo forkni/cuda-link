@@ -266,9 +266,9 @@ def main() -> None:
 
             elif result.outcome is ImportOutcome.NO_FRAME:
                 no_frame_count += 1
-                # R2 doorbell: block on the Win32 named event when enabled
-                # (CUDALINK_DOORBELL=1); returns False immediately when disabled
-                # or non-Windows, preserving the existing poll-sleep behaviour.
+                # R2 doorbell: block on the Win32 named event (on by default since
+                # 2.0.0); returns False immediately with CUDALINK_DOORBELL=0, a
+                # producer without the event, or non-Windows: then poll-sleep.
                 if importer.wait_for_doorbell(2.0):
                     doorbell_wake_count += 1
                 else:
