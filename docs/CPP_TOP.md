@@ -198,6 +198,12 @@ About `Framewaitms`:
   v0.6", P2).
 - The wait can be up to about 1.5 ms longer than the value. The wait blocks the TD main
   thread, so increase the value only if the duplicates stay high.
+- The TOP skips the wait when it cannot get a frame: the next publish is not expected within
+  the budget (a sender slower than TD, for example a 30 fps camera into 60 fps), or the newest
+  frame is older than two sender periods (a paused sender). The period comes from the slot
+  meta `host_timestamp` of the shown frames (`cpp_top/src/core/frame_wait.h`,
+  `cadence_wait_useful`). Until four periods are measured, the TOP waits as before. The Info
+  CHOP `frame_wait_skipped` counts the skips. The `.tox` Receiver has the same wait and guard.
 - Before 2026-11-17 the default was 0, and each value waited about 1 ms less than set.
 
 ## Slot meta from the Out TOP
@@ -259,6 +265,7 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `latency_us` | Time from the sender publish to the copy (now minus `host_timestamp`), in microseconds. 0 when the sender wrote no timestamp. |
 | `frame_gap_count` | Shown frames whose `write_idx` step was more than 1: the ring overwrote frames before this TOP read them |
 | `producer_skip_count` | Shown frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1: the sender skipped TD frames. Not counted when `producer_frame` is 0. |
+| `frame_wait_skipped` | Cooks with no new frame that skipped the `Framewaitms` wait: the next publish was not expected within the budget, or the sender was paused |
 
 The slot meta channels (`producer_frame` to `producer_skip_count`) change only after a
 successful copy. `cpp_top/src/core/frame_step.h` classifies the step between two shown

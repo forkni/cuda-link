@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.tox` Receiver `Framewaitms`** (Integer 0-8, default 3 ms): when `onFrameStart` finds no
+  new frame, the Receiver waits on the sender's doorbell in 1 ms slices and polls `write_idx`
+  after each, the same rules as the C++ In TOP. Dev box, 1280×720: duplicates 1.06 % -> 0.17 %
+  with drifting rates, 0.81 % -> 0.50 % at equal 60 fps; the main thread waits up to the budget
+  on a frame with no new frame (`onFrameStart` p95 0.4 -> 2.7 ms). New stats
+  `rx_frame_wait_rescued` and `rx_frame_wait_skipped`.
+
+- **Framewaitms cadence guard** (C++ In TOP and `.tox` Receiver): the wait is skipped when it
+  cannot get a frame, that is when the next publish is not expected within the budget (a sender
+  slower than TD, for example a 30 fps camera into 60 fps) or the sender is paused. The sender
+  period comes from the slot meta `host_timestamp` (`cpp_top/src/core/frame_wait.h`; Python port
+  in `TDReceiver.py`). New In TOP Info CHOP channel `frame_wait_skipped`.
+
+- **Sender Debug line shows `cuda_memory=`**: the `top.cudaMemory()` time is now reported apart
+  from `export=`, so a slow TD source network is not taken for a slow export.
+
 - **C++ TOP installer** (`install_cpp_top.cmd`, `scripts/install_cpp_top.py`): copies
   `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` into `<Documents>/Derivative/Plugins/CudaLink/`
   with a `VERSION.txt`, shows the installed copy (`status`) and moves it out of `Plugins`
@@ -73,8 +89,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default to `True`, so the producer creates the Win32 doorbell event and signals it after each
   publish. A C++ In TOP with `Framewaitms` > 0 can then wait for a Python-side sender (live test:
   duplicates 3.95 % -> 2.67 %, gaps 78 -> 15 per 60 s). `CUDALINK_DOORBELL=0` turns it off. The
-  consumer side (`ImportPolicy.doorbell`) stays off by default. `ExportPolicy.for_testing()` keeps
-  it off.
+  consumer side follows in the next entry. `ExportPolicy.for_testing()` keeps it off.
+
+- **Consumer doorbell on by default**: `ImportPolicy.doorbell` now defaults to `True`, so
+  `Importer.wait_for_doorbell()` blocks on the producer's event when it exists (TD -> Python
+  latency p50 0.71 -> 0.05 ms in the 2026-11-17 live test). `CUDALINK_DOORBELL=0` turns it off;
+  with no event (a 1.x or doorbell-off producer) it returns False as before.
+  `ImportPolicy.for_testing()` keeps it off.
+- **`Importer.wait_for_doorbell()` waits in 1 ms slices** and polls `write_idx` after each slice
+  that times out. The event wakes one waiter, so a signal that another consumer of the same name
+  takes now costs one slice instead of the whole timeout.
 
 - **NVML docs**: `CUDALINK_NVML` only sets the default `enabled` of an `NVMLObserver`; the observer
   is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old

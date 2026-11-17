@@ -419,7 +419,8 @@ Findings:
 - TD → Python latency: a Python consumer with `CUDALINK_DOORBELL=1` gets about 0.04 ms p50
   against about 0.7-0.8 ms with poll-sleep, in both versions. In 2.0 the producer makes the
   event by default, so a consumer with the variable unset gets the native wait backend (1.14.1:
-  python). The consumer still has to set `=1` to wait on the event.
+  python). In this run the consumer still had to set `=1` to wait on the event; since the
+  later 2.0 change the consumer waits by default.
 - Python → TD: the sender rate is a property of the test, not of the library. The example
   sender paces with a relative `time.sleep`, so its rate is 1/60 s plus the Windows sleep
   overshoot; export cost is absorbed. The stamp-derived rate was 59.3-59.9 fps in the 2.0

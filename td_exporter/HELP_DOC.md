@@ -160,6 +160,28 @@ value instead.
 
 ---
 
+### Framewaitms
+
+**Type:** Integer | **Range:** 0 to 8 | **Default:** 3 (ms)
+
+Receiver mode only. When a frame starts and the sender has not published a new frame, the
+Receiver waits up to this time for the sender's doorbell. It then shows the new frame instead
+of the last frame again. 0 turns the wait off. The C++ In TOP has the same parameter and
+default.
+
+- The wait blocks the TD main thread on a frame with no new frame. Dev box, 2026-11-17,
+  1280×720: at equal 60 fps the duplicate frames went from 0.81 % to 0.50 % and the
+  `onFrameStart` p95 from 0.4 ms to 2.7 ms. With drifting rates the duplicates went from
+  1.06 % to 0.17 %.
+- The Receiver skips the wait when it cannot get a frame: the sender publishes slower than
+  TD cooks (for example a 30 fps camera into a 60 fps project), or the sender has paused. It
+  finds this from the sender's publish times in the slot metadata.
+- The wait needs the sender's doorbell: a 2.0 Sender, Python `Exporter` or C++ Out TOP with
+  `CUDALINK_DOORBELL` unset or `1`. With a 1.x sender the Receiver checks once per frame, as
+  before.
+
+---
+
 ### Status
 
 **Type:** String (read-only) | **Default:** `Idle`
@@ -205,11 +227,14 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
   **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
 
   ```text
-  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | cuda_memory=310.4 µs avg | export=45.2 µs avg (write_idx=150)
   ```
 
-  The `export=` figure is a **windowed (~150-frame) average** that resets with each report;
-  it reflects the current session's performance, not a lifetime mean.
+  The `cuda_memory=` and `export=` figures are **windowed (~150-frame) averages** that reset
+  with each report; they reflect the current session's performance, not a lifetime mean.
+  `cuda_memory=` is TD's `top.cudaMemory()` call before the export: it waits for TD's GPU work
+  on the source texture, so a slow source network shows here. `export=` is the copy and
+  publish.
 
 #### Receiver mode
 
@@ -353,7 +378,7 @@ variables for consumer-side wait behavior. The headline ones:
 | Variable | Purpose |
 |----------|---------|
 | `CUDALINK_WAIT_BACKEND` | Native notification-wait backend (`auto` / `python` / `native`). Target p50 < 10 µs vs the ~136–286 µs poll-sleep baseline. Honest caveat: benchmarked as **not measurably faster** than the doorbell in practice — it ships because it never regresses, not because it's proven faster. |
-| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (one waiter per signal, Windows-only). The Sender signals it by default (2.0.0; `0` turns it off). A Python consumer waits on it only with `1`. Sub-300 µs notify latency, ~zero idle CPU while waiting. |
+| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (one waiter per signal, Windows-only). On by default since 2.0.0: the Sender signals it, and a Python consumer and the Receiver's `Framewaitms` wait on it. `0` turns it off on the side that sets it. Sub-300 µs notify latency, ~zero idle CPU while waiting. |
 | `CUDALINK_TORCH_GPU_WAIT` | GPU-side wait for `get_frame()` (torch backend) — issues `cudaStreamWaitEvent` instead of CPU spin/sleep. Trade-off: `ImportOutcome.TIMEOUT` becomes unreachable on this path. |
 
 This is not the full list — CUDA-Link exposes roughly 40 `CUDALINK_*` tuning variables in
@@ -407,7 +432,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 **Sender `export=` windowed average is higher than expected**
 
-- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region and is not broken out as a separate Debug metric — it is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
+- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region; the summary line shows it as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
 
