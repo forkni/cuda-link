@@ -32,7 +32,7 @@ Measured at the end, on Linux:
 | No-GPU selection | 1730 passed + 18 skipped (18 are Win32-only, with reasons) |
 | Branch coverage, combined (`--cov`) | 91.69 % (gate 91); `cuda_link` alone 96.87 % |
 | Randomized order | 10/10 green on the final tree (`rank_failures.py`: no failing test) |
-| Mutation score | `shm_protocol`, `_exporter_port`, `_importer_port`: 100 % (12 proven-equivalent survivors documented, not pragma'd) |
+| Mutation score | `shm_protocol`, `_exporter_port`, `_importer_port`: 100 % (13 proven-equivalent survivors documented, not pragma'd) |
 | Smell scanner | 18 = baseline; `real-clock` 5 (report only) |
 | C++ `topcore_tests` (core-only build) | 306 checks, 0 failures |
 | ruff check / format, skip ratio | clean / clean / 1.0 % |
@@ -40,6 +40,12 @@ Measured at the end, on Linux:
 ## Remaining
 
 ### A. Needs the Windows GPU machine
+
+**Status 2026-11-18 (Windows, RTX 4090):** A1, A2, A3 and A4 are done. A5 is open: it needs
+TouchDesigner. Results are in TESTING_GUIDE.md, "Phase J, Windows follow-up". A1 had 1815 passed
+and 0 failed. A2 measured 93.25 % and the gate stays at 91. A3 found 0 genuine survivors. A3 also
+found that the committed configs hard-code the main checkout's interpreter. A4 gave 306 checks
+and 0 failures with MSVC.
 
 1. **Full suite including GPU and native tests.** Not run since v0.6. The Phase I audit had 4
    `test_roundtrip.py` failures from a CPU-only torch in the venv; `uv sync` swaps a CUDA torch for
@@ -52,7 +58,7 @@ Measured at the end, on Linux:
 3. **cosmic-ray with the committed configs.** J2/J5 ran on Linux with scratch copies of the configs.
    The committed `cr-shm_protocol.toml` and `cr-exporter_port.toml` now list more test files and
    `--hypothesis-profile=ci`; run them as committed and confirm 100 % (genuine survivors 0). The
-   expected proven-equivalent survivors are listed in TESTING_GUIDE.md (11 for `shm_protocol`, 1 for
+   expected proven-equivalent survivors are listed in TESTING_GUIDE.md (12 for `shm_protocol`, 1 for
    `_exporter_port`); anything else is a finding.
 4. **C++ tests on MSVC.** The two new `test_frame_step_classification` rows passed with GCC
    (core-only build); run the `core-only` (or `msvc-release`) preset's tests on Windows.
@@ -62,7 +68,7 @@ Measured at the end, on Linux:
 
 ### B. Maintainer decision
 
-6. **PR layout.** `feat/orbbec-v0.6` has no PR. A PR into `development` carries the v0.6 feature
+1. **PR layout.** `feat/orbbec-v0.6` has no PR. A PR into `development` carries the v0.6 feature
    commits and the 8 Phase J commits. Options: one PR with the Phase J commits listed separately;
    or revert J1-J6 on the branch (revert commits, no force-push) and re-apply them on their own
    branch and PR. The skill prefers gate changes (`c420e7a`, `2674017`, the J4 `conftest.py` and
@@ -70,10 +76,10 @@ Measured at the end, on Linux:
 
 ### C. Deferred, not blocking
 
-7. `TDReceiverEngine.import_frame` CRAP rose 44 -> 48.6 in v0.6; `Exporter.export` is at the ruff
+1. `TDReceiverEngine.import_frame` CRAP rose 44 -> 48.6 in v0.6; `Exporter.export` is at the ruff
    C901 ceiling (43). Both stay on the Humble-Object split item in the deferral table.
-8. Hypothesis for `DtypeCodec.encode`/`decode` (still hand-enumerated); the profile now exists.
-9. Upstream skill: the two `any([...])` lines in `scan_test_smells.py` need a `noqa: C419` with the
+2. Hypothesis for `DtypeCodec.encode`/`decode` (still hand-enumerated); the profile now exists.
+3. Upstream skill: the two `any([...])` lines in `scan_test_smells.py` need a `noqa: C419` with the
    side-effect reason (applied in this repo's copy), and the bisect recipe's `-p no:randomly` does
    not work with `--randomly-dont-reset-seed` in `addopts`.
 

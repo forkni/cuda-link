@@ -70,7 +70,7 @@ the coverage figures are not directly comparable with the table below (see the p
 | Logic in test bodies | 412 `if/for/while/try` lines (368 at Phase I); top files unchanged |
 | Sleeps | 1 real sleep in the no-GPU suite (`test_exporter_cov_cleanup.py`, past a 0.5 s join deadline) + 3 polls in the GPU roundtrip; the other `sleep` hits are `mock_time.sleep` asserts |
 | Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
-| Mutation score | at the audit: stale for `shm_protocol`, `_exporter_port` and `_importer_port` (all changed in v0.6 after I2/I4). After J2/J5: all three **100 %**, 0 genuine survivors (12 proven-equivalent survivors documented, not pragma'd). `_env`, `activation_barrier`, `_profile`: unchanged since their runs (SPDX headers only) |
+| Mutation score | at the audit: stale for `shm_protocol`, `_exporter_port` and `_importer_port` (all changed in v0.6 after I2/I4). After J2/J5: all three **100 %**, 0 genuine survivors (13 proven-equivalent survivors documented, not pragma'd: 12 `shm_protocol`, 1 `_exporter_port`; confirmed on Windows, A3). `_env`, `activation_barrier`, `_profile`: unchanged since their runs (SPDX headers only) |
 | Low-value tests identified (J6 prune) | 16 flagged in the v0.6 tests and the suite-wide duplicate scan: 11 duplicates, 1 stub-interaction assert, 1 internal-method spy, 2 truthy-flag asserts, 1 borderline sanity check |
 | Tests deleted / rewritten (J6) | 11 deleted, 4 rewritten, 1 kept with a written justification; plus the 14 smell fixes of J1 |
 
@@ -961,7 +961,8 @@ the same hole: with `write_step <= 1` in `frame_step.h` the old C++ tests pass (
 failures); with the new rows that mutant and `(prev_producer_frame | 1)` each fail one check.
 All new Python tests pass under seeds 1, 2 and 3.
 
-**Proven equivalent, left unpragma'd (11).** cosmic-ray's pragma is whole-line only
+**Proven equivalent, left unpragma'd (12 mutants in the rows below; the J2 Linux run reported 11,
+see the Windows follow-up A3 row).** cosmic-ray's pragma is whole-line only
 (`.*#.*pragma:.*no mutate.*`). On lines 266 and 470 it would also hide the mutants the new tests kill,
 and on 162, 178 and 300 it would hide the `+`/`*` mutants that are killed today, so none was added.
 The next run will show these 11 again; this table is the reference:
@@ -1159,6 +1160,7 @@ box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (C
 | A1 full suite, GPU and native | `uv run --no-sync pytest tests/ -q` | **1815 passed, 1 skipped, 0 failed** in 43.5 s. The skip is `test_native_loader.py:24`, which runs only when the native waiter is *not* built. The Phase I `test_roundtrip.py` failures (CPU torch) do not occur |
 | A2 branch coverage, CI selection | `uv run --no-sync pytest tests/ -m "not requires_cuda and not requires_native and not integration and not quarantine" --cov --cov-branch -q` | **93.25 %** (1747 passed, 1 skipped, 68 deselected), against Linux 91.69 %. The difference is the Win32 paths: `_doorbell.py` and `_console.py` are 100 % here and skipped on Linux. `fail_under` stays at **91**: the rule `floor(x) - 1.5` on the lower platform (Linux) gives 89.5, and on Windows alone it gives 91.5, which rounds down to 91. Both are at or below the current gate, so no raise |
 | A4 C++ core tests, MSVC | from a `vcvars64` shell in `cpp_top/`: `cmake --fresh --preset core-only`, `cmake --build --preset core-only`, `ctest --preset core-only` (VS 2022 bundled CMake 3.31.6 and Ninja) | **MSVC 19.44: `topcore_tests` 306 checks, 0 failures**; `protocol_dump_fixture` passed. This is the same count as GCC on Linux, and it includes the two J2 `test_frame_step_classification` rows |
+| A3 mutation, three committed configs | for each config: `cosmic-ray init` (`--force`), `cr-filter-pragma`, `cosmic-ray baseline`, `cosmic-ray exec`, `cr-report` (cosmic-ray in the worktree venv; baseline passed for all three) | **0 genuine survivors on all three, so 100 %.** `shm_protocol`: 774 mutants, 112 pragma'd, 649 killed, 1 incompetent (`metadata_offset << 23`: Windows raises `MemoryError`, Linux OOM-killed it), 12 survived (51 min). All 12 are rows of the J2 equivalence table (lines 162 and 178 `\|`/`^` ×4, 300 ×2, 248, 251, 261, 266 ×2, 470). The J2 heading said 11, but its rows list 12; the Linux run had 651 kills against 649 here, so one of these mutants was counted as killed there. `_exporter_port`: 184 mutants, 50 pragma'd, 133 killed, 1 survived: line 155 `is not` → `!=`, the J5 equivalent (10.5 min). `_importer_port`: 89 mutants, 4 pragma'd, 85 killed, 0 survived (5.3 min). **Config finding:** each `test-command` hard-codes `F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe`. From any other checkout (a git worktree), that venv's scikit-build editable finder imports `cuda-link/src` even when `src` is first on `sys.path`. The run then mutates one file and tests another, so every mutant survives. That venv also has no `hypothesis`. This run used copies of the configs with only the interpreter changed to the worktree venv |
 
 ### Still open
 
