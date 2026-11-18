@@ -39,6 +39,7 @@ appends it after the worktree paths):
 
 ```python
 import sys
+
 sys.meta_path[:] = [f for f in sys.meta_path if "_editable_skbc" not in type(f).__module__]
 ```
 
