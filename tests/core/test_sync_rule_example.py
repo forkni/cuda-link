@@ -19,6 +19,7 @@ LIVE, CACHED, MOD = sync_rule.LIVE, sync_rule.CACHED, sync_rule.FRAME_MOD
 @pytest.mark.parametrize(
     ("a", "b", "expected"),
     [(10, 7, 3), (7, 10, -3), (0, MOD - 1, 1), (MOD - 1, 0, -1), (5, 5, 0)],
+    ids=["ahead", "behind", "ahead_across_wrap", "behind_across_wrap", "equal"],
 )
 def test_frame_delta_wraps(a: int, b: int, expected: int) -> None:
     assert sync_rule.frame_delta(a, b) == expected

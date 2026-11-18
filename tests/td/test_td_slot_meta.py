@@ -84,11 +84,11 @@ def test_sender_stamps_abs_frame_and_streamid() -> None:
     host = FakeTDHost(params={"Active": True, "Debug": False, "Streamid": 4}, tops={"ExportBuffer": _top()})
     engine = _sender(host)
     assert engine.export_frame() is False  # lazy-init probe
-    host.abs_frame_value = (1 << 24) + 17
+    host.abs_frame_value = INFO_CHOP_FRAME_MOD + 17  # one wrap of the Info CHOP channel
     assert engine.export_frame() is True
 
     frame = engine._exporter.frames[-1]
-    assert frame.producer_frame == (1 << 24) + 17
+    assert frame.producer_frame == INFO_CHOP_FRAME_MOD + 17
     assert frame.stream_id == 4
     channels = engine.slot_meta_channels()
     assert tuple(channels) == SLOT_META_CHANNELS
@@ -98,7 +98,7 @@ def test_sender_stamps_abs_frame_and_streamid() -> None:
 
 
 @pytest.mark.usefixtures("fake_exporter_open")
-@pytest.mark.parametrize("streamid", [None, "x", -3, 1 << 32])
+@pytest.mark.parametrize("streamid", [None, "x", -3, 1 << 32], ids=["unset", "non_numeric", "negative", "over_u32"])
 def test_sender_invalid_streamid_is_zero(streamid: object) -> None:
     host = FakeTDHost(params={"Active": True, "Debug": False, "Streamid": streamid}, tops={"ExportBuffer": _top()})
     engine = _sender(host)
@@ -157,13 +157,14 @@ def test_receiver_counts_gaps_and_skips() -> None:
 
 def test_receiver_channels_match_in_top_names() -> None:
     rx = _receiver()
-    rx._record_slot_meta(0, 1, _meta((3 << 24) + 9, sid=7))
+    wrapped_frame = 3 * INFO_CHOP_FRAME_MOD + 9  # three wraps of the Info CHOP channel
+    rx._record_slot_meta(0, 1, _meta(wrapped_frame, sid=7))
     channels = rx.slot_meta_channels()
     assert tuple(channels) == SLOT_META_CHANNELS
     assert channels["producer_frame"] == 9.0
     assert channels["stream_id"] == 7.0
     assert channels["latency_us"] == 0.0  # sender wrote no host_timestamp
-    assert rx.last_slot_meta.producer_frame == (3 << 24) + 9
+    assert rx.last_slot_meta.producer_frame == wrapped_frame
 
 
 def test_receiver_latency_from_host_timestamp() -> None:
@@ -277,11 +278,28 @@ def test_receiver_dropped_frame_counts_as_gap_not_producer_skip() -> None:
     assert rx.producer_skip_count == 0
 
 
-def test_script_top_slot_meta_cook_never_raises() -> None:
+def _raise_lookup(name: str) -> None:
+    raise RuntimeError("no such op")
+
+
+@pytest.mark.parametrize("op", [_raise_lookup, lambda name: None], ids=["op_lookup_raises", "no_slot_meta_chop"])
+def test_script_top_slot_meta_cook_without_chop_never_raises(op) -> None:  # smell: ignore[no-assert]
+    """The contract is "returns without raising": a cook callback must never raise, and with
+    no CHOP there is nothing else to observe."""
     import script_top_callbacks as cb
 
-    def _boom(name):
-        raise RuntimeError("no such op")
+    cb._cook_slot_meta(types.SimpleNamespace(parent=lambda: types.SimpleNamespace(op=op)))
 
-    cb._cook_slot_meta(types.SimpleNamespace(parent=lambda: types.SimpleNamespace(op=_boom)))
-    cb._cook_slot_meta(types.SimpleNamespace(parent=lambda: types.SimpleNamespace(op=lambda name: None)))
+
+def test_script_top_slot_meta_cook_swallows_a_failing_cook() -> None:
+    import script_top_callbacks as cb
+
+    cook_calls: list[bool] = []
+
+    def _cook(force: bool = False) -> None:
+        cook_calls.append(force)
+        raise RuntimeError("cook failed")
+
+    chop = types.SimpleNamespace(cook=_cook)
+    cb._cook_slot_meta(types.SimpleNamespace(parent=lambda: types.SimpleNamespace(op=lambda name: chop)))
+    assert cook_calls == [True]

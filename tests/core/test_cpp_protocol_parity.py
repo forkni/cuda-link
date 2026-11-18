@@ -120,6 +120,7 @@ def test_bits_per_byte_is_cpp_only_and_equals_8(cpp_constants: dict[str, int]) -
 @pytest.mark.parametrize(
     ("num_slots", "expected_total_size"),
     [(2, 368), (3, 528), (4, 688)],  # golden values pinned in tests/core/test_shm_protocol.py
+    ids=["2_slots", "3_slots", "4_slots"],
 )
 def test_shmlayout_formula_matches_golden_and_python(
     cpp_constants: dict[str, int], num_slots: int, expected_total_size: int

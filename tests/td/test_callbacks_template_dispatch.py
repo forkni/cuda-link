@@ -172,7 +172,9 @@ def test_onframestart_receiver_skips_cook_without_new_frame(monkeypatch: pytest.
     assert ext.update_receiver_format_calls == []
 
 
-@pytest.mark.parametrize(("rescued", "expected_cooks"), [(True, [True]), (False, [])])
+@pytest.mark.parametrize(
+    ("rescued", "expected_cooks"), [(True, [True]), (False, [])], ids=["wait_got_frame", "wait_timed_out"]
+)
 def test_onframestart_receiver_frame_wait_decides_the_cook(
     monkeypatch: pytest.MonkeyPatch, rescued: bool, expected_cooks: list[bool]
 ) -> None:

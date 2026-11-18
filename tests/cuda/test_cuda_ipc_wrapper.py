@@ -338,7 +338,6 @@ def test_check_ipc_capability_degrades_on_query_failure() -> None:
 
     msg = api.check_ipc_capability()
 
-    assert msg is not None
     assert "could not query" in msg.lower()
 
 

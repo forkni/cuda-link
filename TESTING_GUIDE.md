@@ -28,9 +28,62 @@ python -m pytest tests/ -q
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
 
-## Current baseline (2026-10-22, Phase I audit)
+## Current baseline (2026-11-18, Phase J audit)
 
-**Supersedes the 2026-10-19 table below.** Measured on `development` at `1da5339` (PRs #79-#87
+**Supersedes the 2026-10-22 table below.** Measured on `feat/orbbec-v0.6` at `35d207d` (86 commits
+after Phase I: SHM protocol v0.6 slot meta, producer/consumer doorbell defaults, Receiver
+Framewaitms), before any Phase J change. **Linux** (cloud container, Python 3.12, `uv sync --locked
+--extra dev`, CPU torch), not the Windows box of earlier audits: the Win32-only paths skip here, so
+the coverage figures are not directly comparable with the table below (see the platform note).
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1717 passed + 18 skipped, 68 deselected (1492 `def test_`) |
+| Skips | 18, all platform with a stated reason: 10 Win32 named events (`_doorbell`), 6 Win32 console handler (`_console`), 2 compiled native module. Ratio 1.0 %, under `max_ratio = 0.02` |
+| No-GPU wall clock | 18.4-18.9 s (10 runs); 34 s with `--cov --cov-branch` |
+| Slowest tests | 4.5 s and 1.8 s (the two subprocess `-O` import tests; by design); next 0.6 s |
+| Branch coverage, clean run | 91.72 % combined (`--cov`, 5671 stmts, 425 miss), gate 91 passes. `cuda_link` 97 % (99 % without the Win32-only `_doorbell`/`_console`), `td_exporter` 84 % |
+| Patch coverage of the v0.6 work | 94.4 % of the 468 executable lines added since `cb7e951` (the Phase I record) |
+| Order independence / flakiness | 10/10 randomized runs green, identical counts; `rank_failures.py`: no failing test |
+| Past-fix recall (`replay_fixes.py --last 12`) | **5/5 = 100 %** caught; 7 skipped (no test change, cpp-only, or merge). Needs the editable-finder bypass below |
+| Test smells (AST scanner) | **33 vs baseline 19: ratchet red.** 14 new findings, all in v0.6 tests: 7 `parametrize-no-ids`, 4 `bitwise-assert`, 2 `overprotective`, 1 `no-assert`. Fixed in J1 |
+| Functions over CRAP 30 | `cuda_link`: `Exporter.export` 47 (CC 47, 100 % covered), `_do_cleanup` 32, `_console._ctrl_handler` 30 (Win32-only, 0 % on Linux). `td_exporter`: `TDSender.export_frame` 68.1, `_refresh_on_version_change` 52.2, `import_frame` 48.6, launcher `onExit` 42 ×2, `initialize_receiver` 34.5 |
+| C901 (ruff, max 43) | passes; `export` still at 43, the ceiling |
+| Logic in test bodies | 412 `if/for/while/try` lines (368 at Phase I); top files unchanged |
+| Sleeps | 1 real sleep in the no-GPU suite (`test_exporter_cov_cleanup.py`, past a 0.5 s join deadline) + 3 polls in the GPU roundtrip; the other `sleep` hits are `mock_time.sleep` asserts |
+| Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
+
+Platform note: on Windows the 16 Win32 skips run and `_doorbell.py`/`_console.py` are covered, so
+the combined figure there is higher. The `fail_under = 91` margin on Linux is 0.7 points. CI's own
+leg measures `--cov=cuda_link` only (97 % here), so it is not at risk.
+
+Audit findings that need a change to a gate or config file, so they are **not** in J1 (they go in
+their own PR; see the review rule on gate files):
+
+- **Coverage measures fake packages.** `source = ["cuda_link", ...]` matches by package name, so the
+  throwaway `cuda_link/` trees that the bootstrap tests build under `tmp_path` show up as 0-statement
+  rows, and `coverage lcov`/`json` fail with "No source for code" unless run with `-i`. The total is
+  unaffected. Fix: `source_pkgs`/`source` with paths, or `omit = ["*/pytest-of-*/*"]`.
+- **`-p no:randomly` cannot be used.** `addopts` passes `--randomly-dont-reset-seed`, which is an
+  unknown argument once the plugin is off. Pin order with `--randomly-seed=<N>` instead (the bisect
+  recipe in the harden-test-suite skill uses `-p no:randomly`; on this repo use the seed form).
+- **`replay_fixes.py` needs the scikit-build-core finder removed.** The editable install
+  (`_editable_skbc_cuda_link`) maps `cuda_link` to the main checkout ahead of `PYTHONPATH`, so a
+  worktree's `src/` is ignored. Without a bypass the control run goes red (the fix commit's tests run
+  against HEAD's code). Bypass used here: a `sitecustomize.py` on `PYTHONPATH` that removes the
+  `_editable_skbc` finder from `sys.meta_path`; checked by importing a fake package from a scratch
+  `src/` with and without it.
+- **Ruff pins disagree.** `uv.lock` resolves ruff 0.17.4, `.pre-commit-config.yaml` pins
+  `ruff-pre-commit` v0.14.11, and the deferral table below said 0.17.0.
+- **Scanner upgrade available.** The skill's `scan_test_smells.py` adds a report-only `real-clock`
+  smell (5 hits here, none flaky in 10 runs: bounds such as `t_before <= host_timestamp <=
+  perf_counter()`). Report-only, so vendoring it needs no baseline change.
+- **CI passes no `--cov-fail-under=0`**, so the local `fail_under` also gates CI's `--cov=cuda_link`
+  leg. Harmless today (97 % vs 91).
+
+## Previous baseline (2026-10-22, Phase I audit)
+
+(Historical — see the current baseline above.) Measured on `development` at `1da5339` (PRs #79-#87 Measured on `development` at `1da5339` (PRs #79-#87
 merged), Python 3.12.11, Windows, before any Phase I change.
 
 | Metric | Value |
@@ -65,7 +118,7 @@ CI never sees these because it deselects `requires_cuda`.
   regression. Product note: the Importer reports this as "Producer not yet available" and retries,
   which hides a permanent local failure.
 
-## Previous baseline (2026-10-19, post Phase H2)
+## Baseline metrics (2026-10-19, post Phase H2)
 
 (Historical — see the current baseline above.)
 
@@ -810,6 +863,49 @@ What changed:
 
 Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
+## Campaign record — Phase J (2026-11-18)
+
+Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
+coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
+it back without touching the baseline file; the remaining phases are proposed, not done.
+
+### J1 — Smell ratchet back to the baseline (test code only)
+
+The 14 findings new since Phase I (found by scanning `cb7e951`'s `tests/` with the same scanner and
+diffing the lists; the 19 baseline findings are unchanged). No production file, `conftest.py`,
+baseline or gate was edited.
+
+| Finding | Tests | Verdict | Change |
+|---------|-------|---------|--------|
+| `parametrize-no-ids` ×7 | `test_classify_frame_step` (13 rows), the two `GpuFrame` range/type tables, `test_sender_invalid_streamid_is_zero`, `test_frame_delta_wraps`, `test_shmlayout_formula_matches_golden_and_python`, the Framewaitms cook decision | real (K 5.8) | `ids=` naming each case. `test_classify_frame_step` keeps plain tuples, so `test_cpp_frame_step_cases_match_python_table` still reads the table from `pytestmark` |
+| `bitwise-assert` ×4 | range limits, frame-mod parity, sender/receiver frame wrap | the shifts stood for named values | `_U32_MAX`/`_U64_MAX`; `INFO_CHOP_FRAME_MOD + 17` and `3 * INFO_CHOP_FRAME_MOD + 9`; the C++ parity test asserts the parsed shift `"24"` and the literal `16_777_216` |
+| `overprotective` ×2 | `m is not None` (frame-mod parity), `msg is not None` (`check_ipc_capability` degrade) | real (K 4.9) | guard deleted; the next line fails anyway |
+| `no-assert` ×1 | `test_script_top_slot_meta_cook_never_raises` | half real | split: `..._swallows_a_failing_cook` asserts the outgoing `cook(force=True)` happened before the error was swallowed (a mock on a command, allowed); the two no-CHOP cases keep "returns without raising" as their whole contract, with `# smell: ignore[no-assert]` and the reason in the docstring |
+
+The range-limit test now checks all three fields at their maximum instead of `stream_id` alone.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| Smell scanner total | 33 (ratchet red) | **19** (= `.smell-baseline.json`, ratchet OK) |
+| No-GPU selection | 1717 passed + 18 skipped | 1719 passed + 18 skipped (+2 from the split) |
+| Branch coverage, combined (Linux) | 91.72 % | 91.72 % |
+| Touched files under seeds 1, 2, 3 | n/a | 143 passed + 8 skipped each |
+
+Break and revert (source edited, touched tests run, source restored from git):
+
+| Mutant | Old tests | New tests |
+|--------|-----------|-----------|
+| `_cook_slot_meta`: `except Exception` narrowed to `(AttributeError, LookupError)` | 1 failed | **2 failed** (the new cook-raises case also catches it) |
+| `INFO_CHOP_FRAME_MOD = 1 << 23` | failed | failed (`test_info_chop_frame_mod_matches_cpp`) |
+
+### Proposed next phases (not started)
+
+| Phase | Why | Notes |
+|-------|-----|-------|
+| J2 — mutation re-run on `shm_protocol.py` | +36 lines in v0.6 (`read_slot_meta`, `classify_frame_step`, slot meta layout) since the I2 run at 100 % | `classify_frame_step` is a pure, zero-mock table; first candidate. `cr-shm_protocol.toml` uses the project venv and `--randomly-seed=1` (I2) |
+| J3 — gate/config PR | the six findings listed under the baseline above | own PR: coverage `omit` for `pytest-of-*`, ruff pin alignment, vendor the newer scanner, CI `--cov-fail-under=0` |
+| Accepted gap | `RealTDHost.abs_frame` (new, 0 %) and `script_chop_callbacks.onCook` | `td`-bound shells (Humble Object edge); covered by the in-TD run, not the committed suite. The logic they drive (`slot_meta_channels`, stamping) is tested through `FakeTDHost` |
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
@@ -825,5 +921,5 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
-| Ruff version drift | Before the `C901` ratchet is trusted long-term | Resolved in Phase G: pinned to 0.17.0 across `uv.lock`, `.pre-commit-config.yaml`, and CI |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted again by Phase J: `uv.lock` 0.17.4, `.pre-commit-config.yaml` v0.14.11 (J3) |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

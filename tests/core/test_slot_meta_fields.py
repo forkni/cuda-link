@@ -37,6 +37,8 @@ from cuda_link.shm_protocol import (
 )
 
 _REPO = Path(__file__).resolve().parents[2]
+_U32_MAX = 0xFFFFFFFF
+_U64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
 def _open_exporter(num_slots: int = 2) -> Exporter:
@@ -77,6 +79,14 @@ def test_gpuframe_slot_meta_defaults() -> None:
         ({"stream_id": -1}, "stream_id"),
         ({"stream_id": 1 << 32}, "stream_id"),
     ],
+    ids=[
+        "frame_negative",
+        "frame_over_u64",
+        "timestamp_negative",
+        "timestamp_over_u64",
+        "stream_negative",
+        "stream_over_u32",
+    ],
 )
 def test_gpuframe_rejects_out_of_range_slot_meta(kwargs: dict, field: str) -> None:
     with pytest.raises(ValueError, match=field):
@@ -91,6 +101,7 @@ def test_gpuframe_rejects_out_of_range_slot_meta(kwargs: dict, field: str) -> No
         ({"stream_id": "3"}, "stream_id"),
         ({"stream_id": None}, "stream_id"),
     ],
+    ids=["frame_float", "timestamp_float", "stream_str", "stream_none"],
 )
 def test_gpuframe_rejects_non_integer_slot_meta(kwargs: dict, field: str) -> None:
     """A non-integer must fail here, not as struct.error inside Exporter.export()."""
@@ -105,10 +116,8 @@ def test_gpuframe_accepts_integer_like_slot_meta() -> None:
 
 
 def test_gpuframe_accepts_range_limits() -> None:
-    frame = GpuFrame(
-        ptr=0, size=4, producer_frame=(1 << 64) - 1, source_timestamp_us=(1 << 64) - 1, stream_id=(1 << 32) - 1
-    )
-    assert frame.stream_id == (1 << 32) - 1
+    frame = GpuFrame(ptr=0, size=4, producer_frame=_U64_MAX, source_timestamp_us=_U64_MAX, stream_id=_U32_MAX)
+    assert (frame.producer_frame, frame.source_timestamp_us, frame.stream_id) == (_U64_MAX, _U64_MAX, _U32_MAX)
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +203,6 @@ def test_importer_keeps_last_slot_meta_on_no_frame() -> None:
 # classify_frame_step: same case table as topcore_tests test_frame_step_classification
 # ---------------------------------------------------------------------------
 
-_U32_MAX = 0xFFFFFFFF
-
 
 @pytest.mark.parametrize(
     ("prev_widx", "prev_pf", "widx", "pf", "expected"),
@@ -213,6 +220,21 @@ _U32_MAX = 0xFFFFFFFF
         (_U32_MAX, 100, 1, 101, FrameStep.FRAME_GAP),
         (_U32_MAX - 1, 100, _U32_MAX, 101, FrameStep.NEXT),
         (5, 100, 5, 100, FrameStep.NEXT),
+    ],
+    ids=[
+        "first_frame",
+        "first_prev_widx_zero",
+        "next_frame",
+        "next_same_producer_frame",
+        "ring_gap_two",
+        "ring_gap_four",
+        "producer_skip",
+        "next_prev_frame_unset",
+        "next_frame_unset",
+        "next_producer_frame_went_back",
+        "ring_gap_across_u32_wrap",
+        "next_at_u32_limit",
+        "same_write_idx",
     ],
 )
 def test_classify_frame_step(prev_widx: int, prev_pf: int, widx: int, pf: int, expected: FrameStep) -> None:
@@ -248,5 +270,5 @@ def test_info_chop_frame_mod_matches_cpp() -> None:
     # One C++ definition, in the core header both TOPs include.
     src = (_REPO / "cpp_top" / "src" / "core" / "frame_step.h").read_text(encoding="utf-8")
     m = re.search(r"constexpr uint64_t kInfoChopFrameMod = uint64_t\{1\} << (\d+);", src)
-    assert m is not None
-    assert INFO_CHOP_FRAME_MOD == 1 << int(m.group(1)) == 1 << 24
+    assert m.group(1) == "24"
+    assert INFO_CHOP_FRAME_MOD == 16_777_216  # 2**24, as the C++ shift above
