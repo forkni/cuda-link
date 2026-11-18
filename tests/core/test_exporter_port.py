@@ -531,12 +531,6 @@ def test_cuda_port_declares_restore_context() -> None:
     assert "restore_context" in get_protocol_members(CudaPort)
 
 
-def test_fake_adapter_satisfies_protocol_with_new_methods() -> None:
-    """FakeCUDAAdapter must satisfy isinstance(fake, CudaPort) after C3a additions."""
-    fake = FakeCUDAAdapter()
-    assert isinstance(fake, CudaPort)
-
-
 def test_fake_adapter_set_device_returns_token() -> None:
     """set_device() on FakeCUDAAdapter returns a token (not None)."""
     fake = FakeCUDAAdapter(device=0)

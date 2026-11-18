@@ -216,33 +216,27 @@ def test_initialize_logs_ipc_capability_note_when_present() -> None:
         exp.close()
 
 
-def test_initialize_propagates_ipc_capability_failure_and_cleans_up() -> None:
+def test_initialize_propagates_ipc_capability_failure_and_leaves_nothing_behind() -> None:
     """cudaDevAttrIpcEventSupport == 0 -> check_ipc_capability() raises -> open()
 
-    propagates it and still runs cleanup (mirrors the pre-existing device-mismatch
-    cleanup contract: open() must leave no half-initialized state on any failure
+    propagates it and leaves no half-initialized state: no device memory held and no
+    SharedMemory segment under the name (the open() failure contract for any error
     inside _initialize()).
     """
-    from unittest.mock import patch
-
     from cuda_link import ExportPolicy, FrameSpec
     from cuda_link._cuda_adapters import FakeCUDAAdapter
     from cuda_link.exporter import Exporter
 
     fake = FakeCUDAAdapter(device=0)
     fake.fail_ipc_capability = True
-    original_do_cleanup = Exporter._do_cleanup
-    with (
-        patch.object(Exporter, "_do_cleanup", autospec=True, side_effect=original_do_cleanup) as mock_cleanup,
-        pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"),
-    ):
-        Exporter.open(
-            FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
-            policy=ExportPolicy.for_testing(),
-            cuda=fake,
-        )
-    mock_cleanup.assert_called_once()
-    assert mock_cleanup.call_args.kwargs["cuda_valid"] is False
+    shm_name = f"test_{uuid.uuid4().hex[:8]}"
+
+    with pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"):
+        Exporter.open(FrameSpec(shm_name=shm_name, height=64, width=64), policy=ExportPolicy.for_testing(), cuda=fake)
+
+    assert fake.allocations == {}
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=shm_name)
 
 
 def test_read_hws_mode_returns_unknown_without_winreg() -> None:

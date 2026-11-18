@@ -48,13 +48,11 @@ def test_ahead_but_cache_not_at_t_is_mismatch() -> None:
 
 
 def test_two_ahead_is_mismatch() -> None:
-    _, mismatch, _ = sync_rule.choose_sources([100, 102], [99, 101])
-    assert mismatch
+    assert sync_rule.choose_sources([100, 102], [99, 101]) == ([LIVE, LIVE], True, 100)
 
 
 def test_unknown_cache_is_mismatch() -> None:
-    _, mismatch, _ = sync_rule.choose_sources([100, 101], [None, None])
-    assert mismatch
+    assert sync_rule.choose_sources([100, 101], [None, None]) == ([LIVE, LIVE], True, 100)
 
 
 def test_min_across_wrap() -> None:

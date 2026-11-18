@@ -70,6 +70,9 @@ the coverage figures are not directly comparable with the table below (see the p
 | Logic in test bodies | 412 `if/for/while/try` lines (368 at Phase I); top files unchanged |
 | Sleeps | 1 real sleep in the no-GPU suite (`test_exporter_cov_cleanup.py`, past a 0.5 s join deadline) + 3 polls in the GPU roundtrip; the other `sleep` hits are `mock_time.sleep` asserts |
 | Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
+| Mutation score | at the audit: stale for `shm_protocol`, `_exporter_port` and `_importer_port` (all changed in v0.6 after I2/I4). After J2/J5: all three **100 %**, 0 genuine survivors (12 proven-equivalent survivors documented, not pragma'd). `_env`, `activation_barrier`, `_profile`: unchanged since their runs (SPDX headers only) |
+| Low-value tests identified (J6 prune) | 16 flagged in the v0.6 tests and the suite-wide duplicate scan: 11 duplicates, 1 stub-interaction assert, 1 internal-method spy, 2 truthy-flag asserts, 1 borderline sanity check |
+| Tests deleted / rewritten (J6) | 11 deleted, 4 rewritten, 1 kept with a written justification; plus the 14 smell fixes of J1 |
 
 Platform note: on Windows the 16 Win32 skips run and `_doorbell.py`/`_console.py` are covered, so
 the combined figure there is higher. The `fail_under = 91` margin on Linux is 0.7 points. CI's own
@@ -885,7 +888,7 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
 Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
 coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
-it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings; J4 adds Hypothesis properties; J5 re-runs mutation testing on the two port modules.
+it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings; J4 adds Hypothesis properties; J5 re-runs mutation testing on the two port modules; J6 is the Phase 0.5 prune.
 
 ### J1 — Smell ratchet back to the baseline (test code only)
 
@@ -1113,6 +1116,38 @@ unchanged (the doorbell default is pinned in `test_importer_port.py`). No produc
 | No-GPU selection | 1741 passed + 18 skipped | 1741 passed + 18 skipped (one test's assertion tightened) |
 | Smell scanner / ruff | OK | OK |
 
+### J6 — Phase 0.5 prune after v0.6
+
+PLAYBOOK Phase 0.5 runs at the start of a campaign and after each large feature. Scope: the 128 test
+functions the v0.6 work added (new since `cb7e951`), plus a suite-wide scan for identical test bodies
+(AST of each body, docstring and imports stripped, annotations ignored on a second pass).
+Pre-screen: tests with no assertion, only weak assertions (`x is not None`, a bare truthy name,
+`isinstance`), or at least as many interaction checks (`assert_called*`, `call_count`) as assertions.
+Every flagged test was read; verdicts follow TEST-VALUE.md's delete/rewrite/keep rule.
+
+| Test(s) | Verdict | Why |
+|---------|---------|-----|
+| 10 GPU-free tests at the bottom of `tests/cuda/test_cuda_ipc_wrapper.py` (3 `_check_pointer_attributes_abi`, 7 `check_ipc_capability`) and their 2 helpers | **deleted** | identical to the same 10 tests and helpers in `test_wrapper_cov_methods.py`, the file whose docstring makes it the GPU-free home for wrapper methods; both copies ran in CI. Both came in through merges (`7afaa84`, PR #83). The surviving `..._degrades_on_query_failure` also gets J1's overprotective-guard removal |
+| `test_fake_adapter_satisfies_protocol_with_new_methods` (`test_exporter_port.py`) | **deleted** | byte-identical to `test_fake_adapter_satisfies_protocol` in the same file (pre-existing, found by the scan) |
+| `test_process_util_falls_back_to_legacy_api` (`test_nvml_observer_cov.py`) | **rewritten** | asserted `assert_called_once()` on the legacy NVML query, a stub that feeds data in (TEST-DOUBLES: never assert interactions with a stub); `other_sm_util_pct == 12` already proves the fallback ran. The call assertion is removed |
+| `test_initialize_propagates_ipc_capability_failure_and_cleans_up` (`test_exporter_python.py`) | **rewritten** as `..._and_leaves_nothing_behind` | spied on `Exporter._do_cleanup`, an internal method, and asserted its `cuda_valid` keyword. Now asserts the documented outcome: the error propagates, `FakeCUDAAdapter.allocations` is empty, and no SharedMemory segment exists under the name |
+| `test_two_ahead_is_mismatch`, `test_unknown_cache_is_mismatch` (`test_sync_rule_example.py`) | **rewritten** | `assert mismatch` passes for any truthy value; both now compare the whole `(sel, mismatch, t)` tuple the rule documents ("otherwise -> live, and this B cook is a mismatch"), as their neighbours do |
+| `test_regex_finds_the_expected_constants` (`test_cpp_protocol_parity.py`) | **kept** | the parity tests would `KeyError` per constant anyway, but this reports a broken header regex as one failure that lists every missing name; one line, no upkeep |
+
+Break and revert for the rewritten cleanup test: with `check_ipc_capability()` moved after the
+allocations and the SharedMemory creation, and `open()`'s failure cleanup removed, it fails. The
+trade-off: the old spy also failed when only the cleanup call was removed while the check still ran
+first. In that state nothing has been allocated, so nothing observable is lost, and not failing
+there is the resistance to refactoring the rewrite buys.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1741 passed + 18 skipped | **1730 passed** + 18 skipped (-11 duplicates) |
+| Branch coverage, combined (Linux) | 91.69 % | 91.69 % (the deleted tests were exact copies) |
+| Smell scanner | 19 | **18** (one overprotective guard gone with the deleted copy) |
+| Identical test bodies, suite-wide | 7 groups | 0 |
+| Touched files under seeds 1, 2, 3 (`-m "not requires_cuda and not requires_native"`) | n/a | 207 passed each |
+
 ### Still open
 
 | Item | What | Notes |
@@ -1123,15 +1158,15 @@ unchanged (the doorbell default is pinned in `test_importer_port.py`). No produc
 
 | Tooling | Trigger that would justify it | Current state |
 |---------|-------------------------------|---------------|
-| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18 s, full suite ~29 s — far below |
+| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18-20 s (Linux, Phase J), full GPU suite ~29 s (Windows, last measured Phase H) — far below |
 | `pytest-split` sharding | per-runner > ~10 min after xdist | n/a |
-| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18 s (full suite ~29 s, local-only) |
-| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 2.9 s (was 22.5 s for the GPU roundtrips before H1) |
+| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18-20 s on Linux (Phase J); full GPU suite ~29 s, local-only (Phase H) |
+| `@pytest.mark.slow` markers | individual test > 5 s | slowest 1.9-4.5 s (the two subprocess `-O` import tests, warm vs cold interpreter cache; Phase J, Linux). Was 22.5 s for the GPU roundtrips before H1 |
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
-| New mutation targets | module's mock density approaches zero | backlog above |
+| New mutation targets | module's mock density approaches zero | backlog above. Re-run whenever a target changes: J2 (`shm_protocol`) and J5 (port modules) were re-runs after v0.6 |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
-| `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
+| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps (Phase J, Linux): `TDSender.export_frame` (CRAP 68.1), `_refresh_on_version_change` (52.2), `import_frame` (**48.6**, up from 44: v0.6 added the slot meta step) |
+| `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3. Phase J: ruff C901 still 43 (at the ceiling); crap4py CRAP 47 (was 46) |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Hypothesis and the `ci` profile exist since J4 (slot meta, `classify_frame_step`, `GpuFrame`); `DtypeCodec` is still hand-enumerated across 8 `@parametrize` lists |
 | Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4. Bump both together |
