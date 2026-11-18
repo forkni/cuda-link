@@ -1157,6 +1157,7 @@ box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (C
 | Item | Command | Result |
 |------|---------|--------|
 | A1 full suite, GPU and native | `uv run --no-sync pytest tests/ -q` | **1815 passed, 1 skipped, 0 failed** in 43.5 s. The skip is `test_native_loader.py:24`, which runs only when the native waiter is *not* built. The Phase I `test_roundtrip.py` failures (CPU torch) do not occur |
+| A2 branch coverage, CI selection | `uv run --no-sync pytest tests/ -m "not requires_cuda and not requires_native and not integration and not quarantine" --cov --cov-branch -q` | **93.25 %** (1747 passed, 1 skipped, 68 deselected), against Linux 91.69 %. The difference is the Win32 paths: `_doorbell.py` and `_console.py` are 100 % here and skipped on Linux. `fail_under` stays at **91**: the rule `floor(x) - 1.5` on the lower platform (Linux) gives 89.5, and on Windows alone it gives 91.5, which rounds down to 91. Both are at or below the current gate, so no raise |
 
 ### Still open
 
