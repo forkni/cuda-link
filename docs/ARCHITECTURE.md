@@ -735,6 +735,20 @@ on both the native waiter (status `CUDA_ERROR`, 5) and the pure-Python wait path
 
 ---
 
+## Security / trust model
+
+- **Any local process can attach.** The named SharedMemory segment and the CUDA IPC handles
+  in it are open to every process on the machine that knows the segment name. There is no
+  authentication.
+- **The receiver checks structure, not allocation size.** It validates the header (magic,
+  `num_slots`, metadata) before it opens any handle. No CUDA API reports the true size of
+  the allocation behind an imported IPC pointer, so the receiver must trust the sender's
+  declared width, height and format. A sender that over-declares them can cause an
+  out-of-bounds device read in the copy.
+- **Rule:** point a receiver's segment name only at producers you trust.
+
+---
+
 ## Performance Characteristics
 
 ### Overhead Breakdown (1080p RGBA float32, 3 slots)
