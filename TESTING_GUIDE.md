@@ -1150,6 +1150,9 @@ there is the resistance to refactoring the rewrite buys.
 
 ### Still open
 
+The full list, with the Windows-only checks and a ready-to-paste message for the agent that
+finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
+
 | Item | What | Notes |
 |------|------|-------|
 | Accepted gap | `RealTDHost.abs_frame` (new, 0 %) and `script_chop_callbacks.onCook` | `td`-bound shells (Humble Object edge); covered by the in-TD run, not the committed suite. The logic they drive (`slot_meta_channels`, stamping) is tested through `FakeTDHost` |
