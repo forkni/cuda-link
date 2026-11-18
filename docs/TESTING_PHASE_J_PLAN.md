@@ -41,11 +41,12 @@ Measured at the end, on Linux:
 
 ### A. Needs the Windows GPU machine
 
-**Status 2026-11-18 (Windows, RTX 4090):** A1, A2, A3 and A4 are done. A5 is open: it needs
-TouchDesigner. Results are in TESTING_GUIDE.md, "Phase J, Windows follow-up". A1 had 1815 passed
-and 0 failed. A2 measured 93.25 % and the gate stays at 91. A3 found 0 genuine survivors. A3 also
-found that the committed configs hard-code the main checkout's interpreter. A4 gave 306 checks
-and 0 failures with MSVC.
+**Status 2026-11-18 (Windows, RTX 4090):** A1 to A5 are done, and all of them passed. Results are
+in TESTING_GUIDE.md, "Phase J, Windows follow-up". A1 had 1815 passed and 0 failed. A2 measured
+93.25 % and the gate stays at 91. A3 found 0 genuine survivors. A3 also found that the committed
+configs hard-code the main checkout's interpreter. A4 gave 306 checks and 0 failures with MSVC.
+In A5, `producer_frame` in TD followed the sender's absFrame and no error showed. Only B6 (PR
+layout, maintainer) and the C items stay open.
 
 1. **Full suite including GPU and native tests.** Not run since v0.6. The Phase I audit had 4
    `test_roundtrip.py` failures from a CPU-only torch in the venv; `uv sync` swaps a CUDA torch for
