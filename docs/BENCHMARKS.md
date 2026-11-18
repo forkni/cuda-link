@@ -460,7 +460,41 @@ every 10 s (6 cycles per 60 s run); this gives a repeatable TD → TD duplicate 
   fw0 (TD hitches), so they are not from the wait.
 - A sender slower than the receiver (a 30 fps camera into 60 fps TD) or a paused sender would
   wait the full budget for nothing. Decided 2026-11-17: a predictive guard in both receivers
-  (wait only when the next expected publish is within the budget); not measured yet.
+  (wait only when the next expected publish is within the budget). Measured with a 30 fps
+  Python sender into 60 fps TD, fw3, same frames with and without the guard: `.tox` Receiver
+  `onFrameStart` p50 3.12 -> 0.22 ms, In TOP cook p50 3.13 -> 0.12 ms (`docs/CPP_TOP.md`).
+
+### GPU load (2026-11-17)
+
+Two probes in `scripts/profiling/`, run beside a cell:
+
+- `gpu_load_probe.py` (NVML, `nvml` extra): GPU % (share of time a kernel ran), SM clock,
+  power, and SM % per process.
+- `gpu_engine_probe.ps1`: the Windows "GPU Engine" counters per process. These are the numbers
+  Task Manager shows. Its "3D" value is the share of time a process has work on the 3D queue,
+  which includes UI drawing and present waits.
+
+Dev box (RTX 4090), both TD instances at 60 fps, 1280×720 rgba8, 30-36 s per cell, NVML:
+
+| Cell | GPU % p50 / p95 / max | TD A SM % p50 | TD B SM % p50 |
+|---|---|---|---|
+| No link active | 8 / 9 / 9 | 5 | 8 |
+| `.tox` Sender → `.tox` Receiver, fw3 | 10 / 12 / 12 | 6 | 10 |
+| Out TOP → In TOP (guard), fw3 | 11 / 11 / 12 | 7 | 10 |
+| Python 30 fps → In TOP, guard | 9 / 11 / 11 | 5 | 9 |
+| Python 30 fps → In TOP, no guard | 9 / 11 / 12 | 5 | 9 |
+
+SM clock 2520 MHz and about 77 W in all cells. The Python sender used 3-5 % SM.
+
+- The link adds at most about 3 points over the idle scene. The guard does not change GPU load:
+  it saves TD main-thread time, not GPU time.
+- Task Manager showed 40-50 % "GPU" in bursts. The engine counters put this on the TD
+  processes' 3D queue, with no link active, while NVML stayed near 10 %. The bursts followed
+  use of the TD windows (network editor, viewers) and hit both instances together; turning
+  off cooking of an unrelated receiver COMP did not remove them. This is TD UI drawing, not
+  cuda-link.
+- For a benchmark, keep the TD windows unfocused (or the node viewers off) while a cell runs,
+  and read GPU load from NVML, not from Task Manager.
 
 ## vs CPU SharedMemory
 
