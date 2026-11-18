@@ -1148,6 +1148,16 @@ there is the resistance to refactoring the rewrite buys.
 | Identical test bodies, suite-wide | 7 groups | 0 |
 | Touched files under seeds 1, 2, 3 (`-m "not requires_cuda and not requires_native"`) | n/a | 207 passed each |
 
+### Phase J, Windows follow-up (2026-11-18)
+
+Items A1-A5 of [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md), run on the Windows
+box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept:
+`uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
+
+| Item | Command | Result |
+|------|---------|--------|
+| A1 full suite, GPU and native | `uv run --no-sync pytest tests/ -q` | **1815 passed, 1 skipped, 0 failed** in 43.5 s. The skip is `test_native_loader.py:24`, which runs only when the native waiter is *not* built. The Phase I `test_roundtrip.py` failures (CPU torch) do not occur |
+
 ### Still open
 
 The full list, with the Windows-only checks and a ready-to-paste message for the agent that
