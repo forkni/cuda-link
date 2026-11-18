@@ -276,15 +276,27 @@ the ctypes/DLL boundary (classicist-compliant), so a mutation score there would
 measure the mocks, not the logic. They form the de-mocking backlog: a module
 graduates to a mutation target only when its mock density approaches zero.
 
-Workflow (Windows; note the **absolute interpreter path** in each `cr-*.toml` —
-bare `python` resolves through the App Paths registry to a different environment):
+Workflow, from the root of any checkout (a git worktree too) on Windows or Linux. Each
+`cr-*.toml` runs its tests with `uv run --no-sync python`, which uses the `.venv` of the checkout
+you are in. Do not put an interpreter path back into a config:
+
+- An absolute path to another checkout's venv imports that checkout's `src` (its editable
+  install wins over `pythonpath`). The run then mutates one file and tests another, so every
+  mutant survives.
+- A relative `.venv/Scripts/python.exe` is not found by Windows `CreateProcess`. Every run is
+  then `INCOMPETENT`, and `cosmic-ray baseline` still prints "Baseline passed": it fails only on
+  `KILLED`.
 
 ```bash
 python -m cosmic_ray.cli init cr-<target>.toml cr-<target>.sqlite
-python -m cosmic_ray.cli baseline cr-<target>.toml     # must pass on unmutated source
+python -m cosmic_ray.cli baseline cr-<target>.toml     # see the note below: a pass proves little
 python -m cosmic_ray.cli exec cr-<target>.toml cr-<target>.sqlite   # sequential, long
 cr-report cr-<target>.sqlite
 ```
+
+`baseline` exits 0 and logs "Baseline passed" even when the test command cannot start, so a pass
+proves nothing. Read `cr-report` after `exec` instead. If it shows a large share of `incompetent`
+or of survivors, the command did not run the tests you expect.
 
 The `cr-*.sqlite` session databases are regenerated artifacts and gitignored.
 `cr-activation_barrier.toml` must never run concurrently with another pytest run or
@@ -1160,7 +1172,7 @@ box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (C
 | A1 full suite, GPU and native | `uv run --no-sync pytest tests/ -q` | **1815 passed, 1 skipped, 0 failed** in 43.5 s. The skip is `test_native_loader.py:24`, which runs only when the native waiter is *not* built. The Phase I `test_roundtrip.py` failures (CPU torch) do not occur |
 | A2 branch coverage, CI selection | `uv run --no-sync pytest tests/ -m "not requires_cuda and not requires_native and not integration and not quarantine" --cov --cov-branch -q` | **93.25 %** (1747 passed, 1 skipped, 68 deselected), against Linux 91.69 %. The difference is the Win32 paths: `_doorbell.py` and `_console.py` are 100 % here and skipped on Linux. `fail_under` stays at **91**: the rule `floor(x) - 1.5` on the lower platform (Linux) gives 89.5, and on Windows alone it gives 91.5, which rounds down to 91. Both are at or below the current gate, so no raise |
 | A4 C++ core tests, MSVC | from a `vcvars64` shell in `cpp_top/`: `cmake --fresh --preset core-only`, `cmake --build --preset core-only`, `ctest --preset core-only` (VS 2022 bundled CMake 3.31.6 and Ninja) | **MSVC 19.44: `topcore_tests` 306 checks, 0 failures**; `protocol_dump_fixture` passed. This is the same count as GCC on Linux, and it includes the two J2 `test_frame_step_classification` rows |
-| A3 mutation, three committed configs | for each config: `cosmic-ray init` (`--force`), `cr-filter-pragma`, `cosmic-ray baseline`, `cosmic-ray exec`, `cr-report` (cosmic-ray in the worktree venv; baseline passed for all three) | **0 genuine survivors on all three, so 100 %.** `shm_protocol`: 774 mutants, 112 pragma'd, 649 killed, 1 incompetent (`metadata_offset << 23`: Windows raises `MemoryError`, Linux OOM-killed it), 12 survived (51 min). All 12 are rows of the J2 equivalence table (lines 162 and 178 `\|`/`^` ×4, 300 ×2, 248, 251, 261, 266 ×2, 470). The J2 heading said 11, but its rows list 12; the Linux run had 651 kills against 649 here, so one of these mutants was counted as killed there. `_exporter_port`: 184 mutants, 50 pragma'd, 133 killed, 1 survived: line 155 `is not` → `!=`, the J5 equivalent (10.5 min). `_importer_port`: 89 mutants, 4 pragma'd, 85 killed, 0 survived (5.3 min). **Config finding:** each `test-command` hard-codes `F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe`. From any other checkout (a git worktree), that venv's scikit-build editable finder imports `cuda-link/src` even when `src` is first on `sys.path`. The run then mutates one file and tests another, so every mutant survives. That venv also has no `hypothesis`. This run used copies of the configs with only the interpreter changed to the worktree venv |
+| A3 mutation, three committed configs | for each config: `cosmic-ray init` (`--force`), `cr-filter-pragma`, `cosmic-ray baseline`, `cosmic-ray exec`, `cr-report` (cosmic-ray in the worktree venv; baseline passed for all three) | **0 genuine survivors on all three, so 100 %.** `shm_protocol`: 774 mutants, 112 pragma'd, 649 killed, 1 incompetent (`metadata_offset << 23`: Windows raises `MemoryError`, Linux OOM-killed it), 12 survived (51 min). All 12 are rows of the J2 equivalence table (lines 162 and 178 `\|`/`^` ×4, 300 ×2, 248, 251, 261, 266 ×2, 470). The J2 heading said 11, but its rows list 12; the Linux run had 651 kills against 649 here, so one of these mutants was counted as killed there. `_exporter_port`: 184 mutants, 50 pragma'd, 133 killed, 1 survived: line 155 `is not` → `!=`, the J5 equivalent (10.5 min). `_importer_port`: 89 mutants, 4 pragma'd, 85 killed, 0 survived (5.3 min). **Config finding:** each `test-command` hard-codes `F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe`. From any other checkout (a git worktree), that venv's scikit-build editable finder imports `cuda-link/src` even when `src` is first on `sys.path`. The run then mutates one file and tests another, so every mutant survives. That venv also has no `hypothesis`. This run used copies of the configs with only the interpreter changed to the worktree venv. **Fixed afterwards:** all six `cr-*.toml` now use `uv run --no-sync python` (see the mutation workflow note) |
 | A5 `RealTDHost.abs_frame` in TouchDesigner | two TD 2025.33230 instances: `local/p5_devbox_A.toe` sends with `/project1/bench_A/py_sender`, `local/p5_devbox_B.toe` receives with `/project1/bench_B/py_receiver` (Ipcmemname set to `t2q4` for the run, then put back). Values read through twozero_td | **Pass.** B's `slot_meta` `producer_frame` follows A's `absTime.frame`, not B's. Three pairs timed by wall clock: A 4115 → B 4130 (expected ~4131), A 4714 → B 4728 (~4729), A 4744 → B 4758 (~4759). Each is one frame behind, in line with `latency_us` ≈ 9.9 ms. B's own absFrame was 4073 at the first pair. `producer_skip_count` 0. Both COMPs had no error and no warning, and both kept the default color (no error tint). The mod 2^24 wrap is not reachable live (78 h at 60 FPS); the unit tests cover it. The 18 C++ TOP errors in these patches load DLLs from a deleted scratchpad folder and have no link to this check |
 
 ### Still open

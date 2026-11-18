@@ -8,13 +8,17 @@
 module-path = "src/cuda_link/shm_protocol.py"
 timeout = 30.0
 excluded-modules = []
-# Absolute interpreter path: bare "python" resolves through the Windows App Paths
-# registry to a potentially different environment. One run ≈ 4.3 s (torch import).
+# `uv run --no-sync python`: the venv of the checkout cosmic-ray runs in (worktrees too),
+# on Windows and Linux. Not an absolute path: another checkout's venv imports that
+# checkout's src through its editable install, so every mutant would survive. Not a
+# relative .venv path: CreateProcess cannot find it, every run is INCOMPETENT and the
+# baseline still says passed. --no-sync keeps a hand-installed CUDA torch.
+# One run ≈ 4.3 s (torch import).
 # The four files are the module's direct tests; slot meta and classify_frame_step (v0.6) are
 # tested in test_slot_meta_fields.py, so a run without it reports false survivors (Phase J2).
 # test_protocol_properties.py adds the Hypothesis properties (J4); --hypothesis-profile=ci keeps
 # their examples derandomized, so a mutant gets the same verdict on every run.
-test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_shm_protocol.py tests/core/test_slot_meta_fields.py tests/core/test_golden_shm_fixtures.py tests/core/test_cpp_protocol_parity.py tests/core/test_protocol_properties.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1 --hypothesis-profile=ci"
+test-command = "uv run --no-sync python -m pytest tests/core/test_shm_protocol.py tests/core/test_slot_meta_fields.py tests/core/test_golden_shm_fixtures.py tests/core/test_cpp_protocol_parity.py tests/core/test_protocol_properties.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1 --hypothesis-profile=ci"
 
 [cosmic-ray.distributor]
 name = "local"
