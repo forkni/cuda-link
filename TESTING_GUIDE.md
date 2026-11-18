@@ -1065,6 +1065,54 @@ Found on the way: ruff 0.17 also formats Python code blocks inside Markdown, and
 `sitecustomize.py` snippet in this guide failed `ruff format --check .` (a missing blank line), so
 J3 as first pushed would have failed CI's format step. Fixed in its own commit (`64b43ed`).
 
+### J5 — Mutation re-run on `_exporter_port.py` and `_importer_port.py`
+
+Both were at 100 % after I4 and changed in v0.6: `_exporter_port.py` +53/-6 (`GpuFrame` slot meta
+fields and their `_check_uint` range check, producer doorbell on by default), `_importer_port.py`
++11/-5 (consumer doorbell on by default). The other I2/I4 targets (`_env`, `activation_barrier`)
+changed only by an SPDX header, so their scores stand. Whole-module cosmic-ray 8.9.0 runs on Linux,
+`--randomly-seed=1`, `--hypothesis-profile=ci`, `cr-filter-pragma` before `exec`, and
+`-m "not requires_cuda and not requires_native"` in the Linux test command (one test in
+`test_exporter_port.py` needs a real CUDA runtime; the committed Windows configs keep it).
+
+| Target | Measure | I4 (2026-10-22) | J5 first run | After kill-test |
+|--------|---------|-----------------|--------------|-----------------|
+| `_exporter_port.py` | Mutants | 114 | 184 (50 pragma'd, 134 run) | 184 |
+| | Killed | | 127 | **133** |
+| | Survivors, genuine / proven equivalent | 0 / 50 pragma'd | 6 / 1 | **0** / 1 |
+| | Score | 100 % | 95.5 % | **100 %** |
+| `_importer_port.py` | Mutants | 88 | 89 (4 pragma'd, 85 run) | 89 |
+| | Killed / survivors | | 85 / 0 | 85 / 0 |
+| | Score | 100 % | **100 %** | 100 % |
+
+Score = killed / (killed + genuine survivors). Every kill was checked: 6 have no "N failed" line, and
+all are `is` / `is not` against a literal, which Python reports as a `SyntaxWarning` that
+`filterwarnings = ["error"]` turns into a collection error (a real detection).
+
+**The six genuine survivors** were `_check_uint`'s `bits` argument at each call site, 64 -> 63/65
+and 32 -> 31/33. `bits` only feeds the error text ("GpuFrame.stream_id must be in 0..2^32-1"), and
+every test matched the field name alone, so a message stating the wrong range passed. Kill-test:
+`test_gpuframe_rejects_every_out_of_range_slot_meta_value` now matches
+`GpuFrame.<field> must be in <range>` with the range as the `GpuFrame` docstring states it, a literal
+per field ("0..2^64-1", "0..2^32-1"), not computed from `bits`. Each of the 7 survivor diffs was
+re-applied to the source and the test command run: 6 killed (one failure each). The test passes
+under seeds 1, 2 and 3.
+
+**Proven equivalent (1, unpragma'd):** line 155, `type(value) is not int` -> `!=`. `type.__eq__`
+is identity, so the two always agree. Not pragma'd: the pragma is whole-line, and the line's other
+mutants (`is` -> `is not` and the like) are killed today.
+
+Tooling: `cr-exporter_port.toml` ran only `test_exporter_port.py`, which has no slot meta test at
+all. Checked: with `0 <= value <= limit` in `_check_uint`, that file passes (78 passed), so every
+`_check_uint` mutant would read as a survivor. Its `test-command` now adds `test_slot_meta_fields.py`
+and `test_protocol_properties.py`, with `--hypothesis-profile=ci`. `cr-importer_port.toml` is
+unchanged (the doorbell default is pinned in `test_importer_port.py`). No production code changed.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1741 passed + 18 skipped | 1741 passed + 18 skipped (one test's assertion tightened) |
+| Smell scanner / ruff | OK | OK |
+
 ### Still open
 
 | Item | What | Notes |

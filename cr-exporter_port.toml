@@ -10,7 +10,9 @@ timeout = 30.0
 excluded-modules = []
 # Absolute interpreter path: bare "python" resolves through the Windows App Paths
 # registry to a potentially different environment.
-test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_exporter_port.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
+# GpuFrame's slot meta checks (v0.6) are tested in test_slot_meta_fields.py and the Hypothesis
+# properties; without them every _check_uint mutant reads as a survivor (Phase J5).
+test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_exporter_port.py tests/core/test_slot_meta_fields.py tests/core/test_protocol_properties.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1 --hypothesis-profile=ci"
 
 [cosmic-ray.distributor]
 name = "local"

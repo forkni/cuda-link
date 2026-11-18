@@ -15,6 +15,8 @@ Expected values come from the documented contracts, not from the code under test
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
@@ -185,24 +187,30 @@ def test_classify_frame_step_is_invariant_under_a_write_idx_shift(
 # GpuFrame slot meta range checks
 # ---------------------------------------------------------------------------
 
+# (field, exclusive limit, the range as the GpuFrame docstring states it)
 _SLOT_META_FIELDS = [
-    pytest.param("producer_frame", U64_LIMIT, id="producer_frame"),
-    pytest.param("source_timestamp_us", U64_LIMIT, id="source_timestamp_us"),
-    pytest.param("stream_id", U32_LIMIT, id="stream_id"),
+    pytest.param("producer_frame", U64_LIMIT, "0..2^64-1", id="producer_frame"),
+    pytest.param("source_timestamp_us", U64_LIMIT, "0..2^64-1", id="source_timestamp_us"),
+    pytest.param("stream_id", U32_LIMIT, "0..2^32-1", id="stream_id"),
 ]
 
 
-@pytest.mark.parametrize(("field", "limit"), _SLOT_META_FIELDS)
+@pytest.mark.parametrize(("field", "limit", "documented_range"), _SLOT_META_FIELDS)
 @given(data=st.data())
-def test_gpuframe_keeps_every_in_range_slot_meta_value(field: str, limit: int, data: st.DataObject) -> None:
+def test_gpuframe_keeps_every_in_range_slot_meta_value(
+    field: str, limit: int, documented_range: str, data: st.DataObject
+) -> None:
     value = data.draw(st.integers(min_value=0, max_value=limit - 1), label=field)
     frame = GpuFrame(ptr=0, size=4, **{field: value})
     assert getattr(frame, field) == value
 
 
-@pytest.mark.parametrize(("field", "limit"), _SLOT_META_FIELDS)
+@pytest.mark.parametrize(("field", "limit", "documented_range"), _SLOT_META_FIELDS)
 @given(data=st.data())
-def test_gpuframe_rejects_every_out_of_range_slot_meta_value(field: str, limit: int, data: st.DataObject) -> None:
+def test_gpuframe_rejects_every_out_of_range_slot_meta_value(
+    field: str, limit: int, documented_range: str, data: st.DataObject
+) -> None:
+    """The error names the field and states its documented range."""
     value = data.draw(st.one_of(st.integers(max_value=-1), st.integers(min_value=limit)), label=field)
-    with pytest.raises(ValueError, match=field):
+    with pytest.raises(ValueError, match=re.escape(f"GpuFrame.{field} must be in {documented_range}")):
         GpuFrame(ptr=0, size=4, **{field: value})
