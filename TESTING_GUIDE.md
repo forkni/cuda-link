@@ -27,6 +27,23 @@ python -m pytest tests/ -q
 
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
+To pin the order (bisecting, mutation runs) use a fixed `--randomly-seed=<N>`, **not**
+`-p no:randomly`: `addopts` passes `--randomly-dont-reset-seed`, which is an unknown argument
+once the plugin is off, so pytest exits with a usage error.
+
+Replaying past fixes (`replay_fixes.py` from the harden-test-suite skill) needs one extra step on
+this repo. The scikit-build-core editable install (`_editable_skbc_cuda_link`) maps `cuda_link` to
+the main checkout ahead of `PYTHONPATH`, so the throwaway worktree's `src/` would be ignored and the
+control run goes red. Put a directory holding this `sitecustomize.py` on `PYTHONPATH` (the script
+appends it after the worktree paths):
+
+```python
+import sys
+sys.meta_path[:] = [f for f in sys.meta_path if "_editable_skbc" not in type(f).__module__]
+```
+
+and pass the venv interpreter as an **absolute** path in `--test-command`, since the command runs
+inside the worktree.
 
 ## Current baseline (2026-11-18, Phase J audit)
 
@@ -58,7 +75,7 @@ the combined figure there is higher. The `fail_under = 91` margin on Linux is 0.
 leg measures `--cov=cuda_link` only (97 % here), so it is not at risk.
 
 Audit findings that need a change to a gate or config file, so they are **not** in J1 (they go in
-their own PR; see the review rule on gate files):
+their own PR; see the review rule on gate files). All six are handled in J3 below:
 
 - **Coverage measures fake packages.** `source = ["cuda_link", ...]` matches by package name, so the
   throwaway `cuda_link/` trees that the bootstrap tests build under `tmp_path` show up as 0-statement
@@ -867,7 +884,7 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
 Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
 coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
-it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`. J3 is proposed, not done.
+it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings.
 
 ### J1 — Smell ratchet back to the baseline (test code only)
 
@@ -962,11 +979,38 @@ direct test files (`test_shm_protocol`, `test_slot_meta_fields`, `test_golden_sh
 `td_exporter` mirror, which a run does not mutate, and the importer/integration tests are mock-heavy,
 so neither is in the set. Production code is unchanged in J2.
 
-### Proposed next phases (not started)
+### J3 — Gate and config findings
 
-| Phase | Why | Notes |
-|-------|-----|-------|
-| J3 — gate/config PR | the six findings listed under the baseline above | own PR: coverage `omit` for `pytest-of-*`, ruff pin alignment, vendor the newer scanner, CI `--cov-fail-under=0` |
+The six findings listed under the current baseline. Config, tooling and docs only: no production
+code, test or `conftest.py` change, and no gate value moved (`fail_under` stays 91, the smell
+baseline stays 19). Committed on its own, apart from J1/J2, so it can be reviewed or split onto
+its own branch.
+
+| Finding | Decision | Change |
+|---------|----------|--------|
+| Coverage measures the fake `cuda_link/` trees under `tmp_path` | fixed | `[tool.coverage.run] source` names `src/cuda_link` as a path instead of the package name `cuda_link` |
+| `-p no:randomly` is a usage error | documented, config kept | "Running the suite" says to pin order with `--randomly-seed=<N>`. `--randomly-dont-reset-seed` stays: dropping it would reseed `random` before every test, which changes what the suite runs, and no reason for it was recorded |
+| `replay_fixes.py` and the scikit-build-core finder | documented | the `sitecustomize.py` bypass and the absolute `--test-command` interpreter, in "Running the suite" |
+| Ruff pins disagree | fixed | `.pre-commit-config.yaml` `ruff-pre-commit` v0.14.11 -> **v0.17.4**, equal to `uv.lock` (the tag exists upstream). `ruff check .` and `ruff format --check .` under 0.17.4: clean |
+| Newer smell scanner | vendored | `scripts/scan_test_smells.py` now has the report-only `real-clock` smell (5 hits, out of the total and the baseline). Formatted to repo style. Ruff's C419 fix ("unnecessary list comprehension in `any()`") is wrong in two places, because `taint()` has side effects and a generator would stop at the first hit, so they carry a `noqa` with that reason. The upstream skill copy has the same two lines |
+| CI passes no `--cov-fail-under=0` | **kept as is, on purpose** | `codecov.yml` records the choice: the project floor is enforced *inside* CI by `fail_under`, and Codecov patch coverage (80 %) is the per-change gate. The harden-test-suite skill's default (a local-only ratchet) does not apply here |
+
+| Measure | Before | After |
+|---------|--------|-------|
+| Combined branch coverage (Linux, bare `--cov`) | 91.72 % (5671 stmts, incl. 29 fake-tree statements counted as covered) | **91.69 %** (5642 stmts); gate 91 passes |
+| `coverage lcov` / `coverage json` | fail without `-i` | work |
+| CI-style `--cov=cuda_link` | 96.87 % | 96.87 % (unchanged: CI measures the installed wheel by package name, so its 29 fake-tree statements remain, +0.03 points) |
+| Smell scanner | 19, OK | 19, OK (`real-clock` 5, report only) |
+| `ruff check .` / `ruff format --check .` | clean | clean |
+| No-GPU selection | 1726 passed + 18 skipped | 1726 passed + 18 skipped |
+
+The 0.03-point drop is the honest denominator, not lost coverage. The Linux margin over `fail_under`
+is now 0.69 points; on Windows the Win32 paths run and the figure is higher.
+
+### Still open
+
+| Item | What | Notes |
+|------|------|-------|
 | Accepted gap | `RealTDHost.abs_frame` (new, 0 %) and `script_chop_callbacks.onCook` | `td`-bound shells (Humble Object edge); covered by the in-TD run, not the committed suite. The logic they drive (`slot_meta_channels`, stamping) is tested through `FakeTDHost` |
 
 ## Deferral table — tooling we deliberately did NOT add
@@ -984,5 +1028,5 @@ so neither is in the set. Production code is unchanged in J2.
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
-| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted again by Phase J: `uv.lock` 0.17.4, `.pre-commit-config.yaml` v0.14.11 (J3) |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4. Bump both together |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |
