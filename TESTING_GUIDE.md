@@ -885,7 +885,7 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
 Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
 coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
-it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings.
+it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings; J4 adds Hypothesis properties; J5 re-runs mutation testing on the two port modules.
 
 ### J1 — Smell ratchet back to the baseline (test code only)
 
@@ -1008,6 +1008,63 @@ its own branch.
 The 0.03-point drop is the honest denominator, not lost coverage. The Linux margin over `fail_under`
 is now 0.69 points; on Windows the Win32 paths run and the figure is higher.
 
+### J4 — Property tests on the v0.6 pure cores (Hypothesis)
+
+PLAYBOOK Phase 4.1: each pure core gets a property before (or alongside) mutation testing, because
+the agent that writes the code also picks the examples. J2 killed its survivors with hand-picked
+rows; J4 adds generated inputs for the same cores. New file `tests/core/test_protocol_properties.py`,
+15 tests, every expected value from a documented contract (the `SlotMeta`, `FrameStep` and
+`GpuFrame` docstrings), none recomputed with the code under test.
+
+| Core | Property |
+|------|----------|
+| `publish_frame` -> `acquire_slot` | for any ring size 1-10, any non-zero write_idx, any finite timestamp and the full u64/u64/u32 field ranges, `acquire_slot` returns `NEW_FRAME` at that write_idx with exactly the slot meta written |
+| `classify_frame_step` | one property per docstring rule: no previous frame is `FIRST`; write_idx step >= 2 (across the wrap) is `FRAME_GAP`; step 0 is `NEXT` whatever producer_frame says; step 1 with a producer jump >= 2 is `PRODUCER_SKIP`; the steady state (+1/+1, from any previous frame) is `NEXT`; a repeated or restarted producer_frame is `NEXT`; an unset previous producer_frame is never a skip. Plus: the result is invariant under shifting both write_idx values by the same amount mod 2^32 |
+| `GpuFrame` | per slot meta field: every value in range is accepted and kept; every value outside it raises `ValueError` naming the field |
+
+Setup (the dependency and `conftest.py` change, stated here because they touch the suite's own
+configuration; no gate value changed):
+
+- `hypothesis>=6.116` in the `dev` extra (`settings.get_profile("ci")` needs 6.116). `uv.lock` adds
+  only `hypothesis` (6.141.1 on Python 3.9, 6.168.5 and 6.170.15 on newer forks) and
+  `sortedcontainers`.
+- `tests/conftest.py` registers `ci` (Hypothesis's own derandomized profile: `derandomize=True`,
+  `deadline=None`, no database) and `dev` (`max_examples=50`), and loads `HYPOTHESIS_PROFILE`, else
+  `ci` when `CI` is set (GitHub Actions sets it), else `dev`. The import is guarded: the
+  `requires_native` CI legs install only `pytest` + `pytest-randomly` and still load the file.
+  Checked: no variable -> 50 examples per test, `CI=1` or `--hypothesis-profile=ci` -> 100; two `ci`
+  runs draw identical examples.
+- `cr-shm_protocol.toml` runs the property file too, with `--hypothesis-profile=ci`.
+
+Break and revert (source edited, the property file alone run under `ci`, source restored from git):
+
+| Deliberate break | Properties |
+|------------------|------------|
+| `publish_frame`: `stream_id & 0xFFFF` (u16 truncation) | 1 failed |
+| `classify_frame_step`: `prev + 1` -> `prev \| 1` | 1 failed |
+| `classify_frame_step`: `prev + 1` -> `prev ^ 1` | 2 failed |
+| `classify_frame_step`: `write_step == 1` -> `<= 1` | 1 failed |
+| `classify_frame_step`: the u32 wrap mask dropped | 3 failed |
+| `GpuFrame`: `value < limit` -> `<= limit` | 3 failed |
+
+The first draft let the `| 1` break through: its "no jump is NEXT" strategy drew the current frame
+from `0..prev+1`, so the boundary `prev + 1`, where that bug lives, came up about once in `prev`
+draws. The steady state is now its own property (`current = prev + 1` over previous frames of both
+parities) and repeats/restarts are a second one (`current <= prev`). A property that misses the
+boundary is the same blind spot as a hand-picked table.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1726 passed + 18 skipped | **1741 passed + 18 skipped** (+15) |
+| Branch coverage, combined (Linux) | 91.69 % | 91.69 % (the lines already ran) |
+| Property file runtime | n/a | about 1 s under `ci` (100 examples per test) |
+| Smell scanner / skip ratio / ruff | OK | OK |
+| Touched file under seeds 1, 2, 3 | n/a | 15 passed each |
+
+Found on the way: ruff 0.17 also formats Python code blocks inside Markdown, and the J3
+`sitecustomize.py` snippet in this guide failed `ruff format --check .` (a missing blank line), so
+J3 as first pushed would have failed CI's format step. Fixed in its own commit (`64b43ed`).
+
 ### Still open
 
 | Item | What | Notes |
@@ -1028,6 +1085,6 @@ is now 0.69 points; on Windows the Win32 paths run and the figure is higher.
 | TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
-| Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
+| Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Hypothesis and the `ci` profile exist since J4 (slot meta, `classify_frame_step`, `GpuFrame`); `DtypeCodec` is still hand-enumerated across 8 `@parametrize` lists |
 | Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4. Bump both together |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

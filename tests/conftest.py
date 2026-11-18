@@ -16,6 +16,20 @@ import pytest
 # Ensure CuPy disk kernel cache uses system temp dir to prevent sandbox permission errors on ~/.cupy
 os.environ.setdefault("CUPY_CACHE_DIR", os.path.join(tempfile.gettempdir(), "cupy_cache"))
 
+# Hypothesis profiles for the property tests (TESTING_GUIDE.md, Phase J4). "ci" is Hypothesis's own
+# derandomized profile (derandomize=True, deadline=None, no database), re-registered so the name is
+# ours; cosmic-ray runs pass --hypothesis-profile=ci so a mutant gets the same examples every run.
+# The default follows the CI variable, so a CI job gets "ci" without setting HYPOTHESIS_PROFILE.
+# Guarded: the requires_native CI legs install only pytest + pytest-randomly and still load this file.
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:  # pragma: no cover -- dev extra always installs it
+    _hypothesis_settings = None
+if _hypothesis_settings is not None:
+    _hypothesis_settings.register_profile("ci", _hypothesis_settings.get_profile("ci"))
+    _hypothesis_settings.register_profile("dev", max_examples=50)
+    _hypothesis_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci" if os.environ.get("CI") else "dev"))
+
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
