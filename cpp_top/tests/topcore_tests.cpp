@@ -472,11 +472,15 @@ void test_frame_step_classification() {
     CHECK(classify_frame_step(5, 100, 6, 0) == FrameStep::Next);
     // Sender restarted its frame count (smaller value): not a skip.
     CHECK(classify_frame_step(5, 100, 6, 3) == FrameStep::Next);
+    // An odd previous producer_frame: +1 is still the next frame, not a skip.
+    CHECK(classify_frame_step(5, 101, 6, 102) == FrameStep::Next);
     // write_idx wraps at 2^32 like the counter.
     CHECK(classify_frame_step(0xFFFFFFFFU, 100, 1, 101) == FrameStep::FrameGap); // step 2 across the wrap
     CHECK(classify_frame_step(0xFFFFFFFEU, 100, 0xFFFFFFFFU, 101) == FrameStep::Next);
     // A repeated write_idx (step 0) is not a gap.
     CHECK(classify_frame_step(5, 100, 5, 100) == FrameStep::Next);
+    // ... nor a skip, whatever producer_frame says: a skip needs write_idx step 1.
+    CHECK(classify_frame_step(5, 100, 5, 102) == FrameStep::Next);
 }
 
 // The In TOP's Framewaitms wait: timeout of the next doorbell wait from the time left.

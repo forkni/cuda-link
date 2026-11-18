@@ -1072,6 +1072,31 @@ def test_publish_wraps_out_of_range_meta_values() -> None:
     assert meta.stream_id == 2**32 - 1
 
 
+def test_publish_frame_without_slot_meta_writes_not_set() -> None:
+    """Slot meta the sender does not pass reads back as 0, the protocol's "not set"."""
+    layout = SHMLayout(num_slots=1)
+    buf = _make_buf(layout)
+    publish_frame(buf, layout, write_idx=1, host_timestamp=1.5)
+    assert read_slot_meta(buf, layout, 0) == SlotMeta(1.5, 0, 0, 0, 0)
+
+
+def test_publish_frame_keeps_slot_meta_at_its_range_limits() -> None:
+    """The largest values each field holds (u64, u64, u32) are written unchanged."""
+    u64_max, u32_max = 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF
+    layout = SHMLayout(num_slots=1)
+    buf = _make_buf(layout)
+    publish_frame(
+        buf,
+        layout,
+        write_idx=1,
+        host_timestamp=0.0,
+        producer_frame=u64_max,
+        source_timestamp_us=u64_max,
+        stream_id=u32_max,
+    )
+    assert read_slot_meta(buf, layout, 0) == SlotMeta(0.0, u64_max, u64_max, u32_max, 0)
+
+
 def test_sender_pid_round_trip_and_build_buffer() -> None:
     layout = SHMLayout(num_slots=2)
     assert read_sender_pid(memoryview(layout.build_buffer())) == 0
@@ -1088,6 +1113,10 @@ def test_is_same_process_sender() -> None:
     assert is_same_process_sender(7, 0x1_0000_0007)  # pid compared as u32
 
 
+def test_is_same_process_sender_lower_sender_pid_is_another_process() -> None:
+    assert not is_same_process_sender(99, 1234)
+
+
 def test_protocol_mismatch_message_names_v05() -> None:
     assert protocol_mismatch_message(PROTOCOL_MAGIC_V05) == (
         "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"
@@ -1095,3 +1124,19 @@ def test_protocol_mismatch_message_names_v05() -> None:
     other = protocol_mismatch_message(0xDEADBEEF)
     assert "0xDEADBEEF" in other
     assert "unrelated process" in other
+
+
+def test_protocol_mismatch_message_zeroed_segment_is_not_v05() -> None:
+    """A zeroed segment (magic 0, below both magics) is an unrelated process, not a v0.5 sender."""
+    msg = protocol_mismatch_message(0)
+    assert "0x00000000" in msg
+    assert "unrelated process" in msg
+
+
+def test_protocol_mismatch_message_names_v05_magic_read_from_the_segment() -> None:
+    """The receiver passes the magic it read from SHM, an int equal to PROTOCOL_MAGIC_V05 but not the same object."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    buf[0:4] = b"DPIC"  # "CIPD", the v0.5 magic, little-endian on the wire
+    msg = protocol_mismatch_message(read_magic(buf))
+    assert msg == "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"

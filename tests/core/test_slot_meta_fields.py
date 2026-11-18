@@ -217,9 +217,11 @@ def test_importer_keeps_last_slot_meta_on_no_frame() -> None:
         (5, 0, 6, 50, FrameStep.NEXT),
         (5, 100, 6, 0, FrameStep.NEXT),
         (5, 100, 6, 3, FrameStep.NEXT),
+        (5, 101, 6, 102, FrameStep.NEXT),
         (_U32_MAX, 100, 1, 101, FrameStep.FRAME_GAP),
         (_U32_MAX - 1, 100, _U32_MAX, 101, FrameStep.NEXT),
         (5, 100, 5, 100, FrameStep.NEXT),
+        (5, 100, 5, 102, FrameStep.NEXT),
     ],
     ids=[
         "first_frame",
@@ -232,9 +234,11 @@ def test_importer_keeps_last_slot_meta_on_no_frame() -> None:
         "next_prev_frame_unset",
         "next_frame_unset",
         "next_producer_frame_went_back",
+        "next_from_odd_producer_frame",
         "ring_gap_across_u32_wrap",
         "next_at_u32_limit",
         "same_write_idx",
+        "same_write_idx_producer_frame_jump",
     ],
 )
 def test_classify_frame_step(prev_widx: int, prev_pf: int, widx: int, pf: int, expected: FrameStep) -> None:

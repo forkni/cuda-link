@@ -10,7 +10,9 @@ timeout = 30.0
 excluded-modules = []
 # Absolute interpreter path: bare "python" resolves through the Windows App Paths
 # registry to a potentially different environment. One run ≈ 4.3 s (torch import).
-test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_shm_protocol.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
+# The four files are the module's direct tests; slot meta and classify_frame_step (v0.6) are
+# tested in test_slot_meta_fields.py, so a run without it reports false survivors (Phase J2).
+test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/core/test_shm_protocol.py tests/core/test_slot_meta_fields.py tests/core/test_golden_shm_fixtures.py tests/core/test_cpp_protocol_parity.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
 
 [cosmic-ray.distributor]
 name = "local"

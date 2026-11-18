@@ -867,7 +867,7 @@ Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
 Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
 coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
-it back without touching the baseline file; the remaining phases are proposed, not done.
+it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`. J3 is proposed, not done.
 
 ### J1 — Smell ratchet back to the baseline (test code only)
 
@@ -898,11 +898,74 @@ Break and revert (source edited, touched tests run, source restored from git):
 | `_cook_slot_meta`: `except Exception` narrowed to `(AttributeError, LookupError)` | 1 failed | **2 failed** (the new cook-raises case also catches it) |
 | `INFO_CHOP_FRAME_MOD = 1 << 23` | failed | failed (`test_info_chop_frame_mod_matches_cpp`) |
 
+### J2 — Mutation re-run on `shm_protocol.py`
+
+`shm_protocol.py` changed by 185+/54- lines since the I2 run (v0.6 header with `sender_pid`, the
+32-byte slot meta, `classify_frame_step`, `protocol_mismatch_message`). Whole-module cosmic-ray
+8.9.0 run on Linux, test command = the module's four direct test files (below), `--randomly-seed=1`,
+`cr-filter-pragma` before `exec`.
+
+| Measure | I2 (2026-10-22) | J2 first run | After kill-tests |
+|---------|-----------------|--------------|------------------|
+| Mutants | 506 | 774 (112 pragma'd, 662 run) | 774 |
+| Killed | | 639 | **651** |
+| Survivors, genuine / proven equivalent | 0 / 52 pragma'd | 12 / 11 | **0** / 11 |
+| Score | 100 % | 98.2 % | **100 %** |
+| No-GPU selection | | 1719 passed + 18 skipped | 1726 passed + 18 skipped (+7) |
+| C++ `topcore_tests` (core-only build) | | 304 checks | 306 checks (+2) |
+
+Score = killed / (killed + genuine survivors); proven-equivalent survivors are excluded. Of the 639
+first-run kills, 612 are test failures, 20 are syntax-invalid mutants (an operator in place of the
+keyword-only `*`), 6 are `x ** 0xFFFFFFFF` timeouts and 1 is a `metadata_offset << 23` allocation
+the kernel OOM-killed; each is a real detection. "After" was checked by re-applying each of the 23
+survivor diffs from the session database to the source, running the test command, and restoring the
+file from git; a full second session was not run, because the change only adds tests and cannot
+un-kill a mutant.
+
+**Kill-tests (7), each from the spec, each with the mutant it kills:**
+
+| Test | Mutants killed (line: operator) | What it pins |
+|------|---------------------------------|--------------|
+| `test_publish_frame_without_slot_meta_writes_not_set` | 518, 520: `NumberReplacer` ×4 (`producer_frame`/`stream_id` defaults to 1 and -1) | slot meta not passed reads back as 0, the `SlotMeta` "not set" |
+| `test_publish_frame_keeps_slot_meta_at_its_range_limits` | 539: `BitAnd_Mod` (`& U64_MAX` -> `% U64_MAX`) | u64/u64/u32 maxima are written unchanged |
+| `test_is_same_process_sender_lower_sender_pid_is_another_process` | 470: `Eq_LtE` | a sender pid below our own pid is another process |
+| `test_protocol_mismatch_message_zeroed_segment_is_not_v05` | 475: `Eq_LtE` | the v0.6 magic is below the v0.5 one, so `<=` named a zeroed segment "v0.5" |
+| `test_protocol_mismatch_message_names_v05_magic_read_from_the_segment` | 475: `Eq_Is` | the magic comes from a buffer read, an equal int that is not the constant object |
+| `classify_frame_step` row `next_from_odd_producer_frame` (5, 101, 6, 102) | 266: `Add_BitOr`, `Add_BitXor` | every existing row had an even previous frame, where `\| 1` and `^ 1` equal `+ 1` |
+| `classify_frame_step` row `same_write_idx_producer_frame_jump` (5, 100, 5, 102) | 266: `Eq_LtE` | a skip needs write_idx step 1, not step 0 |
+
+The two table rows were added to the C++ twin's `test_frame_step_classification` as well, because
+`test_cpp_frame_step_cases_match_python_table` requires the two tables to be equal. The C++ side had
+the same hole: with `write_step <= 1` in `frame_step.h` the old C++ tests pass (304 checks, 0
+failures); with the new rows that mutant and `(prev_producer_frame | 1)` each fail one check.
+All new Python tests pass under seeds 1, 2 and 3.
+
+**Proven equivalent, left unpragma'd (11).** cosmic-ray's pragma is whole-line only
+(`.*#.*pragma:.*no mutate.*`). On lines 266 and 470 it would also hide the mutants the new tests kill,
+and on 162, 178 and 300 it would hide the `+`/`*` mutants that are killed today, so none was added.
+The next run will show these 11 again; this table is the reference:
+
+| Line | Mutant(s) | Why equivalent |
+|------|-----------|----------------|
+| 162 `slot_offset`, 178 `shutdown_offset` | `24 + n*160` -> `\|`, `^` (×4) | `n*160` is a multiple of 32 (bits 5 and up); 24 is bits 3 and 4: no shared bit for any `n >= 0`, so `+`, `\|` and `^` agree |
+| 300 `Metadata.pack_into` | `offset + 4` -> `\|`, `^` (×2) | `metadata_offset = 25 + 160 * num_slots`: bit 2 is always clear. (`+8`, `+12`, `+16` do overlap and are killed) |
+| 248, 251 `FrameStep` | `FIRST = -1`, `PRODUCER_SKIP = 4` | no code reads `.value` (searched `src/` and `td_exporter/`); the mutants that collide with another member become aliases and are killed |
+| 261 | `prev_write_idx == 0` -> `<= 0` | write_idx is a u32 read, never negative |
+| 266 | `write_step == 1` -> `>= 1` | the `> 1` return above leaves `write_step` in {0, 1} |
+| 266 | `prev_producer_frame != 0` -> `> 0` | producer_frame is a u64 read, never negative |
+| 470 | `sender_pid != 0` -> `> 0` | sender_pid is a u32 read, never negative |
+
+Tooling: the committed `cr-shm_protocol.toml` ran only `test_shm_protocol.py`, which would report
+every slot-meta and `classify_frame_step` mutant as a survivor. Its `test-command` now lists the four
+direct test files (`test_shm_protocol`, `test_slot_meta_fields`, `test_golden_shm_fixtures`,
+`test_cpp_protocol_parity`); the Windows interpreter path is unchanged. The `td/` tests import the
+`td_exporter` mirror, which a run does not mutate, and the importer/integration tests are mock-heavy,
+so neither is in the set. Production code is unchanged in J2.
+
 ### Proposed next phases (not started)
 
 | Phase | Why | Notes |
 |-------|-----|-------|
-| J2 — mutation re-run on `shm_protocol.py` | +36 lines in v0.6 (`read_slot_meta`, `classify_frame_step`, slot meta layout) since the I2 run at 100 % | `classify_frame_step` is a pure, zero-mock table; first candidate. `cr-shm_protocol.toml` uses the project venv and `--randomly-seed=1` (I2) |
 | J3 — gate/config PR | the six findings listed under the baseline above | own PR: coverage `omit` for `pytest-of-*`, ruff pin alignment, vendor the newer scanner, CI `--cov-fail-under=0` |
 | Accepted gap | `RealTDHost.abs_frame` (new, 0 %) and `script_chop_callbacks.onCook` | `td`-bound shells (Humble Object edge); covered by the in-TD run, not the committed suite. The logic they drive (`slot_meta_channels`, stamping) is tested through `FakeTDHost` |
 
