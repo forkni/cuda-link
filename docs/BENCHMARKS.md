@@ -493,8 +493,17 @@ SM clock 2520 MHz and about 77 W in all cells. The Python sender used 3-5 % SM.
   use of the TD windows (network editor, viewers) and hit both instances together; turning
   off cooking of an unrelated receiver COMP did not remove them. This is TD UI drawing, not
   cuda-link.
-- For a benchmark, keep the TD windows unfocused (or the node viewers off) while a cell runs,
-  and read GPU load from NVML, not from Task Manager.
+- A sender TD whose Perform window is covered by another window reads 86-97 % "3D" in
+  Task Manager. On the dev box both TDs open their Perform window at the same place on the one
+  monitor, so TD B's covers TD A's. All three are needed: TD A in Perform mode, TD A sending
+  (any sender: `.tox` Sender, a bare `cudaMemory()` call, the Out TOP in either install form),
+  and TD A's window covered. Moving TD A's Perform window clear of TD B's: 97 % -> 0.9 %, with
+  everything else the same; moving it back: 97 %. NVML stays near 2 %, and TD A's frame rate
+  (59.8 fps) and publish rate (about 60/s) do not change. This is queue wait from the covered
+  window, not cuda-link work.
+- For a benchmark: record each TD's Perform mode, keep the Perform windows from overlapping,
+  keep the TD windows unfocused (or the node viewers off) while a cell runs, and read GPU load
+  from NVML, not from Task Manager.
 
 ## vs CPU SharedMemory
 
