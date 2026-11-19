@@ -48,8 +48,9 @@ jobs:
         run: |
           find cpp_top/src cpp_top/tests cpp_top/tools \( -name '*.cpp' -o -name '*.h' \) -print0             | xargs -0 clang-format --dry-run --Werror
 
-      # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll and
-      # CudaLinkOutTOP.dll (D2D memcpy path, no .cu kernels yet) -- no GPU/driver required.
+      # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll,
+      # CudaLinkOutTOP.dll and the Common page kernel (cpp_top/src/common/resize_convert.cu)
+      # -- no GPU/driver required (resize_convert_tests skips with code 77 without a GPU).
       # 12.6.2 (not 12.8.x, the local dev target -- see cpp_top/CMakeLists.txt) is the
       # newest 12.x this pinned action version (v0.2.19) can install on Windows;
       # CMakeLists.txt only checks the CUDA *major* version, so this is compatible.
@@ -85,10 +86,15 @@ jobs:
         # (cpp_top/CMakePresets.json, binaryDir cpp_top/build) so CI and local builds match.
         # The toolkit path goes through an env var, not a ${{ }} expansion inside the script
         # (zizmor template-injection rule). Default shell on this runner is pwsh.
+        #
+        # -allow-unsupported-compiler: windows-latest ships VS 18 (MSVC 14.51), newer than
+        # CUDA 12.6's nvcc accepts (host_config.h #error). The TOPs must stay on the cudart
+        # 12 major that TD ships, so CI cannot move to a CUDA 13 nvcc. This job only builds
+        # and runs the CPU tests; the shipping DLLs are built locally with VS 2022 + 12.8.
         working-directory: cpp_top
         env:
           CUDA_TOOLKIT_ROOT: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT"
+        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT" "-DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler"
 
       - name: Build both Custom TOP DLLs, topcore_tests and protocol_dump
         working-directory: cpp_top
