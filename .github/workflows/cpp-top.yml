@@ -25,7 +25,11 @@ permissions:
 jobs:
   build-lint:
     name: format + build + test + tidy
-    runs-on: windows-latest
+    # windows-2022, not windows-latest: windows-latest ships VS 18 (MSVC 14.51), and the
+    # CUDA 12.6 nvcc rejects it (host_config.h #error; with -allow-unsupported-compiler,
+    # cudafe++ crashes on its headers). The TOPs stay on the cudart 12 major that TD ships,
+    # so CI keeps CUDA 12.x and the VS 2022 toolchain that local builds use.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout code
@@ -86,15 +90,10 @@ jobs:
         # (cpp_top/CMakePresets.json, binaryDir cpp_top/build) so CI and local builds match.
         # The toolkit path goes through an env var, not a ${{ }} expansion inside the script
         # (zizmor template-injection rule). Default shell on this runner is pwsh.
-        #
-        # -allow-unsupported-compiler: windows-latest ships VS 18 (MSVC 14.51), newer than
-        # CUDA 12.6's nvcc accepts (host_config.h #error). The TOPs must stay on the cudart
-        # 12 major that TD ships, so CI cannot move to a CUDA 13 nvcc. This job only builds
-        # and runs the CPU tests; the shipping DLLs are built locally with VS 2022 + 12.8.
         working-directory: cpp_top
         env:
           CUDA_TOOLKIT_ROOT: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT" "-DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler"
+        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT"
 
       - name: Build both Custom TOP DLLs, topcore_tests and protocol_dump
         working-directory: cpp_top
