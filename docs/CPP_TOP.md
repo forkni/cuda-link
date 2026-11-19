@@ -358,6 +358,77 @@ Notes:
 - An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
   frame (see "Topology"). The dev-box scenes load the DLLs through the Plugin Path parameter.
 
+### Live matrix 2.0.0.dev0: 9 cells × 6 formats (2026-11-18)
+
+Run before the merge of `feat/orbbec-v0.6` into `development` (merge commit `fefcdb3`). Dev box:
+RTX 4090, TD 2025.33230 Non-Commercial (A sends, B receives), 60 FPS, **1280×1280** (the
+Non-Commercial maximum). The DLL side uses only the installed Custom OPs (`CudalinkoutTOP`,
+`CudalinkinTOP` from `Documents\Derivative\Plugins\CudaLink`, built from `fefcdb3`, no
+cplusplusTOP with a file path). The `.tox` side is `local\CUDAIPCLink_v2.0.0.dev0.tox`, loaded
+fresh. Python peers use the worktree venv. Debug off, Framewaitms 3 (default).
+
+Pixel check: A stamps R = `absFrame % 256` into a 4×4 patch at the bottom-left of a Noise
+source, in the format under test. The Python sender fills the whole frame with
+`frame_count % 256` (channels 0-2, encoded for the dtype). TD receivers read pixel (1,1) with a
+TOP to CHOP (`rgbaunit` u256); the Python receiver reads pixel (1,1) and (H-2,1). Each reading
+is compared with the one before: step 0 = duplicate, step 1 = new, step 2-127 = new with a gap,
+step 128-255 = backward. A hard fail is a backward step, a value that is not a whole number
+(tolerance 0.35 for float16, which cannot hold k/255 exactly), or an error badge. There was
+**no hard fail in any cell.**
+
+Main pass, rgba8fixed, 60 s per cell (latency: TD receivers from slot meta `latency_us`, Python
+from `Importer.last_latency`):
+
+| # | Sender (A) | Receiver (B) | New / samples | Duplicate % | Gaps | Latency p50 / p95 | v0.6 row |
+|---|---|---|---|---|---|---|---|
+| 1 | `.tox` | `.tox` | 3574/3600 | 0.72 | 32 | 11.7 / 14.9 ms | T1 |
+| 2 | Python | `.tox` | 3581/3600 | 0.53 | 12 | 1.6 / 15.0 ms | T3 |
+| 3 | `.tox` | Python | 3601/3601 | 0 | 0 | 0.035 / 0.86 ms | T2 |
+| 4 | Out TOP | In TOP | 3595/3600 | 0.14 | 5 | 4.4 / 5.1 ms (FLAGGED) | C0 |
+| 5 | Python | In TOP | 3600/3600 | 0 | 0 | 12.0 / 12.8 ms | C4 |
+| 6 | Out TOP | Python | 3600/3600 | 0 | 1 | 0.022 / 0.87 ms | C3 |
+| 7 | Python | Python | 3601/3601 | 0 | 0 | 0.71 / 0.86 ms | none |
+| 8 | Out TOP | `.tox` | 3600/3600 | 0 | 0 | 16.2 / 16.4 ms | C2 |
+| 9 | `.tox` | In TOP | 3591/3600 | 0.25 | 20 | 0.86 / 1.6 ms | C1 |
+
+Format sweep, 20 s per cell, duplicate % / gaps:
+
+| Format | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|
+| rgba16fixed | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| rgba16float | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| rgba32float | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| mono8fixed | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| mono32float | 0/0 | 0/0 | 0/5 | 0/0 | 0/0 | 0/0 | 0/0 | 1.42/20 | 1.83/24 (FLAGGED) |
+
+In the sweep, latency p50 in the TD-to-TD cells was 1.8-15.6 ms; in the cells with a Python
+receiver it was 0.018-0.053 ms (TD senders) and 0.10-0.79 ms (Python sender). Receiver cook
+time p50 was 0.10-0.27 ms in all TD cells.
+
+Notes:
+
+- Flags (2× rule against the v0.6 row, each re-run once, not blocking): cell 4 latency p50
+  (4.4 ms against C0 0.09 ms; three runs gave 0.13, 1.8 and 4.4 ms, while p95 stayed at or
+  under C0's 3.0 ms in two of them), and mono32float cell 9 gaps (24 in 20 s against C1 29 in
+  60 s; the first run gave 36). Cell 9 rgba8fixed was also flagged on latency in its first run
+  (11.6 ms against 0.14 ms) and cleared on the re-run (0.86 ms). TD-to-TD latency p50 changes
+  from run to run with the phase between the two TD frame clocks; this is a working
+  hypothesis, not measured.
+- Float16: the Out TOP shares float16 as-is (the Python receiver got `float16`); the `.tox`
+  Sender converts it to float32 (the Python receiver got `float32`). Both In TOP and `.tox`
+  Receiver show it correctly.
+- Out TOP to Python `get_frame` p50 was 0.75 ms for 4-channel frames and 0.18-0.20 ms for
+  mono, against 0.04 ms from the `.tox` Sender. No baseline; not looked into.
+- Harness faults found and fixed during the run (rows superseded, not counted): a file poll
+  in A's `onFrameStart` that read the source TOP every 15 frames made both TD senders publish a
+  stale frame each time (exactly 80 duplicates in 1200); a TD window without focus drops to
+  about 32-50 FPS and gives large gap counts. Keep one TD window in focus during a run.
+- A `.tox` loaded with `loadTox()` and changed in the same script keeps the Mode and
+  Ipcmemname it had at load time until its extension is re-initialized
+  (`par.reinitextensions.pulse()`).
+- The per-cell table, with the superseded rows, is the `m9_results` Table DAT in
+  `/project1/m9_B` of `local/p5_devbox_B.toe`.
+
 ### Framewaitms guard (2026-11-17)
 
 A Python `Exporter` at 30 FPS sent to TD B at 60 FPS for 60 s, into an In TOP with

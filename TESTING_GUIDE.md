@@ -1175,6 +1175,17 @@ box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (C
 | A3 mutation, three committed configs | for each config: `cosmic-ray init` (`--force`), `cr-filter-pragma`, `cosmic-ray baseline`, `cosmic-ray exec`, `cr-report` (cosmic-ray in the worktree venv; baseline passed for all three) | **0 genuine survivors on all three, so 100 %.** `shm_protocol`: 774 mutants, 112 pragma'd, 649 killed, 1 incompetent (`metadata_offset << 23`: Windows raises `MemoryError`, Linux OOM-killed it), 12 survived (51 min). All 12 are rows of the J2 equivalence table (lines 162 and 178 `\|`/`^` ×4, 300 ×2, 248, 251, 261, 266 ×2, 470). The J2 heading said 11, but its rows list 12; the Linux run had 651 kills against 649 here, so one of these mutants was counted as killed there. `_exporter_port`: 184 mutants, 50 pragma'd, 133 killed, 1 survived: line 155 `is not` → `!=`, the J5 equivalent (10.5 min). `_importer_port`: 89 mutants, 4 pragma'd, 85 killed, 0 survived (5.3 min). **Config finding:** each `test-command` hard-codes `F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe`. From any other checkout (a git worktree), that venv's scikit-build editable finder imports `cuda-link/src` even when `src` is first on `sys.path`. The run then mutates one file and tests another, so every mutant survives. That venv also has no `hypothesis`. This run used copies of the configs with only the interpreter changed to the worktree venv. **Fixed afterwards:** all six `cr-*.toml` now use `uv run --no-sync python` (see the mutation workflow note) |
 | A5 `RealTDHost.abs_frame` in TouchDesigner | two TD 2025.33230 instances: `local/p5_devbox_A.toe` sends with `/project1/bench_A/py_sender`, `local/p5_devbox_B.toe` receives with `/project1/bench_B/py_receiver` (Ipcmemname set to `t2q4` for the run, then put back). Values read through twozero_td | **Pass.** B's `slot_meta` `producer_frame` follows A's `absTime.frame`, not B's. Three pairs timed by wall clock: A 4115 → B 4130 (expected ~4131), A 4714 → B 4728 (~4729), A 4744 → B 4758 (~4759). Each is one frame behind, in line with `latency_us` ≈ 9.9 ms. B's own absFrame was 4073 at the first pair. `producer_skip_count` 0. Both COMPs had no error and no warning, and both kept the default color (no error tint). The mod 2^24 wrap is not reachable live (78 h at 60 FPS); the unit tests cover it. The 18 C++ TOP errors in these patches load DLLs from a deleted scratchpad folder and have no link to this check |
 
+### Merge check: live 9-cell matrix, 1280×1280, 6 formats (2026-11-18)
+
+After the merge of `development` into `feat/orbbec-v0.6` (`fefcdb3`): the `.tox`
+`local\CUDAIPCLink_v2.0.0.dev0.tox` (sha256 `a27216a8…6c4d8`), the DLLs rebuilt from `fefcdb3`
+(ninja-tooling, 13/13, ctest 2/2) and installed as Custom OPs, and the Python package. All 9
+sender/receiver pairs of `.tox`, DLL and Python ran in rgba8fixed (60 s per cell) and in
+rgba16fixed, rgba16float, rgba32float, mono8fixed and mono32float (20 s per cell). **54 cells, 0
+hard fails** (no backward step, no pixel mismatch, no error badge). Two latency/gap flags
+against the v0.6 rows, re-run once and not blocking. Tables and notes:
+[docs/CPP_TOP.md](docs/CPP_TOP.md) "Live matrix 2.0.0.dev0".
+
 ### Still open
 
 The full list, with the Windows-only checks and a ready-to-paste message for the agent that
