@@ -1178,7 +1178,8 @@ box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (C
 ### Merge check: live 9-cell matrix, 1280×1280, 6 formats (2026-11-18)
 
 After the merge of `development` into `feat/orbbec-v0.6` (`fefcdb3`): the `.tox`
-`local\CUDAIPCLink_v2.0.0.dev0.tox` (sha256 `a27216a8…6c4d8`), the DLLs rebuilt from `fefcdb3`
+`local\CUDAIPCLink_v2.0.0.dev0.tox` (sha256 `a27216a8…6c4d8`; re-exported after `b386ba1` with
+the 500 µs ImporterPort, sha256 `002f29fd…bb345`, 22 file-backed DATs equal to `td_exporter/`), the DLLs rebuilt from `fefcdb3`
 (ninja-tooling, 13/13, ctest 2/2) and installed as Custom OPs, and the Python package. All 9
 sender/receiver pairs of `.tox`, DLL and Python ran in rgba8fixed (60 s per cell) and in
 rgba16fixed, rgba16float, rgba32float, mono8fixed and mono32float (20 s per cell). **54 cells, 0
