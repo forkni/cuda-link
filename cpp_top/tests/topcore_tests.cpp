@@ -11,6 +11,7 @@
 // Usage: topcore_tests [fixture_dir]   (default: CUDALINK_FIXTURE_DIR from CMake)
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -20,8 +21,10 @@
 #include <string>
 #include <vector>
 
+#include "common_page.h"
 #include "frame_step.h"
 #include "frame_wait.h"
+#include "pixel_codec.h"
 #include "ring_reader.h"
 #include "ring_writer.h"
 #include "shm_layout.h"
@@ -592,6 +595,148 @@ void test_frame_wait_cadence() {
     CHECK(slow.period_s > 0.099 && slow.period_s < 0.101);
 }
 
+// --- Common page resolver (common_page.h) ------------------------------------------------
+// Expected sizes are the Phase 0 probe values TD itself returned (2026-11-18): the Out TOP's
+// suggested desc for a 1280x1280 input, and the In TOP's 127x127 placeholder base.
+void test_common_resolve_size() {
+    g_ctx = "common_resolve_size";
+    const Size2 in1280{1280, 1280};
+    const Size2 box{640, 360};
+    const Size2 sugg{640, 360};
+    CHECK((resolve_size(ResMode::Eighth, in1280, box, sugg) == Size2{160, 160}));
+    CHECK((resolve_size(ResMode::Quarter, in1280, box, sugg) == Size2{320, 320}));
+    CHECK((resolve_size(ResMode::Half, in1280, box, sugg) == Size2{640, 640}));
+    CHECK((resolve_size(ResMode::X2, in1280, box, sugg) == Size2{2560, 2560}));
+    CHECK((resolve_size(ResMode::Fit, in1280, box, sugg) == Size2{360, 360}));
+    CHECK((resolve_size(ResMode::Limit, in1280, box, sugg) == Size2{360, 360}));
+    CHECK((resolve_size(ResMode::Custom, in1280, box, sugg) == Size2{640, 360}));
+    CHECK((resolve_size(ResMode::ParPanel, in1280, box, Size2{1280, 720}) == Size2{1280, 720}));
+    CHECK((resolve_size(ResMode::UseInput, in1280, box, sugg) == in1280));
+    // In TOP placeholder base 127: relative modes floor.
+    const Size2 b127{127, 127};
+    CHECK((resolve_size(ResMode::Eighth, b127, box, sugg) == Size2{15, 15}));
+    CHECK((resolve_size(ResMode::Half, b127, box, sugg) == Size2{63, 63}));
+    CHECK((resolve_size(ResMode::X2, b127, box, sugg) == Size2{254, 254}));
+    CHECK((resolve_size(ResMode::Limit, b127, box, sugg) == Size2{127, 127})); // already fits
+    // Non-square base keeps its aspect; never below 1x1.
+    CHECK((resolve_size(ResMode::Fit, Size2{1920, 1080}, Size2{640, 640}, sugg) == Size2{640, 360}));
+    CHECK((resolve_size(ResMode::Eighth, Size2{4, 4}, box, sugg) == Size2{1, 1}));
+    // Menu names.
+    CHECK(parse_res_mode("2x") == ResMode::X2);
+    CHECK(parse_res_mode("parpanel") == ResMode::ParPanel);
+    CHECK(parse_res_mode("bogus") == ResMode::UseInput);
+    CHECK(parse_res_mode(nullptr) == ResMode::UseInput);
+    CHECK(parse_aspect_mode("custom") == AspectMode::Custom);
+    CHECK(parse_aspect_mode("useinput") == AspectMode::UseInput);
+    CHECK(parse_aspect_mode("resolution") == AspectMode::Resolution);
+    const Aspect2 a = resolve_aspect(AspectMode::Resolution, Size2{640, 360}, Aspect2{1, 1}, Aspect2{16, 9});
+    CHECK(a.x == 640.0f && a.y == 360.0f);
+    CHECK(resolve_aspect(AspectMode::Custom, Size2{640, 360}, Aspect2{1, 1}, Aspect2{16, 9}).x == 16.0f);
+    CHECK(resolve_aspect(AspectMode::UseInput, Size2{640, 360}, Aspect2{1280, 1280}, Aspect2{16, 9}).y ==
+          1280.0f);
+}
+
+// --- Pixel codec (pixel_codec.h) ---------------------------------------------------------
+void test_half_float_bits() {
+    g_ctx = "half_float_bits";
+    CHECK(float_to_half_bits(0.0f) == 0x0000);
+    CHECK(float_to_half_bits(-0.0f) == 0x8000);
+    CHECK(float_to_half_bits(1.0f) == 0x3C00);
+    CHECK(float_to_half_bits(-2.0f) == 0xC000);
+    CHECK(float_to_half_bits(0.5f) == 0x3800);
+    CHECK(float_to_half_bits(65504.0f) == 0x7BFF);              // max half
+    CHECK(float_to_half_bits(65520.0f) == 0x7C00);              // rounds to inf
+    CHECK(float_to_half_bits(6.103515625e-05f) == 0x0400);      // min normal
+    CHECK(float_to_half_bits(5.9604645e-08f) == 0x0001);        // min subnormal
+    CHECK(float_to_half_bits(1.0f + 1.0f / 2048.0f) == 0x3C00); // tie -> even
+    CHECK(float_to_half_bits(1.0f + 3.0f / 2048.0f) == 0x3C02); // tie -> even (up)
+    // Every finite half survives half -> float -> half.
+    int bad = 0;
+    for (uint32_t h = 0; h < 0x10000U; ++h) {
+        if ((h & 0x7C00U) == 0x7C00U) continue; // inf / nan
+        if (float_to_half_bits(half_bits_to_float(static_cast<uint16_t>(h))) != h) ++bad;
+    }
+    CHECK(bad == 0);
+}
+
+void test_pixel_codec_roundtrip() {
+    g_ctx = "pixel_codec_roundtrip";
+    struct Fmt {
+        uint8_t kind, bits;
+        uint16_t flags;
+        uint32_t comps;
+        float tol;
+    };
+    const Fmt fmts[] = {
+        {FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, 4, 0.5f / 255.0f},
+        {FORMAT_KIND_UNSIGNED, 8, 0, 4, 0.5f / 255.0f},
+        {FORMAT_KIND_UNSIGNED, 8, 0, 1, 0.5f / 255.0f},
+        {FORMAT_KIND_UNSIGNED, 16, 0, 4, 0.5f / 65535.0f},
+        {FORMAT_KIND_FLOAT, 16, 0, 4, 1e-3f},
+        {FORMAT_KIND_FLOAT, 32, 0, 4, 0.0f},
+        {FORMAT_KIND_FLOAT, 32, 0, 2, 0.0f},
+        {FORMAT_KIND_FLOAT, 32, FLAGS_MONO_ALPHA, 2, 0.0f},
+    };
+    const Float4 v{0.25f, 0.5f, 0.75f, 0.125f};
+    for (const Fmt& f : fmts) {
+        const PixelCodec c = make_codec(f.kind, f.bits, f.flags, f.comps);
+        g_ctx = "pixel_codec_roundtrip bits=" + std::to_string(f.bits) + " comps=" + std::to_string(f.comps) +
+                " flags=" + std::to_string(f.flags);
+        CHECK(c.valid);
+        CHECK(c.bytes_per_texel() == f.comps * (f.bits / 8U));
+        uint8_t buf[16] = {};
+        encode_texel(buf, c, v);
+        const Float4 o = decode_texel(buf, c);
+        auto near = [&](float a, float b) { return std::fabs(a - b) <= f.tol + 1e-7f; };
+        CHECK(near(o.r, v.r));
+        if (f.comps == 4) {
+            CHECK(near(o.g, v.g) && near(o.b, v.b) && near(o.a, v.a));
+        } else if (f.comps == 2 && (f.flags & FLAGS_MONO_ALPHA)) {
+            CHECK(near(o.g, v.r) && near(o.b, v.r) && near(o.a, v.a));
+        } else if (f.comps == 2) {
+            CHECK(near(o.g, v.g) && o.b == 0.0f && o.a == 1.0f);
+        } else {
+            CHECK(near(o.g, v.r) && near(o.b, v.r) && o.a == 1.0f);
+        }
+    }
+}
+
+void test_pixel_codec_rules() {
+    g_ctx = "pixel_codec_rules";
+    // BGRA8 byte order on the wire: B, G, R, A.
+    const PixelCodec bgra = make_codec(FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, 4);
+    uint8_t px[4] = {};
+    encode_texel(px, bgra, Float4{1.0f, 0.5f, 0.0f, 1.0f});
+    CHECK(px[0] == 0 && px[1] == 128 && px[2] == 255 && px[3] == 255);
+    // Fixed formats saturate and map NaN to 0; floats pass through.
+    const PixelCodec r8 = make_codec(FORMAT_KIND_UNSIGNED, 8, 0, 1);
+    encode_texel(px, r8, Float4{2.0f, 0, 0, 1});
+    CHECK(px[0] == 255);
+    encode_texel(px, r8, Float4{-1.0f, 0, 0, 1});
+    CHECK(px[0] == 0);
+    encode_texel(px, r8, Float4{std::nanf(""), 0, 0, 1});
+    CHECK(px[0] == 0);
+    const PixelCodec f32 = make_codec(FORMAT_KIND_FLOAT, 32, 0, 1);
+    uint8_t fb[4] = {};
+    encode_texel(fb, f32, Float4{2.5f, 0, 0, 1});
+    CHECK(decode_texel(fb, f32).r == 2.5f);
+    // Alpha-only 1-comp formats carry alpha, not red (TD's A8..A32), and decode to (0,0,0,a).
+    PixelCodec a8 = make_codec(FORMAT_KIND_UNSIGNED, 8, 0, 1);
+    a8.alpha_only = true;
+    encode_texel(px, a8, Float4{0.0f, 0.0f, 0.0f, 1.0f});
+    CHECK(px[0] == 255);
+    const Float4 da = decode_texel(px, a8);
+    CHECK(da.r == 0.0f && da.g == 0.0f && da.b == 0.0f && da.a == 1.0f);
+    // Invalid tuples.
+    CHECK(!make_codec(FORMAT_KIND_FLOAT, 16, FLAGS_BFLOAT16, 4).valid);
+    CHECK(!make_codec(FORMAT_KIND_UNSIGNED, 32, 0, 4).valid);
+    CHECK(!make_codec(FORMAT_KIND_FLOAT, 32, 0, 3).valid);
+    CHECK(!make_codec(FORMAT_KIND_FLOAT, 32, FLAGS_BGRA, 4).valid);
+    CHECK(!make_codec(FORMAT_KIND_SIGNED, 8, 0, 4).valid);
+    CHECK(same_codec(make_codec(FORMAT_KIND_UNSIGNED, 8, FLAGS_BGRA, 4), bgra));
+    CHECK(!same_codec(make_codec(FORMAT_KIND_UNSIGNED, 8, 0, 4), bgra));
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -622,6 +767,10 @@ int main(int argc, char** argv) {
     test_frame_step_classification();
     test_frame_wait_slice();
     test_frame_wait_cadence();
+    test_common_resolve_size();
+    test_half_float_bits();
+    test_pixel_codec_roundtrip();
+    test_pixel_codec_rules();
 
     std::printf("topcore_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

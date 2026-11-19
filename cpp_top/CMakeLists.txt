@@ -97,15 +97,75 @@ endif()
 
 set(TD_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/td/2025")
 
+# CUDA language for the Common page resize/convert kernel (resize_convert.cu), from the same
+# toolkit as CUDA::cudart. Real SASS for Pascal..Ada (and Blackwell from CUDA 12.8, the first
+# toolkit with sm_120), plus PTX of the newest one for later GPUs. CI uses CUDA 12.6.
+if(NOT DEFINED CMAKE_CUDA_COMPILER)
+    set(CMAKE_CUDA_COMPILER "${CUDAToolkit_NVCC_EXECUTABLE}")
+endif()
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        set(CMAKE_CUDA_ARCHITECTURES "61-real;75-real;86-real;89-real;120")
+    else()
+        set(CMAKE_CUDA_ARCHITECTURES "61-real;75-real;86-real;89")
+    endif()
+endif()
+enable_language(CUDA)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
 # --- cudalink_topcommon -- shared, header-only helpers for both TOP DLLs ---
 # TD/CUDA-dependent (CudaDeviceSession touches TD::TOP_Context and cuda_runtime.h), so this is
 # a sibling to cudalink_topcore (protocol-core, TD/CUDA-free) rather than folded into it.
 # INTERFACE, not STATIC: every helper here (cuda_check.h, cuda_op_scope.h, debug_log.h,
-# raii_handles.h, cuda_device_session.h, bench_accumulator.h, param_util.h, win_util.h) is
-# header-only -- there is no .cpp to compile.
+# raii_handles.h, cuda_device_session.h, bench_accumulator.h, param_util.h, win_util.h,
+# info_page.h) is header-only -- there is no .cpp to compile. The one CUDA kernel lives in
+# cudalink_kernels below.
 add_library(cudalink_topcommon INTERFACE)
 target_include_directories(cudalink_topcommon INTERFACE src/common)
-target_link_libraries(cudalink_topcommon INTERFACE CUDA::cudart)
+# shell32: ShellExecuteA for the Info page's Show Help pulse (info_page.h).
+target_link_libraries(cudalink_topcommon INTERFACE CUDA::cudart shell32)
+
+# Info page values (info_page.h): the package version from the repo's pyproject.toml, and the
+# git sha at configure time (reconfigure to refresh it; "unknown" outside a git checkout).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../pyproject.toml" CUDALINK_PYPROJECT_VERSION_LINE
+    REGEX "^version = \"[^\"]+\"" LIMIT_COUNT 1)
+string(REGEX REPLACE "^version = \"([^\"]+)\".*" "\\1" CUDALINK_VERSION "${CUDALINK_PYPROJECT_VERSION_LINE}")
+if(NOT CUDALINK_VERSION)
+    set(CUDALINK_VERSION "unknown")
+endif()
+find_package(Git QUIET)
+set(CUDALINK_BUILD_SHA "unknown")
+if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE CUDALINK_GIT_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE CUDALINK_GIT_RESULT ERROR_QUIET)
+    if(CUDALINK_GIT_RESULT EQUAL 0 AND CUDALINK_GIT_SHA)
+        set(CUDALINK_BUILD_SHA "${CUDALINK_GIT_SHA}")
+    endif()
+endif()
+message(STATUS "cudalink TOPs: version ${CUDALINK_VERSION}, build ${CUDALINK_BUILD_SHA}")
+target_compile_definitions(cudalink_topcommon INTERFACE
+    CUDALINK_VERSION="${CUDALINK_VERSION}" CUDALINK_BUILD_SHA="${CUDALINK_BUILD_SHA}")
+
+# --- cudalink_kernels -- the Common page resize/convert kernel (resize_convert.h) ---
+# Shared cudart, the same runtime the DLLs link (CUDA::cudart): a static cudart here would
+# put a second CUDA runtime into each DLL.
+add_library(cudalink_kernels STATIC src/common/resize_convert.cu)
+target_include_directories(cudalink_kernels PUBLIC src/common src/core)
+target_link_libraries(cudalink_kernels PUBLIC CUDA::cudart)
+set_target_properties(cudalink_kernels PROPERTIES CUDA_RUNTIME_LIBRARY Shared POSITION_INDEPENDENT_CODE ON)
+# sm_61 (Pascal) is still built on purpose; nvcc only warns that it will go away.
+target_compile_options(cudalink_kernels PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
+
+# --- resize_convert_tests -- GPU kernel vs host codec (needs a CUDA device; 77 = skipped) ---
+add_executable(resize_convert_tests tests/resize_convert_tests.cu)
+target_link_libraries(resize_convert_tests PRIVATE cudalink_kernels)
+set_target_properties(resize_convert_tests PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+target_compile_options(resize_convert_tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
+add_test(NAME resize_convert_tests COMMAND resize_convert_tests)
+set_tests_properties(resize_convert_tests PROPERTIES SKIP_RETURN_CODE 77)
 
 # --- CudaLinkInTOP -- the receiver Custom TOP DLL (D6/D7) ---
 add_library(CudaLinkInTOP MODULE
@@ -113,7 +173,7 @@ add_library(CudaLinkInTOP MODULE
     src/in_top/Parameters.cpp
 )
 target_include_directories(CudaLinkInTOP PRIVATE ${TD_VENDOR_DIR} src/common)
-target_link_libraries(CudaLinkInTOP PRIVATE cudalink_topcore cudalink_topcommon CUDA::cudart)
+target_link_libraries(CudaLinkInTOP PRIVATE cudalink_topcore cudalink_topcommon cudalink_kernels CUDA::cudart)
 target_compile_definitions(CudaLinkInTOP PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 # TD loads Custom Operator DLLs from a Plugins folder with no "lib" prefix expected.
@@ -125,7 +185,7 @@ add_library(CudaLinkOutTOP MODULE
     src/out_top/Parameters.cpp
 )
 target_include_directories(CudaLinkOutTOP PRIVATE ${TD_VENDOR_DIR} src/common)
-target_link_libraries(CudaLinkOutTOP PRIVATE cudalink_topcore cudalink_topcommon CUDA::cudart)
+target_link_libraries(CudaLinkOutTOP PRIVATE cudalink_topcore cudalink_topcommon cudalink_kernels CUDA::cudart)
 target_compile_definitions(CudaLinkOutTOP PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 set_target_properties(CudaLinkOutTOP PROPERTIES PREFIX "" SUFFIX ".dll")

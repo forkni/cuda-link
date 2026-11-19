@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **C++ TOPs honor the Common page** (Out TOP and In TOP): Output Resolution, Resolution,
+  Output Aspect, Pixel Format and Input Smoothness now work as on any TOP. The Out TOP resizes and
+  converts its input on the GPU and sends what it shows; the In TOP resizes and converts the wire
+  frame on the GPU. One CUDA kernel (`cpp_top/src/common/resize_convert.cu`) does it, with a
+  TD-free size resolver and pixel codec in `cpp_top/src/core/` (`topcore_tests`, and the new GPU
+  test `resize_convert_tests`, 810 cases). When the Common page asks for the input or wire size
+  and format, the TOPs keep their plain copy path. New Info CHOP channel `converted` on both.
+  Live oracle against TD TOPs with the same settings: 83/83 cases per TOP (`docs/CPP_TOP.md`
+  "Common page").
+
+- **C++ TOPs Info page**: Version, Build (git sha at configure time), Author and a Show Help
+  pulse, with the parameter names of the `.tox` Info page. Plugin `minorVersion` 2.
+
 - **`.tox` Receiver `Framewaitms`** (Integer 0-8, default 3 ms): when `onFrameStart` finds no
   new frame, the Receiver waits on the sender's doorbell in 1 ms slices and polls `write_idx`
   after each, the same rules as the C++ In TOP. Dev box, 1280×720: duplicates 1.06 % -> 0.17 %
@@ -84,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `driver_types.h`); `INVALID_CONTEXT` stays as a deprecated alias.
 
 ### Changed
+
+- **C++ TOPs, Pixel Format default** (breaking for float streams): TD's Common Pixel Format of a
+  new TOP is `rgba8fixed`, and a plugin cannot change it. A new Out TOP now converts a float
+  input to 8-bit before the send, and a new In TOP converts a float stream to 8-bit. Both show a
+  warning that names the two formats. Set Pixel Format to Use Input on both TOPs for float
+  streams. Saved nodes with a format other than Use Input now convert. See `docs/CPP_TOP.md`
+  "Pixel Format default (migration note)".
 
 - **`CUDALINK_WAIT_SPIN_US` default 200 -> 500 µs** (`ImportPolicy.wait_spin_us`). A C++ Out TOP
   publishes without a sync and its slot event completes 0.11-0.28 ms after publish; the 200 µs

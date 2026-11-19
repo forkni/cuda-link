@@ -10,6 +10,10 @@
 
 #include "Parameters.h"
 #include "../common/cuda_check.h"
+#include "../common/common_page_td.h"
+#include "../common/info_page.h"
+#include "../common/resize_convert.h"
+#include "../core/pixel_codec.h"
 #include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
 #include "../common/raii_handles.h"
@@ -44,8 +48,8 @@ constexpr DWORD kIpcCloseGracePeriodMs = 100;
 // Names the Info CHOP channel count returned by getNumInfoCHOPChans() -- must stay in
 // sync with the number of `case` labels in getInfoCHOPChan()'s switch below (frames, cook_us,
 // copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us, graph_hits,
-// graph_builds, producer_frame, stream_id).
-constexpr int32_t kNumInfoCHOPChans = 13;
+// graph_builds, producer_frame, stream_id, converted).
+constexpr int32_t kNumInfoCHOPChans = 14;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
@@ -75,6 +79,9 @@ void FillTOPPluginInfo(TD::TOP_PluginInfo* info) {
     // Mirrors CudaLinkInTOP: harmless with an input present, and guarantees a first cook
     // even if the upstream input isn't already cooking every frame on its own.
     customInfo.cookOnStart = true;
+
+    // 2: Info page added (Semverversion/Semverbuild/Semverauthor/Semvershowhelp).
+    customInfo.minorVersion = 2;
 }
 
 DLLEXPORT
@@ -145,6 +152,7 @@ void CudaLinkOutTOP::setupParameters(TD::OP_ParameterManager* manager, void*) {
     // ABI back into TD.
     try {
         Parameters::setup(manager);
+        cudalink::common::appendInfoPage(manager, "CudaLinkOutTOP");
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }
 }
@@ -155,7 +163,12 @@ void CudaLinkOutTOP::setupParameters(TD::OP_ParameterManager* manager, void*) {
 // (same approach as CudaLinkInTOP::checkParameterChanges).
 // ---------------------------------------------------------------------------
 
+void CudaLinkOutTOP::pulsePressed(const char* name, void*) {
+    cudalink::common::handleInfoPulse(name);
+}
+
 void CudaLinkOutTOP::checkParameterChanges(const TD::OP_Inputs* inputs) {
+    cudalink::common::greyInfoPage(inputs);
     const bool active = Parameters::evalActive(inputs);
     const char* ipcmemnameRaw = Parameters::evalIpcmemname(inputs);
     const std::string ipcmemname = ipcmemnameRaw ? ipcmemnameRaw : "";
@@ -225,6 +238,9 @@ void CudaLinkOutTOP::teardown() {
         // an imported handle after the exporter frees the original is undefined).
         Sleep(kIpcCloseGracePeriodMs);
     }
+
+    myConvertScratch.release();
+    myConverted = false;
 
     // Graph execs reference mySlotDevPtrs/mySlotEvents below -- destroy them first.
     destroyGraphs();
@@ -754,6 +770,42 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             myWarning = "input has zero-sized geometry";
             return;
         }
+
+        // Step 2b: the Common page (Output Resolution, Pixel Format, Output Aspect). TD
+        // resolves all of it against this TOP's input (Phase 0 probe, docs/CPP_TOP.md), so the
+        // suggested desc is the target as is. This TOP sends what it shows: the wire carries
+        // the target size and format.
+        TD::OP_TextureDesc target;
+        output->getSuggestedOutputDesc(&target, nullptr);
+        if (target.width == 0 || target.height == 0) {
+            target.width = width;
+            target.height = height;
+        }
+        if (target.pixelFormat == TD::OP_PixelFormat::Invalid) {
+            target.pixelFormat = in->textureDesc.pixelFormat;
+        }
+        const WireFormat targetFmt = mapFromPixelFormat(target.pixelFormat);
+        if (!targetFmt.supported) {
+            myError = std::string("Common page Pixel Format ") +
+                      cudalink::common::pixelFormatName(target.pixelFormat) +
+                      " has no wire format; pick another Pixel Format";
+            return;
+        }
+        const uint32_t outW = target.width;
+        const uint32_t outH = target.height;
+        const bool convertFormat = target.pixelFormat != in->textureDesc.pixelFormat;
+        const bool convert = convertFormat || outW != width || outH != height;
+        // A BGRA <-> RGBA swap of the same format loses nothing: no warning for it.
+        if (convertFormat &&
+            std::strcmp(cudalink::common::pixelFormatName(target.pixelFormat),
+                        cudalink::common::pixelFormatName(in->textureDesc.pixelFormat)) != 0) {
+            myWarning = cudalink::common::formatConvertWarning("input", in->textureDesc.pixelFormat,
+                                                               target.pixelFormat);
+        }
+        myConverted = convert;
+        // Read before beginCUDAOperations(): OP_Inputs may not be used inside the bracket.
+        const bool bilinear = cudalink::common::commonBilinear(inputs);
+
         const int numSlots = Parameters::evalNumslots(inputs);
         // Slot meta for this publish. absFrame is TD's absolute frame of this cook: every Out
         // TOP that cooks in one TD frame stamps the same value, so the receiver can match
@@ -764,18 +816,20 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         const uint32_t streamId = Parameters::evalStreamid(inputs);
 
         // Step 3: (re)allocate on first cook / resolution / format / numslots change.
-        const bool needsAlloc = !myAllocated || width != myWidth || height != myHeight ||
+        // Keyed on the Common target, not the input: the wire carries what this TOP shows.
+        const bool needsAlloc = !myAllocated || outW != myWidth || outH != myHeight ||
                                 numSlots != static_cast<int>(myLayout.num_slots()) ||
-                                fmt.format_kind != myMetadata.format_kind ||
-                                fmt.bits_per_comp != myMetadata.bits_per_comp ||
-                                fmt.flags != myMetadata.flags || fmt.num_comps != myMetadata.num_comps;
+                                targetFmt.format_kind != myMetadata.format_kind ||
+                                targetFmt.bits_per_comp != myMetadata.bits_per_comp ||
+                                targetFmt.flags != myMetadata.flags ||
+                                targetFmt.num_comps != myMetadata.num_comps;
         if (needsAlloc) {
             const char* name = Parameters::evalIpcmemname(inputs);
             if (!name || !*name) {
                 myError = "Ipcmemname is empty";
                 return;
             }
-            if (!reallocate(width, height, fmt, numSlots, name)) {
+            if (!reallocate(outW, outH, targetFmt, numSlots, name)) {
                 return; // myError already set
             }
         }
@@ -801,6 +855,11 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         // invalid resource handle"), confirmed live.
         TD::TOP_CUDAOutputInfo outInfo;
         outInfo.textureDesc = in->textureDesc;
+        outInfo.textureDesc.width = outW;
+        outInfo.textureDesc.height = outH;
+        outInfo.textureDesc.pixelFormat = target.pixelFormat;
+        outInfo.textureDesc.aspectX = target.aspectX;
+        outInfo.textureDesc.aspectY = target.aspectY;
         outInfo.stream = myStream;
         const TD::OP_CUDAArrayInfo* selfOut = output->createCUDAArray(outInfo, nullptr);
 
@@ -863,10 +922,42 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             // performing none of the enclosed work, so falling through to the legacy path
             // below is required, not optional.
             bool usedGraph = false;
-            if (myGraphsRequested && !myGraphsDisabled) {
+            if (convert) {
+                // Common page path (resize and/or convert): input array -> linear scratch
+                // (the same copy shape as the fast path), then the resize/convert kernel
+                // writes the target frame into the IPC slot. No graph on this path. The
+                // gpu_ipc_us timer brackets the whole of it.
+                const size_t inRowBytes = static_cast<size_t>(width) * fmt.num_comps *
+                                          (fmt.bits_per_comp / cudalink::core::BITS_PER_BYTE);
+                cudaError_t scratchStatus = cudaSuccess;
+                void* scratch = myConvertScratch.ensure(inRowBytes * height, &scratchStatus);
+                if (scratch == nullptr) {
+                    myError = std::string("Common page scratch allocation failed: ") +
+                              cudaGetErrorString(scratchStatus);
+                    return;
+                }
+                CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DFromArrayAsync(scratch, inRowBytes, arr->cudaArray, 0,
+                                                                     0, inRowBytes, height,
+                                                                     cudaMemcpyDeviceToDevice, myStream),
+                                          myError, myFatal);
+                cudalink::core::PixelCodec inCodec =
+                    cudalink::core::make_codec(fmt.format_kind, fmt.bits_per_comp, fmt.flags, fmt.num_comps);
+                inCodec.alpha_only = cudalink::common::isAlphaOnly(in->textureDesc.pixelFormat);
+                cudalink::core::PixelCodec outCodec = cudalink::core::make_codec(
+                    myMetadata.format_kind, myMetadata.bits_per_comp, myMetadata.flags, myMetadata.num_comps);
+                // An alpha-only target sends its alpha as the one wire component (A and Mono
+                // share num_comps = 1, so a receiver reads it as mono).
+                outCodec.alpha_only = cudalink::common::isAlphaOnly(target.pixelFormat);
+                const cudalink::common::LinearImage src{scratch, inRowBytes, width, height, inCodec};
+                const cudalink::common::LinearImageMut dst{mySlotDevPtrs[slot], rowBytes, myMetadata.width,
+                                                           myMetadata.height, outCodec};
+                CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
+                                          myError, myFatal);
+                CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
+            } else if (myGraphsRequested && !myGraphsDisabled) {
                 usedGraph = tryGraphCopy(slot, arr->cudaArray, rowBytes, myMetadata.height);
             }
-            if (!usedGraph) {
+            if (!convert && !usedGraph) {
                 CUDALINK_CUDA_CHECK_FATAL(
                     cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0, rowBytes,
                                                myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
@@ -974,7 +1065,7 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
         // Step 7 (stats recorded below, shared with the error path's cookUs update).
         ++myFrameCount;
-        myStatus = std::to_string(width) + "x" + std::to_string(height);
+        myStatus = std::to_string(outW) + "x" + std::to_string(outH) + (convert ? " (converted)" : "");
     } catch (...) {
         // No exception ever crosses the ABI.
         myError = "unexpected exception in execute()";
@@ -1069,6 +1160,12 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
             case 12:
                 chan->name->setString("stream_id");
                 chan->value = static_cast<float>(myStreamId);
+                break;
+            case 13:
+                // 1 while the Common page resizes or converts the input before send
+                // (off the fast path); gpu_ipc_us then includes the kernel.
+                chan->name->setString("converted");
+                chan->value = myConverted ? 1.0f : 0.0f;
                 break;
             default:
                 break;

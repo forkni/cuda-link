@@ -15,6 +15,7 @@
 
 #include "../common/bench_accumulator.h"
 #include "../common/cadence_counters.h"
+#include "../common/common_page_td.h"
 #include "../common/debug_log.h"
 #include "../common/gpu_timer.h"
 #include "../common/raii_handles.h"
@@ -50,6 +51,7 @@ public:
     void getInfoPopupString(TD::OP_String* info, void* reserved1) override;
 
     void setupParameters(TD::OP_ParameterManager* manager, void* reserved1) override;
+    void pulsePressed(const char* name, void* reserved1) override;
 
 private:
     // Parameter-change detection -- the Custom TOP API has no push notification for
@@ -163,6 +165,11 @@ private:
     // Per-slot IPC resources, sized to myLayout.num_slots() once handles are open.
     std::vector<void*> mySlotDevPtrs;
     std::vector<cudaEvent_t> mySlotEvents;
+
+    // Common page path: linear target frame for the resize/convert kernel (grows only;
+    // freed in teardown), and whether the last cook took that path (Info CHOP).
+    cudalink::common::ScratchBuffer myConvertScratch;
+    bool myConverted = false;
 
     // CUDA Graphs keyed-exec cache (see tryGraphedCopy()). Outer index = ring slot; each
     // entry bakes that slot's devptr+event plus one observed TD output array. The per-slot

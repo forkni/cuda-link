@@ -148,7 +148,8 @@ The tool is built with the TOPs. The `--file` form also works on Linux.
 
 ## Out TOP parameters
 
-All parameters are on the page "CUDA Link".
+These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+(see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
@@ -158,15 +159,17 @@ All parameters are on the page "CUDA Link".
 | `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
 | `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
 
-The Out TOP also copies its input to its own output (the pass-through copy), so that it
-shows the image in the network. On the dev box (RTX 4090) this copy costs about 14 µs CPU
+The Out TOP also copies the sent frame to its own output (the pass-through copy), so that it
+shows the image in the network. With the Common page at its input size and format, that is
+the input image. On the dev box (RTX 4090) this copy costs about 14 µs CPU
 (`cudaMemcpy2DToArrayAsync`) and 8 µs GPU for each stream and frame. A parameter to skip
 the copy was considered and rejected (2026-11-17). Reopen it only if a show stream, for
 example 4K float32, makes the copy expensive.
 
 ## In TOP parameters
 
-All parameters are on the page "CUDA Link".
+These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+(see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
@@ -206,6 +209,107 @@ About `Framewaitms`:
   CHOP `frame_wait_skipped` counts the skips. The `.tox` Receiver has the same wait and guard.
 - Before 2026-11-17 the default was 0, and each value waited about 1 ms less than set.
 
+## Info page
+
+Both TOPs have an "Info" page after "CUDA Link". It has the names of the `.tox` Info page, so a
+script that reads one also reads the other.
+
+| Name | Label | Value |
+|---|---|---|
+| `Semverversion` | Version | Package version, from `pyproject.toml` at configure time |
+| `Semverbuild` | Build | Git sha of the source tree at configure time. Configure again to refresh it. |
+| `Semverauthor` | Author | `forkni (forkni@gmail.com)` |
+| `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub, on the `development` branch until the 2.0.0 release |
+
+The SDK has no read-only flag for custom parameters, so the TOPs grey out the three value rows
+on each cook. The `.tox` has a "Hide built-in Parameters" toggle; the DLLs cannot have it, because
+the SDK cannot hide the Common page. The plugin `minorVersion` is 2 since the Info page was added.
+
+## Common page
+
+TD puts its Common page on every TOP. Both TOPs use it as a normal TOP does: the output has the
+size, aspect and pixel format that the Common page asks for.
+
+| Common parameter | Out TOP | In TOP |
+|---|---|---|
+| Output Resolution, Resolution, Use Global Res Multiplier | Resizes the input on the GPU. The Out TOP sends and shows the result: the wire carries the Common size. | Resizes the wire frame on the GPU. "Use Input", the relative sizes, Fit and Limit refer to the wire size. |
+| Output Aspect, Aspect | Sets the output aspect. | Sets the output aspect. "Use Input" means the wire frame size. |
+| Pixel Format | Converts before the send. The wire carries this format. | Converts the wire frame to this format. |
+| Input Smoothness | Sampler of the resize: Nearest or Linear. Mipmap is the same as Linear (a linear IPC buffer has no mip levels). | Same |
+| Fill Viewer, Viewer Smoothness | TD applies them to the viewer only. | Same |
+| Passes | Has no meaning for IPC. Ignored. | Same |
+| Channel Mask, Parameter Color Space, Parameter Reference White | TD disables them on Custom OPs. | Same |
+
+How it works:
+
+- When the Common page asks for the input size and format (Out TOP) or the wire size and format
+  (In TOP), the TOP takes its plain copy path, as before. The Info CHOP channel `converted` is 0.
+- Otherwise the TOP runs one CUDA kernel (`cpp_top/src/common/resize_convert.cu`) between two
+  linear device buffers: decode the source texel to float4, sample (nearest or bilinear,
+  clamp-to-edge, texel centres), encode to the target format. All of it stays on the GPU.
+  `converted` is 1. The Out TOP copies its input to a scratch buffer first, and the kernel writes
+  the IPC slot. The In TOP kernel writes a scratch buffer, and the TOP copies it to its output.
+  CUDA graphs are not used on this path.
+- The Out TOP takes the target from `TOP_Output::getSuggestedOutputDesc()`, because TD resolves
+  the Common page against the TOP input. The In TOP has no TOP input: TD resolves "Use Input"
+  against a 127×127 placeholder. Thus the In TOP resolves the size and aspect itself against the
+  wire frame (`cpp_top/src/core/common_page.h`), and takes the suggested desc only for Custom and
+  Parameter Panel sizes, a custom aspect and an explicit Pixel Format. A plugin reads the
+  Resolution tuplet as `getParInt("resolution", 0/1)`; `resolutionw` is not found.
+- The pixel codec (`cpp_top/src/core/pixel_codec.h`) maps 4 channels as RGBA (BGRA with
+  `FLAGS_BGRA`), RG as (r, g, 0, 1), mono+alpha as (m, m, m, a), mono as (m, m, m, 1) and the
+  alpha formats (A8 to A32) as (0, 0, 0, a). To mono or alpha, the codec keeps red or alpha.
+  Fixed formats saturate and round; 16-bit float is IEEE half with round-to-nearest-even.
+- A format that has no wire representation (rgb10a2fixed, rgba11float) is an error on the node.
+- The alpha formats and the mono formats have the same wire tuple (one component). An Out TOP
+  set to an alpha format sends its alpha channel, and a receiver reads it as mono.
+
+### Pixel Format default (migration note)
+
+The Common Pixel Format of a new TOP is `rgba8fixed`, and a plugin cannot change that default.
+Before this change both TOPs ignored the Common page. Now a new Out TOP converts a float input to
+8-bit before the send, and a new In TOP converts a float stream to 8-bit. Each TOP then shows a
+warning that names both formats, for example: "Common page Pixel Format converts the input from
+rgba32float to rgba8fixed (set Pixel Format to Use Input to keep rgba32float)". No warning comes
+for a BGRA to RGBA swap of the same format.
+
+For float streams, set Pixel Format to Use Input on both TOPs. A saved node that already has
+"Use Input" keeps its format. A saved node with a format, for example the default rgba8fixed, now
+converts.
+
+### Live oracle (2026-11-18)
+
+Dev box (RTX 4090, TD 2025.33230 Non-Commercial). Source: a 640×360 rgba32float noise TOP with
+noise in all four channels. For each case the test sets the same Common parameters on the DLL TOP
+and on a TD reference TOP, waits 6 frames, and compares the two images (`numpyArray()`, in the
+test harness only). Out TOP: A local. In TOP: A sends the stream unchanged, and B compares the In
+TOP under test with a reference that reads a pass-through In TOP. 83 cases per TOP: 11 formats ×
+7 resolution modes with Linear, and 6 cases with Nearest.
+
+| Check | Out TOP | In TOP |
+|---|---|---|
+| Cases passed | 83 / 83 | 83 / 83 |
+| Size and pixel format equal to TD | all cases | all cases |
+| Linear, 8-bit and 16-bit fixed | ≤ 1 LSB | ≤ 1 LSB |
+| Linear, 32-bit float, original size and integer ratios | ≤ 1e-5 | ≤ 1e-5 |
+| Linear, 32-bit float, Fit, Limit, Custom | ≤ 6e-4 | ≤ 6e-4 |
+| Nearest, 2x and Custom 333×201: pixels equal within 1 LSB | 100 % | 100 % |
+| Nearest, half: pixels equal | 77 % | 77 % |
+
+Notes:
+
+- The reference TOP matters. A Null TOP ignores its Common page. A Select TOP honors the size
+  and the format but ignores Input Smoothness Nearest. A Level TOP honors Nearest, but its 2x
+  Linear upscale is not plain bilinear. The test uses a Select TOP for Linear and a wired Level
+  TOP for Nearest. At 2x Linear the Out TOP equals a separable bilinear in numpy within 1.2e-7.
+- 32-bit float at a non-integer ratio differs by up to 6e-4: TD samples with the GPU texture
+  filter, whose interpolation weights carry about 8 bits. The kernel interpolates in float.
+- Nearest at half and eighth puts every sample on a texel boundary. The kernel takes the lower
+  texel there. TD takes the lower texel for about 77 % of the pixels; the other picks follow the
+  GPU rasterizer rounding of the texture coordinates, which a CUDA kernel cannot copy exactly.
+- `cpp_top/tests/resize_convert_tests.cu` checks the kernel against a host reference
+  (810 cases: 9 formats × 9 formats × 5 sizes × 2 samplers) and runs in ctest when a GPU is present.
+
 ## Slot meta from the Out TOP
 
 Each publish writes these slot meta fields:
@@ -223,7 +327,7 @@ Each publish writes these slot meta fields:
 
 Connect an Info CHOP or an Info DAT to a TOP to read these values.
 
-### Out TOP Info CHOP (13 channels)
+### Out TOP Info CHOP (14 channels)
 
 | Channel | Value |
 |---|---|
@@ -240,8 +344,9 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
 | `producer_frame` | Last published `producer_frame`, mod 2^24 |
 | `stream_id` | Last published `stream_id` |
+| `converted` | 1 when the Common page resizes or converts the input before the send, 0 on the plain copy path. `gpu_ipc_us` then includes the kernel. |
 
-### In TOP Info CHOP (20 channels)
+### In TOP Info CHOP (22 channels)
 
 | Channel | Value |
 |---|---|
@@ -266,6 +371,7 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `frame_gap_count` | Shown frames whose `write_idx` step was more than 1: the ring overwrote frames before this TOP read them |
 | `producer_skip_count` | Shown frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1: the sender skipped TD frames. Not counted when `producer_frame` is 0. |
 | `frame_wait_skipped` | Cooks with no new frame that skipped the `Framewaitms` wait: the next publish was not expected within the budget, or the sender was paused |
+| `converted` | 1 when the Common page resizes or converts the wire frame, 0 on the plain copy path. `gpu_copy_us` then includes the kernel. |
 
 The slot meta channels (`producer_frame` to `producer_skip_count`) change only after a
 successful copy. `cpp_top/src/core/frame_step.h` classifies the step between two shown

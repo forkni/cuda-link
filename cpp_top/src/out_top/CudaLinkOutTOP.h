@@ -14,6 +14,7 @@
 #include "TOP_CPlusPlusBase.h"
 
 #include "../common/bench_accumulator.h"
+#include "../common/common_page_td.h"
 #include "../common/debug_log.h"
 #include "../common/gpu_timer.h"
 #include "../common/raii_handles.h"
@@ -49,6 +50,7 @@ public:
     void getInfoPopupString(TD::OP_String* info, void* reserved1) override;
 
     void setupParameters(TD::OP_ParameterManager* manager, void* reserved1) override;
+    void pulsePressed(const char* name, void* reserved1) override;
 
 private:
     // Diffs Active/Ipcmemname/Numslots against their cached values at the top of every
@@ -129,6 +131,11 @@ private:
     // Per-slot device resources, sized to myLayout.num_slots() once allocated.
     std::vector<void*> mySlotDevPtrs;
     std::vector<cudaEvent_t> mySlotEvents;
+
+    // Common page path: linear copy of the input for the resize/convert kernel (grows
+    // only; freed in teardown), and whether the last cook took that path (Info CHOP).
+    cudalink::common::ScratchBuffer myConvertScratch;
+    bool myConverted = false;
 
     // CUDA Graphs (env-gated PLAN-005 §2.1, default OFF; see the capture-site comment in
     // tryGraphCopy() for the full design). myGraphsRequested is latched once from
