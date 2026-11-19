@@ -19,6 +19,9 @@ on:
       - 'scripts/gen_golden_shm.py'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-lint:
     name: format + build + test + tidy
@@ -27,6 +30,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
 
       # Pinned to the same LLVM 19.x line the repo-root .clang-format/.clang-tidy were
       # calibrated against locally (VS 2022's bundled VC/Tools/Llvm), rather than trusting
@@ -41,8 +46,7 @@ jobs:
         # headers, never reformatted; see .clang-format-ignore) is never touched here.
         shell: bash
         run: |
-          files=$(find cpp_top/src cpp_top/tests cpp_top/tools \( -name '*.cpp' -o -name '*.h' \))
-          clang-format --dry-run --Werror $files
+          find cpp_top/src cpp_top/tests cpp_top/tools \( -name '*.cpp' -o -name '*.h' \) -print0             | xargs -0 clang-format --dry-run --Werror
 
       # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll and
       # CudaLinkOutTOP.dll (D2D memcpy path, no .cu kernels yet) -- no GPU/driver required.
@@ -79,10 +83,12 @@ jobs:
         # solely for the separate format/tidy steps, never for the actual compile.
         # Generator, build type and the cl pin come from the ninja-tooling preset
         # (cpp_top/CMakePresets.json, binaryDir cpp_top/build) so CI and local builds match.
+        # The toolkit path goes through an env var, not a ${{ }} expansion inside the script
+        # (zizmor template-injection rule). Default shell on this runner is pwsh.
         working-directory: cpp_top
-        run: >
-          cmake --preset ninja-tooling
-          "-DCUDAToolkit_ROOT=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+        env:
+          CUDA_TOOLKIT_ROOT: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT"
 
       - name: Build both Custom TOP DLLs, topcore_tests and protocol_dump
         working-directory: cpp_top
@@ -95,8 +101,7 @@ jobs:
       - name: clang-tidy (cpp_top/src, warnings-as-errors per .clang-tidy)
         shell: bash
         run: |
-          files=$(find cpp_top/src -name '*.cpp')
-          clang-tidy -p cpp_top/build $files
+          find cpp_top/src -name '*.cpp' -print0 | xargs -0 clang-tidy -p cpp_top/build
 
   # The protocol core is OS-free: a Linux leg with gcc catches compiler- and
   # platform-specific assumptions cheaply. No CUDA, no TD headers, no TOP DLLs.
@@ -107,6 +112,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
 
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build

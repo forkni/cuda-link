@@ -58,7 +58,9 @@ def _apply_in_pars(comp_path: str, streams: int, names: list[str], retries_left:
         )
         return
     c.op("sync").par.Streams = streams
-    for t, name in zip(ins, names, strict=True):
+    # No strict=: zip(strict=) needs Python 3.10 and the package supports 3.9. `ins` is built
+    # from range(len(names)) above, so the two lists always have the same length.
+    for t, name in zip(ins, names):
         t.par.Ipcmemname = name
         t.par.Framewaitms.expr = "parent().par.Framewaitms"
         t.par.Active = True
