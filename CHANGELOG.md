@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **C++ TOPs honor the Common page** (Out TOP and In TOP): Output Resolution, Resolution,
+  Output Aspect, Pixel Format and Input Smoothness now work as on any TOP. The Out TOP resizes and
+  converts its input on the GPU and sends what it shows; the In TOP resizes and converts the wire
+  frame on the GPU. One CUDA kernel (`cpp_top/src/common/resize_convert.cu`) does it, with a
+  TD-free size resolver and pixel codec in `cpp_top/src/core/` (`topcore_tests`, and the new GPU
+  test `resize_convert_tests`, 810 cases). When the Common page asks for the input or wire size
+  and format, the TOPs keep their plain copy path. New Info CHOP channel `converted` on both.
+  Live oracle against TD TOPs with the same settings: 83/83 cases per TOP (`docs/CPP_TOP.md`
+  "Common page").
+
+- **C++ TOPs Info page**: Version, Build (git sha at configure time), Author and a Show Help
+  pulse, with the parameter names of the `.tox` Info page. Plugin `minorVersion` 2.
+
+- **`.tox` Receiver `Framewaitms`** (Integer 0-8, default 3 ms): when `onFrameStart` finds no
+  new frame, the Receiver waits on the sender's doorbell in 1 ms slices and polls `write_idx`
+  after each, the same rules as the C++ In TOP. Dev box, 1280×720: duplicates 1.06 % -> 0.17 %
+  with drifting rates, 0.81 % -> 0.50 % at equal 60 fps; the main thread waits up to the budget
+  on a frame with no new frame (`onFrameStart` p95 0.4 -> 2.7 ms). New stats
+  `rx_frame_wait_rescued` and `rx_frame_wait_skipped`.
+
+- **Framewaitms cadence guard** (C++ In TOP and `.tox` Receiver): the wait is skipped when it
+  cannot get a frame, that is when the next publish is not expected within the budget (a sender
+  slower than TD, for example a 30 fps camera into 60 fps) or the sender is paused. The sender
+  period comes from the slot meta `host_timestamp` (`cpp_top/src/core/frame_wait.h`; Python port
+  in `TDReceiver.py`). New In TOP Info CHOP channel `frame_wait_skipped`.
+
+- **Sender Debug line shows `cuda_memory=`**: the `top.cudaMemory()` time is now reported apart
+  from `export=`, so a slow TD source network is not taken for a slow export.
+
+- **C++ TOP installer** (`install_cpp_top.cmd`, `scripts/install_cpp_top.py`): copies
+  `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` into `<Documents>/Derivative/Plugins/CudaLink/`
+  with a `VERSION.txt`, shows the installed copy (`status`) and moves it out of `Plugins`
+  (`uninstall`). It refuses while TouchDesigner runs. `docs/CPP_TOP.md` now documents the
+  system Plugins folder as the main install form.
+
+- **PLAN-001 §D3 runtime-version guard, implemented in
+  `cudalink::common::CudaDeviceSession`** (`cpp_top/src/common/cuda_device_session.h`):
+  `cudaRuntimeGetVersion()` is queried once at construction and compared against the
+  compile-time `CUDART_VERSION`; a major-version mismatch latches a fatal error before
+  either TOP proceeds, refusing to cook rather than risk mixing CUDA runtime *major*
+  versions. Also added a non-fatal `note` field on `CudaDeviceSession` for skipped/failed
+  IPC capability probes and a WDDM/TCC support-envelope diagnostic (see
+  [ADR-0004](docs/adr/0004-legacy-cuda-ipc-over-vmm.md)), surfaced via `debugLog()` on the
+  first cook and a new `init_note` Info DAT row in both `CudaLinkInTOP` and
+  `CudaLinkOutTOP`.
+
 - **`NVMLObserver` per-process utilization**: `snapshot()` now adds `proc_sm_util_pct`,
   `proc_mem_util_pct` (this process) and `other_sm_util_pct`, `other_mem_util_pct` (sum over every
   other process), from `nvmlDeviceGetProcessesUtilizationInfo` with the legacy
@@ -16,7 +62,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample; the last good values are re-emitted when NVML has no newer sample. This tells a caller
   whether TouchDesigner or the consumer owns the GPU's time in a slow round trip.
 
+- **Slot meta through the TOPs and Python** (protocol v0.6, [ADR-0015](docs/adr/0015-shm-protocol-v0-6-slot-meta.md)):
+  senders now fill the per-slot meta, and receivers show it.
+  - C++ `CudaLinkOutTOP`: new `Streamid` parameter ("Stream ID", default 0). Each publish
+    writes `producer_frame` = TD `absFrame` of that cook (equal for all Out TOPs that cook
+    in one TD frame), `stream_id` = `Streamid` and `host_timestamp` from `steady_clock`
+    (QPC, the same clock as Python `perf_counter()`). The Info CHOP gains `producer_frame`
+    (mod 2^24) and `stream_id` (13 channels); the Info DAT gains a `producer_frame` row.
+  - C++ `CudaLinkInTOP`: the Info CHOP gains `producer_frame` (mod 2^24, exact in float32),
+    `stream_id`, `latency_us`, `frame_gap_count` and `producer_skip_count` (20 channels);
+    the Info DAT gains `producer_frame` (full value) and `source_timestamp_us` rows. The
+    step rules are in `cpp_top/src/core/frame_step.h`, covered by `topcore_tests`.
+  - Python: `GpuFrame` gains `producer_frame` (`None` sends `write_idx`; 0 = not set),
+    `source_timestamp_us` and `stream_id`, range-checked (`ValueError`).
+    `Exporter.last_slot_meta` and `Importer.last_slot_meta` hold the `SlotMeta` of the last
+    published / acquired frame. `shm_protocol` gains `INFO_CHOP_FRAME_MOD`,
+    `SLOT_META_CHANNELS`, `FrameStep` and `classify_frame_step()`.
+  - TD layer: the Sender stamps `producer_frame` from `TDHost.abs_frame()` and `stream_id`
+    from a new `Streamid` custom parameter. `TDReceiver` gains `last_slot_meta`,
+    `last_latency_us`, `frame_gap_count`, `producer_skip_count` and `slot_meta_channels()`.
+    A new `slot_meta` Script CHOP (`td_exporter/script_chop_callbacks.py`) and Out CHOP
+    `out_slot_meta` show the same channels as the In TOP; it is force-cooked after each
+    export (Sender) or import (Receiver). See `docs/TOX_BUILD_GUIDE.md` Step 6d.
+
+### Fixed
+
+- **C++ `cudalink::common::CudaDeviceSession` IPC capability probe** (the C++ port of the
+  Python fixes from PR #30): the reference to `cudaDevAttrIpcEventSupport` is now behind
+  `#if CUDART_VERSION >= 12000` (the attribute is absent from CUDA 11.x `driver_types.h`),
+  a runtime gate covers a pre-12 `cudart` loaded by a 12-built plugin, and a failed query
+  clears the per-thread last error (`cudaGetLastError()`) and records a diagnostic `note`
+  instead of leaving the error latched for TD's own CUDA calls.
+- **`CUDAError` code 201 renamed `DEVICE_UNINITIALIZED`** (the CUDA Runtime API name in
+  `driver_types.h`); `INVALID_CONTEXT` stays as a deprecated alias.
+
 ### Changed
+
+- **C++ TOPs, Pixel Format default** (breaking for float streams): TD's Common Pixel Format of a
+  new TOP is `rgba8fixed`, and a plugin cannot change it. A new Out TOP now converts a float
+  input to 8-bit before the send, and a new In TOP converts a float stream to 8-bit. Both show a
+  warning that names the two formats. Set Pixel Format to Use Input on both TOPs for float
+  streams. Saved nodes with a format other than Use Input now convert. See `docs/CPP_TOP.md`
+  "Pixel Format default (migration note)".
+
+- **`CUDALINK_WAIT_SPIN_US` default 200 -> 500 µs** (`ImportPolicy.wait_spin_us`). A C++ Out TOP
+  publishes without a sync and its slot event completes 0.11-0.28 ms after publish; the 200 µs
+  spin sat inside that range, so a Python `get_frame()` fell into the ~0.5 ms timer nap (p50
+  0.75 ms in the 2.0.0.dev0 live matrix; at rgba32float 74-118 of 300 frames napped, p95
+  0.77-0.80 ms). With 500 µs: 0-1 of 300, p95 0.27-0.33 ms. The spin ends when the event is
+  ready, so a `.tox` Sender (0.05 ms) is not affected. The `.tox` Receiver waits on the GPU and
+  does not use this value. Live check: `scripts/profiling/bench_get_frame_wait.py`; details in
+  `docs/CPP_TOP.md` ("Python receiver call time").
+
+- **Producer doorbell on by default**: `ExportPolicy.doorbell` and the `.tox` Sender's policy now
+  default to `True`, so the producer creates the Win32 doorbell event and signals it after each
+  publish. A C++ In TOP with `Framewaitms` > 0 can then wait for a Python-side sender (live test:
+  duplicates 3.95 % -> 2.67 %, gaps 78 -> 15 per 60 s). `CUDALINK_DOORBELL=0` turns it off. The
+  consumer side follows in the next entry. `ExportPolicy.for_testing()` keeps it off.
+
+- **Consumer doorbell on by default**: `ImportPolicy.doorbell` now defaults to `True`, so
+  `Importer.wait_for_doorbell()` blocks on the producer's event when it exists (TD -> Python
+  latency p50 0.71 -> 0.05 ms in the 2026-11-17 live test). `CUDALINK_DOORBELL=0` turns it off;
+  with no event (a 1.x or doorbell-off producer) it returns False as before.
+  `ImportPolicy.for_testing()` keeps it off.
+- **`Importer.wait_for_doorbell()` waits in 1 ms slices** and polls `write_idx` after each slice
+  that times out. The event wakes one waiter, so a signal that another consumer of the same name
+  takes now costs one slice instead of the whole timeout.
 
 - **NVML docs**: `CUDALINK_NVML` only sets the default `enabled` of an `NVMLObserver`; the observer
   is caller-attached through `attach_nvml_observer()` and read from `get_stats()["nvml"]`. The old

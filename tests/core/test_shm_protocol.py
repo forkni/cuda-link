@@ -27,9 +27,20 @@ from cuda_link.shm_protocol import (
     NUM_SLOTS_OFFSET,
     NUM_SLOTS_SIZE,
     PROTOCOL_MAGIC,
+    PROTOCOL_MAGIC_V05,
+    SENDER_PID_OFFSET,
+    SENDER_PID_SIZE,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
+    SLOT_META_FLAGS_OFFSET,
+    SLOT_META_HOST_TIMESTAMP_OFFSET,
+    SLOT_META_OFFSET_IN_SLOT,
+    SLOT_META_PRODUCER_FRAME_OFFSET,
+    SLOT_META_SIZE,
+    SLOT_META_SOURCE_TIMESTAMP_US_OFFSET,
+    SLOT_META_STREAM_ID_OFFSET,
     SLOT_SIZE,
+    TRAILER_PAD_SIZE,
     VERSION_OFFSET,
     VERSION_SIZE,
     WRITE_IDX_OFFSET,
@@ -38,17 +49,23 @@ from cuda_link.shm_protocol import (
     DtypeCodec,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
     bump_version,
     clear_shutdown,
+    is_same_process_sender,
+    protocol_mismatch_message,
     publish_frame,
     read_magic,
     read_num_slots,
+    read_sender_pid,
+    read_slot_meta,
     read_version,
     read_write_idx,
     set_shutdown,
     set_version,
+    write_sender_pid,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,19 +96,23 @@ def test_layout_metadata_offset() -> None:
         assert layout.metadata_offset == layout.shutdown_offset + SHUTDOWN_FLAG_SIZE
 
 
-def test_layout_timestamp_offset() -> None:
+def test_layout_slot_meta_offset() -> None:
     for n in [2, 3, 4]:
         layout = SHMLayout(num_slots=n)
-        assert layout.timestamp_offset == layout.metadata_offset + METADATA_SIZE
+        for slot in range(n):
+            assert layout.slot_meta_offset(slot) == layout.slot_offset(slot) + SLOT_META_OFFSET_IN_SLOT
+            assert layout.slot_meta_offset(slot) % 8 == 0  # f64/u64 fields are naturally aligned
 
 
 def test_layout_total_size() -> None:
-    # 3 slots: 20 + 384 + 1 + 20 + 8 = 433
-    assert SHMLayout(num_slots=3).total_size == 433
-    # 2 slots: 20 + 256 + 1 + 20 + 8 = 305
-    assert SHMLayout(num_slots=2).total_size == 305
-    # 4 slots: 20 + 512 + 1 + 20 + 8 = 561
-    assert SHMLayout(num_slots=4).total_size == 561
+    # v0.6 total = 48 + N*160: 24 header + N*160 slots + 1 shutdown + 20 metadata + 3 pad
+    assert SHMLayout(num_slots=2).total_size == 368
+    assert SHMLayout(num_slots=3).total_size == 528
+    assert SHMLayout(num_slots=4).total_size == 688
+    for n in (1, 2, 3, 4, 10):
+        layout = SHMLayout(num_slots=n)
+        assert layout.total_size == layout.metadata_offset + METADATA_SIZE + TRAILER_PAD_SIZE
+        assert layout.total_size % 8 == 0
 
 
 # ---------------------------------------------------------------------------
@@ -220,20 +241,20 @@ def test_publish_then_acquire_new_frame() -> None:
 
     # Simulate a frame publication
     ts = time.perf_counter()
-    publish_frame(buf, layout, write_idx=1, timestamp=ts)
+    publish_frame(buf, layout, write_idx=1, host_timestamp=ts)
 
     result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
     assert result.state == SlotState.NEW_FRAME
     assert result.slot == 0  # (1 - 1) % 3
     assert result.write_idx == 1
-    assert abs(result.timestamp - ts) < 1e-6
+    assert abs(result.slot_meta.host_timestamp - ts) < 1e-6
 
 
 def test_acquire_no_frame_when_write_idx_unchanged() -> None:
     layout = SHMLayout(num_slots=3)
     buf = _make_buf(layout)
 
-    publish_frame(buf, layout, write_idx=2, timestamp=time.perf_counter())
+    publish_frame(buf, layout, write_idx=2, host_timestamp=time.perf_counter())
     result = acquire_slot(buf, layout, last_write_idx=2, last_version=0)
     assert result.state == SlotState.NO_FRAME
 
@@ -269,7 +290,7 @@ def test_acquire_version_zero_skips_version_check() -> None:
     layout = SHMLayout(num_slots=2)
     buf = _make_buf(layout)
     bump_version(buf)
-    publish_frame(buf, layout, write_idx=1, timestamp=time.perf_counter())
+    publish_frame(buf, layout, write_idx=1, host_timestamp=time.perf_counter())
     # last_version=0 should not trigger VERSION_CHANGED
     result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
     assert result.state == SlotState.NEW_FRAME
@@ -282,7 +303,7 @@ def test_slot_wraps_correctly() -> None:
     expected_slots = [0, 1, 2, 0, 1, 2]
     last_write_idx = 0
     for i, expected_slot in enumerate(expected_slots, start=1):
-        publish_frame(buf, layout, write_idx=i, timestamp=time.perf_counter())
+        publish_frame(buf, layout, write_idx=i, host_timestamp=time.perf_counter())
         result = acquire_slot(buf, layout, last_write_idx=last_write_idx, last_version=0)
         assert result.state == SlotState.NEW_FRAME
         assert result.slot == expected_slot
@@ -294,7 +315,7 @@ def test_publish_clears_shutdown_flag() -> None:
     buf = _make_buf(layout)
     # Set shutdown, then publish a frame — flag should be cleared
     buf[layout.shutdown_offset] = 1
-    publish_frame(buf, layout, write_idx=1, timestamp=time.perf_counter())
+    publish_frame(buf, layout, write_idx=1, host_timestamp=time.perf_counter())
     assert buf[layout.shutdown_offset] == 0
 
 
@@ -549,14 +570,14 @@ def test_version_collision_reproduces_old_bug() -> None:
     last_version = read_version(buf)  # receiver caches 1
 
     # Publish a frame so write_idx advances
-    publish_frame(buf, layout, write_idx=5, timestamp=time.perf_counter())
+    publish_frame(buf, layout, write_idx=5, host_timestamp=time.perf_counter())
 
     # Simulate close() unlink + reopen: fresh zeroed segment, bump_version → 1 again.
     fresh_buf = memoryview(bytearray(layout.total_size))
     bump_version(fresh_buf)  # version = 1 — SAME as before!
 
     # Publish a frame on the new segment too
-    publish_frame(fresh_buf, layout, write_idx=1, timestamp=time.perf_counter())
+    publish_frame(fresh_buf, layout, write_idx=1, host_timestamp=time.perf_counter())
 
     # Without set_version: acquire returns NEW_FRAME (stale handles used → bug)
     result = acquire_slot(fresh_buf, layout, last_write_idx=0, last_version=last_version)
@@ -812,9 +833,10 @@ def test_mem_event_handle_roundtrip() -> None:
         assert bytes(buf[e : e + IPC_HANDLE_SIZE]) == bytes([0xCC + slot]) * IPC_HANDLE_SIZE
 
 
-def test_slot_size_equals_two_handle_sizes() -> None:
-    """SLOT_SIZE = 2 * IPC_HANDLE_SIZE — the entire slot is exactly two handles."""
-    assert SLOT_SIZE == 2 * IPC_HANDLE_SIZE
+def test_slot_size_is_two_handles_plus_slot_meta() -> None:
+    """SLOT_SIZE = 2 * IPC_HANDLE_SIZE + SLOT_META_SIZE; the slot meta follows the handles."""
+    assert SLOT_SIZE == 2 * IPC_HANDLE_SIZE + SLOT_META_SIZE
+    assert SLOT_META_OFFSET_IN_SLOT == 2 * IPC_HANDLE_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -833,16 +855,28 @@ def test_header_constants_exact_wire_values() -> None:
     load-bearing byte offsets/sizes for the SHM binary layout — any drift
     silently corrupts the wire contract for every reader/writer of this
     module."""
-    assert PROTOCOL_MAGIC == 0x43495044
+    assert PROTOCOL_MAGIC == 0x43495036
+    assert PROTOCOL_MAGIC_V05 == 0x43495044
     assert MAGIC_OFFSET == 0
     assert MAGIC_SIZE == 4
-    assert VERSION_OFFSET == 4
-    assert VERSION_SIZE == 8
-    assert NUM_SLOTS_OFFSET == 12
+    assert NUM_SLOTS_OFFSET == 4
     assert NUM_SLOTS_SIZE == 4
+    assert VERSION_OFFSET == 8
+    assert VERSION_SIZE == 8
     assert WRITE_IDX_OFFSET == 16
     assert WRITE_IDX_SIZE == 4
-    assert SHM_HEADER_SIZE == 20
+    assert SENDER_PID_OFFSET == 20
+    assert SENDER_PID_SIZE == 4
+    assert SHM_HEADER_SIZE == 24
+    assert SLOT_SIZE == 160
+    assert SLOT_META_SIZE == 32
+    assert SLOT_META_OFFSET_IN_SLOT == 128
+    assert SLOT_META_HOST_TIMESTAMP_OFFSET == 0
+    assert SLOT_META_PRODUCER_FRAME_OFFSET == 8
+    assert SLOT_META_SOURCE_TIMESTAMP_US_OFFSET == 16
+    assert SLOT_META_STREAM_ID_OFFSET == 24
+    assert SLOT_META_FLAGS_OFFSET == 28
+    assert TRAILER_PAD_SIZE == 3
 
 
 def test_format_kind_float_exact_value() -> None:
@@ -924,7 +958,7 @@ def test_acquire_result_defaults() -> None:
     positionally (all real call sites rely on these defaults)."""
     r = AcquireResult(SlotState.NO_FRAME)
     assert r.slot == -1
-    assert r.timestamp == 0.0
+    assert r.slot_meta == SlotMeta(0.0, 0, 0, 0, 0)
     assert r.new_version == 0
     assert r.write_idx == 0
 
@@ -995,19 +1029,114 @@ def test_acquire_slot_write_idx_zero_with_nonzero_last_write_idx() -> None:
     assert result.state == SlotState.NO_FRAME
 
 
-def test_acquire_slot_timestamp_struct_error_fallback() -> None:
-    """Truncate the buffer so the timestamp read at the end of the NEW_FRAME
-    path genuinely raises struct.error (insufficient bytes for the float64),
-    exercising the except-branch for real. Confirms acquire_slot still
-    returns normally (mangling the 'struct.error' exception name would let a
-    NameError escape instead) with the documented timestamp=0.0 fallback."""
+# ---------------------------------------------------------------------------
+# v0.6: slot meta, sender_pid, receiver messages
+# ---------------------------------------------------------------------------
+
+
+def test_publish_writes_slot_meta_to_the_published_slot_only() -> None:
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    before = bytes(buf)
+    publish_frame(
+        buf, layout, write_idx=5, host_timestamp=2.5, producer_frame=1234, source_timestamp_us=99, stream_id=7
+    )
+    slot = (5 - 1) % 3
+    assert read_slot_meta(buf, layout, slot) == SlotMeta(2.5, 1234, 99, 7, 0)
+    changed = [i for i, (a, b) in enumerate(zip(before, bytes(buf))) if a != b]
+    meta = layout.slot_meta_offset(slot)
+    for off in changed:
+        in_meta = meta <= off < meta + SLOT_META_SIZE
+        in_write_idx = WRITE_IDX_OFFSET <= off < WRITE_IDX_OFFSET + WRITE_IDX_SIZE
+        assert in_meta or in_write_idx, f"publish_frame wrote byte {off}"
+
+
+def test_acquire_returns_slot_meta_of_its_slot() -> None:
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    for w in range(1, 4):
+        publish_frame(buf, layout, write_idx=w, host_timestamp=float(w), producer_frame=100 + w, stream_id=3)
+    result = acquire_slot(buf, layout, last_write_idx=0, last_version=0)
+    assert result.slot == 0  # (3 - 1) % 2
+    assert result.slot_meta == SlotMeta(3.0, 103, 0, 3, 0)
+    # The other slot still holds frame 2.
+    assert read_slot_meta(buf, layout, 1).producer_frame == 102
+
+
+def test_publish_wraps_out_of_range_meta_values() -> None:
     layout = SHMLayout(num_slots=1)
-    full_buf = layout.build_buffer(version=1, write_idx=5)
-    # Truncate to 4 of the 8 bytes needed for the float64 timestamp — every
-    # earlier header/slot/shutdown/metadata field stays intact and readable.
-    truncated = memoryview(full_buf)[: layout.timestamp_offset + 4]
+    buf = _make_buf(layout)
+    publish_frame(buf, layout, write_idx=1, host_timestamp=0.0, producer_frame=-1, stream_id=-1)
+    meta = read_slot_meta(buf, layout, 0)
+    assert meta.producer_frame == 2**64 - 1
+    assert meta.stream_id == 2**32 - 1
 
-    result = acquire_slot(truncated, layout, last_write_idx=0, last_version=0)
 
-    assert result.state == SlotState.NEW_FRAME
-    assert result.timestamp == 0.0
+def test_publish_frame_without_slot_meta_writes_not_set() -> None:
+    """Slot meta the sender does not pass reads back as 0, the protocol's "not set"."""
+    layout = SHMLayout(num_slots=1)
+    buf = _make_buf(layout)
+    publish_frame(buf, layout, write_idx=1, host_timestamp=1.5)
+    assert read_slot_meta(buf, layout, 0) == SlotMeta(1.5, 0, 0, 0, 0)
+
+
+def test_publish_frame_keeps_slot_meta_at_its_range_limits() -> None:
+    """The largest values each field holds (u64, u64, u32) are written unchanged."""
+    u64_max, u32_max = 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF
+    layout = SHMLayout(num_slots=1)
+    buf = _make_buf(layout)
+    publish_frame(
+        buf,
+        layout,
+        write_idx=1,
+        host_timestamp=0.0,
+        producer_frame=u64_max,
+        source_timestamp_us=u64_max,
+        stream_id=u32_max,
+    )
+    assert read_slot_meta(buf, layout, 0) == SlotMeta(0.0, u64_max, u64_max, u32_max, 0)
+
+
+def test_sender_pid_round_trip_and_build_buffer() -> None:
+    layout = SHMLayout(num_slots=2)
+    assert read_sender_pid(memoryview(layout.build_buffer())) == 0
+    buf = memoryview(layout.build_buffer(sender_pid=4242))
+    assert read_sender_pid(buf) == 4242
+    write_sender_pid(buf, 0x1_0000_0007)  # wider than 32 bits: low word kept
+    assert read_sender_pid(buf) == 7
+
+
+def test_is_same_process_sender() -> None:
+    assert is_same_process_sender(1234, 1234)
+    assert not is_same_process_sender(1234, 99)
+    assert not is_same_process_sender(0, 0)  # 0 = unknown sender: never "same"
+    assert is_same_process_sender(7, 0x1_0000_0007)  # pid compared as u32
+
+
+def test_is_same_process_sender_lower_sender_pid_is_another_process() -> None:
+    assert not is_same_process_sender(99, 1234)
+
+
+def test_protocol_mismatch_message_names_v05() -> None:
+    assert protocol_mismatch_message(PROTOCOL_MAGIC_V05) == (
+        "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"
+    )
+    other = protocol_mismatch_message(0xDEADBEEF)
+    assert "0xDEADBEEF" in other
+    assert "unrelated process" in other
+
+
+def test_protocol_mismatch_message_zeroed_segment_is_not_v05() -> None:
+    """A zeroed segment (magic 0, below both magics) is an unrelated process, not a v0.5 sender."""
+    msg = protocol_mismatch_message(0)
+    assert "0x00000000" in msg
+    assert "unrelated process" in msg
+
+
+def test_protocol_mismatch_message_names_v05_magic_read_from_the_segment() -> None:
+    """The receiver passes the magic it read from SHM, an int equal to PROTOCOL_MAGIC_V05 but not the same object."""
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    buf[0:4] = b"DPIC"  # "CIPD", the v0.5 magic, little-endian on the wire
+    msg = protocol_mismatch_message(read_magic(buf))
+    assert msg == "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"

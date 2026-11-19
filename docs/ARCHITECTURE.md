@@ -30,8 +30,8 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 │                 ↓                       │
 └─────────────────┼───────────────────────┘
                   │
-                  │ SharedMemory (v0.5.0 protocol)
-                  │ [magic + version + handles + metadata]
+                  │ SharedMemory (v0.6 protocol)
+                  │ [header + handles + slot meta + metadata]
                   │
 ┌─────────────────┼───────────────────────┐
 │                 ↓                       │
@@ -73,7 +73,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 │                 ↓                       │
 └─────────────────┼───────────────────────┘
                   │
-                  │ SharedMemory (v0.5.0 protocol, same layout)
+                  │ SharedMemory (v0.6 protocol, same layout)
                   │
 ┌─────────────────┼───────────────────────┐
 │                 ↓                       │
@@ -91,7 +91,7 @@ The library supports **bidirectional** zero-copy GPU transfer: TD → Python (in
 └─────────────────────────────────────────┘
 ```
 
-Both directions share the **same v0.5.0 binary protocol** — the consumer is symmetric regardless of whether the producer is TD or Python.
+Both directions share the **same v0.6 binary protocol** — the consumer is symmetric regardless of whether the producer is TD or Python.
 
 ---
 
@@ -124,89 +124,119 @@ CUDAIPCExtension  (~300 LOC facade)
 
 ## SharedMemory Protocol
 
-### Binary Layout (433 bytes for 3 slots)
+### Binary Layout (protocol v0.6, 528 bytes for 3 slots)
+
+The canonical definition is the module docstring and the constants in
+`src/cuda_link/shm_protocol.py`. All fields are little-endian.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ HEADER (20 bytes)                                           │
+│ HEADER (24 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
-│ [0-3]     magic (uint32, little-endian)                     │
-│           Protocol validation: 0x43495044 ("CIPD")          │
-│ [4-11]    version (uint64, little-endian)                   │
-│           Increments on producer re-initialization          │
-│ [12-15]   num_slots (uint32, little-endian)                 │
+│ [0-3]     magic (uint32)                                    │
+│           Protocol validation: 0x43495036 ("CIP6")          │
+│ [4-7]     num_slots (uint32)                                │
 │           Number of ring buffer slots (typically 3)         │
-│ [16-19]   write_idx (uint32, little-endian)                 │
+│ [8-15]    version (uint64, 8-aligned)                       │
+│           Increments on producer re-initialization          │
+│ [16-19]   write_idx (uint32)                                │
 │           Atomic counter, increments every frame            │
+│ [20-23]   sender_pid (uint32)                               │
+│           Sender process id (0 = unknown)                   │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 0 (128 bytes)                                          │
+│ SLOT 0 (160 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [20-83]     cudaIpcMemHandle_t (64 bytes)                   │
+│ [24-87]     cudaIpcMemHandle_t (64 bytes)                   │
 │             GPU memory handle for IPC transfer              │
-│ [84-147]    cudaIpcEventHandle_t (64 bytes)                 │
+│ [88-151]    cudaIpcEventHandle_t (64 bytes)                 │
 │             GPU event handle for synchronization            │
+│ [152-183]   slot meta (32 bytes, offsets from slot base)    │
+│             +128  host_timestamp (float64)                  │
+│                   Sender perf_counter / QPC s at publish    │
+│             +136  producer_frame (uint64)                   │
+│                   Sender frame number (cross-stream key)    │
+│             +144  source_timestamp_us (uint64)              │
+│                   Optional producer time, not interpreted   │
+│             +152  stream_id (uint32)                        │
+│             +156  meta_flags (uint32, reserved = 0)         │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 1 (128 bytes)                                          │
+│ SLOT 1 (160 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [148-211]   cudaIpcMemHandle_t (64 bytes)                   │
-│ [212-275]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [184-247]   cudaIpcMemHandle_t (64 bytes)                   │
+│ [248-311]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [312-343]   slot meta (32 bytes)                            │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ SLOT 2 (128 bytes)                                          │
+│ SLOT 2 (160 bytes)                                          │
 ├─────────────────────────────────────────────────────────────┤
-│ [276-339]   cudaIpcMemHandle_t (64 bytes)                   │
-│ [340-403]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [344-407]   cudaIpcMemHandle_t (64 bytes)                   │
+│ [408-471]   cudaIpcEventHandle_t (64 bytes)                 │
+│ [472-503]   slot meta (32 bytes)                            │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ FOOTER (29 bytes)                                           │
+│ FOOTER (24 bytes)                                           │
 ├─────────────────────────────────────────────────────────────┤
-│ [404]       shutdown_flag (uint8)                           │
+│ [504]       shutdown_flag (uint8)                           │
 │             Producer sets to 1 on exit                      │
-│ [405-424]   metadata (20 bytes)                             │
-│             [405-408]   width (uint32)                      │
-│             [409-412]   height (uint32)                     │
-│             [413-416]   num_comps (uint32)                  │
-│             [417]       format_kind (uint8)                 │
+│ [505-524]   metadata (20 bytes)                             │
+│             [505-508]   width (uint32)                      │
+│             [509-512]   height (uint32)                     │
+│             [513-516]   num_comps (uint32)                  │
+│             [517]       format_kind (uint8)                 │
 │                         cudaChannelFormatKind:              │
 │                         0=Signed, 1=Unsigned, 2=Float       │
-│             [418]       bits_per_comp (uint8) — 8/16/32/64  │
-│             [419-420]   flags (uint16 LE)                   │
+│             [518]       bits_per_comp (uint8) — 8/16/32/64  │
+│             [519-520]   flags (uint16 LE)                   │
 │                         bit 0: bfloat16 (kind=Float,bits=16)│
 │                         bit 1: mono+alpha (2ch, not RG)     │
 │                         bit 2: BGRA order (4ch uint8)       │
 │                         bits 3-15: reserved=0               │
-│             [421-424]   data_size (uint32)                  │
+│             [521-524]   data_size (uint32)                  │
 │                         Actual buffer size in bytes         │
-│ [425-432]   timestamp (float64)                             │
-│             Producer timestamp for latency measurement      │
+│ [525-527]   pad (3 bytes; total is a multiple of 8)         │
 └─────────────────────────────────────────────────────────────┘
 
-Total: 20 + 3*128 + 1 + 20 + 8 = 433 bytes
+Total: 24 + 3*160 + 1 + 20 + 3 = 528 bytes
 ```
+
+Protocol v0.5 (cuda-link 1.x) had a global `timestamp` field after the metadata. Protocol
+v0.6 removes it: the per-slot `host_timestamp` does its job. The sender writes the slot meta
+of slot `(write_idx - 1) % N` before the release fence, and writes `write_idx` last
+(`publish_frame(buf, layout, write_idx, *, host_timestamp, producer_frame=0,
+source_timestamp_us=0, stream_id=0)`). Consumers read it as `AcquireResult.slot_meta`
+(a `SlotMeta` NamedTuple). The C++ Out TOP and the .tox write TD's absolute frame and `Streamid`; the Python `Exporter` takes them from `GpuFrame` (`producer_frame=None` sends `write_idx`).
+
+The sender writes `sender_pid` together with `magic` and `num_slots`, before the version commit
+(Python `os.getpid()`, C++ Out TOP `GetCurrentProcessId()`). Receivers refuse a segment whose
+`sender_pid` equals their own process id, because CUDA IPC cannot loop back within one process.
+A receiver that finds the v0.5 magic `0x43495044` ("CIPD") reports "sender uses protocol v0.5
+(cuda-link 1.x); this receiver needs v0.6". See
+[ADR-0015](adr/0015-shm-protocol-v0-6-slot-meta.md).
 
 ### Variable Slot Count Formula
 
 For `N` slots:
 
 ```text
-Total Size = 20 + (N × 128) + 1 + 20 + 8 bytes
+Total Size = 24 + (N × 160) + 1 + 20 + 3 = 48 + (N × 160) bytes
 
-shutdown_offset = 20 + (N × 128)
-metadata_offset = 20 + (N × 128) + 1
-timestamp_offset = 20 + (N × 128) + 1 + 20
+slot_offset(i)  = 24 + (i × 160)
+slot_meta(i)    = 24 + (i × 160) + 128
+shutdown_offset = 24 + (N × 160)
+metadata_offset = 24 + (N × 160) + 1
 ```
 
 **Examples**:
 
-- 2 slots: 20 + 2×128 + 1 + 20 + 8 = 305 bytes, shutdown at [276]
-- 3 slots: 20 + 3×128 + 1 + 20 + 8 = 433 bytes, shutdown at [404]
-- 4 slots: 20 + 4×128 + 1 + 20 + 8 = 561 bytes, shutdown at [532]
+- 2 slots: 48 + 2×160 = 368 bytes, shutdown at [344]
+- 3 slots: 48 + 3×160 = 528 bytes, shutdown at [504]
+- 4 slots: 48 + 4×160 = 688 bytes, shutdown at [664]
 
 ---
 
@@ -250,9 +280,9 @@ Frame 4:
 
 ```python
 write_idx += 1  # Increment before writing
-slot = write_idx % NUM_SLOTS
-# Write frame data to gpu_buffer[slot]
-# Update write_idx in SharedMemory
+slot = (write_idx - 1) % NUM_SLOTS  # same rule as publish_frame / acquire_slot
+# Write frame data to gpu_buffer[slot] and the slot meta of slot
+# Update write_idx in SharedMemory (last)
 ```
 
 #### Consumer (reads from previous slot)
@@ -291,7 +321,8 @@ CUDA IPC events provide **GPU-side synchronization** without CPU involvement. Th
 cuda.memcpy(dst=gpu_buffer[slot], src=top_cuda_ptr, count=size, kind=D2D)
 cuda.record_event(ipc_event[slot])  # ← GPU-side signal, ~1-2μs
 write_idx += 1
-shm.buf[16:20] = struct.pack("<I", write_idx)
+# write the slot meta of `slot` (= (write_idx - 1) % N), then the release fence
+shm.buf[16:20] = struct.pack("<I", write_idx)  # write_idx last
 ```
 
 **Performance**: `cudaEventRecord` takes ~0.5-2μs, does NOT block CPU.
@@ -474,8 +505,9 @@ session lifetime.
 
 ### R2: Win32 Named-Event Doorbell (v1.11.0)
 
-Opt-in consumer-idle signaling primitive (`CUDALINK_DOORBELL=1`, must be set on **both** producer
-and consumer).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
+Consumer-idle signaling primitive. Since 2.0.0 the producer signals it by default
+and a Python consumer waits on it by default (`CUDALINK_DOORBELL=0` turns it off on the side
+that sets it; the consumer waits in 1 ms slices).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
 call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between frames.
 
 **Flow**:
@@ -517,13 +549,13 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 1. Allocate N GPU buffers (`cuda.malloc()`)
 2. Create IPC handles for each buffer (`cuda.ipc_get_mem_handle()`)
 3. Create IPC events for each slot (`cuda.create_ipc_event()`)
-4. Create SharedMemory (size = 20 + N*128 + 29)
-5. Write version=1, num_slots=N, write_idx=0, all handles to SharedMemory
+4. Create SharedMemory (size = 48 + N*160)
+5. Write magic, num_slots=N, sender_pid, write_idx=0 and all handles to SharedMemory, then commit version
 
 **Consumer**:
 
 1. Open SharedMemory (retry with backoff if not ready)
-2. Read version, num_slots from header
+2. Read magic, num_slots, sender_pid and version from the header; refuse a v0.5 magic or a `sender_pid` equal to its own process id
 3. For each slot:
    - Read IPC memory handle (64 bytes)
    - Open handle with `cuda.ipc_open_mem_handle()` → GPU pointer
@@ -610,6 +642,19 @@ return tensors[read_slot]                        ← Zero-copy, 0µs
 
 **Performance**: Re-initialization takes ~50-100μs (one-time cost), does NOT disrupt frame flow.
 
+**C++ TOP resize stalls are an accepted design constraint (PLAN-005 §2.3).** The numbers above
+are the Python producer's. The Out TOP's `reallocate()` instead frees and re-allocates the slot
+ring with `cudaFree`/`cudaMalloc` — both perform an implicit **device-wide synchronization** —
+and `reallocate()`/`teardown()` deliberately hold a 100 ms grace period
+(`kIpcCloseGracePeriodMs`) so receivers can drop their IPC mappings before the allocation
+disappears. A live resolution/format change therefore stalls TD's entire render pipeline for
+~100–140 ms (measured 2026-07-06 from `reallocate: complete, elapsed=...` debug-log lines at
+1080p→4K). The modern fix — stream-ordered pools (`cudaMemPoolCreate` + shareable Win32 handles
+
+- `cudaMemPoolExportPointer`) — is incompatible with the 64-byte `cudaIpcMemHandle_t` wire
+protocol: adopting it is a protocol revision, not a tweak. Accepted as-is; revisit only if
+users report resize hitches in practice.
+
 ### Phase 4: Shutdown
 
 **Producer**:
@@ -668,7 +713,7 @@ on both the native waiter (status `CUDA_ERROR`, 5) and the pure-Python wait path
 
 **Impact**: Consumer reads from stale GPU buffers.
 
-**Detection**: Consumer checks `shm.buf[4:12]` (version) every frame. If changed, triggers re-initialization.
+**Detection**: Consumer checks `shm.buf[8:16]` (version) every frame. If changed, triggers re-initialization.
 
 ### SharedMemory Corruption
 
@@ -899,9 +944,12 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0007** — Spout as a sidecar-launcher COMP, not an embedded transport
 - **ADR-0008** — No native work on the D2H readback path
 - **ADR-0009** — Accept in-process native code inside TD as a C++ Custom TOP (Proposed)
+- **ADR-0010** — Park the Out TOP CUDA-Graphs path (array-source node update rejected)
+- **ADR-0011** — Port CUDA Graphs to the In TOP via a keyed graph-exec cache
 - **ADR-0012** — Fold the native extension into the core wheel (supersedes ADR-0006's packaging conclusion)
 - **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
 - **ADR-0014** — Project-anchored install resolution: layered lookup (explicit folder → project folder → `CUDALINK_LIB_PATH` → `sys.path`), `MIRROR_VERSION` stamp checked before import, rival install refused (amends ADR-0003)
+- **ADR-0015** — SHM protocol v0.6: 32 B per-slot meta (`host_timestamp`, `producer_frame`, `stream_id`), 8-aligned `version`, `sender_pid` loop-back check; one wire break from v0.5 (Proposed)
 
 ---
 

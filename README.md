@@ -154,6 +154,8 @@ with Importer.open(ImportSpec(shm_name="my_texture_ipc")) as importer:
         result = importer.get_frame()
         if result.outcome is ImportOutcome.NEW_FRAME:
             tensor = result.frame
+            meta = importer.last_slot_meta  # SlotMeta of this frame
+            # meta.producer_frame, meta.stream_id, meta.host_timestamp, meta.source_timestamp_us
 
 # Explicit cleanup
 importer.close()
@@ -200,6 +202,12 @@ with Exporter.open(
     )
 ```
 
+`GpuFrame` also takes three optional slot meta fields: `producer_frame` (your frame number;
+`None`, the default, sends the Exporter's `write_idx`; `0` means "not set"),
+`source_timestamp_us` (your own time in µs, not interpreted) and `stream_id` (a number that
+names the stream). An out-of-range value raises `ValueError`. `exporter.last_slot_meta`
+and `importer.last_slot_meta` hold the `SlotMeta` of the last published or acquired frame.
+
 On the TD side, set `CUDAIPCExtension` **Mode** to `Receiver` with matching `Ipcmemname`.
 
 > ▶ Runnable version: [examples/07_python_to_td_exporter_and_benchmark.py](examples/07_python_to_td_exporter_and_benchmark.py) — includes a per-frame `export()` cost benchmark (p50/p95/p99).
@@ -222,7 +230,7 @@ Exporter                           CUDAIPCExtension facade
   │ cudaMemcpy D2D → ring buf             │ import_frame(script_top)
   └─→ SharedMemory ←──────────────────────┘ copyCUDAMemory()
 
-Both directions share the same v0.5.0 binary protocol.
+Both directions share the same v0.6 binary protocol.
 ```
 
 The TD extension uses a **facade-with-delegation** pattern: `CUDAIPCExtension` holds either a `TDSenderEngine` or `TDReceiverEngine` and delegates all work to it. `TDSenderEngine` is a thin TD-only adapter over the canonical `Exporter` — it owns pixel-format bridging (including the float16 → float32 request), the `cuda_memory()`→`GpuFrame` translation, dynamic geometry reopen, and `HolderBarrier` lifecycle; all GPU ring-buffer logic delegates to `Exporter`. Mode switches replace the engine entirely — zero cross-mode state leak. All TouchDesigner runtime access (`ownerComp.par.*`, `top.cudaMemory()`, `copyCUDAMemory()`) goes through the `TDHost`/`TOPHandle` adapter seam, making the engine logic testable without a TD runtime.
@@ -238,24 +246,40 @@ The system uses a 3-slot ring buffer to allow producer and consumer to work in p
 
 This prevents blocking - producer never waits for consumer, consumer is always 1 frame behind.
 
-### SharedMemory Protocol (433 bytes for 3 slots)
+### SharedMemory Protocol v0.6 (528 bytes for 3 slots)
 
 ```text
-[0-3]     magic "CIPD" (4B)       - Protocol validation (0x43495044)
-[4-11]    version (8B)             - Increments on TD re-initialization
-[12-15]   num_slots (4B)           - Number of ring buffer slots (3)
+[0-3]     magic "CIP6" (4B)        - Protocol validation (0x43495036)
+[4-7]     num_slots (4B)           - Number of ring buffer slots (3)
+[8-15]    version (8B, 8-aligned)  - Increments on sender re-initialization
 [16-19]   write_idx (4B)           - Current write index (atomic counter)
+[20-23]   sender_pid (4B)          - Sender process id (0 = unknown)
 
-Per slot (128 bytes each):
-[20+slot*128 : 84+slot*128]   cudaIpcMemHandle_t (64B)  - GPU memory handle
-[84+slot*128 : 148+slot*128]  cudaIpcEventHandle_t (64B) - GPU event handle
+Per slot (160 bytes each, slot base = 24 + slot*160):
+[base+0   : base+64]   cudaIpcMemHandle_t (64B)   - GPU memory handle
+[base+64  : base+128]  cudaIpcEventHandle_t (64B) - GPU event handle
+[base+128 : base+160]  slot meta (32B):
+    +128 host_timestamp (f64)       - Sender perf_counter() / QPC at publish (latency)
+    +136 producer_frame (u64)       - Sender frame number (cross-stream match key)
+    +144 source_timestamp_us (u64)  - Optional producer time, not interpreted
+    +152 stream_id (u32)            - User-set stream name
+    +156 meta_flags (u32)           - Reserved, 0
 
-[20+NUM_SLOTS*128]        shutdown_flag (1B)   - Reasserted to 0 every frame; set to 1 on exit
-[21+NUM_SLOTS*128]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
-[41+NUM_SLOTS*128]        timestamp (8B)       - Producer perf_counter() for latency
+[24+NUM_SLOTS*160]        shutdown_flag (1B)   - Reasserted to 0 every frame; set to 1 on exit
+[25+NUM_SLOTS*160]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
+[45+NUM_SLOTS*160]        pad (3B)             - Total is a multiple of 8
 ```
 
-For 3 slots: `20 + (3 × 128) + 1 + 20 + 8 = 433 bytes`
+Total: `48 + NUM_SLOTS × 160` bytes (368 / 528 / 688 for 2 / 3 / 4 slots).
+The TD senders (the .tox and the C++ Out TOP) write TD's absolute frame as
+`producer_frame` and the `Streamid` parameter as `stream_id`. The Python `Exporter`
+writes `write_idx` as `producer_frame` unless `GpuFrame` sets it.
+
+Protocol v0.6 is a wire break from v0.5 (cuda-link 1.x, magic "CIPD", 433 bytes for 3 slots).
+A v0.6 receiver reports a v0.5 sender by name, and the reverse direction fails with a
+bad-magic error. Upgrade both ends together. Receivers also refuse a segment whose
+`sender_pid` is their own process id: CUDA IPC cannot loop back within one process.
+See [ADR-0015](docs/adr/0015-shm-protocol-v0-6-slot-meta.md).
 
 ## Documentation
 
@@ -361,7 +385,7 @@ The six variables most consumers reach for:
 | Variable | Default | Effect |
 |---|---|---|
 | `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering. **TD Sender default: `1` (blocking)** — the TD source is a transient cook-scoped TOP texture reclaimed right after the cook, so the D2D read must finish first (CUDA 719 guard; see CHANGELOG 1.10.1). |
-| `CUDALINK_DOORBELL` | `0` | R2 Win32 named-event doorbell (opt-in). Producer signals a Win32 event after each `publish_frame()`; consumer blocks on it instead of poll-sleeping. Sub-300 µs notify latency, ~zero idle CPU. Single-consumer, Windows-only. |
+| `CUDALINK_DOORBELL` | `1` | R2 Win32 named-event doorbell, on by default on both sides since 2.0.0; `0` turns it off. The producer signals a Win32 event after each `publish_frame()`. A consumer's `Importer.wait_for_doorbell()` blocks on it in 1 ms slices instead of returning at once. Sub-300 µs notify latency, ~zero idle CPU. One waiter per signal, Windows-only; with a producer that made no event (1.x, or `0`) the consumer polls. |
 | `CUDALINK_WAIT_BACKEND` | `auto` | R5 native notification-wait backend (compiled into the core wheel on Windows, [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)). `auto` uses it when available with silent fallback; `python` forces the pre-R5 path; `native` skips the `auto` gate. Target: p50 < 10 µs vs 136–286 µs poll-sleep baseline. |
 | `CUDALINK_D2H_PIPELINED` | `0` | Opt-in pipelined D2H for `get_frame_numpy()` — overlaps the copy with consumer CPU work at the cost of +1 frame latency. Gain: 1080p −6% / 4K −20% with 5 ms consumer work. |
 | `CUDALINK_IMPORT_RECONNECT` | `1` | Enable automatic reconnect in the importer when the SHM segment disappears (e.g., producer restart). Set to `0` to raise immediately on a missing segment. |
@@ -586,7 +610,7 @@ The TouchDesigner extension (`td_exporter/`) is **not included in the pip packag
 | **Python → TD** (AI output display) | `.tox` Receiver mode | `install_td_library.py --mode 2/4` (see above) |
 | **TD → TD** (two instances communicating) | `.tox` on both sides | Not needed |
 
-Both sides communicate through the 433-byte SharedMemory protocol — zero import dependencies between TD and Python code.
+Both sides communicate through the 528-byte (3-slot) SharedMemory protocol — zero import dependencies between TD and Python code.
 
 ---
 

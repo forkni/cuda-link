@@ -185,6 +185,60 @@ def test_export_sync_false_calls_stream_sync_when_no_event() -> None:
         exp.close()
 
 
+# ---------------------------------------------------------------------------
+# _initialize() — check_ipc_capability() wiring
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_logs_ipc_capability_note_when_present() -> None:
+    """A non-None check_ipc_capability() return is logged via logger.info before
+
+    any IPC handle is minted (see the ipc_capability_note comment in _initialize()).
+    """
+    from unittest.mock import patch
+
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
+    from cuda_link.exporter import Exporter
+
+    fake = FakeCUDAAdapter(device=0)
+    fake.check_ipc_capability = lambda device=None: "WDDM driver model; legacy CUDA IPC is undocumented here."
+    with patch("cuda_link.exporter.logger") as mock_logger:
+        exp = Exporter.open(
+            FrameSpec(shm_name=f"test_{uuid.uuid4().hex[:8]}", height=64, width=64),
+            policy=ExportPolicy.for_testing(),
+            cuda=fake,
+        )
+    try:
+        messages = [str(c.args[0]) for c in mock_logger.info.call_args_list if c.args]
+        assert any("WDDM driver model" in m for m in messages)
+    finally:
+        exp.close()
+
+
+def test_initialize_propagates_ipc_capability_failure_and_leaves_nothing_behind() -> None:
+    """cudaDevAttrIpcEventSupport == 0 -> check_ipc_capability() raises -> open()
+
+    propagates it and leaves no half-initialized state: no device memory held and no
+    SharedMemory segment under the name (the open() failure contract for any error
+    inside _initialize()).
+    """
+    from cuda_link import ExportPolicy, FrameSpec
+    from cuda_link._cuda_adapters import FakeCUDAAdapter
+    from cuda_link.exporter import Exporter
+
+    fake = FakeCUDAAdapter(device=0)
+    fake.fail_ipc_capability = True
+    shm_name = f"test_{uuid.uuid4().hex[:8]}"
+
+    with pytest.raises(RuntimeError, match="simulated cudaDevAttrIpcEventSupport=0"):
+        Exporter.open(FrameSpec(shm_name=shm_name, height=64, width=64), policy=ExportPolicy.for_testing(), cuda=fake)
+
+    assert fake.allocations == {}
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=shm_name)
+
+
 def test_read_hws_mode_returns_unknown_without_winreg() -> None:
     """_read_hws_mode degrades to 'unknown' on platforms without winreg.
 
@@ -238,7 +292,7 @@ def test_close_idempotent(temp_shm_name: str, shared_memory_cleanup: list) -> No
 
 @pytest.mark.requires_cuda
 def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> None:
-    """SharedMemory header contains correct protocol magic 0x43495044 ('CIPD')."""
+    """SharedMemory header contains correct protocol magic 0x43495036 ('CIP6')."""
     from cuda_link import Exporter, FrameSpec
     from cuda_link.shm_protocol import PROTOCOL_MAGIC
 
@@ -259,8 +313,7 @@ def test_shm_protocol_magic(temp_shm_name: str, shared_memory_cleanup: list) -> 
 def test_shm_protocol_num_slots(temp_shm_name: str, shared_memory_cleanup: list) -> None:
     """SharedMemory header encodes the correct num_slots value."""
     from cuda_link import Exporter, FrameSpec
-
-    NUM_SLOTS_OFFSET = 12
+    from cuda_link.shm_protocol import NUM_SLOTS_OFFSET
 
     shared_memory_cleanup.append(temp_shm_name)
     exp = Exporter.open(FrameSpec(shm_name=temp_shm_name, height=64, width=64, num_slots=3))
@@ -366,8 +419,8 @@ def test_timestamp_uses_perf_counter(temp_shm_name: str, shared_memory_cleanup: 
             exp.export(GpuFrame(ptr=int(gpu_buf.value), size=test_size))
             t_after = time.perf_counter()
 
-            ts_bytes = bytes(shm.buf[layout.timestamp_offset : layout.timestamp_offset + 8])
-            ts = struct.unpack("<d", ts_bytes)[0]
+            # First frame: write_idx 1 -> slot 0; host_timestamp is the first slot-meta field.
+            ts = struct.unpack_from("<d", shm.buf, layout.slot_meta_offset(0))[0]
 
             assert t_before <= ts <= t_after + 0.001, (
                 f"Timestamp {ts:.6f} not in expected perf_counter range [{t_before:.6f}, {t_after + 0.001:.6f}]"
@@ -446,19 +499,19 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
             super().__setitem__(key, val)
 
     real_st_u32 = real_struct.Struct("<I")
-    real_st_f64 = real_struct.Struct("<d")
+    real_st_meta = real_struct.Struct("<dQQII")  # slot meta
 
     def spy_u32_pack_into(buf, offset: int, *args) -> None:
         write_log.append(("pack_into", offset))
         real_st_u32.pack_into(buf, offset, *args)
 
-    def spy_f64_pack_into(buf, offset: int, *args) -> None:
-        real_st_f64.pack_into(buf, offset, *args)
+    def spy_meta_pack_into(buf, offset: int, *args) -> None:
+        real_st_meta.pack_into(buf, offset, *args)
 
     mock_st_u32 = MagicMock()
     mock_st_u32.pack_into.side_effect = spy_u32_pack_into
-    mock_st_f64 = MagicMock()
-    mock_st_f64.pack_into.side_effect = spy_f64_pack_into
+    mock_st_meta = MagicMock()
+    mock_st_meta.pack_into.side_effect = spy_meta_pack_into
 
     spy_buf = _SpyBuf(layout.total_size)
     spy_buf[layout.shutdown_offset] = 1  # stale flag
@@ -466,9 +519,9 @@ def test_shm_write_ordering_shutdown_before_write_idx() -> None:
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
-        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_SLOT_META", mock_st_meta),
     ):
-        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
+        publish_frame(spy_buf, layout=layout, write_idx=1, host_timestamp=0.0)
 
     WRITE_IDX_OFFSET = 16
     shutdown_pos = next(
@@ -510,22 +563,22 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
             super().__setitem__(key, val)
 
     real_st_u32 = real_struct.Struct("<I")
-    real_st_f64 = real_struct.Struct("<d")
+    real_st_meta = real_struct.Struct("<dQQII")  # slot meta
 
     def spy_u32_pack_into(buf, offset: int, *args) -> None:
         write_log.append(("pack_into", offset))
         real_st_u32.pack_into(buf, offset, *args)
 
-    def spy_f64_pack_into(buf, offset: int, *args) -> None:
-        real_st_f64.pack_into(buf, offset, *args)
+    def spy_meta_pack_into(buf, offset: int, *args) -> None:
+        real_st_meta.pack_into(buf, offset, *args)
 
     def spy_fence() -> None:
         fence_calls.append(len(write_log))
 
     mock_st_u32 = MagicMock()
     mock_st_u32.pack_into.side_effect = spy_u32_pack_into
-    mock_st_f64 = MagicMock()
-    mock_st_f64.pack_into.side_effect = spy_f64_pack_into
+    mock_st_meta = MagicMock()
+    mock_st_meta.pack_into.side_effect = spy_meta_pack_into
 
     spy_buf = _SpyBuf(layout.total_size)
     spy_buf[layout.shutdown_offset] = 1
@@ -533,10 +586,10 @@ def test_release_fence_called_between_flag_and_write_idx() -> None:
 
     with (
         patch("cuda_link.shm_protocol._ST_U32", mock_st_u32),
-        patch("cuda_link.shm_protocol._ST_F64", mock_st_f64),
+        patch("cuda_link.shm_protocol._ST_SLOT_META", mock_st_meta),
         patch("cuda_link.shm_protocol._release_fence", spy_fence),
     ):
-        publish_frame(spy_buf, layout=layout, write_idx=1, timestamp=0.0)
+        publish_frame(spy_buf, layout=layout, write_idx=1, host_timestamp=0.0)
 
     assert len(fence_calls) == 1, "exactly one fence call per publish_frame()"
 

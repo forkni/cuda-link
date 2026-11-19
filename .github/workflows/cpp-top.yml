@@ -1,0 +1,136 @@
+name: C++ Custom TOP (cpp_top)
+
+on:
+  push:
+    paths:
+      - 'cpp_top/**'
+      - '.clang-format'
+      - '.clang-format-ignore'
+      - '.clang-tidy'
+      - '.github/workflows/cpp-top.yml'
+      - 'scripts/gen_golden_shm.py'
+  pull_request:
+    paths:
+      - 'cpp_top/**'
+      - '.clang-format'
+      - '.clang-format-ignore'
+      - '.clang-tidy'
+      - '.github/workflows/cpp-top.yml'
+      - 'scripts/gen_golden_shm.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-lint:
+    name: format + build + test + tidy
+    # windows-2022, not windows-latest: windows-latest ships VS 18 (MSVC 14.51), and the
+    # CUDA 12.6 nvcc rejects it (host_config.h #error; with -allow-unsupported-compiler,
+    # cudafe++ crashes on its headers). The TOPs stay on the cudart 12 major that TD ships,
+    # so CI keeps CUDA 12.x and the VS 2022 toolchain that local builds use.
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
+
+      # Pinned to the same LLVM 19.x line the repo-root .clang-format/.clang-tidy were
+      # calibrated against locally (VS 2022's bundled VC/Tools/Llvm), rather than trusting
+      # whatever LLVM build happens to ship in the windows-latest image today.
+      - name: Install LLVM/Clang tools (clang-format, clang-tidy)
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0  # v2
+        with:
+          version: '19.1.5'
+
+      - name: Format gate (clang-format --dry-run --Werror)
+        # Scoped to cpp_top/src, tests and tools -- cpp_top/vendor/ (vendored TD SDK
+        # headers, never reformatted; see .clang-format-ignore) is never touched here.
+        shell: bash
+        run: |
+          find cpp_top/src cpp_top/tests cpp_top/tools \( -name '*.cpp' -o -name '*.h' \) -print0             | xargs -0 clang-format --dry-run --Werror
+
+      # Only headers + cudart.lib/nvcc are needed to compile/link CudaLinkInTOP.dll,
+      # CudaLinkOutTOP.dll and the Common page kernel (cpp_top/src/common/resize_convert.cu)
+      # -- no GPU/driver required (resize_convert_tests skips with code 77 without a GPU).
+      # 12.6.2 (not 12.8.x, the local dev target -- see cpp_top/CMakeLists.txt) is the
+      # newest 12.x this pinned action version (v0.2.19) can install on Windows;
+      # CMakeLists.txt only checks the CUDA *major* version, so this is compatible.
+      - name: Install CUDA toolkit (cudart + nvcc only)
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d  # v0.2.19
+        with:
+          cuda: '12.6.2'
+          sub-packages: '["cudart","nvcc"]'
+          method: network
+
+      # Ninja (unlike the Visual Studio generator) does not invoke vcvarsall on its own --
+      # cl.exe/link.exe/rc.exe would otherwise fail to resolve even though VS is preinstalled.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja, emits compile_commands.json for the tidy step below)
+        # CMakeLists.txt only falls back to its hardcoded default path when
+        # CUDAToolkit_ROOT is undefined -- pass the runner's actual install location
+        # explicitly rather than relying on find_package(CUDAToolkit)'s CUDA_PATH
+        # env-var fallback.
+        #
+        # CMAKE_C/CXX_COMPILER=cl is required here: with both cl.exe (via msvc-dev-cmd
+        # above) and clang++.exe (via install-llvm-action above) on PATH and no compiler
+        # pinned, CMake's Ninja-generator compiler search picks clang++ over cl -- and
+        # the standalone LLVM 19.1.5 we install for format/tidy is too old for this
+        # runner image's MSVC STL (which demands Clang 20+ when compiled with clang).
+        # The shipping build target is MSVC only (see CMakeLists.txt); clang is used here
+        # solely for the separate format/tidy steps, never for the actual compile.
+        # Generator, build type and the cl pin come from the ninja-tooling preset
+        # (cpp_top/CMakePresets.json, binaryDir cpp_top/build) so CI and local builds match.
+        # The toolkit path goes through an env var, not a ${{ }} expansion inside the script
+        # (zizmor template-injection rule). Default shell on this runner is pwsh.
+        working-directory: cpp_top
+        env:
+          CUDA_TOOLKIT_ROOT: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT"
+
+      - name: Build both Custom TOP DLLs, topcore_tests and protocol_dump
+        working-directory: cpp_top
+        run: cmake --build --preset ninja-tooling
+
+      - name: topcore_tests (golden-byte parity, CTest)
+        working-directory: cpp_top
+        run: ctest --preset ninja-tooling
+
+      - name: clang-tidy (cpp_top/src, warnings-as-errors per .clang-tidy)
+        shell: bash
+        run: |
+          find cpp_top/src -name '*.cpp' -print0 | xargs -0 clang-tidy -p cpp_top/build
+
+  # The protocol core is OS-free: a Linux leg with gcc catches compiler- and
+  # platform-specific assumptions cheaply. No CUDA, no TD headers, no TOP DLLs.
+  core-linux:
+    name: core tests (Linux, gcc)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (core-only preset)
+        working-directory: cpp_top
+        run: cmake --preset core-only
+
+      - name: Build cudalink_topcore, topcore_tests, protocol_dump
+        working-directory: cpp_top
+        run: cmake --build --preset core-only
+
+      - name: topcore_tests (golden-byte parity, CTest)
+        working-directory: cpp_top
+        run: ctest --preset core-only

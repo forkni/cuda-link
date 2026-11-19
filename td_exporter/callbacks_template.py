@@ -24,6 +24,20 @@ def _extension():
         return None
 
 
+def _cook_slot_meta() -> None:
+    """Force-cook the slot_meta Script CHOP after an export (never raises).
+
+    In Sender mode nothing else makes it cook: it reads plain extension state, which
+    TD does not track as a dependency. A .tox without the CHOP (1.x layout) skips this.
+    """
+    try:
+        meta_chop = parent().op("slot_meta")  # noqa: F821
+        if meta_chop is not None:
+            meta_chop.cook(force=True)
+    except Exception:  # noqa: BLE001 -- a frame callback must never raise
+        return
+
+
 def onFrameStart(frame: int) -> None:
     """Called at the start of every frame.
 
@@ -51,7 +65,11 @@ def onFrameStart(frame: int) -> None:
         # version change, shutdown, or a new write_idx. Returns False only when the
         # sender's write_idx matches our cursor (no new data this frame).
         if not ext.has_new_frame():
-            return
+            # Framewaitms (default 3 ms): wait for the sender's doorbell before this
+            # frame is a repeat. An extension without the method (1.x) keeps poll-once.
+            wait = getattr(ext, "wait_for_new_frame", None)
+            if wait is None or not wait():
+                return
 
         # Force-cook ImportBuffer: triggers Script TOP onCook, which calls import_frame()
         # and consume_pending_format(). update_receiver_format() afterwards is belt-and-suspenders:
@@ -75,8 +93,9 @@ def onFrameEnd(frame: int) -> None:
     if ext is None:
         return
 
-    if ext.mode == "Sender":
-        ext.export_frame()
+    # The CHOP values change only when a frame was published.
+    if ext.mode == "Sender" and ext.export_frame():
+        _cook_slot_meta()
 
 
 def onExit() -> None:

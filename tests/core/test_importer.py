@@ -17,6 +17,7 @@ from fakes import make_connected_importer, make_fake_ipc_connection
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
 from cuda_link.importer import Format, Importer
+from cuda_link.shm_protocol import VERSION_OFFSET
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -489,8 +490,8 @@ def test_reinitialize_uses_format_from_shm(monkeypatch: pytest.MonkeyPatch) -> N
         data_size=2 * 2 * 4,
     ).pack_into(shm_buf, imp._conn.layout)
     # Bump version to trigger VERSION_CHANGED
-    current_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
-    _struct.pack_into("<Q", shm_buf, 4, current_ver + 1)
+    current_ver = _struct.unpack_from("<Q", shm_buf, VERSION_OFFSET)[0]
+    _struct.pack_into("<Q", shm_buf, VERSION_OFFSET, current_ver + 1)
 
     # Call _reinitialize directly
     imp._reinitialize()
@@ -584,8 +585,8 @@ def test_reinitialize_no_numpy_teardown_on_sentinel_mismatch(monkeypatch: pytest
     ).pack_into(shm_buf, layout)
 
     # Bump SHM version so _try_acquire returns VERSION_CHANGED and _reinitialize is needed
-    cur_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
-    _struct.pack_into("<Q", shm_buf, 4, cur_ver + 1)
+    cur_ver = _struct.unpack_from("<Q", shm_buf, VERSION_OFFSET)[0]
+    _struct.pack_into("<Q", shm_buf, VERSION_OFFSET, cur_ver + 1)
 
     # Call _reinitialize directly
     imp._reinitialize()
@@ -728,8 +729,8 @@ def test_reinitialize_numpy_teardown_on_genuine_shape_change(monkeypatch: pytest
         data_size=w * h * c * DtypeCodec.itemsize(dtype),
     ).pack_into(shm_buf, layout)
 
-    cur_ver = _struct.unpack("<Q", bytes(shm_buf[4:12]))[0]
-    _struct.pack_into("<Q", shm_buf, 4, cur_ver + 1)
+    cur_ver = _struct.unpack_from("<Q", shm_buf, VERSION_OFFSET)[0]
+    _struct.pack_into("<Q", shm_buf, VERSION_OFFSET, cur_ver + 1)
 
     imp._reinitialize()
 

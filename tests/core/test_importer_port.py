@@ -60,7 +60,7 @@ def test_import_policy_frozen() -> None:
 
 def test_import_policy_defaults() -> None:
     pol = ImportPolicy()
-    assert pol.wait_spin_us == 200
+    assert pol.wait_spin_us == 500
     assert pol.d2h_num_streams == 1
     assert pol.d2h_stream_high_priority is False
     assert pol.allow_pageable_fallback is False
@@ -95,7 +95,7 @@ def test_import_policy_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch.delenv(var, raising=False)
 
     pol = ImportPolicy.from_env()
-    assert pol.wait_spin_us == 200
+    assert pol.wait_spin_us == 500
     assert pol.d2h_num_streams == 1
     assert pol.d2h_stream_high_priority is False
     assert pol.allow_pageable_fallback is False
@@ -121,7 +121,7 @@ def test_import_policy_low_latency() -> None:
 # Documented defaults (docs/ENV_VARS.md; the backoff ladder is documented only on the field),
 # written out literally rather than read from the source.
 _IMPORT_DEFAULTS = {
-    "wait_spin_us": 200,
+    "wait_spin_us": 500,
     "d2h_num_streams": 1,
     "d2h_stream_high_priority": False,
     "allow_pageable_fallback": False,
@@ -134,7 +134,7 @@ _IMPORT_DEFAULTS = {
     "reconnect_enabled": True,
     "reconnect_max_attempts": 20,
     "reconnect_backoff_frames": (1, 2, 4, 8, 16, 32, 64, 120),
-    "doorbell": False,
+    "doorbell": True,
     "wait_backend": "auto",
 }
 
@@ -226,6 +226,7 @@ def test_import_policy_for_testing_every_field() -> None:
         "allow_pageable_fallback": True,
         "debug": False,
         "reconnect_enabled": False,
+        "doorbell": False,
         "wait_backend": "python",
     }
 

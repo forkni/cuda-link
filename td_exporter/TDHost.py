@@ -179,6 +179,13 @@ class TDHost(Protocol):
         """Write an informational status message to the Status par (no tint/cook side effects)."""
         ...
 
+    def abs_frame(self) -> int | None:
+        """TD absolute frame of the current cook (``int(absTime.frame)``), or None if unknown.
+
+        The sender stamps it into the slot meta producer_frame (the cross-stream match key).
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Production adapters
@@ -285,6 +292,7 @@ class RealTDHost(TDHost):
         self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
         self._status_msg: str | None = None  # current stored status; drives cook-on-transition
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
+        self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
         self._reset_stale_tint()
 
     def param_value(self, name: str) -> Any:
@@ -312,6 +320,19 @@ class RealTDHost(TDHost):
             return bool(self._active_par.eval())
         except (AttributeError, RuntimeError):
             return True
+
+    def abs_frame(self) -> int | None:
+        if self._abs_time is None:
+            try:
+                import td  # noqa: PLC0415 -- TD-only module; absent outside TouchDesigner
+
+                self._abs_time = td.absTime
+            except (ImportError, AttributeError):
+                return None
+        try:
+            return int(self._abs_time.frame)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def find_top(self, name: str) -> RealTOPHandle | None:
         try:

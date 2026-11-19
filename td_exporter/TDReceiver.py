@@ -12,6 +12,7 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
 import time
 import traceback
@@ -25,6 +26,7 @@ try:
 except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
+import Doorbell as _doorbell  # noqa: E402
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
 from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
@@ -38,20 +40,114 @@ from SHMProtocol import (  # noqa: E402
     FORMAT_KIND_FLOAT,
     METADATA_SIZE,
     PROTOCOL_MAGIC,
+    SAME_PROCESS_MESSAGE,
     SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
     SLOT_SIZE,
+    EMPTY_SLOT_META,
+    INFO_CHOP_FRAME_MOD,
+    SLOT_META_CHANNELS,
+    FrameStep,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
+    classify_frame_step,
+    is_same_process_sender,
+    protocol_mismatch_message,
     read_magic,
     read_num_slots,
+    read_sender_pid,
     read_version,
     read_write_idx,
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
+
+# The process id the same-process check compares with the segment's sender_pid; tests that
+# run a sender and a receiver in one process on fake CUDA replace it.
+_current_pid = os.getpid
+
+# Framewaitms: on a frame start with no new frame, wait this long for the sender's doorbell
+# before the frame is a repeat. Same rules as the C++ In TOP (cpp_top/src/core/frame_wait.h,
+# CudaLinkInTOP::waitForFreshFrame): default 3 ms, range 0-8, 0 turns the wait off.
+FRAME_WAIT_DEFAULT_MS = 3
+FRAME_WAIT_MAX_MS = 8
+# The doorbell is an auto-reset event that wakes ONE waiter, so a second consumer of the
+# same name can take the signal. The wait runs in slices and polls write_idx after each:
+# a lost signal costs one slice, not the budget.
+_FRAME_WAIT_SLICE_MS = 1
+
+
+def next_wait_slice_ms(remaining_us: float, slice_ms: int = _FRAME_WAIT_SLICE_MS) -> int:
+    """Timeout (ms) of the next doorbell wait; 0 when the budget is spent.
+
+    Rounds up, so a remainder under 1 ms still waits (port of next_wait_slice_ms in
+    cpp_top/src/core/frame_wait.h).
+    """
+    if remaining_us <= 0 or slice_ms <= 0:
+        return 0
+    return min(slice_ms, -(-int(remaining_us) // 1000) or 1)
+
+
+# Framewaitms guard: the sender's publish cadence, from the slot meta host_timestamp of each
+# shown frame (perf_counter seconds; QueryPerformanceCounter, shared by all processes on a
+# Windows machine). Skips a wait that cannot get a frame: a sender slower than this receiver
+# (a 30 fps camera into a 60 fps project) or a paused sender. Port of PublishCadence /
+# cadence_add / cadence_wait_useful in cpp_top/src/core/frame_wait.h: same rules, same numbers.
+CADENCE_MIN_SAMPLES = 4  # samples before the guard trusts the period
+CADENCE_MAX_OUTLIERS = 4  # consecutive samples over 3 periods: the rate changed, start over
+CADENCE_MAX_PERIOD_S = 1.0  # a gap of 1 s or more is a pause, never a sample
+CADENCE_SLACK_S = 0.001  # one wait slice of slack on "next publish within the budget"
+
+
+@dataclass
+class PublishCadence:
+    """Smoothed seconds per published frame, and the timestamp of the newest frame shown."""
+
+    last_ts: float = 0.0
+    period_s: float = 0.0
+    samples: int = 0
+    outliers: int = 0
+
+
+def cadence_add(c: PublishCadence, ts: float, idx_step: int) -> None:
+    """Add the shown frame with host_timestamp ts, idx_step ring writes after the one before.
+
+    ts <= 0 (a sender that writes no timestamp) leaves the cadence unknown.
+    """
+    if ts <= 0.0:
+        return
+    if c.last_ts > 0.0 and ts > c.last_ts and idx_step > 0:
+        dt = (ts - c.last_ts) / idx_step
+        if dt < CADENCE_MAX_PERIOD_S:
+            if c.samples >= CADENCE_MIN_SAMPLES and dt > 3.0 * c.period_s:
+                c.outliers += 1
+                if c.outliers >= CADENCE_MAX_OUTLIERS:
+                    c.samples = 0
+                    c.outliers = 0
+            else:
+                c.period_s = dt if c.samples == 0 else c.period_s + (dt - c.period_s) / 8.0
+                c.samples = min(c.samples + 1, CADENCE_MIN_SAMPLES)
+                c.outliers = 0
+    c.last_ts = ts
+
+
+def cadence_wait_useful(c: PublishCadence, now_s: float, wait_ms: int) -> bool:
+    """True when a wait of wait_ms can get a frame; an unknown cadence returns True.
+
+    False when the next publish is not expected within the budget plus one slice, or the
+    newest frame is older than two periods (a paused or stalled sender).
+    """
+    if c.samples < CADENCE_MIN_SAMPLES or c.period_s <= 0.0 or c.last_ts <= 0.0:
+        return True
+    since = now_s - c.last_ts
+    if since > 2.0 * c.period_s:
+        return False
+    ahead = c.period_s - since  # time to the next expected publish
+    return ahead <= wait_ms / 1000.0 + CADENCE_SLACK_S
+
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
@@ -262,6 +358,26 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
+        # Slot meta of the frame on the output (set after a successful copy), plus the
+        # session-lifetime gap counters the In TOP shows as frame_gap_count /
+        # producer_skip_count.
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
+        # write_idx of the last frame that reached the output; 0 = none on this connection.
+        # Not _connection.last_write_idx: that one also advances for a frame the copy drops.
+        self._shown_write_idx: int = 0
+        self.last_latency_us: float = 0.0
+        self.frame_gap_count: int = 0
+        self.producer_skip_count: int = 0
+
+        # Framewaitms doorbell wait: handle opened on the first waiting frame start (None
+        # until the sender has made the event), and the frames the wait got.
+        self._doorbell_handle: object = None
+        self.frame_wait_rescued_count: int = 0
+        # Guard: publish cadence from _record_slot_meta(), and the no-frame frame starts
+        # that skipped the wait because it could not get a frame.
+        self.publish_cadence: PublishCadence = PublishCadence()
+        self.frame_wait_skipped_count: int = 0
+
         # Per-frame performance tracking for Debug summary line — shares
         # ReportWindow with TDSenderEngine.
         self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
@@ -362,6 +478,99 @@ class TDReceiverEngine:
         except (AttributeError, struct.error, ValueError, IndexError, OSError):
             return True  # SHM unreadable; let import_frame handle it
 
+    def frame_wait_ms(self) -> int:
+        """Framewaitms par as a wait budget in ms, clamped to 0..FRAME_WAIT_MAX_MS.
+
+        A COMP without the par (a .tox built before it existed) gets the default.
+        """
+        value = self._host.param_value("Framewaitms")
+        if value is None:
+            return FRAME_WAIT_DEFAULT_MS
+        try:
+            wait_ms = int(value)
+        except (TypeError, ValueError):
+            return FRAME_WAIT_DEFAULT_MS
+        return min(max(wait_ms, 0), FRAME_WAIT_MAX_MS)
+
+    def wait_for_new_frame(self, wait_ms: int | None = None) -> bool:
+        """Wait up to wait_ms for the sender's doorbell; True when has_new_frame() turned True.
+
+        Called from onFrameStart after has_new_frame() returned False. Sender and receiver
+        cook at the same rate with a slowly drifting phase; when the publish lands just
+        after this poll, jitter makes repeat/skip pairs. The wait turns those repeats into
+        new frames that come a little later. It blocks TD's main thread for at most the
+        budget plus one slice. Returns False at once when the wait is off, the receiver is
+        not connected, or the sender made no doorbell (CUDALINK_DOORBELL=0, a 1.x sender,
+        non-Windows): the classic poll-once behaviour.
+        """
+        if wait_ms is None:
+            wait_ms = self.frame_wait_ms()
+        if wait_ms <= 0 or not self._initialized or self._connection.shm_handle is None:
+            return False
+        if not cadence_wait_useful(self.publish_cadence, time.perf_counter(), wait_ms):
+            # Next publish not due within the budget (slower sender) or sender paused.
+            self.frame_wait_skipped_count += 1
+            return False
+        if self._doorbell_handle is None:
+            # Retried on each waiting frame start until the sender has made the event.
+            self._doorbell_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self.shm_name))
+            if self._doorbell_handle is None:
+                return False
+
+        deadline = time.perf_counter() + wait_ms / 1000.0
+        # Iteration cap: _doorbell.wait() returns False for a timeout and for a failed wait,
+        # and a failed wait returns at once. Without the cap a dead handle would spin here.
+        for _ in range(2 * wait_ms + 2):
+            slice_ms = next_wait_slice_ms((deadline - time.perf_counter()) * 1e6)
+            if slice_ms == 0:
+                break
+            # A wake can be a stale signal from a publish already read, and a timeout can
+            # hide a signal another consumer took: poll after both.
+            _doorbell.wait(self._doorbell_handle, slice_ms)
+            if self.has_new_frame():
+                self.frame_wait_rescued_count += 1
+                return True
+        return False
+
+    def _close_doorbell(self) -> None:
+        """Close the Framewaitms doorbell handle (idempotent)."""
+        if self._doorbell_handle is not None:
+            _doorbell.close(self._doorbell_handle)
+            self._doorbell_handle = None
+
+    def _record_slot_meta(self, prev_write_idx: int, write_idx: int, meta: SlotMeta) -> None:
+        """Store the shown frame's slot meta and count gaps (same rules as the C++ In TOP)."""
+        step = classify_frame_step(prev_write_idx, self.last_slot_meta.producer_frame, write_idx, meta.producer_frame)
+        if step is FrameStep.FRAME_GAP:
+            self.frame_gap_count += 1
+        elif step is FrameStep.PRODUCER_SKIP:
+            self.producer_skip_count += 1
+        self.last_slot_meta = meta
+        ts = meta.host_timestamp
+        self.last_latency_us = (time.perf_counter() - ts) * 1e6 if ts > 0 else 0.0
+        # A new connection or producer session (prev_write_idx 0) starts the cadence over.
+        if prev_write_idx == 0:
+            self.publish_cadence = PublishCadence()
+        cadence_add(self.publish_cadence, ts, (write_idx - prev_write_idx) & 0xFFFFFFFF)
+
+    def slot_meta_channels(self) -> dict[str, float]:
+        """Slot meta of the frame on the output, as the `slot_meta` Script CHOP channels.
+
+        Same names and meaning as the C++ In TOP Info CHOP: producer_frame is shown mod
+        2^24 (exact in float32); ``last_slot_meta.producer_frame`` has the full value.
+        """
+        meta = self.last_slot_meta
+        # No zip(strict=True): it needs Python 3.10 and this file runs on 3.9. The test
+        # suite checks that the result has exactly SLOT_META_CHANNELS, in order.
+        values = (
+            float(meta.producer_frame % INFO_CHOP_FRAME_MOD),
+            float(meta.stream_id),
+            float(self.last_latency_us),
+            float(self.frame_gap_count),
+            float(self.producer_skip_count),
+        )
+        return dict(zip(SLOT_META_CHANNELS, values))
+
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
         return {
@@ -377,6 +586,8 @@ class TDReceiverEngine:
             ),
             "rx_buffer_size_mb": self._format.frame_nbytes / 1024 / 1024 if self._format.frame_nbytes > 0 else 0,
             "rx_last_write_idx": self._connection.last_write_idx,
+            "rx_frame_wait_rescued": self.frame_wait_rescued_count,
+            "rx_frame_wait_skipped": self.frame_wait_skipped_count,
             "rx_dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self._connection.dev_ptrs],
         }
 
@@ -445,10 +656,13 @@ class TDReceiverEngine:
             if result.state is SlotState.NO_FRAME:
                 return False
 
+            if self._connection.last_write_idx == 0:
+                # New connection or sender re-init: no previous shown frame to step from.
+                self._shown_write_idx = 0
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
-            _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
+            _ts = result.slot_meta.host_timestamp  # producer perf_counter() at publish, for latency
             if not self._rx_window.started:
                 # Session baseline for windowed FPS (frame_count is never reset).
                 self._rx_window.start(time.perf_counter(), self.frame_count)
@@ -547,6 +761,8 @@ class TDReceiverEngine:
 
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
+            self._record_slot_meta(self._shown_write_idx, write_idx, result.slot_meta)
+            self._shown_write_idx = write_idx
 
             if not self._last_fmt_status:
                 # Rebuild only when format changed (initialize_receiver and update_receiver_format
@@ -672,11 +888,11 @@ class TDReceiverEngine:
             try:
                 magic = read_magic(shm_handle.buf)
                 if magic != PROTOCOL_MAGIC:
-                    self._log(
-                        f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
-                        "Sender using incompatible protocol version.",
-                        force=True,
-                    )
+                    self._log(protocol_mismatch_message(magic), force=True)
+                    shm_handle.close()
+                    return False
+                if is_same_process_sender(read_sender_pid(shm_handle.buf), _current_pid()):
+                    self._log(SAME_PROCESS_MESSAGE, force=True)
                     shm_handle.close()
                     return False
             except (struct.error, ValueError, IndexError):
@@ -993,6 +1209,8 @@ class TDReceiverEngine:
         outer except in initialize_receiver()).
         """
         self._connection.close(self.cuda, self._log)
+        self._close_doorbell()
+        self.publish_cadence = PublishCadence()
         self._release_f16_staging()
         self._cached_shape = None
 

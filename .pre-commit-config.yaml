@@ -4,7 +4,7 @@
 repos:
   # Ruff - Fast Python linter and formatter
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.5
+    rev: v0.17.5  # keep equal to ruff in uv.lock (CI runs the locked one)
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]

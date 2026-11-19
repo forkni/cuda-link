@@ -1,0 +1,241 @@
+// CudaLinkOutTOP -- sender TOP: publishes a texture into shared memory for zero-copy
+// CUDA IPC consumption by other processes/TOPs.
+// opType "Cudalinkout", 1 input, TOP_ExecuteMode::CUDA.
+
+#pragma once
+
+#include <cuda_runtime.h>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "CPlusPlus_Common.h"
+#include "TOP_CPlusPlusBase.h"
+
+#include "../common/bench_accumulator.h"
+#include "../common/common_page_td.h"
+#include "../common/debug_log.h"
+#include "../common/gpu_timer.h"
+#include "../common/raii_handles.h"
+#include "../core/ring_writer.h"
+#include "../core/shm_layout.h"
+#include "pixel_format_map.h"
+
+class CudaLinkOutTOP : public TD::TOP_CPlusPlusBase {
+public:
+    CudaLinkOutTOP(const TD::OP_NodeInfo* info, TD::TOP_Context* context);
+    ~CudaLinkOutTOP() override;
+
+    // This class owns raw HANDLE/cudaStream_t/IPC resources with a user-declared
+    // destructor -- an implicitly-defaulted copy would shallow-copy those and double-free
+    // them in ~CudaLinkOutTOP(). TD constructs this class exactly once and never copies or
+    // moves it, so deleting all four is correct, not just defensive.
+    CudaLinkOutTOP(const CudaLinkOutTOP&) = delete;
+    CudaLinkOutTOP& operator=(const CudaLinkOutTOP&) = delete;
+    CudaLinkOutTOP(CudaLinkOutTOP&&) = delete;
+    CudaLinkOutTOP& operator=(CudaLinkOutTOP&&) = delete;
+
+    void getGeneralInfo(TD::TOP_GeneralInfo* ginfo, const TD::OP_Inputs* inputs, void* reserved1) override;
+    void execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void* reserved1) override;
+
+    int32_t getNumInfoCHOPChans(void* reserved1) override;
+    void getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, void* reserved1) override;
+    bool getInfoDATSize(TD::OP_InfoDATSize* infoSize, void* reserved1) override;
+    void getInfoDATEntries(int32_t index, int32_t nEntries, TD::OP_InfoDATEntries* entries,
+                           void* reserved1) override;
+
+    void getErrorString(TD::OP_String* error, void* reserved1) override;
+    void getWarningString(TD::OP_String* warning, void* reserved1) override;
+    void getInfoPopupString(TD::OP_String* info, void* reserved1) override;
+
+    void setupParameters(TD::OP_ParameterManager* manager, void* reserved1) override;
+    void pulsePressed(const char* name, void* reserved1) override;
+
+private:
+    // Diffs Active/Ipcmemname/Numslots against their cached values at the top of every
+    // execute() -- no push-based parameter-change notification exists in the Custom TOP
+    // API, so this is the only way to detect an edit (same approach as
+    // CudaLinkInTOP::checkParameterChanges).
+    void checkParameterChanges(const TD::OP_Inputs* inputs);
+
+    // Publishes shutdown_flag=1 (if a segment is open) and frees every IPC/device/SHM
+    // resource. Called on Active On->Off, on parameter changes that require a fresh
+    // session, and from the destructor.
+    void teardown();
+
+    // (Re)allocates device buffers/events, exports their IPC handles, creates/re-creates
+    // the named SHM mapping + doorbell, and writes the initial header + slot handles +
+    // metadata. Called on first cook and whenever resolution/format/numslots changes.
+    // Returns false (myError set) on any allocation/export failure.
+    bool reallocate(uint32_t width, uint32_t height, const cudalink::out_top::WireFormat& fmt, int numSlots,
+                    const char* name);
+
+    // Frees all cached per-slot graph execs and empties myGraphCache -- called before
+    // rebuilding device buffers/events in reallocate() (the graphs reference them) and from
+    // teardown().
+    void destroyGraphs();
+
+    // Attempts the CUDA-Graphs launch path for 'slot' using this cook's srcArray as the
+    // IPC-copy source: looks up a cached exec keyed on (slot, srcArray) and launches it on a
+    // hit, or captures a fresh 2-node graph (memcpy + interprocess event-record) and caches
+    // it on a miss -- either way collapsing those two ops' separate WDDM submissions into one
+    // cudaGraphLaunch. See the header comment on myGraphCache and the capture-site comment in
+    // CudaLinkOutTOP.cpp for the full design/rationale (PLAN-005 §2.1). Returns false and
+    // latches myGraphsDisabled on ANY failure -- caller must run the legacy per-op path for
+    // this cook instead (a failed capture performs none of the enclosed work).
+    bool tryGraphCopy(uint32_t slot, cudaArray_t srcArray, size_t rowBytes, uint32_t height);
+
+    // Debug-gated diagnostics: neither the error/warning badges nor GPU% are enough to
+    // diagnose a transient failure (see getErrorString/getWarningString for the sticky
+    // myLastError capture, and this for the deeper opt-in trace). Forwards to myDebugLog,
+    // which handles the lazy file-open/gating itself; this wrapper just supplies the
+    // current frame number so call sites don't have to.
+    void debugLog(const std::string& msg) { myDebugLog.log(msg, myFrameCount); }
+
+    TD::TOP_Context* myContext;
+    cudaStream_t myStream = nullptr;
+
+    // Latched fatal-error flag: set once by the ctor's device/IPC-capability checks or by
+    // a CUDALINK_CUDA_CHECK_FATAL failure on the per-frame hot path. Once set,
+    // execute() short-circuits every subsequent cook instead of retrying CUDA calls against a
+    // stream/context that documented behavior says may now be corrupted for the rest of the
+    // process (cudaDeviceReset() is NOT an option here -- it destroys all CUDA resources in
+    // this process, which would also kill TD's own CUDA state).
+    bool myFatal = false;
+
+    // Cached parameter values for the change-detection diff above.
+    bool myFirstCook = true;
+    bool myCachedActive = false;
+    std::string myCachedIpcmemname;
+    int myCachedNumslots = 0;
+
+    // SHM connection state.
+    void* myShmHandle = nullptr;      // HANDLE, void* to avoid <windows.h> in the header
+    void* myDoorbellHandle = nullptr; // HANDLE
+    uint8_t* myShmView = nullptr;
+    cudalink::core::SHMLayout myLayout{0};
+    uint64_t myVersion = 0;
+    uint32_t myWriteIdx = 0;
+    // Slot meta of the last publish (Info CHOP / DAT).
+    uint64_t myProducerFrame = 0;
+    uint32_t myStreamId = 0;
+    bool myAllocated = false;
+
+    // Cached geometry/format this allocation was built for -- a change in any of these
+    // (or Numslots) triggers reallocate().
+    uint32_t myWidth = 0;
+    uint32_t myHeight = 0;
+    cudalink::core::Metadata myMetadata;
+
+    // Per-slot device resources, sized to myLayout.num_slots() once allocated.
+    std::vector<void*> mySlotDevPtrs;
+    std::vector<cudaEvent_t> mySlotEvents;
+
+    // Common page path: linear copy of the input for the resize/convert kernel (grows
+    // only; freed in teardown), and whether the last cook took that path (Info CHOP).
+    cudalink::common::ScratchBuffer myConvertScratch;
+    bool myConverted = false;
+
+    // CUDA Graphs (env-gated PLAN-005 §2.1, default OFF; see the capture-site comment in
+    // tryGraphCopy() for the full design). myGraphsRequested is latched once from
+    // CUDALINK_CPP_USE_GRAPHS at construction; myGraphsDisabled latches permanently (for the
+    // rest of the session) on the first graph-path failure, falling back to the always-correct
+    // legacy path.
+    //
+    // Originally this cached ONE exec per slot and refreshed its memcpy node every cook via
+    // cudaGraphExecMemcpyNodeSetParams(). A standalone repro (probe_graph_memcpy_update.cpp,
+    // during diagnosis of PLAN-005) proved that is invalid on two INDEPENDENT counts, either
+    // one alone sufficient to break it:
+    //   1. The saved cudaGraphNode_t came from the template cudaGraph_t, which this function
+    //      destroyed (cudaGraphDestroy) immediately after cudaGraphInstantiate() -- a node
+    //      handle from an already-destroyed graph is not valid for a LATER exec-level update,
+    //      even though the instantiated cudaGraphExec_t itself remains launchable.
+    //   2. Independently of (1): CUDA Programming Guide §4.2.3.4 "Only 1D cudaMemset/
+    //      cudaMemcpy nodes can be changed" -- this copy's extent is 2D (height > 1)
+    //      whenever the source image has more than one row, so even a live-graph update
+    //      would still be rejected for the shipped shape. Confirmed by the same probe with
+    //      the graph-lifetime issue (1) controlled for.
+    // What did NOT break this: the same §4.2.3.4 also disallows changing a memcpy node's
+    // source/destination memory type (cudaArray_t, etc.) or its cudaMemcpyKind. This code
+    // never changes either -- source is always cudaArray_t, kind is always
+    // cudaMemcpyDeviceToDevice every cook -- so that restriction was satisfied. It just
+    // wasn't SUFFICIENT: the 1D restriction above is independent and applies regardless of
+    // how stable the kind/type are. Nor is cudaGraphExecUpdate() (whole-graph update) an
+    // escape hatch -- §4.2.3.4 governs both individual node update and whole-graph update,
+    // so it would hit the same 1D wall. The keyed re-capture cache below is therefore the
+    // only correct fix, not one option among several.
+    // Fix: mirror the In TOP's keyed exec cache (GraphCacheEntry) -- capture a fresh graph
+    // per (slot, srcArray) key and never call an exec-level memcpy update. On cache hit:
+    // launch. On miss (including first use): capture+instantiate+launch this cook. Sized
+    // lazily inside tryGraphCopy() (not in reallocate()), same as the In TOP; destroyGraphs()
+    // resets it to empty on every reallocation.
+    struct GraphCacheEntry {
+        cudaArray_t srcArray = nullptr;
+        cudalink::common::CudaGraphExecGuard exec;
+    };
+    static constexpr size_t kGraphCacheCapPerSlot = 4;
+    bool myGraphsRequested = false;
+    bool myGraphsDisabled = false;
+    std::vector<std::vector<GraphCacheEntry>> myGraphCache;
+
+    // Session-lifetime graph counters (Debug-gated increments, mirroring the In TOP's
+    // myGraphHits/myGraphBuilds): builds should plateau at (num_slots x observed source
+    // arrays) within seconds; a climbing count is the live pre-signal of the cache-cap
+    // latch. Feed the graph_hits/graph_builds Info CHOP channels.
+    uint64_t myGraphHits = 0;
+    uint64_t myGraphBuilds = 0;
+
+    // Status/error/warning surfaces.
+    std::string myError;
+    std::string myWarning;
+    std::string myStatus = "Idle";
+
+    // Sticky last-error capture (live-test finding: cookEveryFrame=true clears myError
+    // every ~16ms, so a real one-cook error's badge vanishes before it can be read).
+    // Updated only in getErrorString() -- never auto-cleared, only overwritten -- so it
+    // survives across cooks and is visible via the Info DAT without needing the debug log.
+    std::string myLastError;
+    uint64_t myLastErrorFrame = 0;
+
+    // Non-fatal diagnostic from CudaDeviceSession's ctor-time probe (skipped/failed IPC
+    // capability query, WDDM/TCC support-envelope note, ...). Persists for the lifetime of
+    // this instance (unlike myError/myWarning) so it stays reachable via the init_note Info
+    // DAT row even long after the one-time debugLog() emission on the first cook.
+    std::string myInitNote;
+    bool myInitNoteLogged = false;
+
+    // Debug-gated diagnostics (see debugLog()). Enabled state is refreshed once per cook
+    // from Parameters::evalDebug() so reallocate()/teardown() can check it without needing
+    // OP_Inputs threaded through.
+    cudalink::common::DebugLogger myDebugLog{"cudalink_out_top_debug.log"};
+
+    // Stats (Info CHOP channels): frames, cook_us, copy_us, begin_us, end_us,
+    // write_idx, num_slots.
+    uint64_t myFrameCount = 0;
+    float myCookUs = 0.0f;
+    float myCopyUs = 0.0f;
+
+    // myCopyUs measures only the CUDA-call enqueues inside the CUDA-ops bracket;
+    // myBeginUs/myEndUs separately time entering/leaving that bracket
+    // (beginCUDAOperations()/endCUDAOperations()) so the two costs can be told apart.
+    float myBeginUs = 0.0f;
+    float myEndUs = 0.0f;
+
+    // Periodic bench-log accumulator (Debug-gated, reported every 97 frames -- matches the
+    // Python exporter's reporting cadence). Shared with CudaLinkInTOP (see bench_accumulator.h).
+    cudalink::common::BenchAccumulator myBench;
+
+    // Debug-gated GPU-side timing (see gpu_timer.h): the CPU-side channels above only time
+    // async enqueues, so the actual GPU copy cost (4x bigger on float32) is invisible to them.
+    // myIpcTimer brackets the IPC-slot copy + interprocess event-record (or, on the graph
+    // path, the single cudaGraphLaunch replacing both); myPassTimer brackets the optional
+    // pass-through display copy. Both are lazily created on the first Debug-on cook and are
+    // slot-independent local events, untouched by reallocate(). When Debug is off, none of
+    // this is created or recorded -- the hot path is byte-identical to before.
+    cudalink::common::GpuTimerRing myIpcTimer;
+    cudalink::common::GpuTimerRing myPassTimer;
+    float myGpuIpcUs = 0.0f;
+    float myGpuPassUs = 0.0f;
+    bool myGpuTimingUnavailable = false; // sticky once-only "timing unavailable" log guard
+};

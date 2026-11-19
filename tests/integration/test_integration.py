@@ -2,7 +2,7 @@
 Multi-process integration tests for CUDA IPC.
 
 These tests verify the full producer-consumer pipeline.
-Protocol v1.0.0: 20-byte header (4B magic "CIPD" + 8B version + 4B num_slots + 4B write_idx).
+Protocol v0.6: 24-byte header (magic "CIP6", num_slots, version, write_idx, sender_pid).
 """
 
 from __future__ import annotations
@@ -14,10 +14,19 @@ import pytest
 
 from cuda_link import FrameOutcome, FrameSpec, GpuFrame
 from cuda_link.exporter import Exporter
-from cuda_link.shm_protocol import Metadata, SHMLayout, read_num_slots, read_version, read_write_idx
+from cuda_link.shm_protocol import (
+    SHM_HEADER_SIZE,
+    SLOT_SIZE,
+    VERSION_OFFSET,
+    Metadata,
+    SHMLayout,
+    read_num_slots,
+    read_version,
+    read_write_idx,
+)
 
-_HEADER_SIZE = 20  # kept for slot-offset arithmetic in test body
-_SLOT_SIZE = 128
+_HEADER_SIZE = SHM_HEADER_SIZE  # kept for slot-offset arithmetic in test body
+_SLOT_SIZE = SLOT_SIZE
 
 # The real Exporter checks the activation barrier on every export; keep it off the production
 # segment a live TD session may hold.
@@ -25,7 +34,7 @@ pytestmark = pytest.mark.usefixtures("isolated_barrier_shm")
 
 
 def _write_header(shm: SharedMemory, version: int, num_slots: int, write_idx: int = 0) -> None:
-    """Write v0.5.0 protocol header into SharedMemory."""
+    """Write the v0.6 protocol header into SharedMemory."""
     layout = SHMLayout(num_slots)
     shm.buf[: layout.total_size] = layout.build_buffer(version=version, write_idx=write_idx)
 
@@ -107,9 +116,9 @@ def test_shutdown_signal_propagation(
     """Test producer sets shutdown flag, consumer detects and cleans up."""
     shared_memory_cleanup.append(temp_shm_name)
 
-    # Setup SharedMemory (v0.5.0 layout)
+    # Setup SharedMemory (v0.6 layout)
     num_slots = 3
-    shm_size = _HEADER_SIZE + num_slots * _SLOT_SIZE + 1 + 20 + 8
+    shm_size = SHMLayout(num_slots).total_size
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
 
     # Write header
@@ -146,9 +155,9 @@ def test_version_change_reinit(cuda_runtime: object, temp_shm_name: str, shared_
     """Test consumer detects version change and re-opens handles."""
     shared_memory_cleanup.append(temp_shm_name)
 
-    # Setup SharedMemory (v0.5.0 layout)
+    # Setup SharedMemory (v0.6 layout)
     num_slots = 3
-    shm_size = _HEADER_SIZE + num_slots * _SLOT_SIZE + 1 + 20 + 8
+    shm_size = SHMLayout(num_slots).total_size
     shm = SharedMemory(name=temp_shm_name, create=True, size=shm_size)
 
     # Write initial header (version 1)
@@ -164,12 +173,12 @@ def test_version_change_reinit(cuda_runtime: object, temp_shm_name: str, shared_
         base_offset = _HEADER_SIZE + slot * _SLOT_SIZE
         shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
-    # Consumer reads version 1 (at offset 4 in v0.5.0 header)
-    version = struct.unpack("<Q", bytes(shm.buf[4:12]))[0]
+    # Consumer reads version 1 (at VERSION_OFFSET 8 in the v0.6 header)
+    version = struct.unpack_from("<Q", shm.buf, VERSION_OFFSET)[0]
     assert version == 1
 
     # Producer re-initializes (version 2)
-    shm.buf[4:12] = struct.pack("<Q", 2)
+    struct.pack_into("<Q", shm.buf, VERSION_OFFSET, 2)
 
     # Free old buffers and allocate new ones
     for ptr in buffers_v1:
@@ -185,7 +194,7 @@ def test_version_change_reinit(cuda_runtime: object, temp_shm_name: str, shared_
         shm.buf[base_offset : base_offset + 64] = bytes(handle.internal)
 
     # Consumer detects version change
-    new_version = struct.unpack("<Q", bytes(shm.buf[4:12]))[0]
+    new_version = struct.unpack_from("<Q", shm.buf, VERSION_OFFSET)[0]
     assert new_version == 2
     assert new_version != version  # Version changed
 

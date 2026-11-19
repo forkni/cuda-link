@@ -1,21 +1,32 @@
 # SPDX-FileCopyrightText: 2026 Alexander Korneev
 # SPDX-License-Identifier: MIT
 """
-SHM protocol v0.5.0 — canonical source of truth for the CUDA IPC shared-memory layout.
+SHM protocol v0.6.0 — canonical source of truth for the CUDA IPC shared-memory layout.
 
 All binary constants, struct codecs, dtype mappings, and publish/acquire ordering
 live here. Every module that reads or writes the SHM region must import from here;
 never define SHM_HEADER_SIZE or _ST_U32 locally.
 
-Binary layout (total = SHMLayout(num_slots).total_size):
-  [0-3]    magic        uint32 LE = PROTOCOL_MAGIC
-  [4-11]   version      uint64 LE (monotonic; incremented each sender init)
-  [12-15]  num_slots    uint32 LE
-  [16-19]  write_idx    uint32 LE (monotonic; 0 = no frames written yet)
-  [20 + slot*128 ...]   IPC handles (64B mem + 64B event per slot, N slots)
-  [20 + N*128]          shutdown_flag uint8
-  [21 + N*128 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
-  [41 + N*128 ...]      timestamp float64 LE (producer monotonic timestamp, perf_counter seconds)
+Binary layout (total = SHMLayout(num_slots).total_size = 48 + N*160), all little-endian:
+  [0-3]    magic        uint32 = PROTOCOL_MAGIC ("CIP6")
+  [4-7]    num_slots    uint32
+  [8-15]   version      uint64 (monotonic; incremented each sender init; 8-aligned)
+  [16-19]  write_idx    uint32 (monotonic; 0 = no frames written yet)
+  [20-23]  sender_pid   uint32 (sender process id; 0 = unknown)
+  [24 + i*160 ...]      slot i: 64B mem handle, 64B event handle, 32B slot meta
+  [24 + N*160]          shutdown_flag uint8
+  [25 + N*160 ...]      metadata 20B (width/height/num_comps/kind/bits/flags/data_size)
+  [45 + N*160 ...]      3B pad (total is a multiple of 8)
+
+Slot meta, relative to the slot base (+128 .. +159):
+  +128 host_timestamp      float64 (sender perf_counter / QPC seconds at publish)
+  +136 producer_frame      uint64  (sender frame number; the cross-stream match key)
+  +144 source_timestamp_us uint64  (optional producer time, not interpreted)
+  +152 stream_id           uint32  (user-set stream name)
+  +156 meta_flags          uint32  (reserved, always 0)
+
+v0.5 (cuda-link 1.x) used magic 0x43495044 ("CIPD") and a different header; it is kept
+as PROTOCOL_MAGIC_V05 only so receivers can name the version mismatch.
 """
 
 from __future__ import annotations
@@ -30,24 +41,36 @@ from typing import NamedTuple
 # Protocol constants
 # ---------------------------------------------------------------------------
 
-PROTOCOL_MAGIC: int = 0x43495044  # "CIPD" — protocol validation magic number (v1.0.0)
+PROTOCOL_MAGIC: int = 0x43495036  # "CIP6" — protocol v0.6 validation magic number
+PROTOCOL_MAGIC_V05: int = 0x43495044  # "CIPD" — v0.5 (cuda-link 1.x); only to name the mismatch
 
 MAGIC_OFFSET: int = 0
 MAGIC_SIZE: int = 4
-VERSION_OFFSET: int = 4
-VERSION_SIZE: int = 8
-NUM_SLOTS_OFFSET: int = 12
+NUM_SLOTS_OFFSET: int = 4
 NUM_SLOTS_SIZE: int = 4
+VERSION_OFFSET: int = 8
+VERSION_SIZE: int = 8
 WRITE_IDX_OFFSET: int = 16
 WRITE_IDX_SIZE: int = 4
-SHM_HEADER_SIZE: int = 20  # 4B magic + 8B version + 4B num_slots + 4B write_idx
+SENDER_PID_OFFSET: int = 20
+SENDER_PID_SIZE: int = 4
+SHM_HEADER_SIZE: int = 24  # 4B magic + 4B num_slots + 8B version + 4B write_idx + 4B sender_pid
 
-SLOT_SIZE: int = 128  # 64B cudaIpcMemHandle_t + 64B cudaIpcEventHandle_t
 IPC_HANDLE_SIZE: int = 64  # cudaIpc{Mem,Event}Handle_t are each 64 bytes
+SLOT_META_OFFSET_IN_SLOT: int = 128  # after the two IPC handles
+SLOT_META_SIZE: int = 32
+SLOT_SIZE: int = 160  # 64B mem handle + 64B event handle + 32B slot meta
+
+# Slot-meta field offsets, relative to the start of the slot meta.
+SLOT_META_HOST_TIMESTAMP_OFFSET: int = 0  # float64
+SLOT_META_PRODUCER_FRAME_OFFSET: int = 8  # uint64
+SLOT_META_SOURCE_TIMESTAMP_US_OFFSET: int = 16  # uint64
+SLOT_META_STREAM_ID_OFFSET: int = 24  # uint32
+SLOT_META_FLAGS_OFFSET: int = 28  # uint32, reserved (0)
 
 SHUTDOWN_FLAG_SIZE: int = 1
 METADATA_SIZE: int = 20  # 4B width + 4B height + 4B num_comps + 1B kind + 1B bits + 2B flags + 4B data_size
-TIMESTAMP_SIZE: int = 8  # float64 LE producer monotonic timestamp (perf_counter seconds)
+TRAILER_PAD_SIZE: int = 3  # pads the total to a multiple of 8
 
 # ---------------------------------------------------------------------------
 # DtypeCodec constants (cudaChannelFormatKind)
@@ -92,7 +115,7 @@ _DECODE_TABLE: dict[tuple[int, int, int], str] = {(e.kind, e.bits, e.flags): nam
 
 _ST_U32 = struct.Struct("<I")  # uint32 LE (write_idx, num_slots, metadata fields)
 _ST_U64 = struct.Struct("<Q")  # uint64 LE (version)
-_ST_F64 = struct.Struct("<d")  # float64 LE (timestamp)
+_ST_SLOT_META = struct.Struct("<dQQII")  # slot meta: host_ts, producer_frame, source_ts_us, stream_id, flags
 _ST_BBH = struct.Struct("<BBH")  # uint8 + uint8 + uint16 LE (format_kind, bits_per_comp, flags)
 
 # ---------------------------------------------------------------------------
@@ -136,9 +159,7 @@ class SHMLayout:
     num_slots: int
 
     def slot_offset(self, i: int) -> int:
-        # SHM_HEADER_SIZE (20) and i*SLOT_SIZE (multiple of 128) share no set
-        # bits for any i >= 0: + == ^ == | here.
-        return SHM_HEADER_SIZE + i * SLOT_SIZE  # pragma: no mutate
+        return SHM_HEADER_SIZE + i * SLOT_SIZE
 
     def mem_handle_offset(self, slot: int) -> int:
         """Byte offset of the 64-byte cudaIpcMemHandle_t within slot *slot*."""
@@ -146,43 +167,105 @@ class SHMLayout:
 
     def event_handle_offset(self, slot: int) -> int:
         """Byte offset of the 64-byte cudaIpcEventHandle_t within slot *slot*."""
-        # slot_offset(slot) always has bit pattern ...0010100 in its low 7 bits
-        # (20 + slot*128); IPC_HANDLE_SIZE=64 occupies only bit 6, which is 0
-        # there: + == ^ == | here for any slot >= 0.
-        return self.slot_offset(slot) + IPC_HANDLE_SIZE  # pragma: no mutate
+        return self.slot_offset(slot) + IPC_HANDLE_SIZE
+
+    def slot_meta_offset(self, slot: int) -> int:
+        """Byte offset of the 32-byte slot meta within slot *slot*."""
+        return self.slot_offset(slot) + SLOT_META_OFFSET_IN_SLOT
 
     @property
     def shutdown_offset(self) -> int:
-        # SHM_HEADER_SIZE (20) and num_slots*SLOT_SIZE (multiple of 128) share
-        # no set bits for any num_slots >= 0: + == ^ == | here.
-        return SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE  # pragma: no mutate
+        return SHM_HEADER_SIZE + self.num_slots * SLOT_SIZE
 
     @property
     def metadata_offset(self) -> int:
-        # shutdown_offset (20 + num_slots*128) and SHUTDOWN_FLAG_SIZE (1) are
-        # bit-disjoint for any num_slots >= 0: + == ^ == | here.
+        # shutdown_offset (24 + num_slots*160) is a multiple of 8 and
+        # SHUTDOWN_FLAG_SIZE (1) is bit 0: + == ^ == | here for any num_slots >= 0.
         return self.shutdown_offset + SHUTDOWN_FLAG_SIZE  # pragma: no mutate
 
     @property
-    def timestamp_offset(self) -> int:
-        return self.metadata_offset + METADATA_SIZE
-
-    @property
     def total_size(self) -> int:
-        return self.timestamp_offset + TIMESTAMP_SIZE
+        return self.metadata_offset + METADATA_SIZE + TRAILER_PAD_SIZE
 
-    def build_buffer(self, *, version: int = 1, write_idx: int = 0) -> bytearray:
-        """Allocate a SHM-sized bytearray with the 20-byte header packed in.
+    def build_buffer(self, *, version: int = 1, write_idx: int = 0, sender_pid: int = 0) -> bytearray:
+        """Allocate a SHM-sized bytearray with the 24-byte header packed in.
 
         Test factories and out-of-process probes use this; production callers use
         publish_frame / bump_version against an existing mmap buffer.
         """
         buf = bytearray(self.total_size)
         _ST_U32.pack_into(buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
-        _ST_U64.pack_into(buf, VERSION_OFFSET, version)
         _ST_U32.pack_into(buf, NUM_SLOTS_OFFSET, self.num_slots)
+        _ST_U64.pack_into(buf, VERSION_OFFSET, version)
         _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, write_idx)
+        _ST_U32.pack_into(buf, SENDER_PID_OFFSET, sender_pid)
         return buf
+
+
+# ---------------------------------------------------------------------------
+# SlotMeta — the 32-byte per-slot metadata block
+# ---------------------------------------------------------------------------
+
+
+class SlotMeta(NamedTuple):
+    """Per-slot metadata the sender writes with each frame (v0.6).
+
+    host_timestamp: sender perf_counter() / QPC seconds at publish.
+    producer_frame: sender frame number (TD absolute frame); 0 = not set.
+    source_timestamp_us: optional producer-supplied time in µs; not interpreted.
+    stream_id: user-set integer naming the stream.
+    meta_flags: reserved, always 0.
+    """
+
+    host_timestamp: float = 0.0
+    producer_frame: int = 0
+    source_timestamp_us: int = 0
+    stream_id: int = 0
+    meta_flags: int = 0
+
+
+EMPTY_SLOT_META = SlotMeta()
+
+
+def read_slot_meta(buf: memoryview, layout: SHMLayout, slot: int) -> SlotMeta:
+    """Read the slot meta of *slot* (plain read; call after the acquire of write_idx)."""
+    return SlotMeta._make(_ST_SLOT_META.unpack_from(buf, layout.slot_meta_offset(slot)))
+
+
+# TD CHOP samples and Info CHOP values are float32, exact for integers only below 2^24.
+# A producer_frame shown in a CHOP channel is producer_frame % INFO_CHOP_FRAME_MOD; compare
+# two such values with (a - b) % INFO_CHOP_FRAME_MOD. Twin of the C++ kInfoChopFrameMod.
+INFO_CHOP_FRAME_MOD = 1 << 24
+
+# Slot meta channels a receiver shows, in order: the In TOP Info CHOP channels and the
+# .tox `slot_meta` Script CHOP use these names, so a B network reads either the same way.
+SLOT_META_CHANNELS = ("producer_frame", "stream_id", "latency_us", "frame_gap_count", "producer_skip_count")
+
+
+class FrameStep(Enum):
+    """Step between two frames a receiver showed (twin of cpp_top core/frame_step.h)."""
+
+    FIRST = 0  # no previous frame on this connection (prev_write_idx == 0)
+    NEXT = 1  # write_idx step 1 and producer_frame step <= 1 (or not set)
+    FRAME_GAP = 2  # write_idx step > 1: the ring overwrote frames before the read
+    PRODUCER_SKIP = 3  # write_idx step 1, producer_frame step > 1: the sender skipped frames
+
+
+def classify_frame_step(
+    prev_write_idx: int, prev_producer_frame: int, write_idx: int, producer_frame: int
+) -> FrameStep:
+    """Classify the step from the previous shown frame to this one.
+
+    producer_frame 0 means "not set" and never counts as a skip; write_idx wraps at 2^32.
+    """
+    if prev_write_idx == 0:
+        return FrameStep.FIRST
+    write_step = (write_idx - prev_write_idx) & 0xFFFFFFFF
+    if write_step > 1:
+        return FrameStep.FRAME_GAP
+    if write_step == 1 and prev_producer_frame != 0 and producer_frame > prev_producer_frame + 1:
+        return FrameStep.PRODUCER_SKIP
+    return FrameStep.NEXT
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +298,7 @@ class Metadata:
         offset = layout.metadata_offset
         _ST_U32.pack_into(buf, offset, self.width)
         _ST_U32.pack_into(buf, offset + 4, self.height)
-        # offset+8 is bit-disjoint (verified for offset >= 0): + == ^ == | here.
-        _ST_U32.pack_into(buf, offset + 8, self.num_comps)  # pragma: no mutate
+        _ST_U32.pack_into(buf, offset + 8, self.num_comps)
         _ST_BBH.pack_into(buf, offset + 12, self.format_kind, self.bits_per_comp, self.flags)
         _ST_U32.pack_into(buf, offset + 16, self.data_size)
 
@@ -227,8 +309,7 @@ class Metadata:
         width = _ST_U32.unpack_from(buf, offset)[0]  # pragma: no mutate
         # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
         height = _ST_U32.unpack_from(buf, offset + 4)[0]  # pragma: no mutate
-        # offset+8 is bit-disjoint (verified for offset >= 0) and _ST_U32 unpacks
-        # exactly 1 field: [0] == [-1]; + == ^ == | and [0] == [-1] both hold here.
+        # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
         num_comps = _ST_U32.unpack_from(buf, offset + 8)[0]  # pragma: no mutate
         kind, bits, flags = _ST_BBH.unpack_from(buf, offset + 12)
         # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
@@ -344,7 +425,7 @@ class DtypeCodec:
 
 
 # ---------------------------------------------------------------------------
-# Header helpers — read/write the 20-byte header region
+# Header helpers — read/write the 24-byte header region
 # ---------------------------------------------------------------------------
 
 
@@ -366,6 +447,37 @@ def read_num_slots(buf: memoryview) -> int:
 def read_write_idx(buf: memoryview) -> int:
     # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
     return _ST_U32.unpack_from(buf, WRITE_IDX_OFFSET)[0]  # pragma: no mutate
+
+
+def read_sender_pid(buf: memoryview) -> int:
+    # _ST_U32 unpacks exactly 1 field; [0] and [-1] are always equal here.
+    return _ST_U32.unpack_from(buf, SENDER_PID_OFFSET)[0]  # pragma: no mutate
+
+
+def write_sender_pid(buf: memoryview, pid: int) -> None:
+    """Write the sender process id. Call before bump_version, so the version fence covers it."""
+    _ST_U32.pack_into(buf, SENDER_PID_OFFSET, pid & 0xFFFFFFFF)
+
+
+SAME_PROCESS_MESSAGE: str = (
+    "sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within one "
+    "process; run the sender in a separate TD instance or use the Python peer"
+)
+
+
+def is_same_process_sender(sender_pid: int, own_pid: int) -> bool:
+    """True when the segment names this process as its sender (0 = unknown: never same)."""
+    return sender_pid != 0 and sender_pid == (own_pid & 0xFFFFFFFF)
+
+
+def protocol_mismatch_message(magic: int) -> str:
+    """Return the receiver error text for a segment whose magic is not PROTOCOL_MAGIC."""
+    if magic == PROTOCOL_MAGIC_V05:
+        return "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"
+    return (
+        f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
+        "The SHM name is in use by an unrelated process."
+    )
 
 
 def bump_version(buf: memoryview) -> int:
@@ -397,8 +509,20 @@ def set_version(buf: memoryview, version: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def publish_frame(buf: memoryview, layout: SHMLayout, write_idx: int, timestamp: float) -> None:
-    """Write timestamp, clear shutdown_flag, fence, then publish write_idx LAST.
+def publish_frame(
+    buf: memoryview,
+    layout: SHMLayout,
+    write_idx: int,
+    *,
+    host_timestamp: float,
+    producer_frame: int = 0,
+    source_timestamp_us: int = 0,
+    stream_id: int = 0,
+) -> None:
+    """Write the slot meta, clear shutdown_flag, fence, then publish write_idx LAST.
+
+    The frame goes to slot (write_idx - 1) % num_slots, and its slot meta is written
+    there before the fence, so a consumer that acquires write_idx sees it.
 
     Ordering is critical: the consumer reads shutdown_flag BEFORE write_idx.
     Clearing shutdown_flag before incrementing write_idx ensures the consumer
@@ -406,7 +530,16 @@ def publish_frame(buf: memoryview, layout: SHMLayout, write_idx: int, timestamp:
 
     Callers must not replicate this sequence outside this function.
     """
-    _ST_F64.pack_into(buf, layout.timestamp_offset, timestamp)
+    slot = (write_idx - 1) % layout.num_slots
+    _ST_SLOT_META.pack_into(
+        buf,
+        layout.slot_meta_offset(slot),
+        host_timestamp,
+        producer_frame & 0xFFFFFFFFFFFFFFFF,
+        source_timestamp_us & 0xFFFFFFFFFFFFFFFF,
+        stream_id & 0xFFFFFFFF,
+        0,
+    )
     buf[layout.shutdown_offset] = 0
     _release_fence()  # C3 release barrier: shutdown_flag visible before write_idx
     _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, write_idx)
@@ -452,7 +585,7 @@ class AcquireResult(NamedTuple):
 
     state: SlotState
     slot: int = -1
-    timestamp: float = 0.0
+    slot_meta: SlotMeta = EMPTY_SLOT_META
     new_version: int = 0
     write_idx: int = 0
 
@@ -490,10 +623,6 @@ def acquire_slot(
         return AcquireResult(state=SlotState.NO_FRAME)
 
     slot = (write_idx - 1) % layout.num_slots
-    try:
-        # _ST_F64 unpacks exactly 1 field; [0] and [-1] are always equal here.
-        timestamp = _ST_F64.unpack_from(buf, layout.timestamp_offset)[0]  # pragma: no mutate
-    except struct.error:
-        timestamp = 0.0
-
-    return AcquireResult(state=SlotState.NEW_FRAME, slot=slot, timestamp=timestamp, write_idx=write_idx)
+    # The slot meta lies before the shutdown byte read above, so it is always in the buffer.
+    slot_meta = read_slot_meta(buf, layout, slot)
+    return AcquireResult(state=SlotState.NEW_FRAME, slot=slot, slot_meta=slot_meta, write_idx=write_idx)

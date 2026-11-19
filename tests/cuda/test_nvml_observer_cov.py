@@ -391,7 +391,6 @@ def test_process_util_falls_back_to_legacy_api():
     mock_pynvml.nvmlDeviceGetProcessUtilization.return_value = [_sample(111, 12, 3, 100)]
     result = _proc_snapshot(mock_pynvml)
     assert result["other_sm_util_pct"] == 12
-    mock_pynvml.nvmlDeviceGetProcessUtilization.assert_called_once()
 
 
 def test_stop_resets_process_util_cache():

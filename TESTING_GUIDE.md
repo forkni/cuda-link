@@ -27,10 +27,84 @@ python -m pytest tests/ -q
 
 Test order is randomized every run (`pytest-randomly`, fresh seed). Reproduce an
 ordering failure with `pytest --randomly-seed=<N>` (the seed is printed in the header).
+To pin the order (bisecting, mutation runs) use a fixed `--randomly-seed=<N>`, **not**
+`-p no:randomly`: `addopts` passes `--randomly-dont-reset-seed`, which is an unknown argument
+once the plugin is off, so pytest exits with a usage error.
 
-## Current baseline (2026-10-22, Phase I audit)
+Replaying past fixes (`replay_fixes.py` from the harden-test-suite skill) needs one extra step on
+this repo. The scikit-build-core editable install (`_editable_skbc_cuda_link`) maps `cuda_link` to
+the main checkout ahead of `PYTHONPATH`, so the throwaway worktree's `src/` would be ignored and the
+control run goes red. Put a directory holding this `sitecustomize.py` on `PYTHONPATH` (the script
+appends it after the worktree paths):
 
-**Supersedes the 2026-10-19 table below.** Measured on `development` at `1da5339` (PRs #79-#87
+```python
+import sys
+
+sys.meta_path[:] = [f for f in sys.meta_path if "_editable_skbc" not in type(f).__module__]
+```
+
+and pass the venv interpreter as an **absolute** path in `--test-command`, since the command runs
+inside the worktree.
+
+## Current baseline (2026-11-18, Phase J audit)
+
+**Supersedes the 2026-10-22 table below.** Measured on `feat/orbbec-v0.6` at `35d207d` (86 commits
+after Phase I: SHM protocol v0.6 slot meta, producer/consumer doorbell defaults, Receiver
+Framewaitms), before any Phase J change. **Linux** (cloud container, Python 3.12, `uv sync --locked
+--extra dev`, CPU torch), not the Windows box of earlier audits: the Win32-only paths skip here, so
+the coverage figures are not directly comparable with the table below (see the platform note).
+
+| Metric | Value |
+|--------|-------|
+| Tests (no-GPU selection) | 1717 passed + 18 skipped, 68 deselected (1492 `def test_`) |
+| Skips | 18, all platform with a stated reason: 10 Win32 named events (`_doorbell`), 6 Win32 console handler (`_console`), 2 compiled native module. Ratio 1.0 %, under `max_ratio = 0.02` |
+| No-GPU wall clock | 18.4-18.9 s (10 runs); 34 s with `--cov --cov-branch` |
+| Slowest tests | 4.5 s and 1.8 s (the two subprocess `-O` import tests; by design); next 0.6 s |
+| Branch coverage, clean run | 91.72 % combined (`--cov`, 5671 stmts, 425 miss), gate 91 passes. `cuda_link` 97 % (99 % without the Win32-only `_doorbell`/`_console`), `td_exporter` 84 % |
+| Patch coverage of the v0.6 work | 94.4 % of the 468 executable lines added since `cb7e951` (the Phase I record) |
+| Order independence / flakiness | 10/10 randomized runs green, identical counts; `rank_failures.py`: no failing test |
+| Past-fix recall (`replay_fixes.py --last 12`) | **5/5 = 100 %** caught; 7 skipped (no test change, cpp-only, or merge). Needs the editable-finder bypass below |
+| Test smells (AST scanner) | **33 vs baseline 19: ratchet red.** 14 new findings, all in v0.6 tests: 7 `parametrize-no-ids`, 4 `bitwise-assert`, 2 `overprotective`, 1 `no-assert`. Fixed in J1 |
+| Functions over CRAP 30 | `cuda_link`: `Exporter.export` 47 (CC 47, 100 % covered), `_do_cleanup` 32, `_console._ctrl_handler` 30 (Win32-only, 0 % on Linux). `td_exporter`: `TDSender.export_frame` 68.1, `_refresh_on_version_change` 52.2, `import_frame` 48.6, launcher `onExit` 42 ×2, `initialize_receiver` 34.5 |
+| C901 (ruff, max 43) | passes; `export` still at 43, the ceiling |
+| Logic in test bodies | 412 `if/for/while/try` lines (368 at Phase I); top files unchanged |
+| Sleeps | 1 real sleep in the no-GPU suite (`test_exporter_cov_cleanup.py`, past a 0.5 s join deadline) + 3 polls in the GPU roundtrip; the other `sleep` hits are `mock_time.sleep` asserts |
+| Code pollution (`TESTING`, `is_test`) | none in `src/` or `td_exporter/` |
+| Mutation score | at the audit: stale for `shm_protocol`, `_exporter_port` and `_importer_port` (all changed in v0.6 after I2/I4). After J2/J5: all three **100 %**, 0 genuine survivors (13 proven-equivalent survivors documented, not pragma'd: 12 `shm_protocol`, 1 `_exporter_port`; confirmed on Windows, A3). `_env`, `activation_barrier`, `_profile`: unchanged since their runs (SPDX headers only) |
+| Low-value tests identified (J6 prune) | 16 flagged in the v0.6 tests and the suite-wide duplicate scan: 11 duplicates, 1 stub-interaction assert, 1 internal-method spy, 2 truthy-flag asserts, 1 borderline sanity check |
+| Tests deleted / rewritten (J6) | 11 deleted, 4 rewritten, 1 kept with a written justification; plus the 14 smell fixes of J1 |
+
+Platform note: on Windows the 16 Win32 skips run and `_doorbell.py`/`_console.py` are covered, so
+the combined figure there is higher. The `fail_under = 91` margin on Linux is 0.7 points. CI's own
+leg measures `--cov=cuda_link` only (97 % here), so it is not at risk.
+
+Audit findings that need a change to a gate or config file, so they are **not** in J1 (they go in
+their own PR; see the review rule on gate files). All six are handled in J3 below:
+
+- **Coverage measures fake packages.** `source = ["cuda_link", ...]` matches by package name, so the
+  throwaway `cuda_link/` trees that the bootstrap tests build under `tmp_path` show up as 0-statement
+  rows, and `coverage lcov`/`json` fail with "No source for code" unless run with `-i`. The total is
+  unaffected. Fix: `source_pkgs`/`source` with paths, or `omit = ["*/pytest-of-*/*"]`.
+- **`-p no:randomly` cannot be used.** `addopts` passes `--randomly-dont-reset-seed`, which is an
+  unknown argument once the plugin is off. Pin order with `--randomly-seed=<N>` instead (the bisect
+  recipe in the harden-test-suite skill uses `-p no:randomly`; on this repo use the seed form).
+- **`replay_fixes.py` needs the scikit-build-core finder removed.** The editable install
+  (`_editable_skbc_cuda_link`) maps `cuda_link` to the main checkout ahead of `PYTHONPATH`, so a
+  worktree's `src/` is ignored. Without a bypass the control run goes red (the fix commit's tests run
+  against HEAD's code). Bypass used here: a `sitecustomize.py` on `PYTHONPATH` that removes the
+  `_editable_skbc` finder from `sys.meta_path`; checked by importing a fake package from a scratch
+  `src/` with and without it.
+- **Ruff pins disagree.** `uv.lock` resolves ruff 0.17.4, `.pre-commit-config.yaml` pins
+  `ruff-pre-commit` v0.14.11, and the deferral table below said 0.17.0.
+- **Scanner upgrade available.** The skill's `scan_test_smells.py` adds a report-only `real-clock`
+  smell (5 hits here, none flaky in 10 runs: bounds such as `t_before <= host_timestamp <=
+  perf_counter()`). Report-only, so vendoring it needs no baseline change.
+- **CI passes no `--cov-fail-under=0`**, so the local `fail_under` also gates CI's `--cov=cuda_link`
+  leg. Harmless today (97 % vs 91).
+
+## Previous baseline (2026-10-22, Phase I audit)
+
+(Historical — see the current baseline above.) Measured on `development` at `1da5339` (PRs #79-#87 Measured on `development` at `1da5339` (PRs #79-#87
 merged), Python 3.12.11, Windows, before any Phase I change.
 
 | Metric | Value |
@@ -65,7 +139,7 @@ CI never sees these because it deselects `requires_cuda`.
   regression. Product note: the Importer reports this as "Producer not yet available" and retries,
   which hides a permanent local failure.
 
-## Previous baseline (2026-10-19, post Phase H2)
+## Baseline metrics (2026-10-19, post Phase H2)
 
 (Historical — see the current baseline above.)
 
@@ -202,15 +276,27 @@ the ctypes/DLL boundary (classicist-compliant), so a mutation score there would
 measure the mocks, not the logic. They form the de-mocking backlog: a module
 graduates to a mutation target only when its mock density approaches zero.
 
-Workflow (Windows; note the **absolute interpreter path** in each `cr-*.toml` —
-bare `python` resolves through the App Paths registry to a different environment):
+Workflow, from the root of any checkout (a git worktree too) on Windows or Linux. Each
+`cr-*.toml` runs its tests with `uv run --no-sync python`, which uses the `.venv` of the checkout
+you are in. Do not put an interpreter path back into a config:
+
+- An absolute path to another checkout's venv imports that checkout's `src` (its editable
+  install wins over `pythonpath`). The run then mutates one file and tests another, so every
+  mutant survives.
+- A relative `.venv/Scripts/python.exe` is not found by Windows `CreateProcess`. Every run is
+  then `INCOMPETENT`, and `cosmic-ray baseline` still prints "Baseline passed": it fails only on
+  `KILLED`.
 
 ```bash
 python -m cosmic_ray.cli init cr-<target>.toml cr-<target>.sqlite
-python -m cosmic_ray.cli baseline cr-<target>.toml     # must pass on unmutated source
+python -m cosmic_ray.cli baseline cr-<target>.toml     # see the note below: a pass proves little
 python -m cosmic_ray.cli exec cr-<target>.toml cr-<target>.sqlite   # sequential, long
 cr-report cr-<target>.sqlite
 ```
+
+`baseline` exits 0 and logs "Baseline passed" even when the test command cannot start, so a pass
+proves nothing. Read `cr-report` after `exec` instead. If it shows a large share of `incompetent`
+or of survivors, the command did not run the tests you expect.
 
 The `cr-*.sqlite` session databases are regenerated artifacts and gitignored.
 `cr-activation_barrier.toml` must never run concurrently with another pytest run or
@@ -810,20 +896,320 @@ What changed:
 
 Score = killed / (killed + genuine survivors); pragma'd survivors are excluded.
 
+## Campaign record — Phase J (2026-11-18)
+
+Audit numbers are in the current baseline above. The v0.6 work (86 commits) landed with good patch
+coverage (94.4 %) and a 100 % past-fix recall, but pushed the smell ratchet from 19 to 33. J1 brings
+it back without touching the baseline file; J2 re-runs mutation testing on `shm_protocol.py`; J3 handles the gate and config findings; J4 adds Hypothesis properties; J5 re-runs mutation testing on the two port modules; J6 is the Phase 0.5 prune.
+
+### J1 — Smell ratchet back to the baseline (test code only)
+
+The 14 findings new since Phase I (found by scanning `cb7e951`'s `tests/` with the same scanner and
+diffing the lists; the 19 baseline findings are unchanged). No production file, `conftest.py`,
+baseline or gate was edited.
+
+| Finding | Tests | Verdict | Change |
+|---------|-------|---------|--------|
+| `parametrize-no-ids` ×7 | `test_classify_frame_step` (13 rows), the two `GpuFrame` range/type tables, `test_sender_invalid_streamid_is_zero`, `test_frame_delta_wraps`, `test_shmlayout_formula_matches_golden_and_python`, the Framewaitms cook decision | real (K 5.8) | `ids=` naming each case. `test_classify_frame_step` keeps plain tuples, so `test_cpp_frame_step_cases_match_python_table` still reads the table from `pytestmark` |
+| `bitwise-assert` ×4 | range limits, frame-mod parity, sender/receiver frame wrap | the shifts stood for named values | `_U32_MAX`/`_U64_MAX`; `INFO_CHOP_FRAME_MOD + 17` and `3 * INFO_CHOP_FRAME_MOD + 9`; the C++ parity test asserts the parsed shift `"24"` and the literal `16_777_216` |
+| `overprotective` ×2 | `m is not None` (frame-mod parity), `msg is not None` (`check_ipc_capability` degrade) | real (K 4.9) | guard deleted; the next line fails anyway |
+| `no-assert` ×1 | `test_script_top_slot_meta_cook_never_raises` | half real | split: `..._swallows_a_failing_cook` asserts the outgoing `cook(force=True)` happened before the error was swallowed (a mock on a command, allowed); the two no-CHOP cases keep "returns without raising" as their whole contract, with `# smell: ignore[no-assert]` and the reason in the docstring |
+
+The range-limit test now checks all three fields at their maximum instead of `stream_id` alone.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| Smell scanner total | 33 (ratchet red) | **19** (= `.smell-baseline.json`, ratchet OK) |
+| No-GPU selection | 1717 passed + 18 skipped | 1719 passed + 18 skipped (+2 from the split) |
+| Branch coverage, combined (Linux) | 91.72 % | 91.72 % |
+| Touched files under seeds 1, 2, 3 | n/a | 143 passed + 8 skipped each |
+
+Break and revert (source edited, touched tests run, source restored from git):
+
+| Mutant | Old tests | New tests |
+|--------|-----------|-----------|
+| `_cook_slot_meta`: `except Exception` narrowed to `(AttributeError, LookupError)` | 1 failed | **2 failed** (the new cook-raises case also catches it) |
+| `INFO_CHOP_FRAME_MOD = 1 << 23` | failed | failed (`test_info_chop_frame_mod_matches_cpp`) |
+
+### J2 — Mutation re-run on `shm_protocol.py`
+
+`shm_protocol.py` changed by 185+/54- lines since the I2 run (v0.6 header with `sender_pid`, the
+32-byte slot meta, `classify_frame_step`, `protocol_mismatch_message`). Whole-module cosmic-ray
+8.9.0 run on Linux, test command = the module's four direct test files (below), `--randomly-seed=1`,
+`cr-filter-pragma` before `exec`.
+
+| Measure | I2 (2026-10-22) | J2 first run | After kill-tests |
+|---------|-----------------|--------------|------------------|
+| Mutants | 506 | 774 (112 pragma'd, 662 run) | 774 |
+| Killed | | 639 | **651** |
+| Survivors, genuine / proven equivalent | 0 / 52 pragma'd | 12 / 11 | **0** / 11 |
+| Score | 100 % | 98.2 % | **100 %** |
+| No-GPU selection | | 1719 passed + 18 skipped | 1726 passed + 18 skipped (+7) |
+| C++ `topcore_tests` (core-only build) | | 304 checks | 306 checks (+2) |
+
+Score = killed / (killed + genuine survivors); proven-equivalent survivors are excluded. Of the 639
+first-run kills, 612 are test failures, 20 are syntax-invalid mutants (an operator in place of the
+keyword-only `*`), 6 are `x ** 0xFFFFFFFF` timeouts and 1 is a `metadata_offset << 23` allocation
+the kernel OOM-killed; each is a real detection. "After" was checked by re-applying each of the 23
+survivor diffs from the session database to the source, running the test command, and restoring the
+file from git; a full second session was not run, because the change only adds tests and cannot
+un-kill a mutant.
+
+**Kill-tests (7), each from the spec, each with the mutant it kills:**
+
+| Test | Mutants killed (line: operator) | What it pins |
+|------|---------------------------------|--------------|
+| `test_publish_frame_without_slot_meta_writes_not_set` | 518, 520: `NumberReplacer` ×4 (`producer_frame`/`stream_id` defaults to 1 and -1) | slot meta not passed reads back as 0, the `SlotMeta` "not set" |
+| `test_publish_frame_keeps_slot_meta_at_its_range_limits` | 539: `BitAnd_Mod` (`& U64_MAX` -> `% U64_MAX`) | u64/u64/u32 maxima are written unchanged |
+| `test_is_same_process_sender_lower_sender_pid_is_another_process` | 470: `Eq_LtE` | a sender pid below our own pid is another process |
+| `test_protocol_mismatch_message_zeroed_segment_is_not_v05` | 475: `Eq_LtE` | the v0.6 magic is below the v0.5 one, so `<=` named a zeroed segment "v0.5" |
+| `test_protocol_mismatch_message_names_v05_magic_read_from_the_segment` | 475: `Eq_Is` | the magic comes from a buffer read, an equal int that is not the constant object |
+| `classify_frame_step` row `next_from_odd_producer_frame` (5, 101, 6, 102) | 266: `Add_BitOr`, `Add_BitXor` | every existing row had an even previous frame, where `\| 1` and `^ 1` equal `+ 1` |
+| `classify_frame_step` row `same_write_idx_producer_frame_jump` (5, 100, 5, 102) | 266: `Eq_LtE` | a skip needs write_idx step 1, not step 0 |
+
+The two table rows were added to the C++ twin's `test_frame_step_classification` as well, because
+`test_cpp_frame_step_cases_match_python_table` requires the two tables to be equal. The C++ side had
+the same hole: with `write_step <= 1` in `frame_step.h` the old C++ tests pass (304 checks, 0
+failures); with the new rows that mutant and `(prev_producer_frame | 1)` each fail one check.
+All new Python tests pass under seeds 1, 2 and 3.
+
+**Proven equivalent, left unpragma'd (12 mutants in the rows below; the J2 Linux run reported 11,
+see the Windows follow-up A3 row).** cosmic-ray's pragma is whole-line only
+(`.*#.*pragma:.*no mutate.*`). On lines 266 and 470 it would also hide the mutants the new tests kill,
+and on 162, 178 and 300 it would hide the `+`/`*` mutants that are killed today, so none was added.
+The next run will show these 11 again; this table is the reference:
+
+| Line | Mutant(s) | Why equivalent |
+|------|-----------|----------------|
+| 162 `slot_offset`, 178 `shutdown_offset` | `24 + n*160` -> `\|`, `^` (×4) | `n*160` is a multiple of 32 (bits 5 and up); 24 is bits 3 and 4: no shared bit for any `n >= 0`, so `+`, `\|` and `^` agree |
+| 300 `Metadata.pack_into` | `offset + 4` -> `\|`, `^` (×2) | `metadata_offset = 25 + 160 * num_slots`: bit 2 is always clear. (`+8`, `+12`, `+16` do overlap and are killed) |
+| 248, 251 `FrameStep` | `FIRST = -1`, `PRODUCER_SKIP = 4` | no code reads `.value` (searched `src/` and `td_exporter/`); the mutants that collide with another member become aliases and are killed |
+| 261 | `prev_write_idx == 0` -> `<= 0` | write_idx is a u32 read, never negative |
+| 266 | `write_step == 1` -> `>= 1` | the `> 1` return above leaves `write_step` in {0, 1} |
+| 266 | `prev_producer_frame != 0` -> `> 0` | producer_frame is a u64 read, never negative |
+| 470 | `sender_pid != 0` -> `> 0` | sender_pid is a u32 read, never negative |
+
+Tooling: the committed `cr-shm_protocol.toml` ran only `test_shm_protocol.py`, which would report
+every slot-meta and `classify_frame_step` mutant as a survivor. Its `test-command` now lists the four
+direct test files (`test_shm_protocol`, `test_slot_meta_fields`, `test_golden_shm_fixtures`,
+`test_cpp_protocol_parity`); the Windows interpreter path is unchanged. The `td/` tests import the
+`td_exporter` mirror, which a run does not mutate, and the importer/integration tests are mock-heavy,
+so neither is in the set. Production code is unchanged in J2.
+
+### J3 — Gate and config findings
+
+The six findings listed under the current baseline. Config, tooling and docs only: no production
+code, test or `conftest.py` change, and no gate value moved (`fail_under` stays 91, the smell
+baseline stays 19). Committed on its own, apart from J1/J2, so it can be reviewed or split onto
+its own branch.
+
+| Finding | Decision | Change |
+|---------|----------|--------|
+| Coverage measures the fake `cuda_link/` trees under `tmp_path` | fixed | `[tool.coverage.run] source` names `src/cuda_link` as a path instead of the package name `cuda_link` |
+| `-p no:randomly` is a usage error | documented, config kept | "Running the suite" says to pin order with `--randomly-seed=<N>`. `--randomly-dont-reset-seed` stays: dropping it would reseed `random` before every test, which changes what the suite runs, and no reason for it was recorded |
+| `replay_fixes.py` and the scikit-build-core finder | documented | the `sitecustomize.py` bypass and the absolute `--test-command` interpreter, in "Running the suite" |
+| Ruff pins disagree | fixed | `.pre-commit-config.yaml` `ruff-pre-commit` v0.14.11 -> **v0.17.4**, equal to `uv.lock` (the tag exists upstream). `ruff check .` and `ruff format --check .` under 0.17.4: clean |
+| Newer smell scanner | vendored | `scripts/scan_test_smells.py` now has the report-only `real-clock` smell (5 hits, out of the total and the baseline). Formatted to repo style. Ruff's C419 fix ("unnecessary list comprehension in `any()`") is wrong in two places, because `taint()` has side effects and a generator would stop at the first hit, so they carry a `noqa` with that reason. The upstream skill copy has the same two lines |
+| CI passes no `--cov-fail-under=0` | **kept as is, on purpose** | `codecov.yml` records the choice: the project floor is enforced *inside* CI by `fail_under`, and Codecov patch coverage (80 %) is the per-change gate. The harden-test-suite skill's default (a local-only ratchet) does not apply here |
+
+| Measure | Before | After |
+|---------|--------|-------|
+| Combined branch coverage (Linux, bare `--cov`) | 91.72 % (5671 stmts, incl. 29 fake-tree statements counted as covered) | **91.69 %** (5642 stmts); gate 91 passes |
+| `coverage lcov` / `coverage json` | fail without `-i` | work |
+| CI-style `--cov=cuda_link` | 96.87 % | 96.87 % (unchanged: CI measures the installed wheel by package name, so its 29 fake-tree statements remain, +0.03 points) |
+| Smell scanner | 19, OK | 19, OK (`real-clock` 5, report only) |
+| `ruff check .` / `ruff format --check .` | clean | clean |
+| No-GPU selection | 1726 passed + 18 skipped | 1726 passed + 18 skipped |
+
+The 0.03-point drop is the honest denominator, not lost coverage. The Linux margin over `fail_under`
+is now 0.69 points; on Windows the Win32 paths run and the figure is higher.
+
+### J4 — Property tests on the v0.6 pure cores (Hypothesis)
+
+PLAYBOOK Phase 4.1: each pure core gets a property before (or alongside) mutation testing, because
+the agent that writes the code also picks the examples. J2 killed its survivors with hand-picked
+rows; J4 adds generated inputs for the same cores. New file `tests/core/test_protocol_properties.py`,
+15 tests, every expected value from a documented contract (the `SlotMeta`, `FrameStep` and
+`GpuFrame` docstrings), none recomputed with the code under test.
+
+| Core | Property |
+|------|----------|
+| `publish_frame` -> `acquire_slot` | for any ring size 1-10, any non-zero write_idx, any finite timestamp and the full u64/u64/u32 field ranges, `acquire_slot` returns `NEW_FRAME` at that write_idx with exactly the slot meta written |
+| `classify_frame_step` | one property per docstring rule: no previous frame is `FIRST`; write_idx step >= 2 (across the wrap) is `FRAME_GAP`; step 0 is `NEXT` whatever producer_frame says; step 1 with a producer jump >= 2 is `PRODUCER_SKIP`; the steady state (+1/+1, from any previous frame) is `NEXT`; a repeated or restarted producer_frame is `NEXT`; an unset previous producer_frame is never a skip. Plus: the result is invariant under shifting both write_idx values by the same amount mod 2^32 |
+| `GpuFrame` | per slot meta field: every value in range is accepted and kept; every value outside it raises `ValueError` naming the field |
+
+Setup (the dependency and `conftest.py` change, stated here because they touch the suite's own
+configuration; no gate value changed):
+
+- `hypothesis>=6.116` in the `dev` extra (`settings.get_profile("ci")` needs 6.116). `uv.lock` adds
+  only `hypothesis` (6.141.1 on Python 3.9, 6.168.5 and 6.170.15 on newer forks) and
+  `sortedcontainers`.
+- `tests/conftest.py` registers `ci` (Hypothesis's own derandomized profile: `derandomize=True`,
+  `deadline=None`, no database) and `dev` (`max_examples=50`), and loads `HYPOTHESIS_PROFILE`, else
+  `ci` when `CI` is set (GitHub Actions sets it), else `dev`. The import is guarded: the
+  `requires_native` CI legs install only `pytest` + `pytest-randomly` and still load the file.
+  Checked: no variable -> 50 examples per test, `CI=1` or `--hypothesis-profile=ci` -> 100; two `ci`
+  runs draw identical examples.
+- `cr-shm_protocol.toml` runs the property file too, with `--hypothesis-profile=ci`.
+
+Break and revert (source edited, the property file alone run under `ci`, source restored from git):
+
+| Deliberate break | Properties |
+|------------------|------------|
+| `publish_frame`: `stream_id & 0xFFFF` (u16 truncation) | 1 failed |
+| `classify_frame_step`: `prev + 1` -> `prev \| 1` | 1 failed |
+| `classify_frame_step`: `prev + 1` -> `prev ^ 1` | 2 failed |
+| `classify_frame_step`: `write_step == 1` -> `<= 1` | 1 failed |
+| `classify_frame_step`: the u32 wrap mask dropped | 3 failed |
+| `GpuFrame`: `value < limit` -> `<= limit` | 3 failed |
+
+The first draft let the `| 1` break through: its "no jump is NEXT" strategy drew the current frame
+from `0..prev+1`, so the boundary `prev + 1`, where that bug lives, came up about once in `prev`
+draws. The steady state is now its own property (`current = prev + 1` over previous frames of both
+parities) and repeats/restarts are a second one (`current <= prev`). A property that misses the
+boundary is the same blind spot as a hand-picked table.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1726 passed + 18 skipped | **1741 passed + 18 skipped** (+15) |
+| Branch coverage, combined (Linux) | 91.69 % | 91.69 % (the lines already ran) |
+| Property file runtime | n/a | about 1 s under `ci` (100 examples per test) |
+| Smell scanner / skip ratio / ruff | OK | OK |
+| Touched file under seeds 1, 2, 3 | n/a | 15 passed each |
+
+Found on the way: ruff 0.17 also formats Python code blocks inside Markdown, and the J3
+`sitecustomize.py` snippet in this guide failed `ruff format --check .` (a missing blank line), so
+J3 as first pushed would have failed CI's format step. Fixed in its own commit (`64b43ed`).
+
+### J5 — Mutation re-run on `_exporter_port.py` and `_importer_port.py`
+
+Both were at 100 % after I4 and changed in v0.6: `_exporter_port.py` +53/-6 (`GpuFrame` slot meta
+fields and their `_check_uint` range check, producer doorbell on by default), `_importer_port.py`
++11/-5 (consumer doorbell on by default). The other I2/I4 targets (`_env`, `activation_barrier`)
+changed only by an SPDX header, so their scores stand. Whole-module cosmic-ray 8.9.0 runs on Linux,
+`--randomly-seed=1`, `--hypothesis-profile=ci`, `cr-filter-pragma` before `exec`, and
+`-m "not requires_cuda and not requires_native"` in the Linux test command (one test in
+`test_exporter_port.py` needs a real CUDA runtime; the committed Windows configs keep it).
+
+| Target | Measure | I4 (2026-10-22) | J5 first run | After kill-test |
+|--------|---------|-----------------|--------------|-----------------|
+| `_exporter_port.py` | Mutants | 114 | 184 (50 pragma'd, 134 run) | 184 |
+| | Killed | | 127 | **133** |
+| | Survivors, genuine / proven equivalent | 0 / 50 pragma'd | 6 / 1 | **0** / 1 |
+| | Score | 100 % | 95.5 % | **100 %** |
+| `_importer_port.py` | Mutants | 88 | 89 (4 pragma'd, 85 run) | 89 |
+| | Killed / survivors | | 85 / 0 | 85 / 0 |
+| | Score | 100 % | **100 %** | 100 % |
+
+Score = killed / (killed + genuine survivors). Every kill was checked: 6 have no "N failed" line, and
+all are `is` / `is not` against a literal, which Python reports as a `SyntaxWarning` that
+`filterwarnings = ["error"]` turns into a collection error (a real detection).
+
+**The six genuine survivors** were `_check_uint`'s `bits` argument at each call site, 64 -> 63/65
+and 32 -> 31/33. `bits` only feeds the error text ("GpuFrame.stream_id must be in 0..2^32-1"), and
+every test matched the field name alone, so a message stating the wrong range passed. Kill-test:
+`test_gpuframe_rejects_every_out_of_range_slot_meta_value` now matches
+`GpuFrame.<field> must be in <range>` with the range as the `GpuFrame` docstring states it, a literal
+per field ("0..2^64-1", "0..2^32-1"), not computed from `bits`. Each of the 7 survivor diffs was
+re-applied to the source and the test command run: 6 killed (one failure each). The test passes
+under seeds 1, 2 and 3.
+
+**Proven equivalent (1, unpragma'd):** line 155, `type(value) is not int` -> `!=`. `type.__eq__`
+is identity, so the two always agree. Not pragma'd: the pragma is whole-line, and the line's other
+mutants (`is` -> `is not` and the like) are killed today.
+
+Tooling: `cr-exporter_port.toml` ran only `test_exporter_port.py`, which has no slot meta test at
+all. Checked: with `0 <= value <= limit` in `_check_uint`, that file passes (78 passed), so every
+`_check_uint` mutant would read as a survivor. Its `test-command` now adds `test_slot_meta_fields.py`
+and `test_protocol_properties.py`, with `--hypothesis-profile=ci`. `cr-importer_port.toml` is
+unchanged (the doorbell default is pinned in `test_importer_port.py`). No production code changed.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1741 passed + 18 skipped | 1741 passed + 18 skipped (one test's assertion tightened) |
+| Smell scanner / ruff | OK | OK |
+
+### J6 — Phase 0.5 prune after v0.6
+
+PLAYBOOK Phase 0.5 runs at the start of a campaign and after each large feature. Scope: the 128 test
+functions the v0.6 work added (new since `cb7e951`), plus a suite-wide scan for identical test bodies
+(AST of each body, docstring and imports stripped, annotations ignored on a second pass).
+Pre-screen: tests with no assertion, only weak assertions (`x is not None`, a bare truthy name,
+`isinstance`), or at least as many interaction checks (`assert_called*`, `call_count`) as assertions.
+Every flagged test was read; verdicts follow TEST-VALUE.md's delete/rewrite/keep rule.
+
+| Test(s) | Verdict | Why |
+|---------|---------|-----|
+| 10 GPU-free tests at the bottom of `tests/cuda/test_cuda_ipc_wrapper.py` (3 `_check_pointer_attributes_abi`, 7 `check_ipc_capability`) and their 2 helpers | **deleted** | identical to the same 10 tests and helpers in `test_wrapper_cov_methods.py`, the file whose docstring makes it the GPU-free home for wrapper methods; both copies ran in CI. Both came in through merges (`7afaa84`, PR #83). The surviving `..._degrades_on_query_failure` also gets J1's overprotective-guard removal |
+| `test_fake_adapter_satisfies_protocol_with_new_methods` (`test_exporter_port.py`) | **deleted** | byte-identical to `test_fake_adapter_satisfies_protocol` in the same file (pre-existing, found by the scan) |
+| `test_process_util_falls_back_to_legacy_api` (`test_nvml_observer_cov.py`) | **rewritten** | asserted `assert_called_once()` on the legacy NVML query, a stub that feeds data in (TEST-DOUBLES: never assert interactions with a stub); `other_sm_util_pct == 12` already proves the fallback ran. The call assertion is removed |
+| `test_initialize_propagates_ipc_capability_failure_and_cleans_up` (`test_exporter_python.py`) | **rewritten** as `..._and_leaves_nothing_behind` | spied on `Exporter._do_cleanup`, an internal method, and asserted its `cuda_valid` keyword. Now asserts the documented outcome: the error propagates, `FakeCUDAAdapter.allocations` is empty, and no SharedMemory segment exists under the name |
+| `test_two_ahead_is_mismatch`, `test_unknown_cache_is_mismatch` (`test_sync_rule_example.py`) | **rewritten** | `assert mismatch` passes for any truthy value; both now compare the whole `(sel, mismatch, t)` tuple the rule documents ("otherwise -> live, and this B cook is a mismatch"), as their neighbours do |
+| `test_regex_finds_the_expected_constants` (`test_cpp_protocol_parity.py`) | **kept** | the parity tests would `KeyError` per constant anyway, but this reports a broken header regex as one failure that lists every missing name; one line, no upkeep |
+
+Break and revert for the rewritten cleanup test: with `check_ipc_capability()` moved after the
+allocations and the SharedMemory creation, and `open()`'s failure cleanup removed, it fails. The
+trade-off: the old spy also failed when only the cleanup call was removed while the check still ran
+first. In that state nothing has been allocated, so nothing observable is lost, and not failing
+there is the resistance to refactoring the rewrite buys.
+
+| Measure | Before | After |
+|---------|--------|-------|
+| No-GPU selection | 1741 passed + 18 skipped | **1730 passed** + 18 skipped (-11 duplicates) |
+| Branch coverage, combined (Linux) | 91.69 % | 91.69 % (the deleted tests were exact copies) |
+| Smell scanner | 19 | **18** (one overprotective guard gone with the deleted copy) |
+| Identical test bodies, suite-wide | 7 groups | 0 |
+| Touched files under seeds 1, 2, 3 (`-m "not requires_cuda and not requires_native"`) | n/a | 207 passed each |
+
+### Phase J, Windows follow-up (2026-11-18)
+
+Items A1-A5 of [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md), run on the Windows
+box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept:
+`uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
+
+| Item | Command | Result |
+|------|---------|--------|
+| A1 full suite, GPU and native | `uv run --no-sync pytest tests/ -q` | **1815 passed, 1 skipped, 0 failed** in 43.5 s. The skip is `test_native_loader.py:24`, which runs only when the native waiter is *not* built. The Phase I `test_roundtrip.py` failures (CPU torch) do not occur |
+| A2 branch coverage, CI selection | `uv run --no-sync pytest tests/ -m "not requires_cuda and not requires_native and not integration and not quarantine" --cov --cov-branch -q` | **93.25 %** (1747 passed, 1 skipped, 68 deselected), against Linux 91.69 %. The difference is the Win32 paths: `_doorbell.py` and `_console.py` are 100 % here and skipped on Linux. `fail_under` stays at **91**: the rule `floor(x) - 1.5` on the lower platform (Linux) gives 89.5, and on Windows alone it gives 91.5, which rounds down to 91. Both are at or below the current gate, so no raise |
+| A4 C++ core tests, MSVC | from a `vcvars64` shell in `cpp_top/`: `cmake --fresh --preset core-only`, `cmake --build --preset core-only`, `ctest --preset core-only` (VS 2022 bundled CMake 3.31.6 and Ninja) | **MSVC 19.44: `topcore_tests` 306 checks, 0 failures**; `protocol_dump_fixture` passed. This is the same count as GCC on Linux, and it includes the two J2 `test_frame_step_classification` rows |
+| A3 mutation, three committed configs | for each config: `cosmic-ray init` (`--force`), `cr-filter-pragma`, `cosmic-ray baseline`, `cosmic-ray exec`, `cr-report` (cosmic-ray in the worktree venv; baseline passed for all three) | **0 genuine survivors on all three, so 100 %.** `shm_protocol`: 774 mutants, 112 pragma'd, 649 killed, 1 incompetent (`metadata_offset << 23`: Windows raises `MemoryError`, Linux OOM-killed it), 12 survived (51 min). All 12 are rows of the J2 equivalence table (lines 162 and 178 `\|`/`^` ×4, 300 ×2, 248, 251, 261, 266 ×2, 470). The J2 heading said 11, but its rows list 12; the Linux run had 651 kills against 649 here, so one of these mutants was counted as killed there. `_exporter_port`: 184 mutants, 50 pragma'd, 133 killed, 1 survived: line 155 `is not` → `!=`, the J5 equivalent (10.5 min). `_importer_port`: 89 mutants, 4 pragma'd, 85 killed, 0 survived (5.3 min). **Config finding:** each `test-command` hard-codes `F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe`. From any other checkout (a git worktree), that venv's scikit-build editable finder imports `cuda-link/src` even when `src` is first on `sys.path`. The run then mutates one file and tests another, so every mutant survives. That venv also has no `hypothesis`. This run used copies of the configs with only the interpreter changed to the worktree venv. **Fixed afterwards:** all six `cr-*.toml` now use `uv run --no-sync python` (see the mutation workflow note) |
+| A5 `RealTDHost.abs_frame` in TouchDesigner | two TD 2025.33230 instances: `local/p5_devbox_A.toe` sends with `/project1/bench_A/py_sender`, `local/p5_devbox_B.toe` receives with `/project1/bench_B/py_receiver` (Ipcmemname set to `t2q4` for the run, then put back). Values read through twozero_td | **Pass.** B's `slot_meta` `producer_frame` follows A's `absTime.frame`, not B's. Three pairs timed by wall clock: A 4115 → B 4130 (expected ~4131), A 4714 → B 4728 (~4729), A 4744 → B 4758 (~4759). Each is one frame behind, in line with `latency_us` ≈ 9.9 ms. B's own absFrame was 4073 at the first pair. `producer_skip_count` 0. Both COMPs had no error and no warning, and both kept the default color (no error tint). The mod 2^24 wrap is not reachable live (78 h at 60 FPS); the unit tests cover it. The 18 C++ TOP errors in these patches load DLLs from a deleted scratchpad folder and have no link to this check |
+
+### Merge check: live 9-cell matrix, 1280×1280, 6 formats (2026-11-18)
+
+After the merge of `development` into `feat/orbbec-v0.6` (`fefcdb3`): the `.tox`
+`local\CUDAIPCLink_v2.0.0.dev0.tox` (sha256 `a27216a8…6c4d8`; re-exported after `b386ba1` with
+the 500 µs ImporterPort, sha256 `002f29fd…bb345`, 22 file-backed DATs equal to `td_exporter/`), the DLLs rebuilt from `fefcdb3`
+(ninja-tooling, 13/13, ctest 2/2) and installed as Custom OPs, and the Python package. All 9
+sender/receiver pairs of `.tox`, DLL and Python ran in rgba8fixed (60 s per cell) and in
+rgba16fixed, rgba16float, rgba32float, mono8fixed and mono32float (20 s per cell). **54 cells, 0
+hard fails** (no backward step, no pixel mismatch, no error badge). Two latency/gap flags
+against the v0.6 rows, re-run once and not blocking. Tables and notes:
+[docs/CPP_TOP.md](docs/CPP_TOP.md) "Live matrix 2.0.0.dev0".
+
+### Still open
+
+The full list, with the Windows-only checks and a ready-to-paste message for the agent that
+finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
+
+| Item | What | Notes |
+|------|------|-------|
+| Accepted gap | `RealTDHost.abs_frame` (new, 0 %) and `script_chop_callbacks.onCook` | `td`-bound shells (Humble Object edge); covered by the in-TD run, not the committed suite. `abs_frame` was checked live in TD on 2026-11-18 (Windows follow-up A5: pass). The logic they drive (`slot_meta_channels`, stamping) is tested through `FakeTDHost` |
+
 ## Deferral table — tooling we deliberately did NOT add
 
 | Tooling | Trigger that would justify it | Current state |
 |---------|-------------------------------|---------------|
-| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18 s, full suite ~29 s — far below |
+| `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18-20 s (Linux, Phase J), full GPU suite ~29 s (Windows, last measured Phase H) — far below |
 | `pytest-split` sharding | per-runner > ~10 min after xdist | n/a |
-| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18 s (full suite ~29 s, local-only) |
-| `@pytest.mark.slow` markers | individual test > 5 s | slowest is 2.9 s (was 22.5 s for the GPU roundtrips before H1) |
+| Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18-20 s on Linux (Phase J); full GPU suite ~29 s, local-only (Phase H) |
+| `@pytest.mark.slow` markers | individual test > 5 s | slowest 1.9-4.5 s (the two subprocess `-O` import tests, warm vs cold interpreter cache; Phase J, Linux). Was 22.5 s for the GPU roundtrips before H1 |
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
-| New mutation targets | module's mock density approaches zero | backlog above |
+| New mutation targets | module's mock density approaches zero | backlog above. Re-run whenever a target changes: J2 (`shm_protocol`) and J5 (port modules) were re-runs after v0.6 |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
-| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps: `TDSender.export_frame` (CRAP 68), `_refresh_on_version_change` (52), `import_frame` (44) |
-| `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3 |
+| TD-layer coverage push | Done in I3 | `TDReceiver.py` 51 % → 82 %; `initialize_receiver` CRAP 244 → 33.5. Next gaps (Phase J, Linux): `TDSender.export_frame` (CRAP 68.1), `_refresh_on_version_change` (52.2), `import_frame` (**48.6**, up from 44: v0.6 added the slot meta step) |
+| `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3. Phase J: ruff C901 still 43 (at the ceiling); crap4py CRAP 47 (was 46) |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
-| Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Currently hand-enumerated across 8 `@parametrize` lists |
-| Ruff version drift | Before the `C901` ratchet is trusted long-term | Resolved in Phase G: pinned to 0.17.0 across `uv.lock`, `.pre-commit-config.yaml`, and CI |
+| Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Hypothesis and the `ci` profile exist since J4 (slot meta, `classify_frame_step`, `GpuFrame`); `DtypeCodec` is still hand-enumerated across 8 `@parametrize` lists |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4. Bump both together |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

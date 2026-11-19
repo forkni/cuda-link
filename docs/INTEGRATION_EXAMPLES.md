@@ -531,19 +531,22 @@ Full IPC roundtrip timings (with concurrent consumer): [docs/BENCHMARKS.md](BENC
 ### Use Case
 
 High-frequency TD → Python channel where the Python consumer must stay idle without burning CPU
-between frames.  `CUDALINK_DOORBELL=1` replaces the poll-sleep with a blocking Win32 named-event
-wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.
+between frames.  The doorbell replaces the poll-sleep with a blocking Win32 named-event
+wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.  It is on by default since 2.0.0.
 
 ### Requirements
 
 - Windows only (Win32 `CreateEventW`)
-- `CUDALINK_DOORBELL=1` set on **both** TD Sender and Python consumer before either process starts
-- Single consumer per channel only
+- Nothing to set since 2.0.0: the TD Sender signals the doorbell and the Python consumer waits
+  on it by default. Do not set `CUDALINK_DOORBELL=0` on either side. With 1.x, set
+  `CUDALINK_DOORBELL=1` on both sides.
+- One waiter per signal: with several consumers on one channel each waits in 1 ms slices, so a
+  taken signal costs one slice
 
 ### TouchDesigner Setup
 
-Set `CUDALINK_DOORBELL=1` in the environment before launching TD (system env or a launch wrapper),
-or add it to TD's own `CUDALINK_*` env block so it propagates to child processes.
+Nothing to set on TD since 2.0.0: the Sender signals the doorbell by default. With 1.x, set
+`CUDALINK_DOORBELL=1` in the environment before launching TD (system env or a launch wrapper).
 
 ### Python Script (Doorbell Consumer)
 

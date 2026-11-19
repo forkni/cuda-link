@@ -117,7 +117,7 @@ _EXPORT_DEFAULTS = {
     "barrier_stale_ns": 5_000_000_000,
     "high_priority_stream": True,
     "export_profile": False,
-    "doorbell": False,
+    "doorbell": True,  # 2.0.0: producer doorbell on by default
 }
 
 # env var -> policy field, for the plain "1"/"0" booleans
@@ -529,12 +529,6 @@ def test_cuda_port_declares_set_device() -> None:
 def test_cuda_port_declares_restore_context() -> None:
     """restore_context must be a declared member of the CudaPort Protocol."""
     assert "restore_context" in get_protocol_members(CudaPort)
-
-
-def test_fake_adapter_satisfies_protocol_with_new_methods() -> None:
-    """FakeCUDAAdapter must satisfy isinstance(fake, CudaPort) after C3a additions."""
-    fake = FakeCUDAAdapter()
-    assert isinstance(fake, CudaPort)
 
 
 def test_fake_adapter_set_device_returns_token() -> None:

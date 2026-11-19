@@ -7,6 +7,8 @@ without a real TD runtime.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from fakes import FakeTDHost, FakeTOPHandle
 
@@ -102,9 +104,9 @@ def test_initialize_creates_shm(cuda_runtime: object, temp_shm_name: str, shared
     assert exporter._engine.shm_handle is not None
 
     # Verify SharedMemory size
-    # 20 (header: 4B magic + 8B version + 4B num_slots + 4B write_idx)
-    # + 3*128 (slots) + 1 (shutdown) + 20 (metadata) + 8 (timestamp) = 433
-    expected_size = 20 + 3 * 128 + 1 + 20 + 8
+    # v0.6: 24 (header: magic, num_slots, version, write_idx, sender_pid)
+    # + 3*160 (slots: 2 handles + slot meta) + 1 (shutdown) + 20 (metadata) + 3 (pad) = 528
+    expected_size = 24 + 3 * 160 + 1 + 20 + 3
     assert len(exporter._engine.shm_handle.buf) >= expected_size
 
     # Cleanup
@@ -127,11 +129,13 @@ def test_shm_layout_header(cuda_runtime: object, temp_shm_name: str, shared_memo
     # Initialize
     exporter.initialize(width=64, height=64, channels=4)
 
-    # Read header (offsets: magic=0-3, version=4-11, num_slots=12-15, write_idx=16-19)
+    # Read header (v0.6 offsets: magic=0-3, num_slots=4-7, version=8-15, write_idx=16-19, sender_pid=20-23)
     magic = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[0:4]))[0]
-    version = struct.unpack("<Q", bytes(exporter._engine.shm_handle.buf[4:12]))[0]
-    num_slots = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[12:16]))[0]
+    num_slots = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[4:8]))[0]
+    version = struct.unpack("<Q", bytes(exporter._engine.shm_handle.buf[8:16]))[0]
     write_idx = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[16:20]))[0]
+    sender_pid = struct.unpack("<I", bytes(exporter._engine.shm_handle.buf[20:24]))[0]
+    assert sender_pid == os.getpid()
 
     assert magic == PROTOCOL_MAGIC
     assert version >= 1  # Should be at least 1 after initialization

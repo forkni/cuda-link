@@ -15,10 +15,11 @@ as a structural type, plus the four value objects that form the public interface
 
 from __future__ import annotations
 
+import operator
 from ctypes import c_void_p
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, SupportsIndex, cast, runtime_checkable
 
 from ._env import env_bool, env_int, env_str
 from .cuda_runtime_types import (
@@ -78,10 +79,12 @@ class ExportPolicy:
     high_priority_stream: bool = True
     export_profile: bool = False
     # R2: Win32 named-event doorbell. When True the producer creates a named
-    # auto-reset event and signals it after every publish_frame(). Requires
-    # CUDALINK_DOORBELL=1 on the consumer side too. Single-consumer only
-    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
-    doorbell: bool = False
+    # auto-reset event and signals it after every publish_frame(). Default ON
+    # (2.0.0): a C++ In TOP with Framewaitms > 0 waits on it; a Python consumer
+    # waits on it only with CUDALINK_DOORBELL=1 (ImportPolicy stays opt-in).
+    # CUDALINK_DOORBELL=0 turns it off. Auto-reset wakes exactly one waiter.
+    # Windows-only (no-op elsewhere).
+    doorbell: bool = True
 
     @classmethod
     def from_env(cls) -> ExportPolicy:
@@ -96,7 +99,7 @@ class ExportPolicy:
             barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
             high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
-            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
+            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
         )
 
     @classmethod
@@ -135,7 +138,27 @@ class ExportPolicy:
             barrier_stale_ns=0,
             high_priority_stream=False,
             export_profile=False,
+            doorbell=False,
         )
+
+
+_U64_LIMIT = 1 << 64
+_U32_LIMIT = 1 << 32
+
+
+def _check_uint(name: str, value: object, limit: int, bits: int) -> None:
+    """Raise unless *value* is an integer in 0..limit-1.
+
+    publish_frame packs these fields as unsigned integers after the frame is already
+    copied; a float would fail there with struct.error, so it is rejected here.
+    """
+    if type(value) is not int:
+        try:
+            value = operator.index(cast(SupportsIndex, value))  # integer-like types (numpy ints) pass
+        except TypeError:
+            raise TypeError(f"GpuFrame.{name} must be an integer, got {type(value).__name__}") from None
+    if not 0 <= value < limit:
+        raise ValueError(f"GpuFrame.{name} must be in 0..2^{bits}-1, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -146,11 +169,33 @@ class GpuFrame:
     is the raw CUDA stream handle (as int) on which the producer has already
     enqueued work that writes to ptr. The Exporter will issue a GPU-side
     stream_wait_event before copying, maintaining ordering without blocking the CPU.
+
+    The last three fields go into the frame's slot meta (protocol v0.6):
+
+    - producer_frame: the producer's frame number, the key a receiver uses to match
+      frames of several streams (a TD sender passes ``int(absTime.frame)``). None
+      means "use the Exporter's write_idx". 0 means "not set". Range 0..2^64-1.
+    - source_timestamp_us: optional producer time in µs; cuda-link does not
+      interpret it. Range 0..2^64-1.
+    - stream_id: user-set integer naming the stream. Range 0..2^32-1.
+
+    Raises:
+        TypeError: if a slot meta field is not an integer.
+        ValueError: if a slot meta field is out of range.
     """
 
     ptr: int
     size: int
     producer_stream: int | None = None
+    producer_frame: int | None = None
+    source_timestamp_us: int = 0
+    stream_id: int = 0
+
+    def __post_init__(self) -> None:
+        if self.producer_frame is not None:
+            _check_uint("producer_frame", self.producer_frame, _U64_LIMIT, 64)
+        _check_uint("source_timestamp_us", self.source_timestamp_us, _U64_LIMIT, 64)
+        _check_uint("stream_id", self.stream_id, _U32_LIMIT, 32)
 
 
 class FrameOutcome(Enum):

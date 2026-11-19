@@ -130,7 +130,8 @@ example 06.
 
 ### Doorbell never fires (example 08 reports 0 wakes)
 
-Both sides must opt in (`ExportPolicy(doorbell=True)` **and**
-`ImportPolicy(doorbell=True)`), and it is Windows-only. When unavailable,
+The consumer must opt in (`ImportPolicy(doorbell=True)`). The producer
+signals by default since 2.0.0, unless it uses `ExportPolicy(doorbell=False)` or
+`CUDALINK_DOORBELL=0`. It is Windows-only. When unavailable,
 `wait_for_doorbell()` returns `False` immediately and the loop degrades to
 1 ms polling — functional, just not low-CPU.

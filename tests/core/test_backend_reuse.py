@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from cuda_link.shm_protocol import AcquireResult, SlotState
+from cuda_link.shm_protocol import AcquireResult, SlotMeta, SlotState
 
 # ---------------------------------------------------------------------------
 # A1 — AcquireResult is a NamedTuple
@@ -29,17 +29,17 @@ def test_acquire_result_defaults() -> None:
     r = AcquireResult(SlotState.NO_FRAME)
     assert r.state is SlotState.NO_FRAME
     assert r.slot == -1
-    assert r.timestamp == 0.0
+    assert r.slot_meta == SlotMeta()
     assert r.new_version == 0
     assert r.write_idx == 0
 
 
 def test_acquire_result_keyword_construction() -> None:
     """Keyword construction must still work — all call sites use keyword args."""
-    r = AcquireResult(state=SlotState.NEW_FRAME, slot=2, timestamp=1.5, write_idx=7)
+    r = AcquireResult(state=SlotState.NEW_FRAME, slot=2, slot_meta=SlotMeta(host_timestamp=1.5), write_idx=7)
     assert r.state is SlotState.NEW_FRAME
     assert r.slot == 2
-    assert r.timestamp == 1.5
+    assert r.slot_meta.host_timestamp == 1.5
     assert r.new_version == 0  # defaulted
     assert r.write_idx == 7
 

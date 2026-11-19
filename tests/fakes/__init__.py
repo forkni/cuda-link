@@ -163,7 +163,6 @@ def make_fake_ipc_connection(
         ipc_events=ipc_events,
         layout=layout,
         shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
     )
     return conn, mock_cuda, mock_shm
 
@@ -257,7 +256,9 @@ def make_connected_importer(
         )
 
     spec = ImportSpec(shm_name="fake", device=0, timeout_ms=timeout_ms, shape=shape, dtype=dtype)
-    policy = ImportPolicy(wait_spin_us=spin_us, allow_pageable_fallback=allow_pageable_fallback, debug=debug)
+    policy = ImportPolicy(
+        wait_spin_us=spin_us, allow_pageable_fallback=allow_pageable_fallback, debug=debug, doorbell=False
+    )
     # Pass FakeCUDAAdapter explicitly so that _reinitialize (which calls _open_ipc_slots via
     # self._cuda) uses a proper fake rather than the MagicMock stored on conn.cuda.
     return Importer.from_connection(

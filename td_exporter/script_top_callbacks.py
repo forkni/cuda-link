@@ -22,6 +22,7 @@ resolution or pixel-format updates.
 """
 
 _STATUS_EMITTER_NAME = "warning_emitter"
+_SLOT_META_CHOP_NAME = "slot_meta"
 
 
 def _extension():
@@ -34,6 +35,21 @@ def _extension():
         return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
     except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
         return None
+
+
+def _cook_slot_meta(scriptOp: object) -> None:
+    """Force-cook the slot_meta Script CHOP after an import (never raises).
+
+    It shows the slot meta of the frame just imported: cooking it here, in the same frame
+    and after the import, means CHOP readers never see the previous frame's values. A .tox
+    without the CHOP (1.x layout) skips this.
+    """
+    try:
+        meta_chop = scriptOp.parent().op(_SLOT_META_CHOP_NAME)
+        if meta_chop is not None:
+            meta_chop.cook(force=True)
+    except Exception:  # noqa: BLE001 -- a cook callback must never raise
+        return
 
 
 def onCook(scriptOp: object) -> None:
@@ -65,7 +81,9 @@ def onCook(scriptOp: object) -> None:
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not set ImportBuffer resolution: {e}", force=True)
 
-    ext.import_frame(scriptOp)
+    # The CHOP values change only when a frame was imported.
+    if ext.import_frame(scriptOp):
+        _cook_slot_meta(scriptOp)
 
     # Handle pixel-format update (mirrors the resolution block above).
     # _refresh_on_version_change sets needs_format_update = True when dtype/channels change.

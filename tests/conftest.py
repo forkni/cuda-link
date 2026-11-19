@@ -16,6 +16,20 @@ import pytest
 # Ensure CuPy disk kernel cache uses system temp dir to prevent sandbox permission errors on ~/.cupy
 os.environ.setdefault("CUPY_CACHE_DIR", os.path.join(tempfile.gettempdir(), "cupy_cache"))
 
+# Hypothesis profiles for the property tests (TESTING_GUIDE.md, Phase J4). "ci" is Hypothesis's own
+# derandomized profile (derandomize=True, deadline=None, no database), re-registered so the name is
+# ours; cosmic-ray runs pass --hypothesis-profile=ci so a mutant gets the same examples every run.
+# The default follows the CI variable, so a CI job gets "ci" without setting HYPOTHESIS_PROFILE.
+# Guarded: the requires_native CI legs install only pytest + pytest-randomly and still load this file.
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:  # pragma: no cover -- dev extra always installs it
+    _hypothesis_settings = None
+if _hypothesis_settings is not None:
+    _hypothesis_settings.register_profile("ci", _hypothesis_settings.get_profile("ci"))
+    _hypothesis_settings.register_profile("dev", max_examples=50)
+    _hypothesis_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci" if os.environ.get("CI") else "dev"))
+
 if TYPE_CHECKING:
     from cuda_link.cuda_ipc_wrapper import CUDARuntimeAPI
 
@@ -136,3 +150,25 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             bad.append(f"{item.nodeid}: quarantine expired on {kw['expires']} ({kw['issue']})")
     if bad:
         raise pytest.UsageError("\n".join(bad))
+
+
+# Modules whose receiver compares the segment's sender_pid with _current_pid().
+_SAME_PROCESS_CHECK_MODULES = ("cuda_link.importer", "Importer", "TDReceiver")
+
+
+@pytest.fixture(autouse=True)
+def _allow_in_process_peer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn off the v0.6 same-process check for the in-process sender/receiver tests.
+
+    Most tests run an Exporter and an Importer (or TDReceiver) in one process on fake CUDA,
+    where the loop-back works. Real CUDA IPC cannot loop back, so production keeps the
+    check. A test marked ``same_process_check`` keeps the real check.
+    """
+    if request.node.get_closest_marker("same_process_check") is not None:
+        return
+    import sys
+
+    for name in _SAME_PROCESS_CHECK_MODULES:
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "_current_pid"):
+            monkeypatch.setattr(module, "_current_pid", lambda: 0)
