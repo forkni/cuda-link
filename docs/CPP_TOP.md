@@ -418,7 +418,8 @@ Notes:
   Sender converts it to float32 (the Python receiver got `float32`). Both In TOP and `.tox`
   Receiver show it correctly.
 - Out TOP to Python `get_frame` p50 was 0.75 ms for 4-channel frames and 0.18-0.20 ms for
-  mono, against 0.04 ms from the `.tox` Sender. No baseline; not looked into.
+  mono, against 0.04 ms from the `.tox` Sender. Diagnosed the same day: see
+  "Python receiver call time" below.
 - Harness faults found and fixed during the run (rows superseded, not counted): a file poll
   in A's `onFrameStart` that read the source TOP every 15 frames made both TD senders publish a
   stale frame each time (exactly 80 duplicates in 1200); a TD window without focus drops to
@@ -428,6 +429,39 @@ Notes:
   (`par.reinitextensions.pulse()`).
 - The per-cell table, with the superseded rows, is the `m9_results` Table DAT in
   `/project1/m9_B` of `local/p5_devbox_B.toe`.
+
+### Python receiver call time (2026-11-18)
+
+The Out TOP publishes without a sync, so its slot event completes after the publish:
+0.11-0.28 ms later on the dev box (1280×1280; p50 about 0.2 ms, p95 0.28 ms at rgba32float).
+The copy itself takes 20-43 µs on the GPU, and the delay barely depends on the frame size. The
+`.tox` Sender syncs before it publishes (about 0.37 ms in TD's cook thread), so its event is
+complete at publish and a Python `get_frame` returns in 0.05 ms.
+
+`Importer.get_frame()` (torch, no `stream=`) waits for that event on the CPU: it spins on
+`cudaEventQuery` for `CUDALINK_WAIT_SPIN_US`, then naps on a timer that takes about 0.5 ms
+on Windows. The former default of 200 µs sat inside the completion range, so the call
+flipped between about 0.2 ms and 0.75 ms. The default is now 500 µs. Same sender, same TD
+session, runs alternated, 1280×1280, 60 FPS, `get_frame` p50 / p95 and frames that napped:
+
+| Format | Spin 200 µs (former) | Spin 500 µs (default) |
+|---|---|---|
+| rgba8fixed | 0.12-0.17 / 0.23-0.26 ms, 0-11 of 300 | 0.15-0.18 / 0.22-0.27 ms, 0 of 300 |
+| rgba32float | 0.20-0.22 / 0.77-0.80 ms, 74-118 of 300 | 0.19-0.20 / 0.27-0.33 ms, 0-1 of 300 |
+
+Notes:
+
+- The completion time drifts between TD sessions and inside one (0.11-0.24 ms p50 seen at
+  rgba8fixed). Compare settings only with alternated runs in one session.
+- A flush after the event record (`cudaStreamQuery`) changes nothing here (completion 0.210 ms
+  with it, 0.219 ms without; hardware-accelerated GPU scheduling is on). `Debug` shortens the
+  receiver's wait by up to 0.09 ms, because its event queries add 20-40 µs to the cook and so
+  move the publish later; that is not a gain.
+- A receiver whose next step is GPU work can skip the CPU wait: pass `stream=` to
+  `get_frame()` or set `CUDALINK_TORCH_GPU_WAIT=1` (0.07 ms measured; `TIMEOUT` is then not
+  reported).
+- Live check: `scripts/profiling/bench_get_frame_wait.py <shm_name>` (RED when `get_frame`
+  p50 is above 0.3 ms or more than 2 % of the frames napped). Run it at rgba32float.
 
 ### Framewaitms guard (2026-11-17)
 

@@ -115,6 +115,37 @@ def test_ready_spin_when_event_already_signaled():
     assert result.status.name == "READY_SPIN"
 
 
+def test_default_spin_budget_catches_an_event_that_completes_at_300us():
+    """Regression (2026-11-18): a C++ Out TOP's slot event completes 0.11-0.28 ms after publish.
+
+    With the default ``ImportPolicy.wait_spin_us`` the spin phase must catch an event that
+    becomes ready 300 us into the wait. A budget below that (the former 200 us) falls into the
+    block phase, whose nap takes about 0.5 ms on Windows: get_frame() p50 went to 0.75 ms.
+    """
+    from cuda_link._importer_port import ImportPolicy  # noqa: PLC0415
+
+    clock = _FakeClock()
+
+    def event_query(ptr):
+        clock.advance(10.0)  # one poll costs 10 us of fake time
+        return clock.t >= 300.0
+
+    result = _wait_slot_test(
+        event_query=event_query,
+        read_write_idx=lambda addr: 0,
+        nap=lambda nap_us: pytest.fail("the default spin budget must cover a 300 us completion"),
+        now_us=clock.now_us,
+        event_ptr=0x1000,
+        doorbell_handle=0x2000,
+        write_idx_addr=0x3000,
+        last_write_idx=5,
+        spin_us=ImportPolicy().wait_spin_us,
+        timeout_ms=1000,
+    )
+    assert result.status.name == "READY_SPIN"
+    assert result.waited_us < 400.0
+
+
 def test_timeout_when_nothing_ever_ready():
     """Event never ready -- must hit the deadline, not hang."""
     clock = _FakeClock()

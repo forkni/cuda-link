@@ -85,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`CUDALINK_WAIT_SPIN_US` default 200 -> 500 µs** (`ImportPolicy.wait_spin_us`). A C++ Out TOP
+  publishes without a sync and its slot event completes 0.11-0.28 ms after publish; the 200 µs
+  spin sat inside that range, so a Python `get_frame()` fell into the ~0.5 ms timer nap (p50
+  0.75 ms in the 2.0.0.dev0 live matrix; at rgba32float 74-118 of 300 frames napped, p95
+  0.77-0.80 ms). With 500 µs: 0-1 of 300, p95 0.27-0.33 ms. The spin ends when the event is
+  ready, so a `.tox` Sender (0.05 ms) is not affected. The `.tox` Receiver waits on the GPU and
+  does not use this value. Live check: `scripts/profiling/bench_get_frame_wait.py`; details in
+  `docs/CPP_TOP.md` ("Python receiver call time").
+
 - **Producer doorbell on by default**: `ExportPolicy.doorbell` and the `.tox` Sender's policy now
   default to `True`, so the producer creates the Win32 doorbell event and signals it after each
   publish. A C++ In TOP with `Framewaitms` > 0 can then wait for a Python-side sender (live test:
