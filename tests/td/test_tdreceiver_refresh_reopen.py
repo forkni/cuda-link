@@ -67,7 +67,7 @@ class _RefreshCuda:
     def destroy_event(self, event) -> None:
         self.destroyed_events.append(event)
 
-    def malloc_host(self, size: int) -> c_void_p:
+    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
         raise RuntimeError("no pinned memory in tests")  # exercise the pageable path
 
     def free_host(self, ptr) -> None:

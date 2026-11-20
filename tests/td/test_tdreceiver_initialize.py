@@ -90,7 +90,7 @@ class _FakeCuda:
     def destroy_stream(self, stream: object) -> None:
         self.streams_destroyed.append(stream)
 
-    def malloc_host(self, size: int):
+    def malloc_host_alloc(self, size: int, flags: int = 0x01):
         raise RuntimeError("no pinned memory in tests")  # exercise the pageable path
 
     def free_host(self, ptr) -> None:

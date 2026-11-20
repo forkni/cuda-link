@@ -1216,7 +1216,7 @@ class TDReceiverEngine:
         try:
             import ctypes as _ctypes
 
-            self._f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
+            self._f16_pinned_ptr = self.cuda.malloc_host_alloc(f16_bytes)
             _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._f16_pinned_ptr.value)
             self._f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
             self._log("float16 receiver: allocated pinned CPU buffer for D2H (async path)", force=True)
