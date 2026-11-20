@@ -1190,7 +1190,11 @@ def test_clear_slot_zeroes_one_slot_only() -> None:
     assert bytes(buf[base + SLOT_SIZE : base + 2 * SLOT_SIZE]) == b"\xaa" * SLOT_SIZE
 
 
-@pytest.mark.parametrize(("num_slots", "valid"), [(0, False), (1, True), (10, True), (11, False), (-1, False)])
+@pytest.mark.parametrize(
+    ("num_slots", "valid"),
+    [(0, False), (1, True), (10, True), (11, False), (-1, False)],
+    ids=["zero", "lowest", "highest", "one-above", "negative"],
+)
 def test_is_valid_num_slots_bounds(num_slots: int, valid: bool) -> None:
     from cuda_link.shm_protocol import MAX_SLOTS, is_valid_num_slots
 
