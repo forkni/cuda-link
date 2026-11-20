@@ -127,7 +127,11 @@ target_include_directories(cudalink_topcommon INTERFACE src/common)
 target_link_libraries(cudalink_topcommon INTERFACE CUDA::cudart shell32)
 
 # Info page values (info_page.h): the package version from the repo's pyproject.toml, and the
-# git sha at configure time (reconfigure to refresh it; "unknown" outside a git checkout).
+# git sha at configure time ("unknown" outside a git checkout). The sha gets a "-dirty" suffix
+# when tracked files differ from HEAD at configure time. CMake reconfigures by itself when HEAD
+# or the checked-out branch ref moves (a commit, checkout or reset), so a plain rebuild after a
+# commit does not keep the old sha. Uncommitted edits made after configure are not seen: configure
+# again for a dirty build.
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../pyproject.toml" CUDALINK_PYPROJECT_VERSION_LINE
     REGEX "^version = \"[^\"]+\"" LIMIT_COUNT 1)
 string(REGEX REPLACE "^version = \"([^\"]+)\".*" "\\1" CUDALINK_VERSION "${CUDALINK_PYPROJECT_VERSION_LINE}")
@@ -143,6 +147,34 @@ if(GIT_FOUND)
         RESULT_VARIABLE CUDALINK_GIT_RESULT ERROR_QUIET)
     if(CUDALINK_GIT_RESULT EQUAL 0 AND CUDALINK_GIT_SHA)
         set(CUDALINK_BUILD_SHA "${CUDALINK_GIT_SHA}")
+        execute_process(COMMAND "${GIT_EXECUTABLE}" diff --quiet HEAD --
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            RESULT_VARIABLE CUDALINK_GIT_DIRTY ERROR_QUIET)
+        if(CUDALINK_GIT_DIRTY EQUAL 1)
+            string(APPEND CUDALINK_BUILD_SHA "-dirty")
+        endif()
+        # Reconfigure when HEAD or the branch it points to moves. git-path resolves both for a
+        # linked worktree too (HEAD in the worktree's git dir, refs/heads/* in the common dir).
+        set(CUDALINK_GIT_WATCH HEAD)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE CUDALINK_GIT_REF OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE CUDALINK_GIT_REF_RESULT ERROR_QUIET)
+        if(CUDALINK_GIT_REF_RESULT EQUAL 0 AND CUDALINK_GIT_REF)
+            list(APPEND CUDALINK_GIT_WATCH "${CUDALINK_GIT_REF}")
+        endif()
+        foreach(CUDALINK_GIT_ITEM IN LISTS CUDALINK_GIT_WATCH)
+            execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path "${CUDALINK_GIT_ITEM}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE CUDALINK_GIT_FILE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(CUDALINK_GIT_FILE)
+                get_filename_component(CUDALINK_GIT_FILE "${CUDALINK_GIT_FILE}" ABSOLUTE
+                    BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+                if(EXISTS "${CUDALINK_GIT_FILE}")
+                    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CUDALINK_GIT_FILE}")
+                endif()
+            endif()
+        endforeach()
     endif()
 endif()
 message(STATUS "cudalink TOPs: version ${CUDALINK_VERSION}, build ${CUDALINK_BUILD_SHA}")
