@@ -60,6 +60,7 @@ IPC_HANDLE_SIZE: int = 64  # cudaIpc{Mem,Event}Handle_t are each 64 bytes
 SLOT_META_OFFSET_IN_SLOT: int = 128  # after the two IPC handles
 SLOT_META_SIZE: int = 32
 SLOT_SIZE: int = 160  # 64B mem handle + 64B event handle + 32B slot meta
+MAX_SLOTS: int = 10  # ring size limit: a header num_slots outside 1..MAX_SLOTS is a protocol error
 
 # Slot-meta field offsets, relative to the start of the slot meta.
 SLOT_META_HOST_TIMESTAMP_OFFSET: int = 0  # float64
@@ -457,6 +458,32 @@ def read_sender_pid(buf: memoryview) -> int:
 def write_sender_pid(buf: memoryview, pid: int) -> None:
     """Write the sender process id. Call before bump_version, so the version fence covers it."""
     _ST_U32.pack_into(buf, SENDER_PID_OFFSET, pid & 0xFFFFFFFF)
+
+
+def is_valid_num_slots(num_slots: int) -> bool:
+    """True when ``num_slots`` is a ring size the protocol allows (1..MAX_SLOTS)."""
+    return 0 < num_slots <= MAX_SLOTS
+
+
+def write_header(buf: memoryview, num_slots: int, sender_pid: int) -> None:
+    """Write magic, num_slots, write_idx = 0 and the sender process id.
+
+    The version is not written here. The sender calls bump_version last, after the slot
+    handles, so a receiver that sees the new version reads a complete header.
+    """
+    _ST_U32.pack_into(buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
+    _ST_U32.pack_into(buf, NUM_SLOTS_OFFSET, num_slots)
+    _ST_U32.pack_into(buf, WRITE_IDX_OFFSET, 0)
+    write_sender_pid(buf, sender_pid)
+
+
+_ZERO_SLOT: bytes = bytes(SLOT_SIZE)
+
+
+def clear_slot(buf: memoryview, layout: SHMLayout, slot: int) -> None:
+    """Zero one slot (both IPC handles and the slot meta), so a late receiver cannot open them."""
+    base = layout.slot_offset(slot)
+    buf[base : base + SLOT_SIZE] = _ZERO_SLOT
 
 
 SAME_PROCESS_MESSAGE: str = (

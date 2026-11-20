@@ -55,6 +55,7 @@ from SHMProtocol import (  # noqa: E402
     acquire_slot,
     classify_frame_step,
     is_same_process_sender,
+    is_valid_num_slots,
     protocol_mismatch_message,
     read_magic,
     read_num_slots,
@@ -907,7 +908,7 @@ class TDReceiverEngine:
             ipc_version = read_version(shm_handle.buf)
             num_slots = read_num_slots(shm_handle.buf)
 
-            if num_slots == 0 or num_slots > 10:
+            if not is_valid_num_slots(num_slots):
                 self._log(
                     f"Invalid num_slots: {num_slots}. Protocol error.",
                     force=True,

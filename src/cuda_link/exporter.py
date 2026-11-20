@@ -59,23 +59,20 @@ from .cuda_runtime_types import (
     CUDAStream_t,
 )
 from .shm_protocol import (
-    _ST_U32,
     EMPTY_SLOT_META,
     IPC_HANDLE_SIZE,
-    MAGIC_OFFSET,
-    NUM_SLOTS_OFFSET,
-    PROTOCOL_MAGIC,
-    SLOT_SIZE,
-    WRITE_IDX_OFFSET,
+    MAX_SLOTS,
     DtypeCodec,
     Metadata,
     SHMLayout,
     SlotMeta,
     bump_version,
     clear_shutdown,
+    clear_slot,
+    is_valid_num_slots,
     publish_frame,
     set_shutdown,
-    write_sender_pid,
+    write_header,
 )
 
 if TYPE_CHECKING:
@@ -153,8 +150,8 @@ class Exporter:
     def __init__(self, spec: FrameSpec, policy: ExportPolicy, cuda: CudaPort) -> None:
         if spec.dtype not in DtypeCodec.supported():
             raise ValueError(f"Unsupported dtype: {spec.dtype!r}. Must be one of {list(DtypeCodec.supported())}")
-        if not (0 < spec.num_slots <= 10):
-            raise ValueError(f"num_slots must be 1-10, got {spec.num_slots}")
+        if not is_valid_num_slots(spec.num_slots):
+            raise ValueError(f"num_slots must be 1-{MAX_SLOTS}, got {spec.num_slots}")
         if spec.height <= 0 or spec.width <= 0:
             raise ValueError(f"height and width must be positive, got {spec.height}x{spec.width}")
 
@@ -418,10 +415,8 @@ class Exporter:
     def _write_handles_to_shm(self) -> None:
         if self.shm_handle is None or not all(self.ipc_handles):
             return
-        _ST_U32.pack_into(self.shm_handle.buf, MAGIC_OFFSET, PROTOCOL_MAGIC)
-        _ST_U32.pack_into(self.shm_handle.buf, NUM_SLOTS_OFFSET, self._spec.num_slots)
-        _ST_U32.pack_into(self.shm_handle.buf, WRITE_IDX_OFFSET, 0)
-        write_sender_pid(self.shm_handle.buf, os.getpid())  # before bump_version: the version fence covers it
+        # Before bump_version: the version fence covers the header, sender pid included.
+        write_header(self.shm_handle.buf, self._spec.num_slots, os.getpid())
         for slot in range(self._spec.num_slots):
             mem_off = self._layout.mem_handle_offset(slot)
             evt_off = self._layout.event_handle_offset(slot)
@@ -880,8 +875,7 @@ class Exporter:
                 _doorbell.signal(self._doorbell)
             try:
                 for slot in range(self._spec.num_slots):
-                    base = self._layout.slot_offset(slot)
-                    self.shm_handle.buf[base : base + SLOT_SIZE] = b"\x00" * SLOT_SIZE
+                    clear_slot(self.shm_handle.buf, self._layout, slot)
             except (OSError, BufferError) as e:
                 logger.warning("Could not zero IPC handles: %s", e)
 
