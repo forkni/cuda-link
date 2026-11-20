@@ -406,7 +406,7 @@ def test_initialize_commits_connection_for_every_slot(monkeypatch: pytest.Monkey
     assert rig.engine._initialized is True
     assert rig.engine._diag_frames_since_reinit == 0
     assert rig.engine._last_fmt_status == ""
-    assert rig.engine._retry.needs_resolution_update is True
+    assert rig.engine._pending.resolution is True
     assert any("Receiver initialized: 3 slots, 64x64x4" in m for m in rig.logs)
 
 
@@ -441,7 +441,7 @@ def test_initialize_resolves_format_and_shape_dtype_from_metadata(
     assert shape.dataType.__name__ == shape_dtype
     assert rig.engine._format.bits == fmt["bits"]
     assert rig.engine._format.num_comps == fmt["comps"]
-    assert rig.engine._retry.needs_format_update is needs_format_update
+    assert rig.engine._pending.format is needs_format_update
 
 
 def test_initialize_float16_presents_float32_shape_and_stages_conversion_buffers(

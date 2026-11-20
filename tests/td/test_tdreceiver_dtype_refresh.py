@@ -655,7 +655,7 @@ def test_needs_format_update_set_on_bits_change(shm_cleanup: SharedMemory) -> No
     result = engine._refresh_on_version_change(2)
 
     assert result is True
-    assert engine._retry.needs_format_update is True, (
+    assert engine._pending.format is True, (
         "needs_format_update must be True when bits_per_comp changes (float32→uint16)"
     )
 
@@ -707,7 +707,7 @@ def test_needs_format_update_set_on_num_comps_change(shm_cleanup: SharedMemory) 
     result = engine._refresh_on_version_change(2)
 
     assert result is True
-    assert engine._retry.needs_format_update is True, (
+    assert engine._pending.format is True, (
         "needs_format_update must be True when num_comps changes (4ch RGBA → 1ch mono)"
     )
 
@@ -756,11 +756,11 @@ def test_needs_format_update_not_set_on_identical_format(shm_cleanup: SharedMemo
         data_size=W * H * C * 4,
     )
 
-    engine._retry.needs_format_update = False  # ensure it starts clear
+    engine._pending.format = False  # ensure it starts clear
     result = engine._refresh_on_version_change(2)
 
     assert result is True
-    assert engine._retry.needs_format_update is False, "needs_format_update must stay False when format is unchanged"
+    assert engine._pending.format is False, "needs_format_update must stay False when format is unchanged"
 
 
 # ---------------------------------------------------------------------------
@@ -827,14 +827,14 @@ def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int)
         # replicate the exact condition we're testing.)
         from TDReceiver import td_format_string
 
-        engine._retry.needs_format_update = False  # ensure clean state
-        engine._retry.needs_resolution_update = False
+        engine._pending.format = False  # ensure clean state
+        engine._pending.resolution = False
 
         # Simulate the flag-setting block: any format other than the TD default rgba32float
         # requires an explicit set_format call before copyCUDAMemory.
         if td_format_string(engine._format) != "rgba32float":
-            engine._retry.needs_format_update = True
-        engine._retry.needs_resolution_update = True
+            engine._pending.format = True
+        engine._pending.resolution = True
 
         yield engine
     finally:
@@ -959,7 +959,7 @@ def test_consume_pending_format_returns_format_and_clears_flag(shm_cleanup: Shar
     )
     engine._refresh_on_version_change(2)
 
-    assert engine._retry.needs_format_update is True  # flag set by refresh
+    assert engine._pending.format is True  # flag set by refresh
 
     fmt = engine.consume_pending_format()
     assert fmt == "rgba16fixed", (
@@ -970,7 +970,7 @@ def test_consume_pending_format_returns_format_and_clears_flag(shm_cleanup: Shar
     assert engine.consume_pending_format() is None, (
         "consume_pending_format() must be idempotent: returns None after first consume"
     )
-    assert engine._retry.needs_format_update is False
+    assert engine._pending.format is False
 
 
 def test_consume_pending_format_mono_uint16(shm_cleanup: SharedMemory) -> None:

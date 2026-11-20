@@ -33,9 +33,11 @@ from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
 from FrameProfile import ReportWindow  # noqa: E402
 from Importer import (  # noqa: E402
+    BackoffNotice,
     Format,
     HeaderFault,
     SlotEventOpenError,
+    _RetryState,
     check_header,
     open_slot,
     read_slot_handle_bytes,
@@ -272,33 +274,32 @@ class ReceiverConnection:
         )
 
 
+# The connect retry and backoff state is the Importer's: one set of rules for both receivers.
+RetryState = _RetryState
+
+
 @dataclass
-class RetryState:
-    """Retry policy and transient counters for the connection-attempt loop."""
+class PendingUpdates:
+    """Script TOP updates the engine owes after a connect or a format change.
 
-    connect_attempts: int = 0
-    max_connect_attempts: int = 20
-    backoff_intervals: tuple = (1, 2, 4, 8, 16, 32, 64, 120)
-    retry_interval_frames: int = 1
-    frames_since_last_retry: int = 0
-    needs_resolution_update: bool = False
-    needs_format_update: bool = False  # set when bits_per_comp/format_kind/num_comps changes
+    They are applied outside the cook that found them (update_receiver_resolution /
+    update_receiver_format), or taken by script_top_callbacks through the consume methods.
+    """
 
-    def request_immediate_reconnect(self) -> None:
-        """Force the next import_frame call to attempt reconnection."""
-        self.frames_since_last_retry = self.retry_interval_frames
+    resolution: bool = False
+    format: bool = False  # set when bits_per_comp/format_kind/num_comps changes
 
-    def consume_resolution_update(self) -> bool:
+    def consume_resolution(self) -> bool:
         """Return True and clear the flag if a resolution update is pending."""
-        if self.needs_resolution_update:
-            self.needs_resolution_update = False
+        if self.resolution:
+            self.resolution = False
             return True
         return False
 
-    def consume_format_update(self) -> bool:
+    def consume_format(self) -> bool:
         """Return True and clear the flag if a pixel-format update is pending."""
-        if self.needs_format_update:
-            self.needs_format_update = False
+        if self.format:
+            self.format = False
             return True
         return False
 
@@ -341,6 +342,7 @@ class TDReceiverEngine:
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
         self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
+        self._pending = PendingUpdates()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
         self._f16_cpu_buf = None
@@ -417,7 +419,7 @@ class TDReceiverEngine:
 
         Called from script_top_callbacks.onCook to drive ImportBuffer Script TOP par updates.
         """
-        if self._retry.consume_resolution_update():
+        if self._pending.consume_resolution():
             return (self._format.width, self._format.height)
         return None
 
@@ -429,7 +431,7 @@ class TDReceiverEngine:
 
         Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
         """
-        if self._retry.consume_format_update():
+        if self._pending.consume_format():
             return td_format_string(self._format)
         return None
 
@@ -608,22 +610,17 @@ class TDReceiverEngine:
 
         # Lazy initialization with exponential backoff retry logic
         if not self._initialized:
-            self._retry.frames_since_last_retry += 1
-            if self._retry.frames_since_last_retry < self._retry.retry_interval_frames:
+            if not self._retry.tick():
                 return False  # Wait before retrying
 
-            self._retry.frames_since_last_retry = 0
-            self._retry.connect_attempts += 1
-
             if not self.initialize_receiver():
-                backoff_idx = min(self._retry.connect_attempts, len(self._retry.backoff_intervals) - 1)
-                self._retry.retry_interval_frames = self._retry.backoff_intervals[backoff_idx]
-                if self._retry.connect_attempts <= self._retry.max_connect_attempts:
+                notice = self._retry.back_off()
+                if notice is BackoffNotice.WAITING:
                     self._log(
                         f"Waiting for sender... (attempt {self._retry.connect_attempts}, "
                         f"next retry in {self._retry.retry_interval_frames} frames)"
                     )
-                elif self._retry.connect_attempts == self._retry.max_connect_attempts + 1:
+                elif notice is BackoffNotice.NOW_SILENT:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
 
@@ -805,12 +802,12 @@ class TDReceiverEngine:
         Returns:
             True if resolution was updated, False if no update needed or not applicable
         """
-        if not self._retry.needs_resolution_update:
+        if not self._pending.resolution:
             return False
 
         try:
             handle.set_resolution(self._format.width, self._format.height)
-            self._retry.needs_resolution_update = False
+            self._pending.resolution = False
             self._log(
                 f"Set ImportBuffer resolution to {self._format.width}x{self._format.height} (from Execute DAT)",
                 force=True,
@@ -834,12 +831,12 @@ class TDReceiverEngine:
         Returns:
             True if the format was updated, False if no update needed or not applicable.
         """
-        if not self._retry.needs_format_update:
+        if not self._pending.format:
             return False
         try:
             fmt = td_format_string(self._format)
             handle.set_format(fmt)
-            self._retry.needs_format_update = False
+            self._pending.format = False
             self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
             return True
         except (AttributeError, RuntimeError) as e:
@@ -1056,7 +1053,7 @@ class TDReceiverEngine:
             self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
 
             # Flag pixel-format update when the resolved format is anything other than the
             # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
@@ -1068,7 +1065,7 @@ class TDReceiverEngine:
             # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
             # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
             if td_format_string(self._format) != "rgba32float":
-                self._retry.needs_format_update = True
+                self._pending.format = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
@@ -1300,10 +1297,8 @@ class TDReceiverEngine:
         self._release_resources()
 
         self._initialized = False
-        self._retry.connect_attempts = 0
-        self._retry.frames_since_last_retry = 0
         # Drop the backoff from the last connect loop so the first retry after a drop is immediate
-        self._retry.retry_interval_frames = 1
+        self._retry.reset()
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_window.reset()
 
@@ -1416,7 +1411,7 @@ class TDReceiverEngine:
         # previous session would make its first frame read as already consumed.
         conn.last_write_idx = 0
         if width != prev_format.width or height != prev_format.height:
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
         if (
             bits_per_comp != prev_format.bits
             or format_kind != prev_format.kind
@@ -1426,7 +1421,7 @@ class TDReceiverEngine:
             # flags carries the channel layout (e.g. RG vs Mono+Alpha at the same comps).
             # Script TOP's par.format must be updated so the next copyCUDAMemory writes
             # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
-            self._retry.needs_format_update = True
+            self._pending.format = True
 
         self._log(
             f"Format refreshed in-place: {width}x{height}x{num_comps}, "

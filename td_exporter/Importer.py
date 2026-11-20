@@ -807,6 +807,14 @@ def open_slot(cuda: Any, raw: SlotHandleBytes) -> tuple[Any, Any, Any]:
 # ---------------------------------------------------------------------------
 
 
+class BackoffNotice(enum.Enum):
+    """What a caller should log after a failed connect attempt (_RetryState.back_off)."""
+
+    WAITING = "waiting"  # report the attempt and the wait before the next one
+    NOW_SILENT = "now_silent"  # the last report: later attempts are not reported
+    SILENT = "silent"
+
+
 @dataclass
 class _RetryState:
     """Retry policy and transient counters for the connection-attempt loop.
@@ -823,6 +831,31 @@ class _RetryState:
     def request_immediate_reconnect(self) -> None:
         """Force the next get_frame*() call to attempt reconnection without waiting."""
         self.frames_since_last_retry = self.retry_interval_frames
+
+    def tick(self) -> bool:
+        """Count one frame. True when a connect attempt is due; that attempt is then counted."""
+        self.frames_since_last_retry += 1
+        if self.frames_since_last_retry < self.retry_interval_frames:
+            return False
+        self.frames_since_last_retry = 0
+        self.connect_attempts += 1
+        return True
+
+    def back_off(self) -> BackoffNotice:
+        """After a failed attempt: set the wait before the next one and say what to log."""
+        backoff_idx = min(self.connect_attempts, len(self.backoff_intervals) - 1)
+        self.retry_interval_frames = self.backoff_intervals[backoff_idx]
+        if self.connect_attempts <= self.max_connect_attempts:
+            return BackoffNotice.WAITING
+        if self.connect_attempts == self.max_connect_attempts + 1:
+            return BackoffNotice.NOW_SILENT
+        return BackoffNotice.SILENT
+
+    def reset(self) -> None:
+        """Forget the attempts and the backoff, so the next attempt is immediate."""
+        self.connect_attempts = 0
+        self.frames_since_last_retry = 0
+        self.retry_interval_frames = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1580,25 +1613,20 @@ class Importer:
     def _drive_retry(self) -> bool:
         """Advance the reconnect state machine by one frame. Returns True if just connected."""
         retry = self._retry
-        retry.frames_since_last_retry += 1
-        if retry.frames_since_last_retry < retry.retry_interval_frames:
+        if not retry.tick():
             return False
-
-        retry.frames_since_last_retry = 0
-        retry.connect_attempts += 1
 
         if self._connect_silent():
             return True
 
-        backoff_idx = min(retry.connect_attempts, len(retry.backoff_intervals) - 1)
-        retry.retry_interval_frames = retry.backoff_intervals[backoff_idx]
-        if retry.connect_attempts <= retry.max_connect_attempts:
+        notice = retry.back_off()
+        if notice is BackoffNotice.WAITING:
             logger.info(
                 "Waiting for producer... (attempt %d, next retry in %d frames)",
                 retry.connect_attempts,
                 retry.retry_interval_frames,
             )
-        elif retry.connect_attempts == retry.max_connect_attempts + 1:
+        elif notice is BackoffNotice.NOW_SILENT:
             logger.warning("Producer not found. Will keep retrying silently.")
         return False
 
