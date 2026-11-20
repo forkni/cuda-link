@@ -43,8 +43,8 @@ Common flags:
                         Release download covers every supported target.
 
 Environment variables (persisted via `setx`, current user, on by default):
-    CUDALINK_DOORBELL=1 and CUDALINK_WAIT_BACKEND=auto are set after ANY
-    successful install (all modes) — this pins the R2 doorbell on and lets the
+    CUDALINK_WAIT_BACKEND=auto is set after ANY
+    successful install (all modes) — the R2 doorbell is always on, and this lets the
     R5 native waiter (cuda_link._native_waiter) resolve on top of it where the
     prebuilt wheel and a CUDA runtime are available, transparently falling
     back to the pre-R5 Python spin/sleep path otherwise. Setting it explicitly
@@ -818,7 +818,6 @@ def mode_4_system_python(
         # standalone receiver subprocess should use — this IS that interpreter, since
         # mode 4 just installed cuda_link into it. Without this, the launcher falls
         # back to `py -3` resolution, which may pick a DIFFERENT Python 3 install.
-        # (CUDALINK_DOORBELL is set centrally in main() after any mode succeeds.)
         print()
         print(_bold("  Persisting environment variable for the standalone receiver:"))
         set_vars: dict[str, str] = {}
@@ -951,7 +950,7 @@ def main() -> None:
         "--no-set-env",
         action="store_true",
         default=False,
-        help="Don't persist CUDALINK_DOORBELL / CUDALINK_WAIT_BACKEND (any mode) / "
+        help="Don't persist CUDALINK_WAIT_BACKEND (any mode) / "
         "CUDALINK_RECEIVER_PYTHON_EXE (modes 2, 4) as current-user Windows environment "
         "variables via setx (set by default otherwise).",
     )
@@ -997,18 +996,16 @@ def main() -> None:
     elif mode == 5:
         mode_5_td_python(args.td_python, args.wheel, args.build, args.non_interactive, args.dry_run)
 
-    # CUDALINK_DOORBELL / CUDALINK_WAIT_BACKEND: persisted here (not a library
+    # CUDALINK_WAIT_BACKEND: persisted here (not a library
     # code default) after ANY successful mode above — a mode function that hit
     # sys.exit() on error never reaches this point, so a failed install
-    # correctly skips both too. WAIT_BACKEND=auto is explicit (matching the
+    # correctly skips it too. WAIT_BACKEND=auto is explicit (matching the
     # library's own default) so it also overwrites any stale "python"/"native"
     # value left over from earlier manual testing on this machine.
     if set_env:
         print()
-        print(_bold("  Persisting environment variables for the R2 doorbell and R5 native waiter:"))
+        print(_bold("  Persisting the environment variable for the R5 native waiter:"))
         set_vars: dict[str, str] = {}
-        if _setx_user("CUDALINK_DOORBELL", "1", args.dry_run):
-            set_vars["CUDALINK_DOORBELL"] = "1"
         if _setx_user("CUDALINK_WAIT_BACKEND", "auto", args.dry_run):
             set_vars["CUDALINK_WAIT_BACKEND"] = "auto"
         _print_env_vars_set(set_vars)

@@ -343,7 +343,7 @@ class IPCConnection:
     ipc_events: list[Any]  # CUDA event per slot (None when the sender published none)
     layout: SHMLayout
     shutdown_offset: int
-    # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
+    # R2: Win32 doorbell handle (None with ImportPolicy(doorbell=False) or non-Windows)
     doorbell_handle: object = None
 
     def close_ipc_handles(self) -> None:
@@ -1841,7 +1841,7 @@ class Importer:
               take a signal, so the wait runs in slices of _DOORBELL_SLICE_MS and
               polls write_idx after each: a taken signal costs one slice, not the
               whole timeout. Caller always re-checks with get_frame() after True.
-            * Returns False immediately when CUDALINK_DOORBELL=0, on non-Windows,
+            * Returns False immediately with ImportPolicy(doorbell=False), on non-Windows,
               or when the producer made no event (1.x, doorbell off) — the caller
               falls back to its poll-sleep path without any guards.
         """

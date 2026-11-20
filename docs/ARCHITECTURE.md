@@ -506,8 +506,8 @@ session lifetime.
 ### R2: Win32 Named-Event Doorbell (v1.11.0)
 
 Consumer-idle signaling primitive. Since 2.0.0 the producer signals it by default
-and a Python consumer waits on it by default (`CUDALINK_DOORBELL=0` turns it off on the side
-that sets it; the consumer waits in 1 ms slices).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
+and a Python consumer waits on it by default (no environment variable since 2.0.0; code can
+pass `doorbell=False` in a policy; the consumer waits in 1 ms slices).  Replaces the consumer's poll-sleep idle loop with a blocking `WaitForSingleObject`
 call on a Win32 auto-reset named event, eliminating busy-wait CPU usage between frames.
 
 **Flow**:
@@ -926,7 +926,7 @@ AI inference into a 60 FPS TD project).
 See the dedicated subsections in **GPU Synchronization → R1** and **GPU Synchronization → R2** above for full architecture detail.  Summary:
 
 - **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing host-side `cudaEventSynchronize` with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
-- **R2** (`CUDALINK_DOORBELL=1`): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
+- **R2** (always on since 2.0.0): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
 - **R3**: pinned-memory f16 fallback in CuPy wait path — prevents dtype mismatch on f16 producers.
 
 ---

@@ -538,7 +538,7 @@ wait — measured CPU usage: ~3-4% → ~0.3-1% at 60 FPS.  It is on by default s
 
 - Windows only (Win32 `CreateEventW`)
 - Nothing to set since 2.0.0: the TD Sender signals the doorbell and the Python consumer waits
-  on it by default. Do not set `CUDALINK_DOORBELL=0` on either side. With 1.x, set
+  on it. The `CUDALINK_DOORBELL` variable is removed in 2.0.0. With 1.x, set
   `CUDALINK_DOORBELL=1` on both sides.
 - One waiter per signal: with several consumers on one channel each waits in 1 ms slices, so a
   taken signal costs one slice
@@ -553,7 +553,7 @@ Nothing to set on TD since 2.0.0: the Sender signals the doorbell by default. Wi
 ```python
 import os
 
-os.environ["CUDALINK_DOORBELL"] = "1"  # must be set before importing cuda_link
+os.environ["CUDALINK_DOORBELL"] = "1"  # 1.x only (set before importing cuda_link); no effect in 2.0
 
 from cuda_link import Importer, ImportSpec, ImportOutcome
 

@@ -184,15 +184,15 @@ def test_wait_for_doorbell_zero_timeout_polls_the_event(monkeypatch: pytest.Monk
     assert waits == [0]
 
 
-def test_import_policy_doorbell_default_on_and_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_policy_doorbell_is_on_and_has_no_env_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     from cuda_link._importer_port import ImportPolicy
 
     monkeypatch.delenv("CUDALINK_DOORBELL", raising=False)
     assert ImportPolicy().doorbell is True
     assert ImportPolicy.from_env().doorbell is True
     assert ImportPolicy.for_testing().doorbell is False
-    monkeypatch.setenv("CUDALINK_DOORBELL", "0")
-    assert ImportPolicy.from_env().doorbell is False
+    monkeypatch.setenv("CUDALINK_DOORBELL", "0")  # removed in 2.0.0: no effect
+    assert ImportPolicy.from_env().doorbell is True
 
 
 # ---------------------------------------------------------------------------

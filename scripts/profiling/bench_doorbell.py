@@ -5,7 +5,7 @@ Measures consumer idle CPU % and frame notify latency for two strategies
 against a fixed-rate GPU producer:
 
   poll      Baseline: on NO_FRAME, sleep 1 ms then retry.
-            (Existing behaviour when CUDALINK_DOORBELL is unset or 0.)
+            (The 1.x behaviour; in 2.0 only with ImportPolicy(doorbell=False).)
 
   doorbell  R2 opt-in: on NO_FRAME, block on the Win32 named auto-reset
             event that the producer signals after each publish_frame().

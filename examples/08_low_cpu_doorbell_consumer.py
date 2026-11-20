@@ -36,7 +36,7 @@ HOW TO RUN
 
 WHAT IT TEACHES
     * ExportPolicy(doorbell=True) / ImportPolicy(doorbell=True) — explicit
-      policy objects, not the CUDALINK_DOORBELL env var (ordering-sensitive).
+      policy objects (there is no environment variable for the doorbell).
     * The wait loop: poll first, and only when the poll says NO_FRAME block in
       wait_for_doorbell(2000.0).  NOTE the argument is MILLISECONDS.
     * Why it is race-free: wait_for_doorbell() is lost-wakeup-safe — it checks

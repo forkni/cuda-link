@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`CUDALINK_DOORBELL`**: the variable is gone and the doorbell is always on, in the Python
+  `Exporter` and `Importer` and in the `.tox` Sender. Measured 2026-11-20 at 1280x720: off saved
+  under 1 µs per publish (inside the run spread) and raised the consumer notify latency from
+  0.03 ms to 0.93 ms. A value left in the environment has no effect, and the installer no
+  longer sets it. `ExportPolicy(doorbell=False)` and `ImportPolicy(doorbell=False)` stay.
+
 ### Added
 
 - **C++ TOPs honor the Common page** (Out TOP and In TOP): Output Resolution, Resolution,

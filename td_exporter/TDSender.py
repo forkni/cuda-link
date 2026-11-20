@@ -545,8 +545,7 @@ class TDSenderEngine:
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier
                 # so it does not create a conflicting parallel check on the same SHM segment.
                 barrier_enabled=False,
-                # R2: Win32 named-event doorbell (TDSenderConfig.doorbell; CUDALINK_DOORBELL=0
-                # turns it off).
+                # R2: Win32 named-event doorbell (TDSenderConfig.doorbell, always on in the .tox).
                 doorbell=self._config.doorbell,
             )
 

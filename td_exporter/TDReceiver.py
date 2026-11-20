@@ -501,7 +501,7 @@ class TDReceiverEngine:
         after this poll, jitter makes repeat/skip pairs. The wait turns those repeats into
         new frames that come a little later. It blocks TD's main thread for at most the
         budget plus one slice. Returns False at once when the wait is off, the receiver is
-        not connected, or the sender made no doorbell (CUDALINK_DOORBELL=0, a 1.x sender,
+        not connected, or the sender made no doorbell (doorbell=False in its policy, a 1.x sender,
         non-Windows): the classic poll-once behaviour.
         """
         if wait_ms is None:
