@@ -52,8 +52,10 @@ constexpr int32_t kNumInfoCHOPChans = 22; // frames, cook_us, copy_us, begin_us,
                                           // version_changed_count, rescued_count, graph_hits, graph_builds,
                                           // producer_frame, stream_id, latency_us, frame_gap_count,
                                           // producer_skip_count, frame_wait_skipped, converted
-constexpr int32_t kNumInfoDATRows = 7;    // ipc_version, status, last_error, last_error_frame, init_note,
+constexpr int32_t kNumOwnInfoDATRows = 7; // ipc_version, status, last_error, last_error_frame, init_note,
                                           // producer_frame, source_timestamp_us
+// ... then the shared version and build rows (info_page.h).
+constexpr int32_t kNumInfoDATRows = kNumOwnInfoDATRows + cudalink::common::kNumBuildInfoDATRows;
 
 // CUDA IPC cannot open a handle in the process that exported it. Probed 2026-11-16 (runtime
 // 12.8, driver 13.05, RTX 4090): cudaIpcOpenMemHandle and cudaIpcOpenEventHandle on own-process
@@ -107,7 +109,9 @@ void FillTOPPluginInfo(TD::TOP_PluginInfo* info) {
     customInfo.cookOnStart = true;
 
     // 2: Info page added (Semverversion/Semverbuild/Semverauthor/Semvershowhelp).
-    customInfo.minorVersion = 2;
+    // 3: Semverversion/Semverbuild removed (a saved value hid the loaded build); version and
+    //    build moved to the Info page header label and the Info DAT.
+    customInfo.minorVersion = 3;
 }
 
 DLLEXPORT
@@ -1275,6 +1279,8 @@ void CudaLinkInTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEntr
             // Optional producer time in us, not interpreted by cuda-link (the C++ Out TOP writes 0).
             entries->values[0]->setString("source_timestamp_us");
             entries->values[1]->setString(std::to_string(mySourceTimestampUs).c_str());
+        } else if (index >= kNumOwnInfoDATRows) {
+            cudalink::common::fillBuildInfoDATRow(index - kNumOwnInfoDATRows, entries);
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

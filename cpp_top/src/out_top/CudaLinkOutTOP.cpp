@@ -53,8 +53,9 @@ constexpr int32_t kNumInfoCHOPChans = 14;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
-// last_error_frame, init_note, producer_frame).
-constexpr int32_t kNumInfoDATRows = 6;
+// last_error_frame, init_note, producer_frame), then the shared version and build rows.
+constexpr int32_t kNumOwnInfoDATRows = 6;
+constexpr int32_t kNumInfoDATRows = kNumOwnInfoDATRows + cudalink::common::kNumBuildInfoDATRows;
 
 } // namespace
 
@@ -81,7 +82,9 @@ void FillTOPPluginInfo(TD::TOP_PluginInfo* info) {
     customInfo.cookOnStart = true;
 
     // 2: Info page added (Semverversion/Semverbuild/Semverauthor/Semvershowhelp).
-    customInfo.minorVersion = 2;
+    // 3: Semverversion/Semverbuild removed (a saved value hid the loaded build); version and
+    //    build moved to the Info page header label and the Info DAT.
+    customInfo.minorVersion = 3;
 }
 
 DLLEXPORT
@@ -1176,7 +1179,7 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
 
 bool CudaLinkOutTOP::getInfoDATSize(TD::OP_InfoDATSize* infoSize, void*) {
     infoSize->rows = kNumInfoDATRows; // ipc_version, status, last_error, last_error_frame, init_note,
-                                      // producer_frame
+                                      // producer_frame, version, build
     infoSize->cols = 2;
     infoSize->byColumn = false;
     return true;
@@ -1209,6 +1212,8 @@ void CudaLinkOutTOP::getInfoDATEntries(int32_t index, int32_t, TD::OP_InfoDATEnt
             // Full 64-bit producer_frame (the Info CHOP channel shows it mod 2^24).
             entries->values[0]->setString("producer_frame");
             entries->values[1]->setString(std::to_string(myProducerFrame).c_str());
+        } else if (index >= kNumOwnInfoDATRows) {
+            cudalink::common::fillBuildInfoDATRow(index - kNumOwnInfoDATRows, entries);
         }
     } catch (...) { // NOLINT(bugprone-empty-catch) -- deliberate ABI fence, see comment above
     }

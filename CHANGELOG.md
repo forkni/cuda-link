@@ -19,8 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Live oracle against TD TOPs with the same settings: 83/83 cases per TOP (`docs/CPP_TOP.md`
   "Common page").
 
-- **C++ TOPs Info page**: Version, Build (git sha at configure time), Author and a Show Help
-  pulse, with the parameter names of the `.tox` Info page. Plugin `minorVersion` 2.
+- **C++ TOPs Info page**: Author and a Show Help pulse, with the parameter names of the `.tox`
+  Info page. The page header label shows the package version and the build (git sha at configure
+  time), and the Info DAT has them in the rows `version` and `build`. Plugin `minorVersion` 3.
+  The first version (`minorVersion` 2) had Version and Build string rows. TD saved their values
+  in the `.toe`, so after a reinstall they showed the old build. They are removed.
 
 - **`.tox` Receiver `Framewaitms`** (Integer 0-8, default 3 ms): when `onFrameStart` finds no
   new frame, the Receiver waits on the sender's doorbell in 1 ms slices and polls `write_idx`
