@@ -299,13 +299,13 @@ class IPCConnection:
     """
 
     cuda: ImporterCudaPort
-    shm_handle: object  # SharedMemory | None after close()
+    shm_handle: SharedMemory | None  # None after close()
     ipc_version: int
     num_slots: int
-    ipc_handles: list
-    dev_ptrs: list  # [c_void_p | None]
-    ipc_events: list  # [event_t | None]
-    layout: object  # SHMLayout
+    ipc_handles: list[Any]  # cudaIpcMemHandle_t per slot (None until read)
+    dev_ptrs: list[Any]  # c_void_p per slot (None after close_ipc_handles())
+    ipc_events: list[Any]  # CUDA event per slot (None when the sender published none)
+    layout: SHMLayout
     shutdown_offset: int
     # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
     doorbell_handle: object = None
