@@ -36,8 +36,6 @@ from Env import env_int  # noqa: E402
 from FrameProfile import ReportWindow  # noqa: E402
 from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
-    FLAGS_MONO_ALPHA,
-    FORMAT_KIND_FLOAT,
     METADATA_SIZE,
     PROTOCOL_MAGIC,
     SAME_PROCESS_MESSAGE,
@@ -64,6 +62,7 @@ from SHMProtocol import (  # noqa: E402
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
+from TDPixelFormat import to_name as td_format_string  # noqa: E402
 
 # The process id the same-process check compares with the segment's sender_pid; tests that
 # run a sender and a receiver in one process on fake CUDA replace it.
@@ -151,33 +150,6 @@ def cadence_wait_useful(c: PublishCadence, now_s: float, wait_ms: int) -> bool:
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
-
-
-def td_format_string(fmt: Format) -> str:
-    """Map a Format value object → TouchDesigner Script TOP par.format string.
-
-    Produces strings matching TD's internal par.format menu values, e.g.:
-      (FLOAT, 32, 4, flags=0)               → "rgba32float"
-      (UNSIGNED, 16, 4, flags=0)            → "rgba16fixed"
-      (UNSIGNED, 8, 1, flags=0)             → "r8fixed"
-      (FLOAT, 32, 2, flags=FLAGS_MONO_ALPHA) → "monoalpha32float"
-      (FLOAT, 32, 2, flags=0)               → "rg32float"
-
-    TD uses these to allocate the Script TOP's output texture. Setting
-    par.format before copyCUDAMemory ensures the texture is the right size
-    for the incoming dtype, preventing partial writes into an oversized buffer.
-
-    FLAGS_MONO_ALPHA is preserved in fmt.flags so that mono+alpha sources are
-    correctly labelled in the par.format string and in Info/Status messages —
-    the user's only signal that the channel layout is R+A (not R+G).
-    """
-    format_kind, bits_per_comp, num_comps, flags = fmt.kind, fmt.bits, fmt.num_comps, fmt.flags
-    if num_comps == 2 and flags & FLAGS_MONO_ALPHA:
-        ch = "monoalpha"
-    else:
-        ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
-    suffix = "float" if format_kind == FORMAT_KIND_FLOAT else "fixed"
-    return f"{ch}{bits_per_comp}{suffix}"
 
 
 # CuPy import deferred (heavy; only needed for float16 receiver path)
