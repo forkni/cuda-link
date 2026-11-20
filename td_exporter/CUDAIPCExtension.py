@@ -430,7 +430,7 @@ class CUDAIPCExtension:
             )
         return TDReceiverEngine(  # type: ignore[not-callable]
             host=self._host,
-            config=TDReceiverConfig(),  # type: ignore[bad-argument-type]
+            config=TDReceiverConfig.from_env(),  # type: ignore[bad-argument-type]
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,

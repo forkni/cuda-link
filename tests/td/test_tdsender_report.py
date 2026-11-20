@@ -61,7 +61,8 @@ def _make_engine(report_every: int | None = 150, verbose: bool = True, shm_name:
     logs: list[str] = []
     engine = TDSenderEngine(
         host=_SpyHost(),
-        config=TDSenderConfig(),
+        # from_env(), as the extension builds it: the env var reaches the engine through the config.
+        config=TDSenderConfig.from_env(),
         cuda=None,
         log_fn=lambda msg, force=False: logs.append(msg),
         num_slots=3,
@@ -199,7 +200,7 @@ def test_consecutive_reports_use_windowed_fps_and_avg():
 
 
 def test_report_every_env_override(monkeypatch):
-    """CUDALINK_SENDER_REPORT_EVERY env var is respected at engine construction time."""
+    """CUDALINK_SENDER_REPORT_EVERY reaches the engine through TDSenderConfig.from_env()."""
     monkeypatch.setenv("CUDALINK_SENDER_REPORT_EVERY", "50")
     # Pass report_every=None so _make_engine does NOT override the env-sourced value.
     engine, logs = _make_engine(report_every=None, verbose=True)

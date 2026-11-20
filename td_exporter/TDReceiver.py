@@ -32,7 +32,6 @@ from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
-from Env import env_int  # noqa: E402
 from FrameProfile import ReportWindow  # noqa: E402
 from Importer import Format  # noqa: E402
 from SHMProtocol import (  # noqa: E402
@@ -381,7 +380,7 @@ class TDReceiverEngine:
 
         # Per-frame performance tracking for Debug summary line — shares
         # ReportWindow with TDSenderEngine.
-        self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
+        self._rx_report_every: int = config.report_every
         self._rx_window = ReportWindow()
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---

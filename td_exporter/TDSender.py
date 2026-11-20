@@ -26,7 +26,6 @@ import traceback
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
-from Env import env_bool, env_int  # noqa: E402
 from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
@@ -275,7 +274,7 @@ class TDSenderEngine:
 
         # Windowed periodic stats report — shares ReportWindow with TDReceiverEngine.
         # All timing is engine-local; does not depend on export_profile being enabled.
-        self._tx_report_every: int = env_int("CUDALINK_SENDER_REPORT_EVERY", default=150)
+        self._tx_report_every: int = config.report_every
         self._tx_window = ReportWindow()  # owns FPS window + per-frame export-time accumulator
         # Per-window top.cuda_memory() time, apart from export(): cuda_memory() waits for TD's
         # GPU work on the source texture, so a slow source pipeline shows here, not in export.
@@ -546,10 +545,9 @@ class TDSenderEngine:
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier
                 # so it does not create a conflicting parallel check on the same SHM segment.
                 barrier_enabled=False,
-                # R2: Win32 named-event doorbell. Default ON (2.0.0), same as
-                # ExportPolicy.from_env(): a C++ In TOP with Framewaitms > 0 waits on it.
-                # CUDALINK_DOORBELL=0 turns it off. One waiter per signal; Windows-only.
-                doorbell=env_bool("CUDALINK_DOORBELL", default=True),
+                # R2: Win32 named-event doorbell (TDSenderConfig.doorbell; CUDALINK_DOORBELL=0
+                # turns it off).
+                doorbell=self._config.doorbell,
             )
 
             # Exporter.open() with cuda=None creates CTypesCUDAAdapter.for_device(spec.device).
