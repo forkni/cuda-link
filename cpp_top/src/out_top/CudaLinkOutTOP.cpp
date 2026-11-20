@@ -13,6 +13,8 @@
 #include "../common/common_page_td.h"
 #include "../common/info_page.h"
 #include "../common/resize_convert.h"
+#include "../core/doorbell_name.h"
+#include "../core/env_flag.h"
 #include "../core/pixel_codec.h"
 #include "../common/cuda_device_session.h"
 #include "../common/cuda_op_scope.h"
@@ -125,8 +127,7 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     // exposes toggles, but this one is an env var (no UI parameter) precisely so it can stay
     // off by default with zero exposure in the shipped .tox until proven live (see the
     // capture-site comment in tryGraphCopy() for the full rationale and residual risk).
-    const char* graphsEnv = std::getenv("CUDALINK_CPP_USE_GRAPHS");
-    myGraphsRequested = graphsEnv && graphsEnv[0] != '\0' && graphsEnv[0] != '0';
+    myGraphsRequested = cudalink::core::env_flag("CUDALINK_CPP_USE_GRAPHS");
 }
 
 CudaLinkOutTOP::~CudaLinkOutTOP() {
@@ -617,7 +618,7 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     clear_shutdown(view, layout);
 
     if (!myDoorbellHandle) {
-        const std::wstring wDoorbell = L"Local\\cudalink_db_" + widen(name);
+        const std::wstring wDoorbell = cudalink::core::doorbell_event_name(name);
         HANDLE db = CreateEventW(nullptr, FALSE, FALSE, wDoorbell.c_str());
         if (!db) {
             myWarning = "doorbell CreateEventW failed; consumer will fall back to poll-sleep";

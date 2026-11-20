@@ -17,6 +17,8 @@
 #include "../common/info_page.h"
 #include "../common/resize_convert.h"
 #include "../core/common_page.h"
+#include "../core/doorbell_name.h"
+#include "../core/env_flag.h"
 #include "../core/pixel_codec.h"
 #include "../out_top/pixel_format_map.h" // OP_PixelFormat -> wire tuple, for the Common target
 #include "../common/cuda_device_session.h"
@@ -146,12 +148,12 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
 
     // CUDA Graphs opt-in (PLAN-005 task #13 / ADR-0011, default OFF). Deliberately the SAME
     // env var the Out TOP reads: its parked path self-disables at frame 3 when set (harmless
-    // but noisy, accepted in ADR-0010), and one var enables "the graphs feature" project-wide
-    // rather than per-TOP-role -- matching the Python side's single CUDALINK_USE_GRAPHS gate.
+    // but noisy, accepted in ADR-0010), and one var enables "the graphs feature" for both
+    // C++ TOPs rather than per-TOP-role. The Python side has its own two variables
+    // (CUDALINK_USE_GRAPHS for the package, CUDALINK_TD_USE_GRAPHS for the .tox Sender).
     // Read once at construction for the same no-UI-exposure rationale as the sender
     // (CudaLinkOutTOP's ctor comment).
-    const char* graphsEnv = std::getenv("CUDALINK_CPP_USE_GRAPHS");
-    myGraphsRequested = graphsEnv && graphsEnv[0] != '\0' && graphsEnv[0] != '0';
+    myGraphsRequested = cudalink::core::env_flag("CUDALINK_CPP_USE_GRAPHS");
 }
 
 CudaLinkInTOP::~CudaLinkInTOP() {
@@ -563,10 +565,10 @@ cudalink::core::AcquireResult CudaLinkInTOP::waitForFreshFrame(cudalink::core::A
     // Lazy open, retried on every waiting cook until the producer has created the event
     // (CudaLinkOutTOP::reallocate() creates it before its first commit_version; a producer
     // DLL predating the doorbell never will, in which case this stays null and the classic
-    // instant-repeat path below is preserved). Name construction mirrors the producer's
-    // verbatim (win_util.h widen() contract).
+    // instant-repeat path below is preserved). The producer builds the name with the same
+    // function (core/doorbell_name.h).
     if (!myDoorbellHandle) {
-        const std::wstring wDoorbell = L"Local\\cudalink_db_" + widen(myCachedIpcmemname.c_str());
+        const std::wstring wDoorbell = cudalink::core::doorbell_event_name(myCachedIpcmemname.c_str());
         myDoorbellHandle = OpenEventW(SYNCHRONIZE, FALSE, wDoorbell.c_str());
         if (myDoorbellHandle) {
             debugLog("doorbell opened (Framewaitms=" + std::to_string(waitMs) + ")");
