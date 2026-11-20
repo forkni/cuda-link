@@ -116,3 +116,12 @@ from frame to frame.
 **Decision**: keep the code, default off. Do not set `CUDALINK_CPP_USE_GRAPHS` on the dev
 box or on the show machine. With `Debug` on, the GPU timers make Out TOP `copy_us` about
 3.5 times larger (about 230 µs), so do not compare graph and legacy runs with `Debug` on.
+
+## Variable removed 2026-11-20 (2.0.0)
+
+Rule for 2.0.0: each on/off variable is measured on against off, the state that is not slower
+becomes fixed, and the variable goes away. For `CUDALINK_CPP_USE_GRAPHS` the measurement is the
+section "Re-measure 2026-11-17" above: no gain with Debug off. So off is fixed. Both TOPs no
+longer read the variable; `myGraphsRequested` stays false. The graph code stays in the tree and
+is not reachable. To run it again for a measurement, set `myGraphsRequested` in the constructor
+and rebuild.
