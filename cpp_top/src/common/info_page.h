@@ -37,8 +37,8 @@ namespace cudalink::common {
 
 constexpr char kInfoPage[] = "Info";
 constexpr char kInfoHeaderName[] = "Cudalinkheader2";
-constexpr char kInfoHeaderLabel[] =
-    "CUDA-Link " CUDALINK_VERSION " (build " CUDALINK_BUILD_SHA ")   |   Zero-copy GPU texture sharing via CUDA IPC";
+constexpr char kInfoHeaderLabel[] = "CUDA-Link " CUDALINK_VERSION " (build " CUDALINK_BUILD_SHA
+                                    ")   |   Zero-copy GPU texture sharing via CUDA IPC";
 constexpr char kInfoAuthorName[] = "Semverauthor";
 constexpr char kInfoHelpName[] = "Semvershowhelp";
 constexpr char kInfoAuthor[] = "forkni (forkni@gmail.com)";
