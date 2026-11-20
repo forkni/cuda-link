@@ -211,19 +211,29 @@ About `Framewaitms`:
 
 ## Info page
 
-Both TOPs have an "Info" page after "CUDA Link". It has the names of the `.tox` Info page, so a
-script that reads one also reads the other.
+Both TOPs have an "Info" page after "CUDA Link". Its parameters have the names of the `.tox`
+Info page, so a script that reads one also reads the other.
 
 | Name | Label | Value |
 |---|---|---|
-| `Semverversion` | Version | Package version, from `pyproject.toml` at configure time |
-| `Semverbuild` | Build | Git sha of the source tree at configure time. Configure again to refresh it. |
+| `Cudalinkheader2` | (header) | `CUDA-Link <version> (build <sha>)`: the loaded DLL's package version (`pyproject.toml`) and git sha, both set at configure time. The sha ends in `-dirty` when tracked files differed from HEAD at configure time. A commit or checkout makes the next build configure again by itself; after uncommitted edits, configure again by hand. |
 | `Semverauthor` | Author | `forkni (forkni@gmail.com)` |
 | `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub, on the `development` branch until the 2.0.0 release |
 
-The SDK has no read-only flag for custom parameters, so the TOPs grey out the three value rows
-on each cook. The `.tox` has a "Hide built-in Parameters" toggle; the DLLs cannot have it, because
-the SDK cannot hide the Common page. The plugin `minorVersion` is 2 since the Info page was added.
+The Info DAT of each TOP has the same two values in its last rows, `version` and `build`, for
+scripts.
+
+The version and the build are not string parameters. TD saves the value of a custom string
+parameter in the `.toe`, and a saved value beats the default of a newer DLL. So a `Semverversion`
+or `Semverbuild` row showed the build that the file was saved with, not the loaded build. The
+header label and the Info DAT come from the loaded DLL each time. A `.toe` saved with plugin
+`minorVersion` 2 can have saved values for `Semverversion` and `Semverbuild`. The parameters are
+gone, so read `version` and `build` from the Info DAT instead.
+
+The SDK has no read-only flag for custom parameters, so the TOPs grey out the Author row on each
+cook. The `.tox` has a "Hide built-in Parameters" toggle. The DLLs cannot have it, because the
+SDK cannot hide the Common page. The plugin `minorVersion` is 3: 2 added the Info page, and 3
+removed the Version and Build rows.
 
 ## Common page
 
@@ -389,6 +399,8 @@ frames, and `topcore_tests` tests it. Python has the same rules in
 | `init_note` | yes | yes |
 | `producer_frame` | yes: last published, full 64-bit value | yes: shown frame, full 64-bit value |
 | `source_timestamp_us` | no | yes: shown frame |
+| `version` | yes: loaded DLL, package version at configure time | yes: loaded DLL, package version at configure time |
+| `build` | yes: loaded DLL, git sha at configure time | yes: loaded DLL, git sha at configure time |
 
 ### producer_frame in a CHOP channel
 
