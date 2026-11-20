@@ -28,21 +28,24 @@ except ImportError:
 
 import Doorbell as _doorbell  # noqa: E402
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
-from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
 from FrameProfile import ReportWindow  # noqa: E402
-from Importer import Format  # noqa: E402
+from Importer import (  # noqa: E402
+    Format,
+    HeaderFault,
+    SlotEventOpenError,
+    check_header,
+    open_slot,
+    read_slot_handle_bytes,
+)
 from SHMProtocol import (  # noqa: E402
     FLAGS_MONO_ALPHA,
     FORMAT_KIND_FLOAT,
     METADATA_SIZE,
-    PROTOCOL_MAGIC,
     SAME_PROCESS_MESSAGE,
-    SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
-    SLOT_SIZE,
     EMPTY_SLOT_META,
     INFO_CHOP_FRAME_MOD,
     SLOT_META_CHANNELS,
@@ -53,12 +56,7 @@ from SHMProtocol import (  # noqa: E402
     SlotState,
     acquire_slot,
     classify_frame_step,
-    is_same_process_sender,
-    is_valid_num_slots,
     protocol_mismatch_message,
-    read_magic,
-    read_num_slots,
-    read_sender_pid,
     read_version,
     read_write_idx,
 )
@@ -884,36 +882,21 @@ class TDReceiverEngine:
                 self._log(f"SharedMemory '{self.shm_name}' not found. Sender not ready?")
                 return False
 
-            # Validate protocol magic number (new in this version)
-            try:
-                magic = read_magic(shm_handle.buf)
-                if magic != PROTOCOL_MAGIC:
-                    self._log(protocol_mismatch_message(magic), force=True)
-                    shm_handle.close()
-                    return False
-                if is_same_process_sender(read_sender_pid(shm_handle.buf), _current_pid()):
-                    self._log(SAME_PROCESS_MESSAGE, force=True)
-                    shm_handle.close()
-                    return False
-            except (struct.error, ValueError, IndexError):
+            # Validate the header: protocol magic, same-process rule, slot count.
+            header = check_header(shm_handle.buf, _current_pid())
+            if header.fault is not None:
                 self._log(
-                    "Cannot read protocol magic. Sender may be using old protocol version.",
+                    {
+                        HeaderFault.BAD_MAGIC: protocol_mismatch_message(header.magic),
+                        HeaderFault.SAME_PROCESS: SAME_PROCESS_MESSAGE,
+                        HeaderFault.UNREADABLE: "Cannot read protocol magic. Sender may be using old protocol version.",
+                        HeaderFault.BAD_NUM_SLOTS: f"Invalid num_slots: {header.num_slots}. Protocol error.",
+                    }[header.fault],
                     force=True,
                 )
                 shm_handle.close()
                 return False
-
-            # Read header
-            ipc_version = read_version(shm_handle.buf)
-            num_slots = read_num_slots(shm_handle.buf)
-
-            if not is_valid_num_slots(num_slots):
-                self._log(
-                    f"Invalid num_slots: {num_slots}. Protocol error.",
-                    force=True,
-                )
-                shm_handle.close()
-                return False
+            ipc_version, num_slots = header.ipc_version, header.num_slots
 
             # Sync UI parameter to show sender's slot count (informational only).
             # Do NOT set self.num_slots — that's the sender-specific working value.
@@ -1012,12 +995,9 @@ class TDReceiverEngine:
 
             # Open all IPC handles (per slot)
             for slot in range(num_slots):
-                base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+                raw = read_slot_handle_bytes(shm_handle.buf, layout, slot)
 
-                # Read + open memory handle
-                mem_handle_bytes = bytes(shm_handle.buf[base_offset : base_offset + 64])
-
-                if not any(mem_handle_bytes):
+                if not raw.has_mem:
                     self._log(
                         f"Slot {slot}: IPC mem handle is all zeros - "
                         "sender hasn't written handles yet. Will retry with backoff.",
@@ -1027,11 +1007,21 @@ class TDReceiverEngine:
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
-                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
-                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {raw.mem[:16].hex()}...")
 
                 try:
-                    dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+                    ipc_handles[slot], dev_ptrs[slot], ipc_events[slot] = open_slot(self.cuda, raw)
+                except SlotEventOpenError as e:
+                    # Without the event the wait has nothing to order against the
+                    # sender, so every frame would be read unsynced: fail the init
+                    # (slot + 1 also releases this slot's just-opened mem handle).
+                    dev_ptrs[slot] = e.dev_ptr
+                    self._log(
+                        f"Slot {slot}: failed to open IPC event: {e.cause}. Will retry with backoff.",
+                        force=True,
+                    )
+                    self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                    return False
                 except RuntimeError as e:
                     self._log(
                         f"Slot {slot}: cudaIpcOpenMemHandle failed: {e}. "
@@ -1041,23 +1031,6 @@ class TDReceiverEngine:
                     )
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
-
-                # Read + open event handle
-                event_handle_bytes = bytes(shm_handle.buf[base_offset + 64 : base_offset + 128])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        # Without the event the wait has nothing to order against the
-                        # sender, so every frame would be read unsynced: fail the init
-                        # (slot + 1 also releases this slot's just-opened mem handle).
-                        self._log(
-                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
-                            force=True,
-                        )
-                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
-                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -1380,8 +1353,7 @@ class TDReceiverEngine:
         handles_changed = False
         if self.cuda is not None and conn.ipc_handles:
             for slot in range(conn.num_slots):
-                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-                new_mem_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+                new_mem_bytes = read_slot_handle_bytes(shm.buf, layout, slot).mem
                 old_handle = conn.ipc_handles[slot] if slot < len(conn.ipc_handles) else None
                 if old_handle is None or bytes(old_handle) != new_mem_bytes:
                     handles_changed = True
@@ -1474,29 +1446,24 @@ class TDReceiverEngine:
         new_dev_ptrs: list = [None] * num_slots
         new_ipc_handles: list = [None] * num_slots
         new_ipc_events: list = [None] * num_slots
+        layout = SHMLayout(num_slots)
         for slot in range(num_slots):
-            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
-            if not any(mem_handle_bytes):
+            raw = read_slot_handle_bytes(shm.buf, layout, slot)
+            if not raw.has_mem:
                 self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
             try:
-                new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
+                new_ipc_handles[slot], new_dev_ptrs[slot], new_ipc_events[slot] = open_slot(self.cuda, raw)
+            except SlotEventOpenError as e:
+                new_dev_ptrs[slot] = e.dev_ptr
+                self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e.cause} — falling back", force=True)
+                self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                return None
             except (RuntimeError, OSError) as e:
                 self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
-            if any(event_handle_bytes):
-                try:
-                    ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                    new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
-                except (RuntimeError, OSError) as e:
-                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
-                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
-                    return None
         return new_dev_ptrs, new_ipc_handles, new_ipc_events
 
     def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:
