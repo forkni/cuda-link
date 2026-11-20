@@ -230,7 +230,6 @@ def main() -> None:
     graphs_active = bool(exporter._policy.use_graphs and not exporter._graphs_disabled)
     graphs_label = "ON" if graphs_active else "OFF"
     profile_on = os.environ.get("CUDALINK_EXPORT_PROFILE", "0") == "1"
-    env_setting = os.environ.get("CUDALINK_USE_GRAPHS", "(default=1)")
     try:
         rt_version = cuda.get_runtime_version()
         rt_label = f"{rt_version // 1000}.{(rt_version % 1000) // 10}"
@@ -238,8 +237,8 @@ def main() -> None:
         rt_version = 0
         rt_label = "unknown"
     print(f"[sender] cudart runtime: {rt_label} ({rt_version})")
-    print(f"[sender] CUDA Graphs path: {graphs_label}  (CUDALINK_USE_GRAPHS={env_setting})")
-    if not graphs_active and env_setting in ("1", "(default=1)"):
+    print(f"[sender] CUDA Graphs path: {graphs_label}")
+    if not graphs_active and exporter._policy.use_graphs:
         print("[sender]   (graphs requested but disabled — see exporter logs for reason)")
     print("[sender] Initialized — waiting for TD receiver to connect ...\n")
 

@@ -47,11 +47,11 @@ Write-Host "==> Output  : $out/run.nsys-rep"
 
 $env:CUDALINK_NVTX            = "1"
 $env:CUDALINK_NVTX_VERBOSE    = "1"
-$env:CUDALINK_USE_GRAPHS      = "$Graphs"
 $env:CUDALINK_TD_USE_GRAPHS   = "$Graphs"
 
 if ($Target -eq "profile_export") {
     $cmd = "python scripts/profiling/profile_export.py --frames $Frames --export-profile"
+    if ($Graphs -eq 0) { $cmd += " --no-graphs" }
 } else {
     # bench_sweep --quick runs a single cell (512x512, uint8, 200 frames) for a quick smoke;
     # omit --quick for a full sweep across resolutions. For nsys timing use --quick to keep

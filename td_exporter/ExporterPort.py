@@ -70,6 +70,9 @@ class ExportPolicy:
     """
 
     export_sync: bool = False
+    # CUDA graph path for export(). On, with no environment variable since 2.0.0: measured
+    # 2026-11-20 at 1280x720, export_frame median 13.4 us with graphs, 22.9 us without.
+    # The Exporter still falls back to the legacy path on a capture or launch failure.
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
@@ -92,7 +95,6 @@ class ExportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
             export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=False),
-            use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
             require_source_sync=env_bool("CUDALINK_REQUIRE_SOURCE_SYNC", default=False),

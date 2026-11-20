@@ -65,7 +65,7 @@ def test_export_policy_defaults() -> None:
 
 def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "0")
-    monkeypatch.setenv("CUDALINK_USE_GRAPHS", "0")
+    monkeypatch.setenv("CUDALINK_USE_GRAPHS", "0")  # removed in 2.0.0: no effect
     monkeypatch.setenv("CUDALINK_EXPORT_FLUSH_PROBE", "0")
     monkeypatch.setenv("CUDALINK_STRICT_DEVICE", "1")
     monkeypatch.setenv("CUDALINK_ACTIVATION_BARRIER", "0")
@@ -75,7 +75,7 @@ def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     pol = ExportPolicy.from_env()
     assert pol.export_sync is False
-    assert pol.use_graphs is False
+    assert pol.use_graphs is True
     assert pol.flush_probe is False
     assert pol.strict_device is True
     assert pol.barrier_enabled is False
@@ -123,7 +123,6 @@ _EXPORT_DEFAULTS = {
 # env var -> policy field, for the plain "1"/"0" booleans
 _EXPORT_BOOL_ENV = {
     "CUDALINK_EXPORT_SYNC": "export_sync",
-    "CUDALINK_USE_GRAPHS": "use_graphs",
     "CUDALINK_EXPORT_FLUSH_PROBE": "flush_probe",
     "CUDALINK_STRICT_DEVICE": "strict_device",
     "CUDALINK_REQUIRE_SOURCE_SYNC": "require_source_sync",
