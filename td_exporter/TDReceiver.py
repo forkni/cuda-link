@@ -27,6 +27,7 @@ except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
 import Doorbell as _doorbell  # noqa: E402
+from CUDAAdapters import CTypesCUDAAdapter  # noqa: E402
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
@@ -867,7 +868,10 @@ class TDReceiverEngine:
         # leaks the SHM mapping on every failed attempt / backoff retry.
         shm_handle = None
         try:
-            self.cuda = get_cuda_runtime(device=self.device)
+            # The `cuda` constructor argument wins (tests, and a caller that already holds a
+            # port). Without one, wrap the process-wide runtime in the production adapter.
+            if self.cuda is None:
+                self.cuda = CTypesCUDAAdapter(get_cuda_runtime(device=self.device))
             if not getattr(self, "_runtime_load_logged", False):
                 self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
                 self._runtime_load_logged = True

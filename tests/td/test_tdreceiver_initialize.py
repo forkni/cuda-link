@@ -466,6 +466,21 @@ def test_initialize_float16_presents_float32_shape_and_stages_conversion_buffers
     assert rig.cuda.host_registered == [(rig.engine._f16_cpu_buf.ctypes.data, 8 * 4 * 4 * 2)]
 
 
+def test_initialize_uses_the_cuda_port_given_to_the_constructor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a port passed in, the engine does not load the process-wide runtime."""
+    import TDReceiver as TDReceiverMod
+
+    def _must_not_load(device):
+        raise AssertionError("get_cuda_runtime() called although a port was given")
+
+    rig = _rig(monkeypatch, _segment())
+    monkeypatch.setattr(TDReceiverMod, "get_cuda_runtime", _must_not_load)
+    rig.engine.cuda = rig.cuda
+
+    assert rig.engine.initialize_receiver() is True
+    assert rig.engine.cuda is rig.cuda
+
+
 def test_initialize_cuda_runtime_failure_returns_false_without_touching_segment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
