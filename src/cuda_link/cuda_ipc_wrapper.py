@@ -70,6 +70,158 @@ else:
     _kernel32 = None
 
 
+# Every cudart function the wrapper calls: (name, argtypes, restype, strict).
+# argtypes None leaves the ctypes default. strict: a non-zero return raises CudaIpcError
+# through the ctypes errcheck hook. Not strict: cudaGetErrorString (returns a string),
+# cudaEventQuery / cudaStreamQuery (cudaErrorNotReady is a normal answer) and
+# cudaGetLastError / cudaPeekAtLastError (they read the sticky error).
+_CUDART_SIGNATURES: tuple[tuple[str, tuple[object, ...] | None, object, bool], ...] = (
+    # cudaMalloc(void** devPtr, size_t size)
+    ("cudaMalloc", (POINTER(c_void_p), c_size_t), c_int, True),
+    # cudaFree(void* devPtr)
+    ("cudaFree", (c_void_p,), c_int, True),
+    # cudaMallocHost(void** ptr, size_t size) — allocate pinned (page-locked) host memory
+    ("cudaMallocHost", (POINTER(c_void_p), c_size_t), c_int, True),
+    # cudaFreeHost(void* ptr) — free pinned host memory
+    ("cudaFreeHost", (c_void_p,), c_int, True),
+    # cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind)
+    ("cudaMemcpy", (c_void_p, c_void_p, c_size_t, c_int), c_int, True),
+    # cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr)
+    ("cudaIpcGetMemHandle", (POINTER(cudaIpcMemHandle_t), c_void_p), c_int, True),
+    # cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int flags)
+    ("cudaIpcOpenMemHandle", (POINTER(c_void_p), cudaIpcMemHandle_t, c_uint), c_int, True),
+    # cudaIpcCloseMemHandle(void* devPtr)
+    ("cudaIpcCloseMemHandle", (c_void_p,), c_int, True),
+    # cudaIpcGetEventHandle(cudaIpcEventHandle_t* handle, cudaEvent_t event)
+    ("cudaIpcGetEventHandle", (POINTER(cudaIpcEventHandle_t), CUDAEvent_t), c_int, True),
+    # cudaIpcOpenEventHandle(cudaEvent_t* event, cudaIpcEventHandle_t handle)
+    ("cudaIpcOpenEventHandle", (POINTER(CUDAEvent_t), cudaIpcEventHandle_t), c_int, True),
+    # cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags)
+    ("cudaEventCreateWithFlags", (POINTER(CUDAEvent_t), c_uint), c_int, True),
+    # cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
+    ("cudaEventRecord", (CUDAEvent_t, CUDAStream_t), c_int, True),
+    # cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream, unsigned int flags)
+    # Requires CUDA 11.0+. Used with CUDA_EVENT_RECORD_EXTERNAL to record an event
+    # as an external node during stream capture (plain cudaEventRecord fails with 900).
+    ("cudaEventRecordWithFlags", (CUDAEvent_t, CUDAStream_t, c_uint), c_int, True),
+    # cudaEventQuery(cudaEvent_t event)
+    ("cudaEventQuery", (CUDAEvent_t,), c_int, False),
+    # cudaEventSynchronize(cudaEvent_t event)
+    ("cudaEventSynchronize", (CUDAEvent_t,), c_int, True),
+    # cudaEventDestroy(cudaEvent_t event)
+    ("cudaEventDestroy", (CUDAEvent_t,), c_int, True),
+    # cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end)
+    ("cudaEventElapsedTime", (POINTER(c_float), CUDAEvent_t, CUDAEvent_t), c_int, True),
+    # cudaDeviceSynchronize()
+    ("cudaDeviceSynchronize", (), c_int, True),
+    # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
+    ("cudaPeekAtLastError", (), c_int, False),
+    # cudaGetLastError() — destructive read: returns AND clears the latched error.
+    # Only for one-shot recovery after a caught failure (clear_last_error); never call it
+    # in poll paths, where it would swallow errors meant for check_sticky_error.
+    ("cudaGetLastError", (), c_int, False),
+    # cudaHostRegister(void* ptr, size_t size, unsigned int flags) — page-lock existing host memory
+    ("cudaHostRegister", (c_void_p, c_size_t, c_uint), c_int, True),
+    # cudaHostUnregister(void* ptr) — unregister page-locked host memory
+    ("cudaHostUnregister", (c_void_p,), c_int, True),
+    # cudaGetErrorString(cudaError_t error)
+    ("cudaGetErrorString", (c_int,), ctypes.c_char_p, False),
+    # cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags)
+    ("cudaStreamCreateWithFlags", (POINTER(CUDAStream_t), c_uint), c_int, True),
+    # cudaStreamDestroy(cudaStream_t stream)
+    ("cudaStreamDestroy", (CUDAStream_t,), c_int, True),
+    # cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
+    ("cudaStreamWaitEvent", (CUDAStream_t, CUDAEvent_t, c_uint), c_int, True),
+    # cudaStreamSynchronize(cudaStream_t stream)
+    ("cudaStreamSynchronize", (CUDAStream_t,), c_int, True),
+    # cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream)
+    ("cudaMemcpyAsync", (c_void_p, c_void_p, c_size_t, c_int, CUDAStream_t), c_int, True),
+    # cudaMemGetInfo(size_t* free, size_t* total)
+    ("cudaMemGetInfo", (POINTER(c_size_t), POINTER(c_size_t)), c_int, True),
+    # cudaSetDevice(int device)
+    ("cudaSetDevice", (c_int,), c_int, True),
+    # cudaGetDevice(int* device)
+    ("cudaGetDevice", (POINTER(c_int),), c_int, True),
+    # cudaStreamQuery(cudaStream_t stream)
+    ("cudaStreamQuery", (CUDAStream_t,), c_int, False),
+    # cudaDeviceCanAccessPeer(int* canAccessPeer, int device, int peerDevice)
+    ("cudaDeviceCanAccessPeer", (POINTER(c_int), c_int, c_int), c_int, True),
+    # cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority)
+    ("cudaDeviceGetStreamPriorityRange", (POINTER(c_int), POINTER(c_int)), c_int, True),
+    # cudaStreamCreateWithPriority(cudaStream_t* pStream, unsigned int flags, int priority)
+    ("cudaStreamCreateWithPriority", (POINTER(CUDAStream_t), c_uint, c_int), c_int, True),
+    # cudaPointerGetAttributes(cudaPointerAttributes* attributes, const void* ptr)
+    ("cudaPointerGetAttributes", (POINTER(cudaPointerAttributes), c_void_p), c_int, True),
+    # === G1: non-graph helpers ===
+    # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
+    # Replaces cudaMallocHost with explicit flag control.
+    # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
+    # cudaHostAllocMapped    = 0x02 — map into device address space
+    # cudaHostAllocWriteCombined = 0x04 — write-combined (fast CPU writes, slow CPU reads)
+    ("cudaHostAlloc", (POINTER(c_void_p), c_size_t, c_uint), c_int, True),
+    # cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr, int device)
+    # Used to query e.g. cudaDevAttrAsyncEngineCount (attr=40, CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT)
+    # — how many DMA copy engines exist — and cudaDevAttrIpcEventSupport (attr=125,
+    # CUDA_DEV_ATTR_IPC_EVENT_SUPPORT) — see check_ipc_capability() below.
+    ("cudaDeviceGetAttribute", (POINTER(c_int), c_int, c_int), c_int, True),
+    # === G2: graph lifecycle ===
+    # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
+    # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
+    # mode: 0=global, 1=thread_local, 2=relaxed
+    ("cudaStreamBeginCapture", (CUDAStream_t, c_int), c_int, True),
+    # cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* pGraph)
+    ("cudaStreamEndCapture", (CUDAStream_t, POINTER(CUDAGraph_t)), c_int, True),
+    # cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
+    #                               unsigned long long flags)   [CUDA 11.4+ stable 3-arg form]
+    # Prefer this over cudaGraphInstantiate on any cudart 11.x: the latter changed
+    # from 5-arg (CUDA 10.0–11.8) to 3-arg (CUDA 12.0+) — calling the 12.0 3-arg
+    # binding against an 11.x DLL mismatches the ABI and crashes (WDDM access
+    # violation). cudaGraphInstantiateWithFlags has had a stable 3-arg signature
+    # since 11.4 and is available in all 12.x releases as well.
+    ("cudaGraphInstantiateWithFlags", (POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64), c_int, True),
+    # cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
+    ("cudaGraphLaunch", (CUDAGraphExec_t, CUDAStream_t), c_int, True),
+    # cudaGraphDestroy(cudaGraph_t graph)
+    ("cudaGraphDestroy", (CUDAGraph_t,), c_int, True),
+    # cudaGraphExecDestroy(cudaGraphExec_t graphExec)
+    ("cudaGraphExecDestroy", (CUDAGraphExec_t,), c_int, True),
+    # cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t* numNodes)
+    # Pass nodes=NULL to query count; then call again with allocated array.
+    ("cudaGraphGetNodes", (CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)), c_int, True),
+    # cudaRuntimeGetVersion(int* runtimeVersion)
+    # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
+    # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
+    # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
+    ("cudaRuntimeGetVersion", (POINTER(c_int),), c_int, True),
+    # === G3: graph node setters ===
+    # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
+    # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
+    # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
+    #                                  const cudaMemcpy3DParms*)
+    # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
+    # (1D form) use cudaGraphExecMemcpyNodeSetParams1D instead.
+    ("cudaGraphExecMemcpyNodeSetParams", (CUDAGraphExec_t, CUDAGraphNode_t, POINTER(cudaMemcpy3DParms)), c_int, True),
+    # cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t, cudaGraphNode_t,
+    #                                    void* dst, const void* src,
+    #                                    size_t count, cudaMemcpyKind kind)
+    # Updates a 1D memcpy node (captured from cudaMemcpyAsync). CUDA 11.3+.
+    (
+        "cudaGraphExecMemcpyNodeSetParams1D",
+        (CUDAGraphExec_t, CUDAGraphNode_t, c_void_p, c_void_p, c_size_t, c_int),
+        c_int,
+        True,
+    ),
+    # cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
+    #                                      cudaEvent_t event)
+    # Updates the event recorded by an event-record node. CUDA 11.4+.
+    ("cudaGraphExecEventRecordNodeSetEvent", (CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t), c_int, True),
+    # cudaGraphExecEventWaitNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
+    #                                    cudaEvent_t event)
+    # Updates the event waited on by an event-wait node. CUDA 11.4+.
+    ("cudaGraphExecEventWaitNodeSetEvent", (CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t), c_int, True),
+)
+
+
 class CUDARuntimeAPI(CUDAGraphsMixin):
     """CUDA Runtime API wrapper using ctypes.
 
@@ -327,279 +479,17 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
         return drv
 
     def _setup_function_signatures(self) -> None:
-        """Define function signatures for CUDA runtime functions."""
-        # cudaMalloc(void** devPtr, size_t size)
-        self.cudart.cudaMalloc.argtypes = [POINTER(c_void_p), c_size_t]
-        self.cudart.cudaMalloc.restype = c_int
+        """Set argtypes and restype on each cudart function in _CUDART_SIGNATURES."""
+        for name, argtypes, restype, _strict in _CUDART_SIGNATURES:
+            fn = getattr(self.cudart, name)
+            if argtypes is not None:
+                fn.argtypes = list(argtypes)
+            fn.restype = restype
 
-        # cudaFree(void* devPtr)
-        self.cudart.cudaFree.argtypes = [c_void_p]
-        self.cudart.cudaFree.restype = c_int
-
-        # cudaMallocHost(void** ptr, size_t size) — allocate pinned (page-locked) host memory
-        self.cudart.cudaMallocHost.argtypes = [POINTER(c_void_p), c_size_t]
-        self.cudart.cudaMallocHost.restype = c_int
-
-        # cudaFreeHost(void* ptr) — free pinned host memory
-        self.cudart.cudaFreeHost.argtypes = [c_void_p]
-        self.cudart.cudaFreeHost.restype = c_int
-
-        # cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind)
-        self.cudart.cudaMemcpy.argtypes = [c_void_p, c_void_p, c_size_t, c_int]
-        self.cudart.cudaMemcpy.restype = c_int
-
-        # cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr)
-        self.cudart.cudaIpcGetMemHandle.argtypes = [
-            POINTER(cudaIpcMemHandle_t),
-            c_void_p,
-        ]
-        self.cudart.cudaIpcGetMemHandle.restype = c_int
-
-        # cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int flags)
-        self.cudart.cudaIpcOpenMemHandle.argtypes = [
-            POINTER(c_void_p),
-            cudaIpcMemHandle_t,
-            c_uint,
-        ]
-        self.cudart.cudaIpcOpenMemHandle.restype = c_int
-
-        # cudaIpcCloseMemHandle(void* devPtr)
-        self.cudart.cudaIpcCloseMemHandle.argtypes = [c_void_p]
-        self.cudart.cudaIpcCloseMemHandle.restype = c_int
-
-        # cudaIpcGetEventHandle(cudaIpcEventHandle_t* handle, cudaEvent_t event)
-        self.cudart.cudaIpcGetEventHandle.argtypes = [
-            POINTER(cudaIpcEventHandle_t),
-            CUDAEvent_t,
-        ]
-        self.cudart.cudaIpcGetEventHandle.restype = c_int
-
-        # cudaIpcOpenEventHandle(cudaEvent_t* event, cudaIpcEventHandle_t handle)
-        self.cudart.cudaIpcOpenEventHandle.argtypes = [
-            POINTER(CUDAEvent_t),
-            cudaIpcEventHandle_t,
-        ]
-        self.cudart.cudaIpcOpenEventHandle.restype = c_int
-
-        # cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags)
-        self.cudart.cudaEventCreateWithFlags.argtypes = [POINTER(CUDAEvent_t), c_uint]
-        self.cudart.cudaEventCreateWithFlags.restype = c_int
-
-        # cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
-        self.cudart.cudaEventRecord.argtypes = [CUDAEvent_t, CUDAStream_t]
-        self.cudart.cudaEventRecord.restype = c_int
-
-        # cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream, unsigned int flags)
-        # Requires CUDA 11.0+. Used with CUDA_EVENT_RECORD_EXTERNAL to record an event
-        # as an external node during stream capture (plain cudaEventRecord fails with 900).
-        self.cudart.cudaEventRecordWithFlags.argtypes = [CUDAEvent_t, CUDAStream_t, c_uint]
-        self.cudart.cudaEventRecordWithFlags.restype = c_int
-
-        # cudaEventQuery(cudaEvent_t event)
-        self.cudart.cudaEventQuery.argtypes = [CUDAEvent_t]
-        self.cudart.cudaEventQuery.restype = c_int
-
-        # cudaEventSynchronize(cudaEvent_t event)
-        self.cudart.cudaEventSynchronize.argtypes = [CUDAEvent_t]
-        self.cudart.cudaEventSynchronize.restype = c_int
-
-        # cudaEventDestroy(cudaEvent_t event)
-        self.cudart.cudaEventDestroy.argtypes = [CUDAEvent_t]
-        self.cudart.cudaEventDestroy.restype = c_int
-
-        # cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end)
-        self.cudart.cudaEventElapsedTime.argtypes = [POINTER(c_float), CUDAEvent_t, CUDAEvent_t]
-        self.cudart.cudaEventElapsedTime.restype = c_int
-
-        # cudaDeviceSynchronize()
-        self.cudart.cudaDeviceSynchronize.argtypes = []
-        self.cudart.cudaDeviceSynchronize.restype = c_int
-
-        # cudaPeekAtLastError() — non-destructive sticky-error read (does NOT clear the error)
-        self.cudart.cudaPeekAtLastError.argtypes = []
-        self.cudart.cudaPeekAtLastError.restype = c_int
-
-        # cudaGetLastError() — destructive read: returns AND clears the latched error.
-        # Only for one-shot recovery after a caught failure (clear_last_error); never call it
-        # in poll paths, where it would swallow errors meant for check_sticky_error.
-        self.cudart.cudaGetLastError.argtypes = []
-        self.cudart.cudaGetLastError.restype = c_int
-
-        # cudaHostRegister(void* ptr, size_t size, unsigned int flags) — page-lock existing host memory
-        self.cudart.cudaHostRegister.argtypes = [c_void_p, c_size_t, c_uint]
-        self.cudart.cudaHostRegister.restype = c_int
-
-        # cudaHostUnregister(void* ptr) — unregister page-locked host memory
-        self.cudart.cudaHostUnregister.argtypes = [c_void_p]
-        self.cudart.cudaHostUnregister.restype = c_int
-
-        # cudaGetErrorString(cudaError_t error)
-        self.cudart.cudaGetErrorString.argtypes = [c_int]
-        self.cudart.cudaGetErrorString.restype = ctypes.c_char_p
-
-        # cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags)
-        self.cudart.cudaStreamCreateWithFlags.argtypes = [POINTER(CUDAStream_t), c_uint]
-        self.cudart.cudaStreamCreateWithFlags.restype = c_int
-
-        # cudaStreamDestroy(cudaStream_t stream)
-        self.cudart.cudaStreamDestroy.argtypes = [CUDAStream_t]
-        self.cudart.cudaStreamDestroy.restype = c_int
-
-        # cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
-        self.cudart.cudaStreamWaitEvent.argtypes = [CUDAStream_t, CUDAEvent_t, c_uint]
-        self.cudart.cudaStreamWaitEvent.restype = c_int
-
-        # cudaStreamSynchronize(cudaStream_t stream)
-        self.cudart.cudaStreamSynchronize.argtypes = [CUDAStream_t]
-        self.cudart.cudaStreamSynchronize.restype = c_int
-
-        # cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream)
-        self.cudart.cudaMemcpyAsync.argtypes = [c_void_p, c_void_p, c_size_t, c_int, CUDAStream_t]
-        self.cudart.cudaMemcpyAsync.restype = c_int
-
-        # cudaMemGetInfo(size_t* free, size_t* total)
-        self.cudart.cudaMemGetInfo.argtypes = [POINTER(c_size_t), POINTER(c_size_t)]
-        self.cudart.cudaMemGetInfo.restype = c_int
-
-        # cudaSetDevice(int device)
-        self.cudart.cudaSetDevice.argtypes = [c_int]
-        self.cudart.cudaSetDevice.restype = c_int
-
-        # cudaGetDevice(int* device)
-        self.cudart.cudaGetDevice.argtypes = [POINTER(c_int)]
-        self.cudart.cudaGetDevice.restype = c_int
-
-        # cudaStreamQuery(cudaStream_t stream)
-        self.cudart.cudaStreamQuery.argtypes = [CUDAStream_t]
-        self.cudart.cudaStreamQuery.restype = c_int
-
-        # cudaDeviceCanAccessPeer(int* canAccessPeer, int device, int peerDevice)
-        self.cudart.cudaDeviceCanAccessPeer.argtypes = [POINTER(c_int), c_int, c_int]
-        self.cudart.cudaDeviceCanAccessPeer.restype = c_int
-
-        # cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority)
-        self.cudart.cudaDeviceGetStreamPriorityRange.argtypes = [POINTER(c_int), POINTER(c_int)]
-        self.cudart.cudaDeviceGetStreamPriorityRange.restype = c_int
-
-        # cudaStreamCreateWithPriority(cudaStream_t* pStream, unsigned int flags, int priority)
-        self.cudart.cudaStreamCreateWithPriority.argtypes = [POINTER(CUDAStream_t), c_uint, c_int]
-        self.cudart.cudaStreamCreateWithPriority.restype = c_int
-
-        # cudaPointerGetAttributes(cudaPointerAttributes* attributes, const void* ptr)
-        self.cudart.cudaPointerGetAttributes.argtypes = [POINTER(cudaPointerAttributes), c_void_p]
-        self.cudart.cudaPointerGetAttributes.restype = c_int
-
-        # === G1: non-graph helpers ===
-        # cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
-        # Replaces cudaMallocHost with explicit flag control.
-        # cudaHostAllocPortable  = 0x01 — accessible from any CUDA context in process
-        # cudaHostAllocMapped    = 0x02 — map into device address space
-        # cudaHostAllocWriteCombined = 0x04 — write-combined (fast CPU writes, slow CPU reads)
-        self.cudart.cudaHostAlloc.argtypes = [POINTER(c_void_p), c_size_t, c_uint]
-        self.cudart.cudaHostAlloc.restype = c_int
-
-        # cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr, int device)
-        # Used to query e.g. cudaDevAttrAsyncEngineCount (attr=40, CUDA_DEV_ATTR_ASYNC_ENGINE_COUNT)
-        # — how many DMA copy engines exist — and cudaDevAttrIpcEventSupport (attr=125,
-        # CUDA_DEV_ATTR_IPC_EVENT_SUPPORT) — see check_ipc_capability() below.
-        self.cudart.cudaDeviceGetAttribute.argtypes = [POINTER(c_int), c_int, c_int]
-        self.cudart.cudaDeviceGetAttribute.restype = c_int
-
-        # === G2: graph lifecycle ===
-        # CUDA 10.0+ graph capture/build/launch/teardown + runtime-version gate.
-
-        # cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode)
-        # mode: 0=global, 1=thread_local, 2=relaxed
-        self.cudart.cudaStreamBeginCapture.argtypes = [CUDAStream_t, c_int]
-        self.cudart.cudaStreamBeginCapture.restype = c_int
-
-        # cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* pGraph)
-        self.cudart.cudaStreamEndCapture.argtypes = [CUDAStream_t, POINTER(CUDAGraph_t)]
-        self.cudart.cudaStreamEndCapture.restype = c_int
-
-        # cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
-        #                               unsigned long long flags)   [CUDA 11.4+ stable 3-arg form]
-        # Prefer this over cudaGraphInstantiate on any cudart 11.x: the latter changed
-        # from 5-arg (CUDA 10.0–11.8) to 3-arg (CUDA 12.0+) — calling the 12.0 3-arg
-        # binding against an 11.x DLL mismatches the ABI and crashes (WDDM access
-        # violation). cudaGraphInstantiateWithFlags has had a stable 3-arg signature
-        # since 11.4 and is available in all 12.x releases as well.
-        self.cudart.cudaGraphInstantiateWithFlags.argtypes = [POINTER(CUDAGraphExec_t), CUDAGraph_t, c_uint64]
-        self.cudart.cudaGraphInstantiateWithFlags.restype = c_int
-
-        # cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
-        self.cudart.cudaGraphLaunch.argtypes = [CUDAGraphExec_t, CUDAStream_t]
-        self.cudart.cudaGraphLaunch.restype = c_int
-
-        # cudaGraphDestroy(cudaGraph_t graph)
-        self.cudart.cudaGraphDestroy.argtypes = [CUDAGraph_t]
-        self.cudart.cudaGraphDestroy.restype = c_int
-
-        # cudaGraphExecDestroy(cudaGraphExec_t graphExec)
-        self.cudart.cudaGraphExecDestroy.argtypes = [CUDAGraphExec_t]
-        self.cudart.cudaGraphExecDestroy.restype = c_int
-
-        # cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t* numNodes)
-        # Pass nodes=NULL to query count; then call again with allocated array.
-        self.cudart.cudaGraphGetNodes.argtypes = [CUDAGraph_t, POINTER(CUDAGraphNode_t), POINTER(c_size_t)]
-        self.cudart.cudaGraphGetNodes.restype = c_int
-
-        # cudaRuntimeGetVersion(int* runtimeVersion)
-        # Returns the version as int (e.g., 11040 = CUDA 11.4, 12080 = CUDA 12.8).
-        # Used to gate optional API calls (e.g., cudaGraphExecMemcpyNodeSetParams1D
-        # requires 11.3+) when the loaded cudart DLL may be a 11.0.x patch.
-        self.cudart.cudaRuntimeGetVersion.argtypes = [POINTER(c_int)]
-        self.cudart.cudaRuntimeGetVersion.restype = c_int
-
-        # === G3: graph node setters ===
-        # Per-frame in-place node update for ring-slot remap. Most CUDA-12-flavoured
-        # of the 14 (NodeSetParams1D 11.3+; event-node setters 11.4+).
-
-        # cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t, cudaGraphNode_t,
-        #                                  const cudaMemcpy3DParms*)
-        # Updates a 3D-captured memcpy node. For nodes captured from cudaMemcpyAsync
-        # (1D form) use cudaGraphExecMemcpyNodeSetParams1D instead.
-        self.cudart.cudaGraphExecMemcpyNodeSetParams.argtypes = [
-            CUDAGraphExec_t,
-            CUDAGraphNode_t,
-            POINTER(cudaMemcpy3DParms),
-        ]
-        self.cudart.cudaGraphExecMemcpyNodeSetParams.restype = c_int
-
-        # cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t, cudaGraphNode_t,
-        #                                    void* dst, const void* src,
-        #                                    size_t count, cudaMemcpyKind kind)
-        # Updates a 1D memcpy node (captured from cudaMemcpyAsync). CUDA 11.3+.
-        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.argtypes = [
-            CUDAGraphExec_t,
-            CUDAGraphNode_t,
-            c_void_p,
-            c_void_p,
-            c_size_t,
-            c_int,
-        ]
-        self.cudart.cudaGraphExecMemcpyNodeSetParams1D.restype = c_int
-
-        # cudaGraphExecEventRecordNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
-        #                                      cudaEvent_t event)
-        # Updates the event recorded by an event-record node. CUDA 11.4+.
-        self.cudart.cudaGraphExecEventRecordNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
-        self.cudart.cudaGraphExecEventRecordNodeSetEvent.restype = c_int
-
-        # cudaGraphExecEventWaitNodeSetEvent(cudaGraphExec_t, cudaGraphNode_t,
-        #                                    cudaEvent_t event)
-        # Updates the event waited on by an event-wait node. CUDA 11.4+.
-        self.cudart.cudaGraphExecEventWaitNodeSetEvent.argtypes = [CUDAGraphExec_t, CUDAGraphNode_t, CUDAEvent_t]
-        self.cudart.cudaGraphExecEventWaitNodeSetEvent.restype = c_int
         self._install_errcheck()
 
     def _install_errcheck(self) -> None:
-        """Install ctypes errcheck on all cudart functions that always treat non-zero as fatal.
-
-        Exempted: cudaGetErrorString (c_char_p restype), cudaEventQuery/cudaStreamQuery
-        (poll sentinels that allow cudaErrorNotReady), cudaGetLastError/cudaPeekAtLastError
-        (read the sticky-error value, raising would defeat their purpose).
-        """
+        """Install ctypes errcheck on the cudart functions marked strict in _CUDART_SIGNATURES."""
         cudart = self.cudart
 
         def _strict_errcheck(result, func, _args):
@@ -609,55 +499,9 @@ class CUDARuntimeAPI(CUDAGraphsMixin):
                 raise CudaIpcError(f"CUDA {func.__name__} failed: {error_str} (code {result})", code=result)
             return result
 
-        _strict_funcs = (
-            "cudaMalloc",
-            "cudaFree",
-            "cudaMallocHost",
-            "cudaFreeHost",
-            "cudaMemcpy",
-            "cudaIpcGetMemHandle",
-            "cudaIpcOpenMemHandle",
-            "cudaIpcCloseMemHandle",
-            "cudaIpcGetEventHandle",
-            "cudaIpcOpenEventHandle",
-            "cudaEventCreateWithFlags",
-            "cudaEventRecord",
-            "cudaEventRecordWithFlags",
-            "cudaEventSynchronize",
-            "cudaEventDestroy",
-            "cudaEventElapsedTime",
-            "cudaDeviceSynchronize",
-            "cudaHostRegister",
-            "cudaHostUnregister",
-            "cudaStreamCreateWithFlags",
-            "cudaStreamDestroy",
-            "cudaStreamWaitEvent",
-            "cudaStreamSynchronize",
-            "cudaMemcpyAsync",
-            "cudaMemGetInfo",
-            "cudaSetDevice",
-            "cudaGetDevice",
-            "cudaDeviceCanAccessPeer",
-            "cudaDeviceGetStreamPriorityRange",
-            "cudaStreamCreateWithPriority",
-            "cudaPointerGetAttributes",
-            "cudaHostAlloc",
-            "cudaDeviceGetAttribute",
-            "cudaStreamBeginCapture",
-            "cudaStreamEndCapture",
-            "cudaGraphInstantiateWithFlags",
-            "cudaGraphLaunch",
-            "cudaGraphDestroy",
-            "cudaGraphExecDestroy",
-            "cudaGraphGetNodes",
-            "cudaRuntimeGetVersion",
-            "cudaGraphExecMemcpyNodeSetParams",
-            "cudaGraphExecMemcpyNodeSetParams1D",
-            "cudaGraphExecEventRecordNodeSetEvent",
-            "cudaGraphExecEventWaitNodeSetEvent",
-        )
-        for fname in _strict_funcs:
-            getattr(cudart, fname).errcheck = _strict_errcheck
+        for name, _argtypes, _restype, strict in _CUDART_SIGNATURES:
+            if strict:
+                getattr(cudart, name).errcheck = _strict_errcheck
 
     def check_error(self, result: int, operation: str) -> None:
         """Check CUDA error code and raise exception if failed.
