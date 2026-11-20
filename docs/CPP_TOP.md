@@ -216,7 +216,7 @@ Info page, so a script that reads one also reads the other.
 
 | Name | Label | Value |
 |---|---|---|
-| `Cudalinkheader2` | (header) | `CUDA-Link <version> (build <sha>)`: the loaded DLL's package version (`pyproject.toml`) and git sha, both set at configure time. The sha ends in `-dirty` when tracked files differed from HEAD at configure time. A commit or checkout makes the next build configure again by itself; after uncommitted edits, configure again by hand. |
+| `Cudalinkheader2` | (header) | `CUDA-Link <version> (build <sha>)`: the loaded DLL's package version (`__version__` in `src/cuda_link/__init__.py`) and git sha, both set at configure time. The sha ends in `-dirty` when tracked files differed from HEAD at configure time. A commit or checkout makes the next build configure again by itself; after uncommitted edits, configure again by hand. |
 | `Semverauthor` | Author | `forkni (forkni@gmail.com)` |
 | `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub, on the `development` branch until the 2.0.0 release |
 

@@ -126,15 +126,16 @@ target_include_directories(cudalink_topcommon INTERFACE src/common)
 # shell32: ShellExecuteA for the Info page's Show Help pulse (info_page.h).
 target_link_libraries(cudalink_topcommon INTERFACE CUDA::cudart shell32)
 
-# Info page values (info_page.h): the package version from the repo's pyproject.toml, and the
+# Info page values (info_page.h): the package version from __version__ in the repo's
+# src/cuda_link/__init__.py (the single version source; pyproject.toml reads it too), and the
 # git sha at configure time ("unknown" outside a git checkout). The sha gets a "-dirty" suffix
 # when tracked files differ from HEAD at configure time. CMake reconfigures by itself when HEAD
 # or the checked-out branch ref moves (a commit, checkout or reset), so a plain rebuild after a
 # commit does not keep the old sha. Uncommitted edits made after configure are not seen: configure
 # again for a dirty build.
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../pyproject.toml" CUDALINK_PYPROJECT_VERSION_LINE
-    REGEX "^version = \"[^\"]+\"" LIMIT_COUNT 1)
-string(REGEX REPLACE "^version = \"([^\"]+)\".*" "\\1" CUDALINK_VERSION "${CUDALINK_PYPROJECT_VERSION_LINE}")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../src/cuda_link/__init__.py" CUDALINK_INIT_VERSION_LINE
+    REGEX "^__version__ = \"[^\"]+\"" LIMIT_COUNT 1)
+string(REGEX REPLACE "^__version__ = \"([^\"]+)\".*" "\\1" CUDALINK_VERSION "${CUDALINK_INIT_VERSION_LINE}")
 if(NOT CUDALINK_VERSION)
     set(CUDALINK_VERSION "unknown")
 endif()
