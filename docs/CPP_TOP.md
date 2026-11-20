@@ -399,6 +399,8 @@ frames, and `topcore_tests` tests it. Python has the same rules in
 | `init_note` | yes | yes |
 | `producer_frame` | yes: last published, full 64-bit value | yes: shown frame, full 64-bit value |
 | `source_timestamp_us` | no | yes: shown frame |
+| `version` | yes: loaded DLL, package version at configure time | yes: loaded DLL, package version at configure time |
+| `build` | yes: loaded DLL, git sha at configure time | yes: loaded DLL, git sha at configure time |
 
 ### producer_frame in a CHOP channel
 
