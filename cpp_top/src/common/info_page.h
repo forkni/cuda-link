@@ -10,7 +10,7 @@
 // enablePar(..., false) on every cook (greyInfoPage). "Hide built-in Parameters" from the .tox
 // has no SDK equivalent: the Common page cannot be hidden.
 //
-// CUDALINK_VERSION and CUDALINK_BUILD_SHA come from CMake (pyproject.toml version, and
+// CUDALINK_VERSION and CUDALINK_BUILD_SHA come from CMake (__version__ of the package, and
 // `git rev-parse --short HEAD` at configure time, "-dirty" for uncommitted edits). CMake
 // reconfigures by itself when HEAD moves (cpp_top/CMakeLists.txt).
 #pragma once
