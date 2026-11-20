@@ -1344,8 +1344,10 @@ class Importer:
         header = check_header(shm.buf, _current_pid())
         if header.fault is not None:
             shm.close()
-            if header.fault is HeaderFault.UNREADABLE and header.error is not None:
-                raise header.error
+            if header.fault is HeaderFault.UNREADABLE:
+                # ProtocolError is a ValueError, so the reconnect driver (_connect_silent)
+                # takes it as one more failed attempt. A bare struct.error went through it.
+                raise ProtocolError(f"Cannot read the SHM header: {header.error}") from header.error
             if header.fault is HeaderFault.BAD_MAGIC:
                 raise IncompatiblePeerError(protocol_mismatch_message(header.magic))
             if header.fault is HeaderFault.SAME_PROCESS:
