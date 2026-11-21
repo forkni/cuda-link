@@ -9,6 +9,7 @@ This module must be the **first import** in CUDAIPCExtension.py.  It runs before
 any sibling Text DAT is imported by bare name, so the aliases it registers in
 sys.modules are visible to all later imports:
   TDConfig     → Env
+  TDPixelFormat → SHMProtocol
   TDSender     → ActivationBarrier, Exporter, NVTXShim, SHMProtocol
   TDReceiver   → CUDAIPCWrapper, CUDARuntimeTypes, NVTXShim, SHMProtocol
   (all others pulled in transitively by the installed package's own relative imports)

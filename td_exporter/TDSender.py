@@ -31,8 +31,6 @@ from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
 from SHMProtocol import (  # noqa: E402
-    FLAGS_BGRA,
-    FLAGS_MONO_ALPHA,
     INFO_CHOP_FRAME_MOD,
     SLOT_META_CHANNELS,
     DtypeCodec,
@@ -41,6 +39,11 @@ from SHMProtocol import (  # noqa: E402
 )
 from TDConfig import TDSenderConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
+from TDPixelFormat import F16_CONVERT_TARGET as _F16_CONVERT_TARGET  # noqa: E402
+from TDPixelFormat import NAME_TO_DTYPE as _PIXEL_FMT_NAME_TO_DTYPE  # noqa: E402, F401  # tests import it from here
+from TDPixelFormat import channel_flags as _channel_flags  # noqa: E402
+from TDPixelFormat import label as _format_label  # noqa: E402
+from TDPixelFormat import to_wire as _format_to_wire  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module-level constants (TD 2025 pixel-format rejection table)
@@ -48,7 +51,7 @@ from TDHost import TDHost  # noqa: E402
 
 _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
     # Rejected outright by cudaMemory(): "Texture is invalid pixel format to be shared with CUDA."
-    # Sources whose pixelFormatName is in _F16_CONVERT_TARGET bypass this check and are
+    # Sources whose pixelFormatName is in TDPixelFormat.F16_CONVERT_TARGET bypass this check and are
     # converted instead; these entries still catch float16 when the name is unmapped.
     "16-bit float",
     "16float",
@@ -60,58 +63,6 @@ _CUDA_UNSUPPORTED_PIXEL_FORMATS = {
     "11-bit",
     "11bit",
 }
-# Map TD pixelFormatName values (op.pixelFormatName) → (dtype_str, num_channels).
-# Used in export_frame to detect dtype changes that are invisible to cm.size/cm.data_type —
-# specifically dtype-shrink transitions (e.g. float32→uint8) where TD keeps the old
-# (larger) CUDA allocation unchanged, so neither cm.size nor cm.data_type reflects the change.
-# pixelFormatName updates immediately on any format change (grow or shrink).
-# Built from the TD Script TOP par.format menu names (Section 1 of pixel_format_probe.py).
-# Float16 variants are included for completeness; export_frame swaps them for their
-# _F16_CONVERT_TARGET name before the lookup, so they never resolve to float16.
-_PIXEL_FMT_NAME_TO_DTYPE: dict[str, tuple[str, int]] = {
-    # RGBA
-    "rgba32float": ("float32", 4),
-    "rgba16fixed": ("uint16", 4),
-    "rgba8fixed": ("uint8", 4),
-    # RG
-    "rg32float": ("float32", 2),
-    "rg16fixed": ("uint16", 2),
-    "rg8fixed": ("uint8", 2),
-    # Mono (1 component)
-    "mono32float": ("float32", 1),
-    "mono16fixed": ("uint16", 1),
-    "mono8fixed": ("uint8", 1),
-    # Alpha-only (1 component)
-    "a32float": ("float32", 1),
-    "a16fixed": ("uint16", 1),
-    "a8fixed": ("uint8", 1),
-    # Mono+Alpha (2 components)
-    "monoalpha32float": ("float32", 2),
-    "monoalpha16fixed": ("uint16", 2),
-    "monoalpha8fixed": ("uint8", 2),
-    # Float16 variants (cudaMemory cannot share them; converted via _F16_CONVERT_TARGET)
-    "rgba16float": ("float16", 4),
-    "rg16float": ("float16", 2),
-    "mono16float": ("float16", 1),
-    "a16float": ("float16", 1),
-    "monoalpha16float": ("float16", 2),
-    # "useinput", "rgb10a2fixed", "rgba11float" → NOT mapped (no reliable dtype/channel count)
-}
-
-# Float16 source → 32-bit float target requested via cudaMemory(pixelFormat=...).
-# cudaMemory() cannot share float16 textures, but TD converts on the GPU before sharing,
-# and the float32 result matches numpyArray() bit-exactly with the full range kept
-# (pixel-format matrix probe, TD 2025.33230). Measured at 1280x720 RGBA, TD 2025.33230:
-# cudaMemory() median 0.89 ms converted vs 0.86 ms native float32 (numpyArray() readback
-# 3.4 ms), so no CPU round trip. The shared frame is 2x the bytes of the float16 source.
-_F16_CONVERT_TARGET: dict[str, str] = {
-    "rgba16float": "rgba32float",
-    "rg16float": "rg32float",
-    "mono16float": "mono32float",
-    "a16float": "a32float",
-    "monoalpha16float": "monoalpha32float",
-}
-
 _EXPORT_BUFFER_NAME = "ExportBuffer"
 
 # Pre-built NVTX range name strings per slot — eliminates f-string allocation on every export_frame call.
@@ -187,20 +138,6 @@ def _resolve_frame_dtype(
         if DtypeCodec.itemsize(guessed) * px == cm_size:
             return guessed
     return fallback_dtype
-
-
-def _channel_flags(pixel_format_name: str, channels: int, dtype: str) -> int:
-    """Return the SHM channel-semantic flag bits for a TD source frame.
-
-    FLAGS_MONO_ALPHA: 2-channel Mono+Alpha source (R+A, not R+G).
-    FLAGS_BGRA: 4-channel uint8 frame. TD's cudaMemory() hands 8-bit RGBA textures
-    over in B,G,R,A order (pixel-format matrix probe, TD 2025.33230); 16-bit and
-    32-bit RGBA come back R,G,B,A.
-    """
-    flags = FLAGS_MONO_ALPHA if pixel_format_name.startswith("monoalpha") else 0
-    if channels == 4 and dtype == "uint8":
-        flags |= FLAGS_BGRA
-    return flags
 
 
 # ---------------------------------------------------------------------------
@@ -650,11 +587,9 @@ class TDSenderEngine:
             # pixelFormatName updates immediately when the source format changes, so it
             # gives the correct dtype even before cm.size has caught up.
             _pf_init = _pf_name  # already the float32 target for a converted float16 source
-            _pf_init_mapped = (
-                _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_init) if _pf_init and _pf_init not in ("useinput",) else None
-            )
-            if _pf_init_mapped is not None:
-                _init_dtype, _init_ch = _pf_init_mapped
+            _pf_init_wire = _format_to_wire(_pf_init)
+            if _pf_init_wire is not None:
+                _init_dtype, _init_ch, _init_extra_flags = _pf_init_wire
                 # Compute the buffer_size that should correspond to the declared format.
                 # _guess_dtype_from_buffer_size will then derive the same dtype from it,
                 # ensuring _current_spec uses the correct dtype from the start.
@@ -664,7 +599,6 @@ class TDSenderEngine:
                     f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
                     force=True,
                 )
-                _init_extra_flags = _channel_flags(_pf_init, _init_ch, _init_dtype)
                 self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
                 # Unmapped name (e.g. "useinput"): derive flags from the same dtype guess
@@ -745,10 +679,10 @@ class TDSenderEngine:
                 # allocation — the same approach v1.5.1 uses with its fixed slot size.
                 #
                 _pf_name_override = False
-                if _pf_name and _pf_name not in ("useinput",):
-                    _pf_mapped = _PIXEL_FMT_NAME_TO_DTYPE.get(_pf_name)
-                    if _pf_mapped is not None:
-                        _pf_dtype, _pf_ch = _pf_mapped
+                if _pf_name:
+                    _pf_wire = _format_to_wire(_pf_name)
+                    if _pf_wire is not None:
+                        _pf_dtype, _pf_ch, _ = _pf_wire
                         if _pf_name != self._last_pixel_fmt_name:
                             # Format name changed — log the transition once.
                             if _pf_dtype != resolved_dtype or _pf_ch != cm_channels:
@@ -877,9 +811,7 @@ class TDSenderEngine:
                 # Emit Status immediately on reopen — don't wait for the first PUBLISHED
                 # frame so the format change is visible in the UI right away.
                 _reopen_status = (
-                    f"{new_spec.width}x{new_spec.height} {_pf_name}"
-                    if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
-                    else f"{new_spec.width}x{new_spec.height} {resolved_dtype} {cm_channels}ch"
+                    f"{new_spec.width}x{new_spec.height} {_format_label(_pf_name, resolved_dtype, cm_channels)}"
                 )
                 self._host.set_info_status(_reopen_status)
 
@@ -927,9 +859,7 @@ class TDSenderEngine:
                     # Rebuild status string only when geometry changed (fast-path sets it "");
                     # avoids one f-string allocation per frame in steady state.
                     self._last_pub_status = (
-                        f"{cm.width}x{cm.height} {_pf_name}"
-                        if _pf_name and _pf_name not in ("useinput",) and _pf_name in _PIXEL_FMT_NAME_TO_DTYPE
-                        else f"{cm.width}x{cm.height} {resolved_dtype} {cm_channels}ch"
+                        f"{cm.width}x{cm.height} {_format_label(_pf_name, resolved_dtype, cm_channels)}"
                     )
                 self._host.set_info_status(self._last_pub_status)
                 self._maybe_report_stats(self._exporter.write_idx, now=_now)

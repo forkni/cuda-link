@@ -274,6 +274,20 @@ How it works:
 - The alpha formats and the mono formats have the same wire tuple (one component). An Out TOP
   set to an alpha format sends its alpha channel, and a receiver reads it as mono.
 
+### Format mapping: differences from the `.tox`
+
+The C++ TOPs map formats in `cpp_top/src/out_top/pixel_format_map.h` and
+`cpp_top/src/in_top/pixel_format_map.h`. The `.tox` maps them in `td_exporter/TDPixelFormat.py`.
+The two mappings agree except in these two points, and both are intended:
+
+| Topic | C++ Out TOP | `.tox` Sender |
+|---|---|---|
+| `FLAGS_BGRA` | Set when the input format is `BGRA8Fixed`. An `RGBA8Fixed` input goes out without the flag. | Set for each 4-channel 8-bit frame, because `cudaMemory()` gives 8-bit RGBA textures in B, G, R, A order. |
+| 16-bit float | Sent as float16. | Sent as float32: `cudaMemory()` cannot share float16, so TouchDesigner converts on the GPU first. The frame has 2x the bytes. |
+
+A receiver gets the correct picture in both cases, because it reads the flag and the format
+from the stream.
+
 ### Pixel Format default (migration note)
 
 The Common Pixel Format of a new TOP is `rgba8fixed`, and a plugin cannot change that default.

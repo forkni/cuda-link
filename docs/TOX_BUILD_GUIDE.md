@@ -26,6 +26,7 @@ CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDPixelFormat     (Text DAT)     ← Copy from td_exporter/TDPixelFormat.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
 ├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
 ├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
@@ -69,6 +70,7 @@ CUDAIPCExporter (Base COMP)
 ├── Importer          (Text DAT)     ← Copy from td_exporter/Importer.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDPixelFormat     (Text DAT)     ← Copy from td_exporter/TDPixelFormat.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
 ├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
 ├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
@@ -192,6 +194,13 @@ This module provides the `RealTDHost` and `RealTOPHandle` adapters that isolate 
 2. Paste the entire contents of `td_exporter/TDConfig.py`
 
 This module provides the `TDSenderConfig` frozen dataclass that centralises all `CUDALINK_*` environment-variable reads.
+
+#### 3c-2. TDPixelFormat Text DAT
+
+1. Create a **Text DAT**, rename to `TDPixelFormat`
+2. Paste the entire contents of `td_exporter/TDPixelFormat.py`
+
+This module holds the mapping between TouchDesigner pixel format names and the wire format. `TDSender` and `TDReceiver` both import it, so it must exist in both build modes.
 
 #### 3d. TDSender Text DAT
 
@@ -626,6 +635,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDALinkBootstrap.py` | `td_exporter/` | **NEW** — sys.path injector + sys.modules alias registry; must be first DAT |
 | `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
 | `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
+| `TDPixelFormat.py` | `td_exporter/` | TD pixel format name ↔ wire format (dtype, channels, flags); float16 share targets |
 | `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
 | `TDReceiver.py` | `td_exporter/` | `TDReceiverEngine` — Receiver-mode engine (SHM attach, IPC open, copyCUDAMemory) |
 | `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
