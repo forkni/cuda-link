@@ -73,7 +73,7 @@ def onFrameStart(frame: int) -> None:
 
         # Force-cook ImportBuffer: triggers Script TOP onCook, which calls import_frame()
         # and consume_pending_format(). update_receiver_format() afterwards is belt-and-suspenders:
-        # a no-op when needs_format_update is already cleared in onCook, but catches any
+        # a no-op when the pending format flag is already cleared in onCook, but catches any
         # residual flag if onCook couldn't apply the par write.
         import_buffer.cook(force=True)
         ext.update_receiver_format(import_buffer)
