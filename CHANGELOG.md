@@ -101,10 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **C++ TOPs: `CUDALINK_CPP_USE_GRAPHS` removed.** The CUDA graph path of both TOPs is off with no
-  switch. It was opt-in and gave no gain with `Debug` off (measured 2026-11-17, ADR-0010 and
-  ADR-0011). The code stays in the tree and is not reachable. The Info CHOP channel `graph_hits`
-  is always 0.
+- **C++ TOPs: CUDA graph path and `CUDALINK_CPP_USE_GRAPHS` removed.** The path was opt-in and
+  gave no gain with `Debug` off (measured 2026-11-17, ADR-0010 and ADR-0011). The Info CHOP
+  channels `graph_hits` and `graph_builds` are removed from both TOPs (breaking for a network
+  that selects them by name). The In TOP now has 20 Info CHOP channels and the Out TOP 12.
 
 - **C++ TOPs, Pixel Format default** (breaking for float streams): TD's Common Pixel Format of a
   new TOP is `rgba8fixed`, and a plugin cannot change it. A new Out TOP now converts a float

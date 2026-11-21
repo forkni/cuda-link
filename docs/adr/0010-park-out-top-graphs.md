@@ -1,7 +1,7 @@
 # ADR-0010: Park the Out TOP CUDA-Graphs path (array-source node update rejected)
 
 **Status**: Accepted (design replaced 2026-08-14 by a keyed exec cache; re-measured
-2026-11-17: no gain, not recommended. See the two dated sections at the end.)
+2026-11-17: no gain; code removed 2026-11-20. See the dated sections at the end.)
 **Date**: 2026-07-06
 **Applies to**: the env-gated CUDA-Graphs submission collapse in the Out TOP
 (`CudaLinkOutTOP::tryGraphCopy`, PLAN-005 §2.1, `CUDALINK_CPP_USE_GRAPHS`).
@@ -122,6 +122,15 @@ box or on the show machine. With `Debug` on, the GPU timers make Out TOP `copy_u
 Rule for 2.0.0: each on/off variable is measured on against off, the state that is not slower
 becomes fixed, and the variable goes away. For `CUDALINK_CPP_USE_GRAPHS` the measurement is the
 section "Re-measure 2026-11-17" above: no gain with Debug off. So off is fixed. Both TOPs no
-longer read the variable; `myGraphsRequested` stays false. The graph code stays in the tree and
-is not reachable. To run it again for a measurement, set `myGraphsRequested` in the constructor
-and rebuild.
+longer read the variable; `myGraphsRequested` stays false. The section below removes the code.
+
+## Code removed 2026-11-20 (2.0.0)
+
+With the variable gone, no code could set `myGraphsRequested`, so the graph path could not
+run. The reason to keep it ("costs nothing with the variable unset") covered an opt-in
+switch, and the switch no longer exists. The reopen conditions above depend on a CUDA or
+TouchDesigner API change, and such a change needs a new design, not the keyed cache. So the
+code is removed from both TOPs: `tryGraphCopy`, `tryGraphedCopy`, `destroyGraphs`, the
+exec cache, `CudaGraphExecGuard`, and the Info CHOP channels `graph_hits` and
+`graph_builds`. The last commit that holds the code is `9255d4c` (branch
+`perf/cpp-graphs-off`). This ADR stays as the record of the design and the measurements.

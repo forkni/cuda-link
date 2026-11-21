@@ -259,7 +259,6 @@ How it works:
   clamp-to-edge, texel centres), encode to the target format. All of it stays on the GPU.
   `converted` is 1. The Out TOP copies its input to a scratch buffer first, and the kernel writes
   the IPC slot. The In TOP kernel writes a scratch buffer, and the TOP copies it to its output.
-  CUDA graphs are not used on this path.
 - The Out TOP takes the target from `TOP_Output::getSuggestedOutputDesc()`, because TD resolves
   the Common page against the TOP input. The In TOP has no TOP input: TD resolves "Use Input"
   against a 127×127 placeholder. Thus the In TOP resolves the size and aspect itself against the
@@ -350,8 +349,6 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `num_slots` | Number of ring slots |
 | `gpu_ipc_us` | GPU time of the slot copy and the event record (0 while `Debug` is off) |
 | `gpu_pass_us` | GPU time of the pass-through copy (0 while `Debug` is off) |
-| `graph_hits` | CUDA graph cache hits. Always 0 since 2.0.0: the graph path is off (ADR-0010, ADR-0011) |
-| `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
 | `producer_frame` | Last published `producer_frame`, mod 2^24 |
 | `stream_id` | Last published `stream_id` |
 | `converted` | 1 when the Common page resizes or converts the input before the send, 0 on the plain copy path. `gpu_ipc_us` then includes the kernel. |
@@ -373,8 +370,6 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `noframe_count` | Cooks with no new frame (only with `Debug` on) |
 | `version_changed_count` | Cooks that saw a sender restart (only with `Debug` on) |
 | `rescued_count` | Frames that the `Framewaitms` wait got (only with `Debug` on) |
-| `graph_hits` | CUDA graph cache hits. Always 0 since 2.0.0: the graph path is off (ADR-0010, ADR-0011) |
-| `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
 | `producer_frame` | `producer_frame` of the shown frame, mod 2^24 |
 | `stream_id` | `stream_id` of the shown frame |
 | `latency_us` | Time from the sender publish to the copy (now minus `host_timestamp`), in microseconds. 0 when the sender wrote no timestamp. |
@@ -726,9 +721,9 @@ Measure the cost of a TOP with `Debug` off:
 - On the In TOP, do not use `cook_us` for a cost: it includes the `Framewaitms` wait for
   the producer.
 - `Debug` adds GPU timer events to each cook. They make Out TOP `copy_us` about 3.5 times
-  larger (67 µs to about 230 µs on the dev box), and the CUDA graph path and the legacy
-  path do not carry the same number of them. Compare `bench:` lines only between runs
-  on the same path, both with `Debug` on.
+  larger (67 µs to about 230 µs on the dev box). Compare `bench:` lines only between runs
+  that both have `Debug` on.
 
-With `Debug` off, the CUDA graph path gave no gain on either TOP (measured 2026-11-17). Since
-2.0.0 the path is off and the variable `CUDALINK_CPP_USE_GRAPHS` is removed (ADR-0010, ADR-0011).
+With `Debug` off, the CUDA graph path gave no gain on either TOP (measured 2026-11-17). 2.0.0
+removes the path, the variable `CUDALINK_CPP_USE_GRAPHS` and the Info CHOP channels
+`graph_hits` and `graph_builds` (ADR-0010, ADR-0011).
