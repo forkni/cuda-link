@@ -58,8 +58,6 @@ class TDSenderConfig:
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
             report_every=env_int("CUDALINK_SENDER_REPORT_EVERY", default=150),
-            # Default ON (2.0.0), same as ExportPolicy.from_env(): a C++ In TOP with
-            # Framewaitms > 0 waits on it. One waiter per signal; Windows-only.
         )
 
     def __post_init__(self) -> None:
