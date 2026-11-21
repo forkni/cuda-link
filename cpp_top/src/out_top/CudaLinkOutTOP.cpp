@@ -119,6 +119,9 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+    if (myFatal) {
+        myFatalError = session.error;
+    }
     myInitNote = session.note;
 }
 
@@ -553,8 +556,15 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
         // option (it would tear down TD's own CUDA state too).
         if (myFatal) {
-            myError = "fatal CUDA error latched -- recreate this node or restart TouchDesigner "
-                      "to recover (see last_error in the Info DAT)";
+            // Keep the error that latched: getErrorString() copied it into myLastError after
+            // the failing cook, and the constructor stores its own reason in myFatalError.
+            // Without this, the latch text replaced it within one frame and last_error could
+            // only ever show the latch text.
+            if (myFatalError.empty()) {
+                myFatalError = myLastError;
+            }
+            myError = "fatal CUDA error latched: " + myFatalError +
+                      " -- recreate this node or restart TouchDesigner to recover";
             return;
         }
 

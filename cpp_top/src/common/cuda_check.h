@@ -23,19 +23,50 @@
         }                                                                                                    \
     } while (0)
 
-// Fatal variant -- for CUDA calls on the per-frame hot path where a failure likely means the
-// stream/context is now corrupted for the rest of the process. Latches fatal_var so the
-// caller's execute() can short-circuit future cooks instead of retrying the same doomed CUDA
-// calls forever against an already-broken context. Not used on cold paths (IPC open,
-// reallocate) where a failure is often transient/recoverable (e.g. producer not ready yet) --
-// those keep retrying via the plain macros above.
+namespace cudalink::common {
+
+// True for the errors the CUDA Runtime API reference describes as leaving "the process in an
+// inconsistent state": every later CUDA call returns the same error, so a retry cannot work.
+// cudaErrorUnknown is counted too, so an error of unknown kind keeps the old latch behaviour.
+// Every other error (cudaErrorInvalidValue from a bad argument, a failed launch config, ...)
+// is not sticky: the next cook can succeed once its cause is gone.
+inline bool isStickyCudaError(cudaError_t status) {
+    switch (status) {
+        case cudaErrorIllegalAddress:      // 700
+        case cudaErrorLaunchTimeout:       // 702
+        case cudaErrorAssert:              // 710
+        case cudaErrorHardwareStackError:  // 714
+        case cudaErrorIllegalInstruction:  // 715
+        case cudaErrorMisalignedAddress:   // 716
+        case cudaErrorInvalidAddressSpace: // 717
+        case cudaErrorInvalidPc:           // 718
+        case cudaErrorLaunchFailure:       // 719
+        case cudaErrorUnknown:             // 999
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace cudalink::common
+
+// Hot-path variant -- for CUDA calls on the per-frame path. A sticky error (see
+// isStickyCudaError) latches fatal_var so the caller's execute() stops retrying CUDA calls
+// against a broken context. Any other error is reported for this cook only: the per-thread
+// last-error slot is cleared (so neither the next call nor TD's own CUDA code picks it up)
+// and the next cook retries. Before 2026-11-21 every error latched, so a plain bad argument
+// (cudaErrorInvalidValue from the Common page convert) killed the node for good.
 #define CUDALINK_CUDA_CHECK_FATAL(call, err_var, fatal_var)                                                  \
     do {                                                                                                     \
         cudaError_t _cudalink_status = (call);                                                               \
         if (_cudalink_status != cudaSuccess) {                                                               \
             (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
                         __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
-            (fatal_var) = true;                                                                              \
+            if (cudalink::common::isStickyCudaError(_cudalink_status)) {                                     \
+                (fatal_var) = true;                                                                          \
+            } else {                                                                                         \
+                cudaGetLastError();                                                                          \
+            }                                                                                                \
             return;                                                                                          \
         }                                                                                                    \
     } while (0)

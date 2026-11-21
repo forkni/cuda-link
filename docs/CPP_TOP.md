@@ -153,8 +153,8 @@ These parameters are on the page "CUDA Link". The TOP also has the pages "Info" 
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
-| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_TD>>Python` | Name of the shared-memory segment. The receiver must use the same name. |
-| `Active` | Active | Toggle | On | Off stops the publish and frees the ring. |
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. The receiver must use the same name. The In TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off stops the publish and frees the ring. A new node starts Off. |
 | `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
 | `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
 | `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
@@ -173,8 +173,8 @@ These parameters are on the page "CUDA Link". The TOP also has the pages "Info" 
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
-| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_Python>>TD` | Name of the shared-memory segment. Use the name of the sender. |
-| `Active` | Active | Toggle | On | Off closes the segment. |
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. Use the name of the sender. The Out TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off closes the segment. A new node starts Off. |
 | `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
 | `Framewaitms` | Frame Wait (ms) | Integer, 0 to 8 | `3` | On a cook with no new frame, wait for the sender publish for this time. 0 turns the wait off. |
 

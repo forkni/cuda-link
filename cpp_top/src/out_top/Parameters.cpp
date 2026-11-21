@@ -49,10 +49,10 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.name = IpcmemnameName;
         p.label = IpcmemnameLabel;
         p.page = "CUDA Link";
-        // Matches the default direction the Python example scripts exercise: TD as
-        // sender, a separate Python process as receiver (td_exporter/
-        // example_receiver_python.py's default CUDALINK_RECEIVER_SHM_NAME).
-        p.defaultValue = "cudalink_ipc_TD>>Python";
+        // Same default as CudaLinkInTOP, so a new Out/In pair connects with no typing. Not
+        // the example .tox Sender's name (cudalink_ipc_TD>>Python): a new Out TOP used to
+        // publish into that example stream the moment it was created.
+        p.defaultValue = "cudalink_ipc_CPP";
 
         TD::OP_ParAppendResult res = manager->appendString(p);
         checkParamAppend(res, IpcmemnameName, "CudaLinkOutTOP");
@@ -63,7 +63,9 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         p.name = ActiveName;
         p.label = ActiveLabel;
         p.page = "CUDA Link";
-        p.defaultValues[0] = 1.0;
+        // Off on a new node: it connects only after the user sets the IPC Mem Name and
+        // turns it on (2026-11-21: a new node joined a live stream the moment it was created).
+        p.defaultValues[0] = 0.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
         checkParamAppend(res, ActiveName, "CudaLinkOutTOP");
