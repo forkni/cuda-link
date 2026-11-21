@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import importlib.util
 import logging
 import os
+import re
 import struct
 import sys
 import time
@@ -50,6 +52,43 @@ if _probe_log_file:
 # Ensure cuda_link is importable for the console helper (may need sys.path
 # patch when run without a pip install, same pattern as main() below).
 # ---------------------------------------------------------------------------
+
+
+def _use_peer_library() -> None:
+    """Load cuda_link from CUDALINK_PEER_LIB_PATH (set by the TD launcher) when it is set.
+
+    A cuda-link installed in this Python can be another release with another SHM protocol
+    version; it is replaced only then. The package is loaded by file path: sys.path does not
+    change, so no other package in that folder hides the ones of this Python.
+    """
+    root = os.environ.get("CUDALINK_PEER_LIB_PATH", "")
+    init = os.path.join(root, "cuda_link", "__init__.py")
+    if not root or not os.path.isfile(init):
+        return
+    try:
+        import cuda_link as installed
+    except ImportError:
+        installed = None
+    if installed is not None:
+        with open(init, encoding="utf-8") as f:
+            match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', f.read(), re.MULTILINE)
+        if match and match.group(1) == getattr(installed, "__version__", None):
+            return  # same release: keep the installed build (it has the native wait extension)
+        for name in [m for m in sys.modules if m == "cuda_link" or m.startswith("cuda_link.")]:
+            del sys.modules[name]
+    spec = importlib.util.spec_from_file_location("cuda_link", init, submodule_search_locations=[os.path.dirname(init)])
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["cuda_link"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 -- fall back to the installed package
+        sys.modules.pop("cuda_link", None)
+        print(f"[sender] WARNING: could not load cuda_link from {root}: {exc}", flush=True)
+
+
+_use_peer_library()
 
 try:
     from cuda_link._console import install_console_ctrl_handler, run_with_watchdog

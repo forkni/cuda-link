@@ -38,6 +38,12 @@ Python executable resolution (priority order) — mirrors example_receiver_launc
 
     The resolved path is printed on each onStart() so you can verify which
     interpreter is used without opening a terminal.
+
+cuda_link library of the child:
+    The launcher sets CUDALINK_PEER_LIB_PATH for the child to the folder of the cuda_link
+    package that this TouchDesigner process loaded (or ``src`` next to the .toe). The example
+    script loads cuda_link from that folder, so both sides use one SHM protocol version, also
+    when the child's Python has another cuda-link installed.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 
 
 def _find_python_exe() -> str | None:
@@ -82,6 +89,31 @@ def _find_python_exe() -> str | None:
     return shutil.which("python")
 
 
+def _peer_library_root() -> str | None:
+    """Folder that holds the ``cuda_link`` package this TouchDesigner process uses.
+
+    The child must speak the same SHM protocol as the component in this project. Another
+    cuda-link in the child's site-packages (an older release) would not: a 1.x peer cannot
+    read a 2.x segment. Order: the package this process loaded, then ``src`` next to the .toe.
+    """
+    loaded = getattr(sys.modules.get("cuda_link"), "__file__", None)
+    if loaded:
+        return os.path.dirname(os.path.dirname(os.path.abspath(loaded)))
+    src = os.path.join(project.folder, "src")
+    if os.path.isfile(os.path.join(src, "cuda_link", "__init__.py")):
+        return src
+    return None
+
+
+def _peer_env() -> dict[str, str]:
+    """Environment of the child: this process's, plus CUDALINK_PEER_LIB_PATH when known."""
+    env = dict(os.environ)
+    root = _peer_library_root()
+    if root:
+        env["CUDALINK_PEER_LIB_PATH"] = root
+    return env
+
+
 _SENDER_PYTHON_EXE = _find_python_exe()
 
 _process = None  # Sender subprocess handle
@@ -104,8 +136,10 @@ def onStart() -> None:
         print(f"  {script}")
         return
 
+    env = _peer_env()
     _process = subprocess.Popen(
         [_SENDER_PYTHON_EXE, script],
+        env=env,
         # CREATE_NEW_CONSOLE: opens a visible console window for the sender.
         # CREATE_NEW_PROCESS_GROUP: required to send CTRL_BREAK_EVENT on shutdown
         # (CTRL_C_EVENT is blocked for new process groups on Windows).
@@ -114,6 +148,7 @@ def onStart() -> None:
     print(f"[CUDA-Link Launcher] Sender subprocess started  (PID {_process.pid})")
     print(f"  Script:     {script}")
     print(f"  Python exe: {_SENDER_PYTHON_EXE}")
+    print(f"  cuda_link:  {env.get('CUDALINK_PEER_LIB_PATH', 'the one installed in that Python')}")
 
 
 def onCreate() -> None:
