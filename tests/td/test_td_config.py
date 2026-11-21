@@ -227,14 +227,15 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
     ext = object.__new__(CUDAIPCExtension)
     ext._host = MagicMock()
     ext._config = TDSenderConfig()
+    ext._receiver_config = TDReceiverConfig(report_every=7)
     ext._mode = "Receiver"
     ext._device = 0
     ext._runtime_state = TDRuntimeState(shm_name="test", num_slots=3, verbose=False)
     ext._log = lambda msg, force=False: None
 
     engine = ext._make_engine()
-    assert isinstance(engine._config, TDReceiverConfig), (
-        "_make_engine() must pass TDReceiverConfig() to TDReceiverEngine, not TDSenderConfig"
+    assert engine._config is ext._receiver_config, (
+        "_make_engine() must pass the receiver config resolved in __init__, not TDSenderConfig"
     )
 
 
