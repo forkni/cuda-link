@@ -511,7 +511,6 @@ void test_frame_wait_slice() {
     CHECK(next_wait_slice_ms(4000, 0) == 0);
 }
 
-// Feeds `n` frames at `period` seconds from t0; returns the time of the last one.
 // The doorbell event name both TOPs build (core/doorbell_name.h).
 void test_doorbell_event_name() {
     g_ctx = "doorbell_name";
@@ -519,6 +518,7 @@ void test_doorbell_event_name() {
     CHECK(doorbell_event_name("") == std::wstring(kDoorbellPrefix));
 }
 
+// Feeds `n` frames at `period` seconds from t0; returns the time of the last one.
 double feed_cadence(PublishCadence& c, double t0, double period, int n) {
     double t = t0;
     for (int i = 0; i < n; ++i) {
