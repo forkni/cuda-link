@@ -34,7 +34,8 @@ def test_spin_phase_hit_reports_ready_spin_and_no_blocked_time() -> None:
     query, seen = _ready_after(0)
     start = time.perf_counter()
 
-    status, waited_us, blocked_us, slept = _python_wait_slot(query, _EVT, start, 200, start + 1.0)
+    # A spin budget of seconds: a stalled runner must not skip the spin phase.
+    status, waited_us, blocked_us, slept = _python_wait_slot(query, _EVT, start, 30_000_000, start + 60.0)
 
     assert status == "READY_SPIN"
     assert waited_us >= 0.0
