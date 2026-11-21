@@ -105,14 +105,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`.tox`: parameters set in the same script call as `loadTox()` now reach the extension.**
-  The extension reads `Mode`, `Ipcmemname`, `Numslots` and `Debug` when it starts. After that,
-  only the `parexec1` Parameter Execute DAT tells it about a change, and `parexec1` reports
-  nothing that happens before its first cook. Found on 2026-11-21: a script that loaded the
-  `.tox` and set `Mode` to Receiver and a new `Ipcmemname` in the same call got a component
-  whose parameters said Receiver, while the extension stayed a Sender on
-  `cudalink_ipc_TD>>TD`, with no error. Now the `execute1` frame callback compares these four
-  parameters with the extension once, on the first frame of each extension instance, and sends
-  each difference through `parexec1`'s `onValueChange`, the same path as a normal change. Under
+  The extension reads `Mode`, `Ipcmemname`, `Numslots`, `Debug` and `Hidebuiltin` when it
+  starts. After that, only the `parexec1` Parameter Execute DAT tells it about a change, and
+  `parexec1` reports nothing that happens before its first cook. Found on 2026-11-21: a script
+  that loaded the `.tox` and set `Mode` to Receiver and a new `Ipcmemname` in the same call got
+  a component whose parameters said Receiver, while the extension stayed a Sender on
+  `cudalink_ipc_TD>>TD`, with no error. Now the `execute1` frame callback checks these
+  parameters once per extension instance, on its first Frame Start or Frame End (a mid-frame
+  `loadTox()` reaches Frame End first, before any export). Each difference goes through the
+  Parameter Execute DAT's `onValueChange` (`parexec1`, or `parexecute` as in the build guide),
+  the same path as a normal change, so a `Numslots` change while `Active` is on is still
+  ignored. `Active` is read live; the check only corrects its `Numslots` enable state. Under
   `CUDALINK_EXPORT_PROFILE`, `Debug` is not compared, because the profile forces verbose output on.
   A `.tox` exported before this fix keeps the old frame callback: export it again to get the fix.
 

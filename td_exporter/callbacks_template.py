@@ -16,14 +16,31 @@ import weakref
 # Extension instances whose parameters were checked against their own state after init.
 _RESYNCED: "weakref.WeakSet[object]" = weakref.WeakSet()
 
-# Parameters that CUDAIPCExtension reads in __init__ and afterwards follows only through
-# parexec1's onValueChange: (parameter, extension attribute, type to compare as). Mode
-# comes first, so the later handlers see the engine of the new mode.
+# Names of the Parameter Execute DAT: parexec1 in the shipped .tox, parexecute in
+# docs/TOX_BUILD_GUIDE.md.
+_PAREXEC_NAMES = ("parexec1", "parexecute")
+
+
+def _numslots_enabled(ext: object, comp: object) -> bool:
+    return bool(comp.par.Numslots.enable)
+
+
+def _numslots_should_enable(comp: object) -> bool:
+    return not comp.par.Active.eval() and str(comp.par.Mode.eval()) == "Sender"
+
+
+# Parameters whose state follows a change only through parexec1's onValueChange:
+# (parameter, read of the state the handler keeps, type to compare as, wanted value or
+# None for the parameter's own value). Mode comes first, so the later handlers see the
+# engine of the new mode. Active is live (is_active() reads the parameter); only its
+# Numslots.enable side effect can be stale.
 _RESYNC_PARS = (
-    ("Mode", "mode", str),
-    ("Ipcmemname", "shm_name", str),
-    ("Numslots", "num_slots", int),
-    ("Debug", "verbose_performance", bool),
+    ("Mode", lambda ext, comp: ext.mode, str, None),
+    ("Active", _numslots_enabled, bool, _numslots_should_enable),
+    ("Ipcmemname", lambda ext, comp: ext.shm_name, str, None),
+    ("Numslots", lambda ext, comp: ext.num_slots, int, None),
+    ("Debug", lambda ext, comp: ext.verbose_performance, bool, None),
+    ("Hidebuiltin", lambda ext, comp: comp.showCustomOnly, bool, None),
 )
 
 
@@ -42,35 +59,46 @@ def _extension():
 def _resync_params_once(ext: object) -> None:
     """Apply parameter writes that the extension missed, once per extension instance.
 
-    The extension reads Mode, Ipcmemname, Numslots and Debug in __init__. After that, only
-    parexec1 tells it about a change, and parexec1 reports nothing that happened before it
-    first cooked. So a script that sets these parameters in the same call as loadTox() or
-    create() leaves the extension on the old values, with no error (2026-11-21: a Receiver
-    set up this way stayed a Sender on the default Ipcmemname). On the first frame, each
-    parameter that differs from the extension's own value goes through parexec1's
-    onValueChange, the same path as a normal change. Never raises.
+    The extension reads Mode, Ipcmemname, Numslots, Debug and Hidebuiltin in __init__.
+    After that, only parexec1 tells it about a change, and parexec1 reports nothing that
+    happened before it first cooked. So a script that sets these parameters in the same
+    call as loadTox() or create() leaves the extension on the old values, with no error
+    (2026-11-21: a Receiver set up this way stayed a Sender on the default Ipcmemname).
+    On the first frame (start or end, whichever runs first), each parameter that differs
+    from the state its handler keeps goes through parexec1's onValueChange, the same path
+    as a normal change. One parameter that fails does not stop the others. Never raises.
     """
     try:
         if ext in _RESYNCED:
             return
         _RESYNCED.add(ext)
         comp = parent()  # noqa: F821
-        handlers = comp.op("parexec1")
-        on_change = getattr(getattr(handlers, "module", None), "onValueChange", None)
+        on_change = None
+        for name in _PAREXEC_NAMES:
+            on_change = getattr(getattr(comp.op(name), "module", None), "onValueChange", None)
+            if on_change is not None:
+                break
         if on_change is None:
-            return  # a COMP without parexec1 has nothing to resync through
+            return  # a COMP without a Parameter Execute DAT has nothing to resync through
         profile = bool(getattr(getattr(ext, "_config", None), "export_profile", False))
-        for par_name, attr, kind in _RESYNC_PARS:
-            if par_name == "Debug" and profile:
-                continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
+    except Exception:  # noqa: BLE001 -- a frame callback must never raise
+        return
+    for par_name, read_state, kind, wanted in _RESYNC_PARS:
+        if par_name == "Debug" and profile:
+            continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
+        try:
             par = getattr(comp.par, par_name, None)
             if par is None:
                 continue
-            seen = getattr(ext, attr)
-            if kind(par.eval()) != kind(seen):
-                on_change(par, seen)
-    except Exception:  # noqa: BLE001 -- a frame callback must never raise
-        return
+            seen = read_state(ext, comp)
+            target = par.eval() if wanted is None else wanted(comp)
+            if kind(target) == kind(seen):
+                continue
+            # A value parameter reports the extension's value as `prev`. Active's handler
+            # does not read `prev`; it gets the opposite of the current state.
+            on_change(par, seen if wanted is None else not par.eval())
+        except Exception:  # noqa: BLE001,S112 -- isolate each parameter; never raise
+            continue
 
 
 def _cook_slot_meta() -> None:
@@ -143,6 +171,9 @@ def onFrameEnd(frame: int) -> None:
     ext = _extension()
     if ext is None:
         return
+
+    # A loadTox() in mid-frame reaches Frame End before Frame Start: resync before export.
+    _resync_params_once(ext)
 
     # The CHOP values change only when a frame was published.
     if ext.mode == "Sender" and ext.export_frame():
