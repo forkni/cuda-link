@@ -108,7 +108,7 @@ private:
     // set) on rejection.
     bool validateMetadata(const cudalink::core::Metadata& metadata);
 
-    // CUDA Graphs path (opt-in via CUDALINK_CPP_USE_GRAPHS, PLAN-005 task #13 / ADR-0011):
+    // CUDA Graphs path (not reachable since 2.0.0: see the constructor; PLAN-005 task #13 / ADR-0011):
     // folds the per-cook waitEvent + memcpy2DToArray pair into one cudaGraphLaunch via a
     // keyed graph-exec cache. Never calls cudaGraphExecMemcpyNodeSetParams -- exec-level
     // memcpy updates require 1D operands on BOTH sides (see cuda_graphs.py:249's docstring),
@@ -182,7 +182,7 @@ private:
         cudalink::common::CudaGraphExecGuard exec;
     };
     static constexpr size_t kGraphCacheCapPerSlot = 4;
-    bool myGraphsRequested = false; // CUDALINK_CPP_USE_GRAPHS, read once in the ctor
+    bool myGraphsRequested = false; // never set since 2.0.0 (the variable is removed)
     bool myGraphsDisabled = false;  // sticky latch -> legacy path for the rest of the session
     std::vector<std::vector<GraphCacheEntry>> myGraphCache;
 

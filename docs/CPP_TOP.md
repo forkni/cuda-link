@@ -364,7 +364,7 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `num_slots` | Number of ring slots |
 | `gpu_ipc_us` | GPU time of the slot copy and the event record (0 while `Debug` is off) |
 | `gpu_pass_us` | GPU time of the pass-through copy (0 while `Debug` is off) |
-| `graph_hits` | CUDA graph cache hits (only with `Debug` on and `CUDALINK_CPP_USE_GRAPHS` set) |
+| `graph_hits` | CUDA graph cache hits. Always 0 since 2.0.0: the graph path is off (ADR-0010, ADR-0011) |
 | `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
 | `producer_frame` | Last published `producer_frame`, mod 2^24 |
 | `stream_id` | Last published `stream_id` |
@@ -387,7 +387,7 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `noframe_count` | Cooks with no new frame (only with `Debug` on) |
 | `version_changed_count` | Cooks that saw a sender restart (only with `Debug` on) |
 | `rescued_count` | Frames that the `Framewaitms` wait got (only with `Debug` on) |
-| `graph_hits` | CUDA graph cache hits (only with `Debug` on and `CUDALINK_CPP_USE_GRAPHS` set) |
+| `graph_hits` | CUDA graph cache hits. Always 0 since 2.0.0: the graph path is off (ADR-0010, ADR-0011) |
 | `graph_builds` | CUDA graph captures (same condition as `graph_hits`) |
 | `producer_frame` | `producer_frame` of the shown frame, mod 2^24 |
 | `stream_id` | `stream_id` of the shown frame |
@@ -744,5 +744,5 @@ Measure the cost of a TOP with `Debug` off:
   path do not carry the same number of them. Compare `bench:` lines only between runs
   on the same path, both with `Debug` on.
 
-With `Debug` off, the CUDA graph path (`CUDALINK_CPP_USE_GRAPHS`) gives no gain on either
-TOP. Keep the variable unset (ADR-0010, ADR-0011).
+With `Debug` off, the CUDA graph path gave no gain on either TOP (measured 2026-11-17). Since
+2.0.0 the path is off and the variable `CUDALINK_CPP_USE_GRAPHS` is removed (ADR-0010, ADR-0011).

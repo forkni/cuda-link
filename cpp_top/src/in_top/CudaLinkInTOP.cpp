@@ -18,7 +18,6 @@
 #include "../common/resize_convert.h"
 #include "../core/common_page.h"
 #include "../core/doorbell_name.h"
-#include "../core/env_flag.h"
 #include "../core/pixel_codec.h"
 #include "../out_top/pixel_format_map.h" // OP_PixelFormat -> wire tuple, for the Common target
 #include "../common/cuda_device_session.h"
@@ -146,14 +145,9 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
     myFatal = session.fatal;
     myInitNote = session.note;
 
-    // CUDA Graphs opt-in (PLAN-005 task #13 / ADR-0011, default OFF). Deliberately the SAME
-    // env var the Out TOP reads: its parked path self-disables at frame 3 when set (harmless
-    // but noisy, accepted in ADR-0010), and one var enables "the graphs feature" for both
-    // C++ TOPs rather than per-TOP-role. The Python side has its own two variables
-    // (CUDALINK_USE_GRAPHS for the package, CUDALINK_TD_USE_GRAPHS for the .tox Sender).
-    // Read once at construction for the same no-UI-exposure rationale as the sender
-    // (CudaLinkOutTOP's ctor comment).
-    myGraphsRequested = cudalink::core::env_flag("CUDALINK_CPP_USE_GRAPHS");
+    // CUDA Graphs: off, with no switch (2.0.0). The variable CUDALINK_CPP_USE_GRAPHS is gone:
+    // the 2026-11-17 measurement with Debug off showed no gain on either TOP (ADR-0010,
+    // ADR-0011). myGraphsRequested stays false, so the graph path below is not reachable.
 }
 
 CudaLinkInTOP::~CudaLinkInTOP() {
@@ -1180,7 +1174,7 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
             case 13:
                 // Session-lifetime count of graph-path cache hits (one cudaGraphLaunch in
                 // place of the waitEvent+memcpy pair -- see tryGraphedCopy()); only advances
-                // while Debug is on AND CUDALINK_CPP_USE_GRAPHS is set.
+                // while Debug is on AND the graph path runs (it does not: see the constructor).
                 chan->name->setString("graph_hits");
                 chan->value = static_cast<float>(myGraphHits);
                 break;
@@ -1189,7 +1183,7 @@ void CudaLinkInTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, vo
                 // (num_slots x observed output arrays) within seconds; a count that keeps
                 // climbing is the live signal that TD's output arrays are NOT pointer-stable
                 // and the cache cap will eventually latch graphs off. Only advances while
-                // Debug is on AND CUDALINK_CPP_USE_GRAPHS is set.
+                // Debug is on AND the graph path runs (it does not: see the constructor).
                 chan->name->setString("graph_builds");
                 chan->value = static_cast<float>(myGraphBuilds);
                 break;

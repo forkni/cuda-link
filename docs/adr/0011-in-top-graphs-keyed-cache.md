@@ -218,3 +218,12 @@ or on the show machine. Measure later changes with `Debug` off (see "Measuring c
 - CUDA adds exec-level memcpy updates accepting array operands or a TD API guarantees stable
   output arrays → revisit both this design (the cache becomes over-engineering) and
   ADR-0010's parked sender path.
+
+## Variable removed 2026-11-20 (2.0.0)
+
+Rule for 2.0.0: each on/off variable is measured on against off, the state that is not slower
+becomes fixed, and the variable goes away. For `CUDALINK_CPP_USE_GRAPHS` the measurement is the
+section "Re-measure 2026-11-17" above: no gain with Debug off. So off is fixed. Both TOPs no
+longer read the variable; `myGraphsRequested` stays false. The graph code stays in the tree and
+is not reachable. To run it again for a measurement, set `myGraphsRequested` in the constructor
+and rebuild.

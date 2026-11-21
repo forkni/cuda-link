@@ -23,7 +23,6 @@
 
 #include "common_page.h"
 #include "doorbell_name.h"
-#include "env_flag.h"
 #include "frame_step.h"
 #include "frame_wait.h"
 #include "pixel_codec.h"
@@ -512,20 +511,6 @@ void test_frame_wait_slice() {
     CHECK(next_wait_slice_ms(4000, 0) == 0);
 }
 
-// Feeds `n` frames at `period` seconds from t0; returns the time of the last one.
-// The on/off rule of the CUDALINK_* environment flags (core/env_flag.h).
-void test_env_flag_rule() {
-    g_ctx = "env_flag";
-    CHECK(!flag_value_on(nullptr)); // not set
-    CHECK(!flag_value_on(""));
-    CHECK(!flag_value_on("0"));
-    CHECK(!flag_value_on("01")); // only the first character decides
-    CHECK(flag_value_on("1"));
-    CHECK(flag_value_on("true"));
-    // A name no process sets: env_flag reads the real environment and gets "not set".
-    CHECK(!env_flag("CUDALINK_TOPCORE_TESTS_NO_SUCH_VARIABLE"));
-}
-
 // The doorbell event name both TOPs build (core/doorbell_name.h).
 void test_doorbell_event_name() {
     g_ctx = "doorbell_name";
@@ -533,6 +518,7 @@ void test_doorbell_event_name() {
     CHECK(doorbell_event_name("") == std::wstring(kDoorbellPrefix));
 }
 
+// Feeds `n` frames at `period` seconds from t0; returns the time of the last one.
 double feed_cadence(PublishCadence& c, double t0, double period, int n) {
     double t = t0;
     for (int i = 0; i < n; ++i) {
@@ -789,7 +775,6 @@ int main(int argc, char** argv) {
     test_frame_step_classification();
     test_frame_wait_slice();
     test_frame_wait_cadence();
-    test_env_flag_rule();
     test_doorbell_event_name();
     test_common_resolve_size();
     test_half_float_bits();

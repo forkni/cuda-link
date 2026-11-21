@@ -137,9 +137,9 @@ private:
     cudalink::common::ScratchBuffer myConvertScratch;
     bool myConverted = false;
 
-    // CUDA Graphs (env-gated PLAN-005 §2.1, default OFF; see the capture-site comment in
-    // tryGraphCopy() for the full design). myGraphsRequested is latched once from
-    // CUDALINK_CPP_USE_GRAPHS at construction; myGraphsDisabled latches permanently (for the
+    // CUDA Graphs (PLAN-005 §2.1; see the capture-site comment in tryGraphCopy() for the
+    // full design). Not reachable since 2.0.0: myGraphsRequested is never set (the variable
+    // CUDALINK_CPP_USE_GRAPHS is removed); myGraphsDisabled latches permanently (for the
     // rest of the session) on the first graph-path failure, falling back to the always-correct
     // legacy path.
     //
