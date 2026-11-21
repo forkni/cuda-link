@@ -56,7 +56,19 @@ def test_init_version_line_matches_every_reader() -> None:
 
 
 def test_cmake_reads_version_from_init() -> None:
-    text = CPP_CMAKE.read_text(encoding="utf-8")
-    assert "src/cuda_link/__init__.py" in text
-    assert 'REGEX "^__version__ = ' in text
-    assert 'pyproject.toml" CUDALINK' not in text, "cpp_top must not read the version from pyproject.toml"
+    lines = CPP_CMAKE.read_text(encoding="utf-8").splitlines()
+    # Comment lines name both files in prose: only the commands count.
+    code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    read = re.search(
+        r'file\(STRINGS\s+"\$\{CMAKE_CURRENT_SOURCE_DIR\}/\.\./src/cuda_link/__init__\.py"\s+(\w+)'
+        r'\s+REGEX\s+"\^__version__ = ',
+        code,
+    )
+    assert read, "cpp_top must read the version line from src/cuda_link/__init__.py"
+    # CUDALINK_VERSION comes from that line, not from a literal.
+    assert re.search(
+        r"string\(REGEX REPLACE\s+\S.*\sCUDALINK_VERSION\s+\"\$\{" + read.group(1) + r"\}\"\)",
+        code,
+    ), "CUDALINK_VERSION must come from the __init__.py line"
+    assert not re.search(r'set\(CUDALINK_VERSION\s+"\d', code), "cpp_top must not hold a version literal"
+    assert "pyproject.toml" not in code, "cpp_top must not read the version from pyproject.toml"
