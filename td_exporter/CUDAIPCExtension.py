@@ -91,7 +91,9 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
             return cls()
 
     class TDReceiverConfig:  # type: ignore[no-redef]
-        pass
+        @classmethod
+        def from_env(cls) -> TDReceiverConfig:
+            return cls()
 
 
 def _bootstrap_active() -> bool:
@@ -254,6 +256,8 @@ class CUDAIPCExtension:
         self.ownerComp = ownerComp
         self._host: TDHost = host if host is not None else RealTDHost(ownerComp)
         self._config: TDSenderConfig = config if config is not None else TDSenderConfig.from_env()
+        # Resolved once here, like the sender config: a mode switch does not read the environment again.
+        self._receiver_config: TDReceiverConfig = TDReceiverConfig.from_env()
 
         _mode_val = self._host.param_value("Mode")
         self._mode: str = str(_mode_val) if _mode_val is not None else "Sender"
@@ -430,7 +434,7 @@ class CUDAIPCExtension:
             )
         return TDReceiverEngine(  # type: ignore[not-callable]
             host=self._host,
-            config=TDReceiverConfig.from_env(),  # type: ignore[bad-argument-type]
+            config=self._receiver_config,  # type: ignore[bad-argument-type]
             cuda=None,
             log_fn=self._log,
             num_slots=rs.num_slots,
