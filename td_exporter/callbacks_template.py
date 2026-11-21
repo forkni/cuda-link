@@ -11,6 +11,21 @@ Architecture:
 - Receiver: onFrameStart=force-cook ImportBuffer (triggers Script TOP onCook)
 """
 
+import weakref
+
+# Extension instances whose parameters were checked against their own state after init.
+_RESYNCED: "weakref.WeakSet[object]" = weakref.WeakSet()
+
+# Parameters that CUDAIPCExtension reads in __init__ and afterwards follows only through
+# parexec1's onValueChange: (parameter, extension attribute, type to compare as). Mode
+# comes first, so the later handlers see the engine of the new mode.
+_RESYNC_PARS = (
+    ("Mode", "mode", str),
+    ("Ipcmemname", "shm_name", str),
+    ("Numslots", "num_slots", int),
+    ("Debug", "verbose_performance", bool),
+)
+
 
 def _extension():
     """Return the CUDAIPCExtension, or None if it is not available.
@@ -22,6 +37,40 @@ def _extension():
         return getattr(parent().ext, "CUDAIPCExtension", None)  # noqa: F821
     except Exception:  # noqa: BLE001 -- td.tdAttributeError, plus parent() == None
         return None
+
+
+def _resync_params_once(ext: object) -> None:
+    """Apply parameter writes that the extension missed, once per extension instance.
+
+    The extension reads Mode, Ipcmemname, Numslots and Debug in __init__. After that, only
+    parexec1 tells it about a change, and parexec1 reports nothing that happened before it
+    first cooked. So a script that sets these parameters in the same call as loadTox() or
+    create() leaves the extension on the old values, with no error (2026-11-21: a Receiver
+    set up this way stayed a Sender on the default Ipcmemname). On the first frame, each
+    parameter that differs from the extension's own value goes through parexec1's
+    onValueChange, the same path as a normal change. Never raises.
+    """
+    try:
+        if ext in _RESYNCED:
+            return
+        _RESYNCED.add(ext)
+        comp = parent()  # noqa: F821
+        handlers = comp.op("parexec1")
+        on_change = getattr(getattr(handlers, "module", None), "onValueChange", None)
+        if on_change is None:
+            return  # a COMP without parexec1 has nothing to resync through
+        profile = bool(getattr(getattr(ext, "_config", None), "export_profile", False))
+        for par_name, attr, kind in _RESYNC_PARS:
+            if par_name == "Debug" and profile:
+                continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
+            par = getattr(comp.par, par_name, None)
+            if par is None:
+                continue
+            seen = getattr(ext, attr)
+            if kind(par.eval()) != kind(seen):
+                on_change(par, seen)
+    except Exception:  # noqa: BLE001 -- a frame callback must never raise
+        return
 
 
 def _cook_slot_meta() -> None:
@@ -50,6 +99,8 @@ def onFrameStart(frame: int) -> None:
     ext = _extension()
     if ext is None:
         return
+
+    _resync_params_once(ext)
 
     if ext.mode == "Sender":
         # Check if deferred GPU cleanup is scheduled (lightweight, ~0ms normally)
