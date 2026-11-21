@@ -48,9 +48,9 @@ constexpr DWORD kIpcCloseGracePeriodMs = 100;
 
 // Names the Info CHOP channel count returned by getNumInfoCHOPChans() -- must stay in
 // sync with the number of `case` labels in getInfoCHOPChan()'s switch below (frames, cook_us,
-// copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us, graph_hits,
-// graph_builds, producer_frame, stream_id, converted).
-constexpr int32_t kNumInfoCHOPChans = 14;
+// copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us, gpu_pass_us, producer_frame,
+// stream_id, converted).
+constexpr int32_t kNumInfoCHOPChans = 12;
 
 // Names the Info DAT row count returned by getInfoDATSize() -- must stay in sync with
 // the number of index branches in getInfoDATEntries() below (ipc_version, status, last_error,
@@ -120,10 +120,6 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     myError = session.error;
     myFatal = session.fatal;
     myInitNote = session.note;
-
-    // CUDA Graphs: off, with no switch (2.0.0). The variable CUDALINK_CPP_USE_GRAPHS is gone:
-    // the 2026-11-17 measurement with Debug off showed no gain on either TOP (ADR-0010,
-    // ADR-0011). myGraphsRequested stays false, so the graph path below is not reachable.
 }
 
 CudaLinkOutTOP::~CudaLinkOutTOP() {
@@ -242,9 +238,6 @@ void CudaLinkOutTOP::teardown() {
     myConvertScratch.release();
     myConverted = false;
 
-    // Graph execs reference mySlotDevPtrs/mySlotEvents below -- destroy them first.
-    destroyGraphs();
-
     for (auto* evt : mySlotEvents) {
         if (evt) {
             // Non-fatal: teardown must run to completion and reset state regardless of a
@@ -288,165 +281,6 @@ void CudaLinkOutTOP::teardown() {
     myWriteIdx = 0;
     myStatus = "Idle";
     debugLog("teardown: complete");
-}
-
-void CudaLinkOutTOP::destroyGraphs() {
-    // Each entry's CudaGraphExecGuard destructor calls cudaGraphExecDestroy, which (like
-    // cudaEventDestroy/cudaFree elsewhere in this file) is safe to call without first
-    // draining in-flight work on myStream -- the driver defers actual resource release
-    // until any launch already queued completes. Non-fatal by construction: the guard
-    // swallows the destroy status, matching the logged-only, never-latched stance of the
-    // teardown loops in teardown().
-    size_t total = 0;
-    for (const auto& entries : myGraphCache) {
-        total += entries.size();
-    }
-    if (total > 0) {
-        debugLog("destroyGraphs: dropping " + std::to_string(total) + " cached graph exec(s)");
-    }
-    myGraphCache.clear();
-}
-
-bool CudaLinkOutTOP::tryGraphCopy(uint32_t slot, cudaArray_t srcArray, size_t rowBytes, uint32_t height) {
-    // Keyed exec cache (see the header comment on myGraphCache for why this replaced a
-    // single per-slot exec updated via cudaGraphExecMemcpyNodeSetParams -- that pattern was
-    // invalid on two independent counts, confirmed during diagnosis). Mirrors the In TOP's
-    // tryGraphedCopy(): capture a fresh graph per (slot, srcArray) key, never update a node
-    // in place. Sized lazily so the graphs-off path never touches this state at all;
-    // destroyGraphs() resets it to empty on every reallocation.
-    if (myGraphCache.size() < mySlotDevPtrs.size()) {
-        myGraphCache.resize(mySlotDevPtrs.size());
-    }
-
-    auto& entries = myGraphCache[slot];
-    for (const auto& entry : entries) {
-        if (entry.srcArray == srcArray) {
-            // Pointer-equality hit: this cook's source array is one we already captured a
-            // graph against for this slot, so launching is exactly equivalent to re-issuing
-            // the memcpy+event-record pair with these operands. Residual ABA risk (TD
-            // freeing and reallocating a DIFFERENT array at the same address with identical
-            // dims/format between cooks) is accepted, same as the In TOP's cache -- the
-            // vendor API exposes no generation counter to detect it.
-            const cudaError_t st = cudaGraphLaunch(entry.exec.get(), myStream);
-            if (st != cudaSuccess) {
-                debugLog(std::string("graphs: launch failed: ") + cudaGetErrorString(st));
-                myGraphsDisabled = true;
-                return false;
-            }
-            if (myDebugLog.enabled()) {
-                ++myGraphHits;
-            }
-            return true;
-        }
-    }
-
-    if (entries.size() >= kGraphCacheCapPerSlot) {
-        // More distinct source arrays per slot than any plausible swap-chain depth: the
-        // pointer-stability assumption this cache rests on has failed for this session.
-        // Hard-disable rather than evict -- eviction would silently mask exactly the
-        // instability signal this cap exists to surface (and keep building execs against
-        // arrays TD may free at any time).
-        debugLog("graphs: src-array cache cap (" + std::to_string(kGraphCacheCapPerSlot) +
-                 ") exceeded for slot " + std::to_string(slot) + ", disabling");
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    // Cache miss: capture this cook's real two-op sequence with BOTH operands baked in --
-    // the IPC-slot copy and the interprocess event-record -- NOT the pass-through display
-    // copy that follows it in execute(). That copy's destination ('selfOut->cudaArray') is
-    // optional and best-effort (null when output->createCUDAArray() fails) and non-fatal by
-    // existing design, unlike this pair, which is this TOP's actual job. Mirrors the Python
-    // reference's shape (src/cuda_link/cuda_graphs.py + exporter.py's _build_export_graphs)
-    // minus that one op.
-    //
-    // extent is in the SOURCE ARRAY's own element units, not raw bytes: 'width' (not
-    // rowBytes) x 'height' x depth=1. This holds because the array was created by TD from
-    // the same pixel format this TOP reads out of Metadata, so its element size already
-    // equals num_comps*itemsize -- rowBytes/width recovers exactly that.
-    cudaMemcpy3DParms params{};
-    params.srcArray = srcArray;
-    params.srcPos = make_cudaPos(0, 0, 0);
-    params.dstArray = nullptr;
-    params.dstPtr = make_cudaPitchedPtr(mySlotDevPtrs[slot], rowBytes, rowBytes, height);
-    params.dstPos = make_cudaPos(0, 0, 0);
-    params.extent = make_cudaExtent(myMetadata.width, height, 1);
-    params.kind = cudaMemcpyDeviceToDevice;
-
-    cudaError_t st = cudaStreamBeginCapture(myStream, cudaStreamCaptureModeRelaxed);
-    if (st != cudaSuccess) {
-        debugLog(std::string("graphs: stream_begin_capture failed: ") + cudaGetErrorString(st));
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    st = cudaMemcpy3DAsync(&params, myStream);
-    if (st == cudaSuccess) {
-        // MUST use cudaEventRecordWithFlags(..., cudaEventRecordExternal), NOT plain
-        // cudaEventRecord, to record an INTERPROCESS event inside a capture region --
-        // confirmed via src/cuda_link/cuda_ipc_wrapper.py's own comment: plain
-        // cudaEventRecord is rejected with cudaErrorStreamCaptureUnsupported (900) here.
-        st = cudaEventRecordWithFlags(mySlotEvents[slot], myStream, cudaEventRecordExternal);
-    }
-    if (st != cudaSuccess) {
-        debugLog(std::string("graphs: capture body failed: ") + cudaGetErrorString(st));
-        cudaGraph_t abandoned = nullptr;
-        cudaStreamEndCapture(myStream, &abandoned); // must still end capture even on failure
-        if (abandoned) {
-            cudaGraphDestroy(abandoned);
-        }
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    cudaGraph_t templateGraph = nullptr;
-    st = cudaStreamEndCapture(myStream, &templateGraph);
-    if (st != cudaSuccess || !templateGraph) {
-        debugLog(std::string("graphs: stream_end_capture failed: ") + cudaGetErrorString(st));
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    size_t nodeCount = 0;
-    cudaGraphGetNodes(templateGraph, nullptr, &nodeCount);
-    if (nodeCount != 2) {
-        // Validate the shape before instantiating -- an unexpected node count means the
-        // capture picked up something other than the two ops we expect (e.g. a driver
-        // difference), and this cache no longer represents just this copy.
-        debugLog("graphs: unexpected node count " + std::to_string(nodeCount) + " (expected 2)");
-        cudaGraphDestroy(templateGraph);
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    cudaGraphExec_t graphExec = nullptr;
-    st = cudaGraphInstantiate(&graphExec, templateGraph, 0);
-    cudaGraphDestroy(templateGraph); // the exec owns its own copy; the template is done.
-    // Safe here (unlike the old node-update pattern) because nothing below ever reaches back
-    // into templateGraph or a node handle drawn from it -- the cache holds only the exec.
-    if (st != cudaSuccess) {
-        debugLog(std::string("graphs: instantiate failed: ") + cudaGetErrorString(st));
-        myGraphsDisabled = true;
-        return false;
-    }
-
-    GraphCacheEntry entry;
-    entry.srcArray = srcArray;
-    entry.exec.reset(graphExec);
-
-    st = cudaGraphLaunch(entry.exec.get(), myStream);
-    if (st != cudaSuccess) {
-        debugLog(std::string("graphs: launch failed: ") + cudaGetErrorString(st));
-        myGraphsDisabled = true;
-        return false; // entry's guard destroys the exec on scope exit
-    }
-
-    entries.push_back(std::move(entry));
-    if (myDebugLog.enabled()) {
-        ++myGraphBuilds;
-    }
-    debugLog("graphs: built for slot " + std::to_string(slot));
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,12 +484,6 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
     for (auto& guard : newEvents) {
         mySlotEvents.push_back(guard.release());
     }
-
-    // Old graph execs (if any) captured a copy referencing the OLD device buffers/events
-    // above -- destroy them now, before those buffers are freed below. The cache itself
-    // resizes lazily inside tryGraphCopy() against the new mySlotDevPtrs, same as the In
-    // TOP -- no need to pre-size it here.
-    destroyGraphs();
 
     myShmView = view;
     myShmHandle = mapping;
@@ -897,8 +725,8 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
             // Debug-gated GPU-side timing (see gpu_timer.h): read the interval recorded
             // kRingSize cooks ago (its GPU work has long completed -- never this cook's own,
             // never a sync), then arm this cook's start event before the IPC copy. The stop
-            // event is recorded after the graph/legacy branch below, so the interval brackets
-            // either path uniformly (a cudaGraphLaunch is just another enqueue on myStream).
+            // event is recorded after the copy below, so the interval brackets both the fast
+            // path and the Common page path.
             uint32_t ipcTimerIdx = 0;
             bool ipcTimerArmed = false;
             if (myDebugLog.enabled()) {
@@ -915,17 +743,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 }
             }
 
-            // CUDA Graphs (env-gated, PLAN-005 §2.1): collapses the IPC-slot copy + the
-            // interprocess event-record below into a single cudaGraphLaunch submission.
-            // tryGraphCopy() does the exact same two ops as the 'else' branch (see its
-            // definition) -- on ANY failure it latches myGraphsDisabled and returns false,
-            // performing none of the enclosed work, so falling through to the legacy path
-            // below is required, not optional.
-            bool usedGraph = false;
             if (convert) {
                 // Common page path (resize and/or convert): input array -> linear scratch
                 // (the same copy shape as the fast path), then the resize/convert kernel
-                // writes the target frame into the IPC slot. No graph on this path. The
+                // writes the target frame into the IPC slot. The
                 // gpu_ipc_us timer brackets the whole of it.
                 const size_t inRowBytes = static_cast<size_t>(width) * fmt.num_comps *
                                           (fmt.bits_per_comp / cudalink::core::BITS_PER_BYTE);
@@ -954,10 +775,7 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
                                           myError, myFatal);
                 CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
-            } else if (myGraphsRequested && !myGraphsDisabled) {
-                usedGraph = tryGraphCopy(slot, arr->cudaArray, rowBytes, myMetadata.height);
-            }
-            if (!convert && !usedGraph) {
+            } else {
                 CUDALINK_CUDA_CHECK_FATAL(
                     cudaMemcpy2DFromArrayAsync(mySlotDevPtrs[slot], rowBytes, arr->cudaArray, 0, 0, rowBytes,
                                                myMetadata.height, cudaMemcpyDeviceToDevice, myStream),
@@ -1087,7 +905,7 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
 
 int32_t CudaLinkOutTOP::getNumInfoCHOPChans(void*) {
     // frames, cook_us, copy_us, begin_us, end_us, write_idx, num_slots, gpu_ipc_us,
-    // gpu_pass_us, graph_hits, graph_builds, producer_frame, stream_id
+    // gpu_pass_us, producer_frame, stream_id, converted
     return kNumInfoCHOPChans;
 }
 
@@ -1137,31 +955,15 @@ void CudaLinkOutTOP::getInfoCHOPChan(int32_t index, TD::OP_InfoCHOPChan* chan, v
                 chan->value = myGpuPassUs;
                 break;
             case 9:
-                // Session-lifetime count of graph-path cache hits (one cudaGraphLaunch in
-                // place of the memcpy+event-record pair -- see tryGraphCopy()); only advances
-                // while Debug is on AND the graph path runs (it does not: see the constructor).
-                chan->name->setString("graph_hits");
-                chan->value = static_cast<float>(myGraphHits);
-                break;
-            case 10:
-                // Session-lifetime count of graph captures (cache misses). Should plateau at
-                // (num_slots x observed source arrays) within seconds; a count that keeps
-                // climbing is the live signal that TD's source arrays are NOT pointer-stable
-                // and the cache cap will eventually latch graphs off. Only advances while
-                // Debug is on AND the graph path runs (it does not: see the constructor).
-                chan->name->setString("graph_builds");
-                chan->value = static_cast<float>(myGraphBuilds);
-                break;
-            case 11:
                 // Last published producer_frame mod 2^24 (exact in float32; see kInfoChopFrameMod).
                 chan->name->setString("producer_frame");
                 chan->value = static_cast<float>(myProducerFrame % kInfoChopFrameMod);
                 break;
-            case 12:
+            case 10:
                 chan->name->setString("stream_id");
                 chan->value = static_cast<float>(myStreamId);
                 break;
-            case 13:
+            case 11:
                 // 1 while the Common page resizes or converts the input before send
                 // (off the fast path); gpu_ipc_us then includes the kernel.
                 chan->name->setString("converted");
