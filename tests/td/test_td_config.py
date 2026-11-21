@@ -47,7 +47,7 @@ def test_sender_config_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_sender_config_from_env_report_every_and_doorbell(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The two knobs the engine used to read from the environment itself come through the config."""
+    """The report interval comes from the environment; the doorbell is on with no variable."""
     from TDConfig import TDSenderConfig
 
     assert TDSenderConfig().report_every == 150
@@ -57,7 +57,7 @@ def test_sender_config_from_env_report_every_and_doorbell(monkeypatch: pytest.Mo
     monkeypatch.setenv("CUDALINK_DOORBELL", "0")
     cfg = TDSenderConfig.from_env()
     assert cfg.report_every == 50
-    assert cfg.doorbell is False
+    assert cfg.doorbell is True  # CUDALINK_DOORBELL was removed in 2.0.0
 
 
 def test_receiver_config_from_env_report_every(monkeypatch: pytest.MonkeyPatch) -> None:

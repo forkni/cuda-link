@@ -42,7 +42,9 @@ class TDSenderConfig:
     activation_barrier: bool = True
     barrier_settle_frames: int = 30
     report_every: int = 150  # published frames between two Debug summary lines
-    doorbell: bool = True  # signal the Win32 named-event doorbell on each publish
+    # Signal the Win32 named-event doorbell on each publish. Not read from the environment
+    # (CUDALINK_DOORBELL is gone since 2.0.0): always on in the .tox.
+    doorbell: bool = True
 
     @classmethod
     def from_env(cls) -> TDSenderConfig:
@@ -56,9 +58,6 @@ class TDSenderConfig:
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
             report_every=env_int("CUDALINK_SENDER_REPORT_EVERY", default=150),
-            # Default ON (2.0.0), same as ExportPolicy.from_env(): a C++ In TOP with
-            # Framewaitms > 0 waits on it. One waiter per signal; Windows-only.
-            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
         )
 
     def __post_init__(self) -> None:

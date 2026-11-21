@@ -177,7 +177,7 @@ default.
   TD cooks (for example a 30 fps camera into a 60 fps project), or the sender has paused. It
   finds this from the sender's publish times in the slot metadata.
 - The wait needs the sender's doorbell: a 2.0 Sender, Python `Exporter` or C++ Out TOP with
-  `CUDALINK_DOORBELL` unset or `1`. With a 1.x sender the Receiver checks once per frame, as
+  default settings. With a 1.x sender the Receiver checks once per frame, as
   before.
 
 ---
@@ -378,7 +378,7 @@ variables for consumer-side wait behavior. The headline ones:
 | Variable | Purpose |
 |----------|---------|
 | `CUDALINK_WAIT_BACKEND` | Native notification-wait backend (`auto` / `python` / `native`). Target p50 < 10 µs vs the ~136–286 µs poll-sleep baseline. Honest caveat: benchmarked as **not measurably faster** than the doorbell in practice — it ships because it never regresses, not because it's proven faster. |
-| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (one waiter per signal, Windows-only). On by default since 2.0.0: the Sender signals it, and a Python consumer and the Receiver's `Framewaitms` wait on it. `0` turns it off on the side that sets it. Sub-300 µs notify latency, ~zero idle CPU while waiting. |
+| `CUDALINK_DOORBELL` | Removed in 2.0.0. The doorbell is always on: the producer signals a Win32 named event after each publish and a consumer waits on it. Measured 2026-11-20 (1280x720, Python `Exporter`): off saved under 1 µs per publish, inside the run spread, and raised the consumer notify latency from 0.03 ms to 0.93 ms. A value left in the environment has no effect. In code, `ExportPolicy(doorbell=False)` and `ImportPolicy(doorbell=False)` still turn it off. |
 | `CUDALINK_TORCH_GPU_WAIT` | GPU-side wait for `get_frame()` (torch backend) — issues `cudaStreamWaitEvent` instead of CPU spin/sleep. Trade-off: `ImportOutcome.TIMEOUT` becomes unreachable on this path. |
 
 This is not the full list — CUDA-Link exposes roughly 40 `CUDALINK_*` tuning variables in

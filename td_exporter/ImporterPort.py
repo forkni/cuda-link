@@ -99,8 +99,8 @@ class ImportPolicy:
     reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
     # R2: Win32 named-event doorbell. When True the consumer opens the named
     # event the producer creates and wait_for_doorbell() blocks on it instead of
-    # returning False. On by default since 2.0.0 (the producer signals by default
-    # too); CUDALINK_DOORBELL=0 turns it off. Auto-reset wakes ONE waiter: with
+    # returning False. On since 2.0.0 (the producer signals too); there is no
+    # environment variable, code can pass doorbell=False. Auto-reset wakes ONE waiter: with
     # several consumers on one name the wait runs in 1 ms slices and polls
     # write_idx after each, so a taken signal costs one slice. Windows-only; when
     # the event does not exist (a 1.x or doorbell-off producer) the consumer polls.
@@ -136,7 +136,6 @@ class ImportPolicy:
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
-            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
             wait_backend=env_str("CUDALINK_WAIT_BACKEND", default="auto"),
         )
 

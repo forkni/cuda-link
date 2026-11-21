@@ -70,6 +70,9 @@ class ExportPolicy:
     """
 
     export_sync: bool = False
+    # CUDA graph path for export(). On, with no environment variable since 2.0.0: measured
+    # 2026-11-20 at 1280x720, export_frame median 13.4 us with graphs, 22.9 us without.
+    # The Exporter still falls back to the legacy path on a capture or launch failure.
     use_graphs: bool = True
     flush_probe: bool = True
     strict_device: bool = False
@@ -79,10 +82,11 @@ class ExportPolicy:
     high_priority_stream: bool = True
     export_profile: bool = False
     # R2: Win32 named-event doorbell. When True the producer creates a named
-    # auto-reset event and signals it after every publish_frame(). Default ON
-    # (2.0.0): a C++ In TOP with Framewaitms > 0 waits on it; a Python consumer
-    # waits on it only with CUDALINK_DOORBELL=1 (ImportPolicy stays opt-in).
-    # CUDALINK_DOORBELL=0 turns it off. Auto-reset wakes exactly one waiter.
+    # auto-reset event and signals it after every publish_frame(). On since 2.0.0:
+    # a C++ In TOP with Framewaitms > 0 and a Python consumer both wait on it.
+    # No environment variable: measured 2026-11-20, off saves under 1 us per
+    # publish (inside the run spread) and costs the consumer 0.9 ms of notify
+    # latency. Code can still pass doorbell=False. Auto-reset wakes exactly one waiter.
     # Windows-only (no-op elsewhere).
     doorbell: bool = True
 
@@ -91,7 +95,6 @@ class ExportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
             export_sync=env_bool("CUDALINK_EXPORT_SYNC", default=False),
-            use_graphs=env_bool("CUDALINK_USE_GRAPHS", default=True),
             flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             strict_device=env_bool("CUDALINK_STRICT_DEVICE", default=False),
             require_source_sync=env_bool("CUDALINK_REQUIRE_SOURCE_SYNC", default=False),
@@ -99,7 +102,6 @@ class ExportPolicy:
             barrier_stale_ns=env_int("CUDALINK_BARRIER_STALE_NS", default=5_000_000_000),
             high_priority_stream=env_str("CUDALINK_LIB_STREAM_PRIO", default="high") != "normal",
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
-            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
         )
 
     @classmethod

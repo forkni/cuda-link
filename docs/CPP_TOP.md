@@ -192,8 +192,8 @@ About `Framewaitms`:
 - The default 3 ms gives the same wait as the Phase 5 sync kit setting (0.19 %
   mismatches). That setting was 4, but the older wait code waited about 1 ms less.
 - The wait is in steps of 1 ms. After each step, the TOP reads `write_idx` again. Thus two
-  consumers of one segment (two In TOPs, or an In TOP and a Python receiver with
-  `CUDALINK_DOORBELL`) can both use the wait. The sender signal wakes only one waiter.
+  consumers of one segment (two In TOPs, or an In TOP and a Python receiver)
+  can both use the wait. The sender signal wakes only one waiter.
 - One doorbell waiter per `Ipcmemname` is best. With an In TOP and a Python receiver on one
   name, the In TOP is not affected. The Python receiver misses the signal on about 3 % of
   frames and then waits its full `wait_for_doorbell()` timeout (2 ms in the examples).

@@ -90,10 +90,10 @@ Note: WDDM submission count/frame is inferred from nsys call counts ÷ frame cou
 Reproduce (all four cells; on Windows use `SET VAR=value &` prefix):
 
 ```bash
-CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_A.json
-CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_B.json
-CUDALINK_EXPORT_SYNC=1 CUDALINK_USE_GRAPHS=1 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_C.json
-CUDALINK_EXPORT_SYNC=0 CUDALINK_USE_GRAPHS=1 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_D.json
+CUDALINK_EXPORT_SYNC=1 python scripts/profiling/profile_export.py --no-graphs --frames 2000 --export-profile --outfile .profiling/exp_A.json
+CUDALINK_EXPORT_SYNC=0 python scripts/profiling/profile_export.py --no-graphs --frames 2000 --export-profile --outfile .profiling/exp_B.json
+CUDALINK_EXPORT_SYNC=1 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_C.json
+CUDALINK_EXPORT_SYNC=0 python scripts/profiling/profile_export.py --frames 2000 --export-profile --outfile .profiling/exp_D.json
 ```
 
 ---
@@ -591,3 +591,47 @@ See [README.md §Performance Tuning](../README.md#performance-tuning-env-vars) f
 full table of `CUDALINK_*` environment variables and their effect on throughput.
 
 For GPU-timeline profiling (Nsight Systems / Nsight Compute) see [PROFILING.md](PROFILING.md).
+
+## Flag winners (2026-11-20)
+
+Two variables were measured on against off, to keep the winner and remove the variable.
+Dev box: RTX 4090, three idle TouchDesigner projects open (GPU load 4-5 %). Python `Exporter` and
+`Importer` from `development` (bd1d7e1), `torch` 2.11.0+cu128.
+
+### Exporter cost
+
+`scripts/profiling/profile_export.py --frames 2000 --width 1280 --height 720 --dtype uint8`,
+`CUDALINK_EXPORT_SYNC=0`, 3 runs per state, states interleaved. `export_frame` median / p95 in µs.
+
+| Doorbell | Graphs | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|---|
+| on | on | 16.5 / 23.7 | 13.6 / 22.0 | 13.4 / 20.4 |
+| off | on | 13.3 / 23.0 | 13.4 / 23.3 | 12.9 / 23.5 |
+| on | off | 23.1 / 28.9 | 23.9 / 33.4 | 22.9 / 26.8 |
+| off | off | 22.1 / 43.4 | 23.2 / 28.2 | 22.6 / 25.5 |
+
+- Graphs: on is 9 to 10 µs faster per frame in each run. Graphs on is the winner.
+- Doorbell: off is 0.2 to 0.7 µs faster in the median (run 1 of the first row is an outlier),
+  which is smaller than the spread between runs of one state. No benefit from off.
+
+### Consumer notify latency
+
+`scripts/profiling/bench_doorbell.py --fps 60 --frames 600`, one run.
+
+| Arm | CPU % | Latency p50 | p95 | p99 | NO_FRAME polls |
+|---|---|---|---|---|---|
+| poll (doorbell off) | 2.3 | 0.93 ms | 1.60 ms | 1.71 ms | 6448 |
+| doorbell | 2.1 | 0.03 ms | 0.04 ms | 0.06 ms | 601 |
+| native wait backend | 1.8 | 0.03 ms | 0.04 ms | 0.05 ms | 600 |
+
+- Doorbell on is the winner by a factor of about 30 in notify latency.
+
+### Result
+
+`CUDALINK_DOORBELL` and `CUDALINK_USE_GRAPHS` are removed in 2.0.0; both paths are always on.
+For an A/B run, `profile_export.py --no-graphs` selects the legacy export path, and
+`bench_doorbell.py` selects polling through `ImportPolicy(doorbell=False)`.
+
+Not measured here: `CUDALINK_TD_USE_GRAPHS` (the `.tox` Sender, default off). It needs two
+TouchDesigner processes on a quiet machine. `CUDALINK_CPP_USE_GRAPHS` was measured on 2026-11-17
+(no gain, see ADR-0010 and ADR-0011).

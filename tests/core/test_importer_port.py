@@ -145,7 +145,6 @@ _IMPORT_BOOL_ENV = {
     "CUDALINK_TORCH_GPU_WAIT": "torch_gpu_wait",
     "CUDALINK_TORCH_GPU_WAIT_ADAPTIVE": "torch_gpu_wait_adaptive",
     "CUDALINK_IMPORT_RECONNECT": "reconnect_enabled",
-    "CUDALINK_DOORBELL": "doorbell",
 }
 _IMPORT_INT_ENV = {
     "CUDALINK_WAIT_SPIN_US": "wait_spin_us",
