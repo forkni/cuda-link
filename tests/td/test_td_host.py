@@ -499,9 +499,10 @@ def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
 class _TDFixTOP:
     """Stub shaped like the MonoAlphaFix Reorder TOP."""
 
+    bypass = True
+
     def __init__(self) -> None:
         self.par = _TDPar(format="useinput")
-        self.bypass = True
 
 
 def _import_buffer_with_fix(fix: _TDFixTOP | None) -> _TDTOP:
@@ -564,10 +565,53 @@ def test_real_td_host_replaces_a_saved_warning_or_error_status(saved: str) -> No
     assert comp.par.Status.eval() == "Idle"
 
 
-def test_real_td_host_keeps_a_saved_info_status() -> None:
+def test_real_td_host_replaces_a_saved_format_status() -> None:
+    """The format of the stream at save time is stale too: no sender is connected at start."""
     from TDHost import RealTDHost
 
     comp = _TDComp(Status="1280x720 rgba8fixed")
     RealTDHost(comp)
 
-    assert comp.par.Status.eval() == "1280x720 rgba8fixed"
+    assert comp.par.Status.eval() == "Idle"
+
+
+class _TDError(Exception):
+    """Shaped like td.tdError: derives from Exception, not from RuntimeError."""
+
+
+class _RaisingStatusPar(_TDPar):
+    def __getattr__(self, name: str) -> Any:
+        if name == "Status":
+            raise _TDError("simulated td.tdError")
+        return super().__getattr__(name)
+
+
+def test_real_td_host_init_survives_a_td_error_from_the_status_par() -> None:
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Mode="Sender")
+    comp.par = _RaisingStatusPar(Mode="Sender")
+
+    host = RealTDHost(comp)
+
+    assert host.param_value("Mode") == "Sender"
+
+
+def test_sync_mono_alpha_fix_survives_a_td_error() -> None:
+    from TDHost import RealTOPHandle
+
+    class _RaisingFix(_TDFixTOP):
+        @property
+        def bypass(self) -> bool:
+            return True
+
+        @bypass.setter
+        def bypass(self, value: bool) -> None:
+            raise _TDError("simulated td.tdError")
+
+    top = _import_buffer_with_fix(_RaisingFix.__new__(_RaisingFix))
+    top.parent().op("MonoAlphaFix").par = _TDPar(format="useinput")
+
+    RealTOPHandle(top).set_format("monoalpha8fixed")  # must not raise
+
+    assert top.par._attrs["format"]._v == "monoalpha8fixed"

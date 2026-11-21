@@ -156,11 +156,9 @@ __all__ = [
 CUPY_AVAILABLE: bool = False
 cp = None
 
+
 # Session-level dedup guard: track which COMP paths have already shown the install banner.
 # Prevents the banner firing twice when an extension is re-compiled in the same TD session.
-_banner_shown_for_comps: set[str] = set()
-
-
 def _bootstrap_error() -> str:
     return str(getattr(CUDALinkBootstrap, "last_error", "") or "")
 
@@ -304,13 +302,10 @@ class CUDAIPCExtension:
         # module object -- a module-level set cannot dedup across them (that is what
         # produced four stacked dialogs).  Deferred 5 frames so COMP operators finish
         # loading; delayRef=op.TDResources fires even when the timeline is paused.
-        _comp_path = getattr(ownerComp, "path", str(ownerComp))
-        if (
-            _comp_path not in _banner_shown_for_comps
-            and (not LIBRARY_READY or not _bootstrap_active())
-            and not self._sibling_mirrors_available()
-        ):
-            _banner_shown_for_comps.add(_comp_path)
+        # Scheduled on every init, also after Re-Init Extensions: the new RealTDHost starts
+        # with a clean tint and Status, so a library that is still missing must be reported
+        # again.  _claim_notice_once keeps the Textport lines to one per process.
+        if (not LIBRARY_READY or not _bootstrap_active()) and not self._sibling_mirrors_available():
             with contextlib.suppress(NameError):
                 run(  # noqa: F821  -- td global; NameError suppressed (non-TD context)
                     "args[0]()",

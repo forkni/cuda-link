@@ -110,9 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is bypassed for all other formats. The Receiver now also sets the Script TOP format on each
   connect, also for `rgba32float`. A `.tox` built before this change has no `MonoAlphaFix` and
   keeps the RG output (`docs/TOX_BUILD_GUIDE.md`, Step 6a).
-- **`.tox`: a saved WARNING or ERROR text stayed in the Status parameter.** A project saved with
-  such a text showed it after the next load until a frame arrived. The component now replaces
-  it with `Idle` when it starts; a condition that still holds is reported again.
+- **`.tox`: stale text in the Status parameter.** A project saved with a WARNING, an ERROR or a
+  stream format in Status showed that text after the next load, and a Receiver kept the format
+  after its sender closed. The component now writes `Idle` when it starts and when a Receiver
+  stream ends. A library that is still not loaded is reported again on each extension start,
+  also after Re-Init Extensions.
 - **Example launchers** (`example_sender_launcher.py`, `example_receiver_launcher.py`): after the
   Python child exited with an error, the "exited unexpectedly" warning was printed on every
   frame. It is now printed one time.

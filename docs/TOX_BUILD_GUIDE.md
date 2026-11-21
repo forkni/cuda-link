@@ -327,6 +327,9 @@ back, on the GPU. For all other formats the component sets its Bypass flag, so i
    `Input 1` / `Green`.
 4. Turn its Bypass flag on. The component sets the flag and the Pixel Format of this TOP when
    the stream format changes.
+5. If the component has the `bg` Select TOP (the node viewer image), a change to Receiver mode
+   points it at `MonoAlphaFix`. For a component saved in Receiver mode, set its TOP parameter
+   to `MonoAlphaFix` by hand.
 
 A component without this TOP still works: a Mono+Alpha stream then arrives as RG (mono in R,
 alpha in G).

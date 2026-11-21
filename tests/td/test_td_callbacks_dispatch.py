@@ -190,6 +190,22 @@ def test_pending_format_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("Set ImportBuffer pixel format to 'rgba16fixed'" in m for m in ext.log_calls)
 
 
+def test_pending_format_with_an_extension_without_the_fix_method(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older extension has no sync_mono_alpha_fix: the format is set and no failure is logged."""
+
+    class _OldExt(_StubExt):
+        sync_mono_alpha_fix = None  # type: ignore[assignment]
+
+    ext = _OldExt(pending_format="rgba16fixed")
+    _patch_global_parent(monkeypatch, ext)
+    scriptOp = _StubScriptOp("ImportBuffer")
+
+    script_top_callbacks.onCook(scriptOp)
+
+    assert scriptOp.par.format == "rgba16fixed"
+    assert not any("Could not set ImportBuffer pixel format" in m for m in ext.log_calls)
+
+
 class _RaisingPar:
     """par-like object whose attribute writes raise, to exercise onCook's except branches."""
 

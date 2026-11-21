@@ -246,7 +246,10 @@ class RealTOPHandle(TOPHandle):
         self.sync_mono_alpha_fix(fmt)
 
     def sync_mono_alpha_fix(self, fmt: str) -> None:
-        with contextlib.suppress(AttributeError, RuntimeError):
+        # Exception, not (AttributeError, RuntimeError): td.tdError derives from Exception only,
+        # and an error here must not stop the frame path (set_format runs before the pending
+        # flag is cleared, so it would repeat on every frame).
+        with contextlib.suppress(Exception):
             fix = self._top.parent().op(MONO_ALPHA_FIX_NAME)
             if fix is None:
                 return  # a COMP built before 2.0: the output stays RG
@@ -405,14 +408,15 @@ class RealTDHost(TDHost):
                 self._comp.unstore("cuda_link_status_msg")
 
     def _reset_stale_status_par(self) -> None:
-        """Replace a WARNING or ERROR text that the project file saved in the Status par.
+        """Replace the Status text that the project file saved (a format, a WARNING, an ERROR).
 
-        The condition behind that text belongs to an earlier session. If it still holds, the
-        extension reports it again; if not, nothing else would clear the text.
+        That text belongs to an earlier session. The engine writes the format again on the
+        first frame, and the extension reports a condition that still holds again
+        (CUDAIPCExtension.__init__ schedules the library notice on every init).
         """
-        with contextlib.suppress(AttributeError, RuntimeError):
-            saved = str(self._comp.par.Status.eval())
-            if saved.startswith(("WARNING:", "ERROR:")):
+        # Exception: td.tdError derives from Exception only, and __init__ must not fail here.
+        with contextlib.suppress(Exception):
+            if str(self._comp.par.Status.eval()) != "Idle":
                 self._write_status_par("Idle")
 
     def _capture_default_color(self) -> None:

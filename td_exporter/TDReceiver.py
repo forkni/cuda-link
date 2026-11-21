@@ -1266,6 +1266,8 @@ class TDReceiverEngine:
             return
 
         self._release_resources()
+        # The Status text was the format of this stream (set_info_status in import_frame).
+        self._host.clear_status()
 
         self._initialized = False
         # Drop the backoff from the last connect loop so the first retry after a drop is immediate
