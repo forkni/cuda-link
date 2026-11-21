@@ -115,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after its sender closed. The component now writes `Idle` when it starts and when a Receiver
   stream ends. A library that is still not loaded is reported again on each extension start,
   also after Re-Init Extensions.
+- **Example launchers started a Python child with another protocol version.** The example
+  scripts used the `cuda-link` installed in the child's Python, so a 1.x install there could not
+  talk to a 2.x component ("Producer not found", "sender uses protocol v0.5"). The launchers now
+  set `CUDALINK_PEER_LIB_PATH` to the folder of the `cuda_link` that the TouchDesigner process
+  loaded, and the scripts load that package when the installed one is another release. An
+  installed package with the same version and the same protocol magic stays in use (it has the
+  native wait extension).
+- **`.tox` Receiver: node viewer for Mono+Alpha.** The `bg` Select TOP read `ImportBuffer`, so the
+  COMP viewer showed a Mono+Alpha stream as red and green. The component now points it at
+  `MonoAlphaFix` for a Mono+Alpha stream and back at `ImportBuffer` for all other formats.
 - **Example launchers** (`example_sender_launcher.py`, `example_receiver_launcher.py`): after the
   Python child exited with an error, the "exited unexpectedly" warning was printed on every
   frame. It is now printed one time.
