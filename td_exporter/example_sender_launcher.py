@@ -43,7 +43,8 @@ cuda_link library of the child:
     The launcher sets CUDALINK_PEER_LIB_PATH for the child to the folder of the cuda_link
     package that this TouchDesigner process loaded (or ``src`` next to the .toe). The example
     script loads cuda_link from that folder, so both sides use one SHM protocol version, also
-    when the child's Python has another cuda-link installed.
+    when the child's Python has another cuda-link installed. Exception: an installed package
+    with the same version and the same protocol magic stays in use.
 """
 
 from __future__ import annotations

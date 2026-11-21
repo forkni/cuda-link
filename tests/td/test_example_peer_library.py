@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -103,6 +104,16 @@ def run_with_watchdog(*args, **kwargs):
 """
 
 
+def _installed_magic() -> str:
+    """PROTOCOL_MAGIC of the cuda_link that this Python imports, as the source text."""
+    import cuda_link
+
+    text = (Path(cuda_link.__file__).parent / "shm_protocol.py").read_text(encoding="utf-8")
+    match = re.search(r"^PROTOCOL_MAGIC\s*(?::\s*\w+)?\s*=\s*(0[xX][0-9A-Fa-f]+)", text, re.MULTILINE)
+    assert match is not None
+    return match.group(1)
+
+
 @pytest.mark.parametrize("script", _SCRIPTS)
 def test_example_script_loads_cuda_link_from_the_peer_path(script: str, tmp_path: Path) -> None:
     """The package at CUDALINK_PEER_LIB_PATH wins over the cuda_link this Python can import."""
@@ -134,6 +145,7 @@ def test_example_script_keeps_the_installed_cuda_link_of_the_same_release(script
     package = tmp_path / "peer" / "cuda_link"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f'__version__ = "{cuda_link.__version__}"\nIS_PEER_COPY = True\n')
+    (package / "shm_protocol.py").write_text(f"PROTOCOL_MAGIC: int = {_installed_magic()}\n")
     code = (
         "import runpy\n"
         f"runpy.run_path({str(_TD_EXPORTER / script)!r}, run_name='loaded_by_test')\n"
@@ -145,4 +157,52 @@ def test_example_script_keeps_the_installed_cuda_link_of_the_same_release(script
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
 
     assert result.returncode == 0, result.stderr
+    assert "IS_PEER_COPY False" in result.stdout
+
+
+@pytest.mark.parametrize("script", _SCRIPTS, ids=_SCRIPTS)
+def test_example_script_loads_the_peer_when_the_protocol_magic_differs(script: str, tmp_path: Path) -> None:
+    """Same version text, other SHM protocol: the peer package is the one that can talk to TD."""
+    import cuda_link
+
+    package = tmp_path / "peer" / "cuda_link"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(f'__version__ = "{cuda_link.__version__}"\nIS_PEER_COPY = True\n')
+    (package / "shm_protocol.py").write_text("PROTOCOL_MAGIC: int = 0x00000001\n")
+    (package / "_console.py").write_text(_FAKE_CONSOLE)
+    code = (
+        "import runpy\n"
+        f"runpy.run_path({str(_TD_EXPORTER / script)!r}, run_name='loaded_by_test')\n"
+        "import cuda_link\n"
+        "print('IS_PEER_COPY', hasattr(cuda_link, 'IS_PEER_COPY'))\n"
+    )
+    env = dict(os.environ, CUDALINK_PEER_LIB_PATH=str(tmp_path / "peer"))
+
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+
+    assert result.returncode == 0, result.stderr
+    assert "IS_PEER_COPY True" in result.stdout
+
+
+@pytest.mark.parametrize("script", _SCRIPTS, ids=_SCRIPTS)
+def test_failed_peer_load_leaves_no_peer_submodule(script: str, tmp_path: Path) -> None:
+    """The peer raises after it imported a submodule: the fallback must be the installed package only."""
+    package = tmp_path / "peer" / "cuda_link"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "__version__ = 'broken-peer'\nfrom . import shm_protocol\nraise RuntimeError('peer is broken')\n"
+    )
+    (package / "shm_protocol.py").write_text("IS_PEER_COPY = True\n")
+    code = (
+        "import runpy\n"
+        f"runpy.run_path({str(_TD_EXPORTER / script)!r}, run_name='loaded_by_test')\n"
+        "import cuda_link.shm_protocol as p\n"
+        "print('IS_PEER_COPY', hasattr(p, 'IS_PEER_COPY'))\n"
+    )
+    env = dict(os.environ, CUDALINK_PEER_LIB_PATH=str(tmp_path / "peer"))
+
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+
+    assert result.returncode == 0, result.stderr
+    assert "WARNING: could not load cuda_link" in result.stdout
     assert "IS_PEER_COPY False" in result.stdout

@@ -56,37 +56,66 @@ if _probe_log_file:
 # ---------------------------------------------------------------------------
 
 
+_VERSION_RE = r'^__version__\s*=\s*["\']([^"\']+)["\']'
+_MAGIC_RE = r"^PROTOCOL_MAGIC\s*(?::\s*\w+)?\s*=\s*(0[xX][0-9A-Fa-f]+)"
+
+
+def _first_match(path: str, pattern: str) -> str | None:
+    """First group of ``pattern`` in the file at ``path``; None when not readable or not found."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            match = re.search(pattern, f.read(), re.MULTILINE)
+    except OSError:
+        return None
+    return match.group(1) if match else None
+
+
+def _same_build(package_a: str, package_b: str) -> bool:
+    """True when two cuda_link package folders have one version and one SHM protocol magic."""
+    for rel, pattern in (("__init__.py", _VERSION_RE), ("shm_protocol.py", _MAGIC_RE)):
+        value = _first_match(os.path.join(package_a, rel), pattern)
+        if value is None or value != _first_match(os.path.join(package_b, rel), pattern):
+            return False
+    return True
+
+
+def _forget_cuda_link() -> None:
+    for name in [m for m in sys.modules if m == "cuda_link" or m.startswith("cuda_link.")]:
+        del sys.modules[name]
+
+
 def _use_peer_library() -> None:
     """Load cuda_link from CUDALINK_PEER_LIB_PATH (set by the TD launcher) when it is set.
 
     A cuda-link installed in this Python can be another release with another SHM protocol
-    version; it is replaced only then. The package is loaded by file path: sys.path does not
-    change, so no other package in that folder hides the ones of this Python.
+    version; it is replaced only then. An installed package with the same version and the same
+    protocol magic stays in use (it has the native wait extension). The two are compared as
+    files: the installed package is not imported for the comparison. The peer package is
+    loaded by file path: sys.path does not change, so no other package in that folder hides
+    the ones of this Python.
     """
     root = os.environ.get("CUDALINK_PEER_LIB_PATH", "")
     init = os.path.join(root, "cuda_link", "__init__.py")
     if not root or not os.path.isfile(init):
         return
+    package = os.path.dirname(init)
     try:
-        import cuda_link as installed
-    except ImportError:
+        installed = importlib.util.find_spec("cuda_link")
+    except (ImportError, ValueError):
         installed = None
-    if installed is not None:
-        with open(init, encoding="utf-8") as f:
-            match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', f.read(), re.MULTILINE)
-        if match and match.group(1) == getattr(installed, "__version__", None):
-            return  # same release: keep the installed build (it has the native wait extension)
-        for name in [m for m in sys.modules if m == "cuda_link" or m.startswith("cuda_link.")]:
-            del sys.modules[name]
-    spec = importlib.util.spec_from_file_location("cuda_link", init, submodule_search_locations=[os.path.dirname(init)])
+    if installed is not None and installed.origin and _same_build(os.path.dirname(installed.origin), package):
+        return
+    spec = importlib.util.spec_from_file_location("cuda_link", init, submodule_search_locations=[package])
     if spec is None or spec.loader is None:
         return
+    _forget_cuda_link()
     module = importlib.util.module_from_spec(spec)
     sys.modules["cuda_link"] = module
     try:
         spec.loader.exec_module(module)
     except Exception as exc:  # noqa: BLE001 -- fall back to the installed package
-        sys.modules.pop("cuda_link", None)
+        # Also the submodules: one that stays would be mixed into the installed package.
+        _forget_cuda_link()
         print(f"[receiver] WARNING: could not load cuda_link from {root}: {exc}", flush=True)
 
 

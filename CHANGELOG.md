@@ -120,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   talk to a 2.x component ("Producer not found", "sender uses protocol v0.5"). The launchers now
   set `CUDALINK_PEER_LIB_PATH` to the folder of the `cuda_link` that the TouchDesigner process
   loaded, and the scripts load that package when the installed one is another release. An
-  installed package of the same release stays in use (it has the native wait extension).
+  installed package with the same version and the same protocol magic stays in use (it has the
+  native wait extension).
 - **`.tox` Receiver: node viewer for Mono+Alpha.** The `bg` Select TOP read `ImportBuffer`, so the
   COMP viewer showed a Mono+Alpha stream as red and green. The component now points it at
   `MonoAlphaFix` for a Mono+Alpha stream and back at `ImportBuffer` for all other formats.
