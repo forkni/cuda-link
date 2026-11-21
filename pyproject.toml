@@ -4,7 +4,9 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cuda-link"
-version = "2.0.0.dev0"
+# The version has one source: __version__ in src/cuda_link/__init__.py (see
+# [tool.scikit-build.metadata.version] below). Do not add a static version here.
+dynamic = ["version"]
 description = "Zero-copy GPU texture sharing via CUDA IPC for TouchDesigner integration"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -85,6 +87,12 @@ wheel.packages = ["src/cuda_link"]
 # platforms CMakeLists.txt returns early and this produces a pure-Python wheel;
 # the native backend then raises a clear RuntimeError only if actually used.
 cmake.version = ">=3.24"
+
+# Single version source: the wheel metadata, the mirror stamp (scripts/sync_td_wrapper.py)
+# and the C++ TOP DLLs (cpp_top/CMakeLists.txt) all read this one line.
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/cuda_link/__init__.py"
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "td_exporter", "tests"]
