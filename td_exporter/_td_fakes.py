@@ -123,6 +123,9 @@ class FakeTOPHandle(TOPHandle):
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
 
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        """No sibling TOPs in the fake: set_format records the format, nothing else to do."""
+
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self.copy_cuda_calls.append((ptr, size, shape, stream))
 

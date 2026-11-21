@@ -152,9 +152,12 @@ def onExit() -> None:
 
 
 def onFrameStart(frame: int) -> None:
-    """Check if the subprocess is still running; warn if it exited unexpectedly."""
+    """Check if the subprocess is still running; warn one time if it exited unexpectedly."""
+    global _process
+
     if _process is not None and _process.poll() is not None:
         code = _process.returncode
+        _process = None  # report the exit one time, not on every frame
         if code != 0:
             print(f"[CUDA-Link Receiver Launcher] WARNING: receiver subprocess exited unexpectedly (code={code}).")
 

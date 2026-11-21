@@ -415,9 +415,9 @@ def test_initialize_commits_connection_for_every_slot(monkeypatch: pytest.Monkey
     [
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 4},
-            False,
+            True,
             "float32",
-            id="rgba32float-is-script-top-default",
+            id="rgba32float-resets-a-format-left-by-an-earlier-stream",
         ),
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 2, "flags": FLAGS_MONO_ALPHA},
@@ -559,3 +559,16 @@ def test_initialize_against_real_shared_memory_round_trips(monkeypatch: pytest.M
         engine._release_resources()
         shm.close()
         shm.unlink()
+
+
+def test_cleanup_after_a_stream_clears_the_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Status text is the format of the stream: it must not stay after the stream ends."""
+    rig = _rig(monkeypatch, _segment(width=32, height=16, kind=FORMAT_KIND_UNSIGNED, bits=8, comps=4))
+    assert rig.engine.initialize_receiver() is True
+
+    cleared: list[bool] = []
+    rig.engine._host.clear_status = lambda: cleared.append(True)
+
+    rig.engine.cleanup()
+
+    assert cleared == [True]

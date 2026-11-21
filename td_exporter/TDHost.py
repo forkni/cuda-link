@@ -76,7 +76,11 @@ class TOPHandle(Protocol):
         ...
 
     def set_format(self, fmt: str) -> None:
-        """Write top.par.format = fmt."""
+        """Write top.par.format = fmt, then call sync_mono_alpha_fix(fmt)."""
+        ...
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        """Enable the sibling MonoAlphaFix Reorder TOP for a monoalpha ``fmt``, else bypass it."""
         ...
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
@@ -192,6 +196,12 @@ class TDHost(Protocol):
 # ---------------------------------------------------------------------------
 
 
+# Reorder TOP between ImportBuffer and out1. copyCUDAMemory makes an RG texture from every
+# 2-channel CUDAMemoryShape (the shape has no Mono+Alpha layout), so for a Mono+Alpha stream
+# this TOP moves G to alpha and copies R to RGB, on the GPU. For all other formats it is bypassed.
+MONO_ALPHA_FIX_NAME = "MonoAlphaFix"
+
+
 class RealTOPHandle(TOPHandle):
     """Wraps a real TD TOP operator."""
 
@@ -233,6 +243,20 @@ class RealTOPHandle(TOPHandle):
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError, RuntimeError):
             self._top.par.format = fmt
+        self.sync_mono_alpha_fix(fmt)
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        # Exception, not (AttributeError, RuntimeError): td.tdError derives from Exception only,
+        # and an error here must not stop the frame path (set_format runs before the pending
+        # flag is cleared, so it would repeat on every frame).
+        with contextlib.suppress(Exception):
+            fix = self._top.parent().op(MONO_ALPHA_FIX_NAME)
+            if fix is None:
+                return  # a COMP built before 2.0: the output stays RG
+            wanted = fmt.startswith("monoalpha")
+            if wanted:
+                fix.par.format = fmt
+            fix.bypass = not wanted
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self._top.copyCUDAMemory(ptr, size, shape, stream=stream)
@@ -294,6 +318,7 @@ class RealTDHost(TDHost):
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
         self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
         self._reset_stale_tint()
+        self._reset_stale_status_par()
 
     def param_value(self, name: str) -> Any:
         try:
@@ -381,6 +406,18 @@ class RealTDHost(TDHost):
                 self._comp.color = _DEFAULT_NODE_COLOR
                 self._comp.clearScriptErrors(error="*")
                 self._comp.unstore("cuda_link_status_msg")
+
+    def _reset_stale_status_par(self) -> None:
+        """Replace the Status text that the project file saved (a format, a WARNING, an ERROR).
+
+        That text belongs to an earlier session. The engine writes the format again on the
+        first frame, and the extension reports a condition that still holds again
+        (CUDAIPCExtension.__init__ schedules the library notice on every init).
+        """
+        # Exception: td.tdError derives from Exception only, and __init__ must not fail here.
+        with contextlib.suppress(Exception):
+            if str(self._comp.par.Status.eval()) != "Idle":
+                self._write_status_par("Idle")
 
     def _capture_default_color(self) -> None:
         if self._default_color is not None:

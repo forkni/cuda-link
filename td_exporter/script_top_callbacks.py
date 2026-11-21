@@ -95,6 +95,10 @@ def onCook(scriptOp: object) -> None:
     if fmt is not None:
         try:
             scriptOp.par.format = fmt
+            # An older extension has no such method: the output then stays RG for Mono+Alpha.
+            sync_fix = getattr(ext, "sync_mono_alpha_fix", None)
+            if sync_fix is not None:
+                sync_fix(scriptOp, fmt)
             ext._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not set ImportBuffer pixel format in onCook: {e}", force=True)

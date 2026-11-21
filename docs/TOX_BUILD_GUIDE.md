@@ -35,6 +35,7 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
 ├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
 ├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
@@ -79,6 +80,7 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
 ├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
 ├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
@@ -311,6 +313,26 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 | **Healthy** | Original node color restored, badges cleared | Condition cleared automatically |
 
 On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. Float16 sources whose format name is one of the five float16 menu entries do not warn: the Sender asks `cudaMemory(pixelFormat=...)` for the matching 32-bit float format and shares that (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
+
+### Step 6a: Add MonoAlphaFix (Reorder TOP)
+
+`copyCUDAMemory` makes an RG texture from every 2-channel frame, because `CUDAMemoryShape` has
+no Mono+Alpha layout. For a Mono+Alpha stream the Receiver uses this TOP to put the channels
+back, on the GPU. For all other formats the component sets its Bypass flag, so it costs nothing.
+
+1. Add a **Reorder TOP** inside the component and name it `MonoAlphaFix`.
+2. Connect `ImportBuffer` to its first input, and connect its output to the Out TOP (in place
+   of the direct wire from `ImportBuffer`).
+3. Set Output Red, Output Green and Output Blue to `Input 1` / `Red`, and Output Alpha to
+   `Input 1` / `Green`.
+4. Turn its Bypass flag on. The component sets the flag and the Pixel Format of this TOP when
+   the stream format changes.
+5. If the component has the `bg` Select TOP (the node viewer image), a change to Receiver mode
+   points it at `MonoAlphaFix`. For a component saved in Receiver mode, set its TOP parameter
+   to `MonoAlphaFix` by hand.
+
+A component without this TOP still works: a Mono+Alpha stream then arrives as RG (mono in R,
+alpha in G).
 
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 

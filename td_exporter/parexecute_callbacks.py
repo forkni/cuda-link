@@ -221,8 +221,11 @@ def handle_mode_change(ext: object, new_value: object, prev: object) -> None:
                     bg_select.par.top = "ExportBuffer"
                     ext._log("Updated bg selectTOP -> ExportBuffer", force=False)
                 elif new_value == "Receiver":
-                    bg_select.par.top = "ImportBuffer"
-                    ext._log("Updated bg selectTOP -> ImportBuffer", force=False)
+                    # MonoAlphaFix (TDHost.MONO_ALPHA_FIX_NAME) follows ImportBuffer; without
+                    # it the viewer shows a Mono+Alpha stream as red and green.
+                    target = "MonoAlphaFix" if parent().op("MonoAlphaFix") else "ImportBuffer"
+                    bg_select.par.top = target
+                    ext._log(f"Updated bg selectTOP -> {target}", force=False)
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not update bg selectTOP: {e}", force=False)
 
