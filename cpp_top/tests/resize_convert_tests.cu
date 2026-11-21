@@ -44,8 +44,15 @@ int check_latch_policy() {
 
     std::string err;
     bool fatal = false;
-    check_fatal(cudaErrorInvalidValue, err, fatal);
-    if (fatal || err.empty() || cudaGetLastError() != cudaSuccess) ++failures;
+    // A real failing runtime call, so the per-thread last-error slot is set (an enum value
+    // alone never sets it). Baseline first: the call must set the slot, or the check below
+    // would pass without the macro's cudaGetLastError().
+    (void)cudaGetLastError();
+    if (cudaMemset(nullptr, 0, 16) == cudaSuccess || cudaPeekAtLastError() == cudaSuccess) ++failures;
+    (void)cudaGetLastError();
+    check_fatal(cudaMemset(nullptr, 0, 16), err, fatal);
+    if (fatal || err.empty() || cudaPeekAtLastError() != cudaSuccess) ++failures;
+    (void)cudaGetLastError();
 
     err.clear();
     check_fatal(cudaErrorIllegalAddress, err, fatal);

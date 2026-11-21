@@ -114,7 +114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **C++ TOPs: the latch message keeps the error that caused it.** `execute()` replaced the
   real error with the latch text one frame later, so `last_error` in the Info DAT could only show
   "fatal CUDA error latched". The message now reads `fatal CUDA error latched: <first error> --
-  recreate this node ...`, for constructor and hot-path latches alike.
+  recreate this node ...`, for constructor and hot-path latches alike. The latch reads the cause
+  from the failing cook's own error, so it no longer depends on TD calling `getErrorString()`
+  between cooks.
+- **C++ Out TOP: an earlier CUDA error no longer fails the next convert.** A failed pass-through
+  copy (for example a capped texture on TouchDesigner Non-Commercial) left its error in the CUDA
+  last-error slot, and the next cook's Common page convert reported it as its own and dropped
+  that frame. The pass-through, scratch-allocation and `CUDALINK_CUDA_CHECK_BOOL` failure paths
+  now clear the slot, and the convert names any error an earlier call left.
 - **In TOP: a texture smaller than the output gives a clear error.** TouchDesigner Non-Commercial
   caps textures at 1280x1280, so a 1920x1080 stream made `cudaMemcpy2DToArrayAsync` fail with
   "invalid argument" each cook. The In TOP now reads the size of the texture TD gives and, when it

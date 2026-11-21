@@ -547,7 +547,6 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
 void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void*) {
     const auto cookStart = std::chrono::steady_clock::now();
     try {
-        myError.clear();
         myWarning.clear();
 
         // Once a fatal CUDA error has latched (ctor's device/IPC checks, or a
@@ -556,17 +555,26 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
         // option (it would tear down TD's own CUDA state too).
         if (myFatal) {
-            // Keep the error that latched: getErrorString() copied it into myLastError after
-            // the failing cook, and the constructor stores its own reason in myFatalError.
-            // Without this, the latch text replaced it within one frame and last_error could
-            // only ever show the latch text.
+            // Keep the error that latched (the constructor stores its own reason in
+            // myFatalError). This check runs before myError.clear(): if TD did not call
+            // getErrorString() after the failing cook, myError still holds the failing call's
+            // message. If it did, getErrorString() moved that message to myLastError and
+            // cleared myError. Earlier, only myLastError was read, so a cook without
+            // getErrorString() in between gave an empty or stale cause, or the latch text twice.
             if (myFatalError.empty()) {
-                myFatalError = myLastError;
+                if (!myError.empty()) {
+                    myFatalError = myError;
+                } else if (!myLastError.empty()) {
+                    myFatalError = myLastError;
+                } else {
+                    myFatalError = "unknown error";
+                }
             }
             myError = "fatal CUDA error latched: " + myFatalError +
                       " -- recreate this node or restart TouchDesigner to recover";
             return;
         }
+        myError.clear();
 
         // Step 0/1: cached-diff parameter-change detection + Active gate.
         checkParameterChanges(inputs);
@@ -782,8 +790,15 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 const cudalink::common::LinearImage src{scratch, inRowBytes, width, height, inCodec};
                 const cudalink::common::LinearImageMut dst{mySlotDevPtrs[slot], rowBytes, myMetadata.width,
                                                            myMetadata.height, outCodec};
+                // launchResizeConvert() returns cudaGetLastError() after the launch, so an
+                // error an earlier call left in the per-thread slot would be blamed on the
+                // kernel. Take it out first and name it in the message instead (as the In TOP).
+                const cudaError_t priorStatus = cudaGetLastError();
                 CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
                                           myError, myFatal);
+                if (priorStatus != cudaSuccess) {
+                    myWarning = std::string("an earlier CUDA call left: ") + cudaGetErrorString(priorStatus);
+                }
                 CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
             } else {
                 CUDALINK_CUDA_CHECK_FATAL(
@@ -849,6 +864,10 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 if (passThroughStatus != cudaSuccess) {
                     myWarning = std::string("pass-through output copy failed: ") +
                                 cudaGetErrorString(passThroughStatus);
+                    // Clear the per-thread slot, or the next cook's convert reports this
+                    // error as its own and drops that frame. A sticky error stays set anyway
+                    // and latches at the next CUDALINK_CUDA_CHECK_FATAL.
+                    cudaGetLastError();
                 }
             } else {
                 myWarning = "createCUDAArray failed (pass-through output unavailable this cook)";

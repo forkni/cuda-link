@@ -75,8 +75,9 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   type collide.
 - TD locks a loaded DLL. Close TD before you replace it.
 - Keep cuda-link 1.14.1 off TD's Python module path while you test 2.0.0.dev0.
-- Give each stream its own `Ipcmemname`. The default names are the same in 1.x and 2.x. A
-  v0.5 segment is refused with a magic error; the two protocols do not mix.
+- Give each stream its own `Ipcmemname`. A new 2.x C++ TOP uses `cudalink_ipc_CPP`, but a
+  saved node or a `.tox` can still use the same name as a 1.x peer. A v0.5 segment is refused
+  with a magic error; the two protocols do not mix.
 
 ## Build
 

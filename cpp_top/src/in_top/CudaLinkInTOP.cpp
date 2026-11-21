@@ -561,7 +561,6 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
 void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void*) {
     const auto cookStart = std::chrono::steady_clock::now();
     try {
-        myError.clear();
         myWarning.clear();
 
         // Once a fatal CUDA error has latched (ctor's device/IPC checks, or a
@@ -570,17 +569,26 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
         // option (it would tear down TD's own CUDA state too).
         if (myFatal) {
-            // Keep the error that latched: getErrorString() copied it into myLastError after
-            // the failing cook, and the constructor stores its own reason in myFatalError.
-            // Without this, the latch text replaced it within one frame and last_error could
-            // only ever show the latch text.
+            // Keep the error that latched (the constructor stores its own reason in
+            // myFatalError). This check runs before myError.clear(): if TD did not call
+            // getErrorString() after the failing cook, myError still holds the failing call's
+            // message. If it did, getErrorString() moved that message to myLastError and
+            // cleared myError. Earlier, only myLastError was read, so a cook without
+            // getErrorString() in between gave an empty or stale cause, or the latch text twice.
             if (myFatalError.empty()) {
-                myFatalError = myLastError;
+                if (!myError.empty()) {
+                    myFatalError = myError;
+                } else if (!myLastError.empty()) {
+                    myFatalError = myLastError;
+                } else {
+                    myFatalError = "unknown error";
+                }
             }
             myError = "fatal CUDA error latched: " + myFatalError +
                       " -- recreate this node or restart TouchDesigner to recover";
             return;
         }
+        myError.clear();
 
         // Step 0: cached-diff parameter-change detection (no push notification exists).
         checkParameterChanges(inputs);

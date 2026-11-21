@@ -19,6 +19,7 @@
         if (_cudalink_status != cudaSuccess) {                                                               \
             (err_var) = std::string(#call) + " failed: " + cudaGetErrorString(_cudalink_status) + " (" +     \
                         __FILE__ + ":" + std::to_string(__LINE__) + ")";                                     \
+            cudaGetLastError(); /* clear the slot so a later call does not report this error */              \
             return false;                                                                                    \
         }                                                                                                    \
     } while (0)
