@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import enum
 import logging
 import os
 import struct
@@ -691,15 +692,133 @@ class NumpyBuffers:
 
 
 # ---------------------------------------------------------------------------
+# Connect helpers — shared by the Importer and the .tox Receiver (TDReceiver.py)
+# ---------------------------------------------------------------------------
+# Plain functions with typed results and no logging: each caller keeps its own log
+# text, its own exceptions and its own rollback.
+
+
+class HeaderFault(enum.Enum):
+    """Why a segment header cannot be used."""
+
+    UNREADABLE = "unreadable"  # the magic or the sender pid could not be read
+    BAD_MAGIC = "bad_magic"  # another protocol version, or not a cuda-link segment
+    SAME_PROCESS = "same_process"  # the sender is this process
+    BAD_NUM_SLOTS = "bad_num_slots"
+
+
+@dataclass(frozen=True)
+class HeaderCheck:
+    """Result of check_header(). ``fault`` is None when the header is usable.
+
+    ``magic`` is set from BAD_MAGIC on, ``num_slots`` and ``ipc_version`` from
+    BAD_NUM_SLOTS on. ``error`` is the exception behind UNREADABLE.
+    """
+
+    fault: HeaderFault | None = None
+    magic: int = 0
+    num_slots: int = 0
+    ipc_version: int = 0
+    error: Exception | None = None
+
+
+def check_header(buf: Any, current_pid: int) -> HeaderCheck:
+    """Validate the segment header: magic, then the same-process rule, then num_slots."""
+    try:
+        magic = read_magic(buf)
+        if magic != PROTOCOL_MAGIC:
+            return HeaderCheck(HeaderFault.BAD_MAGIC, magic=magic)
+        if is_same_process_sender(read_sender_pid(buf), current_pid):
+            return HeaderCheck(HeaderFault.SAME_PROCESS, magic=magic)
+    except (struct.error, ValueError, IndexError) as e:
+        return HeaderCheck(HeaderFault.UNREADABLE, error=e)
+    ipc_version = read_version(buf)
+    num_slots = read_num_slots(buf)
+    fault = None if is_valid_num_slots(num_slots) else HeaderFault.BAD_NUM_SLOTS
+    return HeaderCheck(fault, magic=magic, num_slots=num_slots, ipc_version=ipc_version)
+
+
+@dataclass(frozen=True)
+class SlotHandleBytes:
+    """The raw IPC handle bytes of one ring slot, copied out of the segment."""
+
+    mem: bytes
+    event: bytes
+
+    @property
+    def has_mem(self) -> bool:
+        """False while the sender has not written the memory handle (all zeros)."""
+        return any(self.mem)
+
+    @property
+    def has_event(self) -> bool:
+        """False for a sender that publishes no IPC event for this slot."""
+        return any(self.event)
+
+
+def read_slot_handle_bytes(buf: Any, layout: SHMLayout, slot: int) -> SlotHandleBytes:
+    """Copy the memory handle and the event handle of ``slot`` out of the segment."""
+    mem_off = layout.mem_handle_offset(slot)
+    evt_off = layout.event_handle_offset(slot)
+    return SlotHandleBytes(
+        mem=bytes(buf[mem_off : mem_off + IPC_HANDLE_SIZE]),
+        event=bytes(buf[evt_off : evt_off + IPC_HANDLE_SIZE]),
+    )
+
+
+class SlotEventOpenError(Exception):
+    """open_slot() opened the memory handle of a slot, then failed on its event.
+
+    Not a RuntimeError, so a caller's ``except RuntimeError`` for the memory open does
+    not take it. ``dev_ptr`` is still open: the caller must close it in its rollback.
+    """
+
+    def __init__(self, cause: Exception, ipc_handle: Any, dev_ptr: Any) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.ipc_handle = ipc_handle
+        self.dev_ptr = dev_ptr
+
+
+def open_slot(cuda: Any, raw: SlotHandleBytes) -> tuple[Any, Any, Any]:
+    """Open one slot's IPC handles. Returns (ipc_handle, dev_ptr, event).
+
+    ``event`` is None when the slot has no event handle. A failed memory open raises
+    whatever the CUDA port raises and leaves nothing open. A failed event open raises
+    SlotEventOpenError: without the event the wait has nothing to order against the
+    sender, so the caller must fail the connect instead of reading unsynced frames.
+    """
+    from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
+
+    ipc_handle = cudaIpcMemHandle_t.from_buffer_copy(raw.mem)
+    dev_ptr = cuda.ipc_open_mem_handle(ipc_handle, flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
+    event = None
+    if raw.has_event:
+        try:
+            event = cuda.ipc_open_event_handle(cudaIpcEventHandle_t.from_buffer_copy(raw.event))
+        except (RuntimeError, OSError) as e:
+            raise SlotEventOpenError(e, ipc_handle, dev_ptr) from e
+    return ipc_handle, dev_ptr, event
+
+
+# ---------------------------------------------------------------------------
 # Reconnect state machine
 # ---------------------------------------------------------------------------
+
+
+class BackoffNotice(enum.Enum):
+    """What a caller should log after a failed connect attempt (_RetryState.back_off)."""
+
+    WAITING = "waiting"  # report the attempt and the wait before the next one
+    NOW_SILENT = "now_silent"  # the last report: later attempts are not reported
+    SILENT = "silent"
 
 
 @dataclass
 class _RetryState:
     """Retry policy and transient counters for the connection-attempt loop.
 
-    Mirrors RetryState in td_exporter/TDReceiver.py — keep fields in sync.
+    The .tox Receiver uses this class too (RetryState in td_exporter/TDReceiver.py is an alias).
     """
 
     connect_attempts: int = 0
@@ -711,6 +830,31 @@ class _RetryState:
     def request_immediate_reconnect(self) -> None:
         """Force the next get_frame*() call to attempt reconnection without waiting."""
         self.frames_since_last_retry = self.retry_interval_frames
+
+    def tick(self) -> bool:
+        """Count one frame. True when a connect attempt is due; that attempt is then counted."""
+        self.frames_since_last_retry += 1
+        if self.frames_since_last_retry < self.retry_interval_frames:
+            return False
+        self.frames_since_last_retry = 0
+        self.connect_attempts += 1
+        return True
+
+    def back_off(self) -> BackoffNotice:
+        """After a failed attempt: set the wait before the next one and say what to log."""
+        backoff_idx = min(self.connect_attempts, len(self.backoff_intervals) - 1)
+        self.retry_interval_frames = self.backoff_intervals[backoff_idx]
+        if self.connect_attempts <= self.max_connect_attempts:
+            return BackoffNotice.WAITING
+        if self.connect_attempts == self.max_connect_attempts + 1:
+            return BackoffNotice.NOW_SILENT
+        return BackoffNotice.SILENT
+
+    def reset(self) -> None:
+        """Forget the attempts and the backoff, so the next attempt is immediate."""
+        self.connect_attempts = 0
+        self.frames_since_last_retry = 0
+        self.retry_interval_frames = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1230,26 +1374,19 @@ class Importer:
 
         logger.info("Opened SharedMemory: %s", self._spec.shm_name)
 
-        try:
-            magic = read_magic(shm.buf)
-        except (struct.error, ValueError, IndexError):
+        header = check_header(shm.buf, _current_pid())
+        if header.fault is not None:
             shm.close()
-            raise
-
-        if magic != PROTOCOL_MAGIC:
-            shm.close()
-            raise IncompatiblePeerError(protocol_mismatch_message(magic))
-
-        if is_same_process_sender(read_sender_pid(shm.buf), _current_pid()):
-            shm.close()
-            raise IncompatiblePeerError(SAME_PROCESS_MESSAGE)
-
-        ipc_version = read_version(shm.buf)
-        num_slots = read_num_slots(shm.buf)
-
-        if not is_valid_num_slots(num_slots):
-            shm.close()
-            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–{MAX_SLOTS})")
+            if header.fault is HeaderFault.UNREADABLE:
+                # ProtocolError is a ValueError, so the reconnect driver (_connect_silent)
+                # takes it as one more failed attempt. A bare struct.error went through it.
+                raise ProtocolError(f"Cannot read the SHM header: {header.error}") from header.error
+            if header.fault is HeaderFault.BAD_MAGIC:
+                raise IncompatiblePeerError(protocol_mismatch_message(header.magic))
+            if header.fault is HeaderFault.SAME_PROCESS:
+                raise IncompatiblePeerError(SAME_PROCESS_MESSAGE)
+            raise ProtocolError(f"Invalid num_slots={header.num_slots} in SHM (expected 1–{MAX_SLOTS})")
+        ipc_version, num_slots = header.ipc_version, header.num_slots
 
         shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
@@ -1313,8 +1450,6 @@ class Importer:
         method rolls back only the resources it opened itself (dev_ptrs, ipc_events,
         doorbell), so a partial slot-open never leaks a GPU IPC mapping.
         """
-        from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
-
         cuda = self._cuda
         ipc_handles: list = [None] * num_slots
         dev_ptrs: list = [None] * num_slots
@@ -1324,26 +1459,18 @@ class Importer:
 
         try:
             for slot in range(num_slots):
-                mem_off = layout.mem_handle_offset(slot)
-                evt_off = layout.event_handle_offset(slot)
-
-                mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
-                logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
-                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-                dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
-
-                event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        # A published event that won't open leaves the wait with nothing to
-                        # order against the producer, so every frame would be read unsynced.
-                        # Fail the connect (rolled back below) instead of degrading silently.
-                        raise IPCEventOpenError(
-                            f"Failed to open IPC event for slot {slot}: {e}", code=getattr(e, "code", None)
-                        ) from e
+                raw = read_slot_handle_bytes(shm.buf, layout, slot)
+                logger.debug("Slot %d IPC read handle prefix: %s...", slot, raw.mem[:16].hex())
+                try:
+                    ipc_handles[slot], dev_ptrs[slot], ipc_events[slot] = open_slot(cuda, raw)
+                except SlotEventOpenError as e:
+                    # A published event that won't open leaves the wait with nothing to
+                    # order against the producer, so every frame would be read unsynced.
+                    # Fail the connect (rolled back below) instead of degrading silently.
+                    ipc_handles[slot], dev_ptrs[slot] = e.ipc_handle, e.dev_ptr
+                    raise IPCEventOpenError(
+                        f"Failed to open IPC event for slot {slot}: {e.cause}", code=getattr(e.cause, "code", None)
+                    ) from e.cause
 
                 logger.info(
                     "Slot %d: GPU ptr=0x%016x, event=%s",
@@ -1485,25 +1612,20 @@ class Importer:
     def _drive_retry(self) -> bool:
         """Advance the reconnect state machine by one frame. Returns True if just connected."""
         retry = self._retry
-        retry.frames_since_last_retry += 1
-        if retry.frames_since_last_retry < retry.retry_interval_frames:
+        if not retry.tick():
             return False
-
-        retry.frames_since_last_retry = 0
-        retry.connect_attempts += 1
 
         if self._connect_silent():
             return True
 
-        backoff_idx = min(retry.connect_attempts, len(retry.backoff_intervals) - 1)
-        retry.retry_interval_frames = retry.backoff_intervals[backoff_idx]
-        if retry.connect_attempts <= retry.max_connect_attempts:
+        notice = retry.back_off()
+        if notice is BackoffNotice.WAITING:
             logger.info(
                 "Waiting for producer... (attempt %d, next retry in %d frames)",
                 retry.connect_attempts,
                 retry.retry_interval_frames,
             )
-        elif retry.connect_attempts == retry.max_connect_attempts + 1:
+        elif notice is BackoffNotice.NOW_SILENT:
             logger.warning("Producer not found. Will keep retrying silently.")
         return False
 

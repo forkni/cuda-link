@@ -114,7 +114,7 @@ def test_open_and_validate_shm_raises_file_not_found_when_missing() -> None:
 
 
 def test_open_and_validate_shm_raises_on_truncated_magic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Buffer too short for the 4-byte magic read -> struct.error, shm.close() called, re-raised.
+    """Buffer too short for the 4-byte magic read -> shm.close() called, ProtocolError raised.
 
     Windows rounds SharedMemory segment allocations up to page granularity, so a
     real segment can't be made shorter than MAGIC_SIZE bytes -- a fake stand-in
@@ -134,10 +134,28 @@ def test_open_and_validate_shm_raises_on_truncated_magic(monkeypatch: pytest.Mon
     monkeypatch.setattr(_imp_mod, "SharedMemory", _FakeShm)
     imp = _make_importer(_extra_name())
 
-    with pytest.raises(struct.error):
+    with pytest.raises(ProtocolError, match="Cannot read the SHM header") as raised:
         imp._open_and_validate_shm()
 
     assert closed == [True]
+    assert isinstance(raised.value.__cause__, struct.error)
+
+
+def test_connect_silent_treats_an_unreadable_header_as_a_failed_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reconnect driver must get False, not an exception, from a segment it cannot read."""
+    import cuda_link.importer as _imp_mod
+
+    class _FakeShm:
+        def __init__(self, name: str | None = None) -> None:
+            self.buf = bytearray(2)  # shorter than MAGIC_SIZE=4
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(_imp_mod, "SharedMemory", _FakeShm)
+    imp = _make_importer(_extra_name())
+
+    assert imp._connect_silent() is False
 
 
 def test_open_and_validate_shm_raises_protocol_error_on_bad_magic(

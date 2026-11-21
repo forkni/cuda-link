@@ -86,7 +86,7 @@ def onCook(scriptOp: object) -> None:
         _cook_slot_meta(scriptOp)
 
     # Handle pixel-format update (mirrors the resolution block above).
-    # _refresh_on_version_change sets needs_format_update = True when dtype/channels change.
+    # _refresh_on_version_change sets the pending format flag when dtype/channels change.
     # consume_pending_format() clears the flag and returns the par.format string to apply.
     # Setting par.format from inside onCook mirrors how resolution is handled above
     # (scriptOp.par.outputresolution etc.) — it takes effect on the next cook, which is

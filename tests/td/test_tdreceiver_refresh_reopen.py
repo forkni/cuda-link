@@ -67,7 +67,7 @@ class _RefreshCuda:
     def destroy_event(self, event) -> None:
         self.destroyed_events.append(event)
 
-    def malloc_host(self, size: int) -> c_void_p:
+    def malloc_host_alloc(self, size: int, flags: int = 0x01) -> c_void_p:
         raise RuntimeError("no pinned memory in tests")  # exercise the pageable path
 
     def free_host(self, ptr) -> None:
@@ -205,14 +205,14 @@ def test_refresh_flags_only_change_requests_format_update_and_resets_cursor(shm:
     cuda = _RefreshCuda()
     engine = _make_receiver(f"test_rro_{uuid.uuid4().hex[:8]}")
     _connect(engine, shm, cuda, md_rg, old_tag=0x10, last_write_idx=7)
-    engine._retry.needs_format_update = False
+    engine._pending.format = False
 
     # Same handles (metadata-only bump), new flags.
     _write_shm(shm, version=2, slot_tag=0x10, md=md_ma)
 
     assert engine._refresh_on_version_change(2) is True
     assert cuda.closed_ptrs == []  # handles unchanged: nothing reopened
-    assert engine._retry.needs_format_update is True
+    assert engine._pending.format is True
     assert engine._format.flags == FLAGS_MONO_ALPHA
     assert engine._connection.last_write_idx == 0
     assert engine._connection.ipc_version == 2

@@ -27,20 +27,26 @@ except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
 import Doorbell as _doorbell  # noqa: E402
+from CUDAAdapters import CTypesCUDAAdapter  # noqa: E402
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
-from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
 from FrameProfile import ReportWindow  # noqa: E402
-from Importer import Format  # noqa: E402
+from Importer import (  # noqa: E402
+    BackoffNotice,
+    Format,
+    HeaderFault,
+    SlotEventOpenError,
+    _RetryState,
+    check_header,
+    open_slot,
+    read_slot_handle_bytes,
+)
 from SHMProtocol import (  # noqa: E402
     METADATA_SIZE,
-    PROTOCOL_MAGIC,
     SAME_PROCESS_MESSAGE,
-    SHM_HEADER_SIZE,
     SHUTDOWN_FLAG_SIZE,
-    SLOT_SIZE,
     EMPTY_SLOT_META,
     INFO_CHOP_FRAME_MOD,
     SLOT_META_CHANNELS,
@@ -51,12 +57,7 @@ from SHMProtocol import (  # noqa: E402
     SlotState,
     acquire_slot,
     classify_frame_step,
-    is_same_process_sender,
-    is_valid_num_slots,
     protocol_mismatch_message,
-    read_magic,
-    read_num_slots,
-    read_sender_pid,
     read_version,
     read_write_idx,
 )
@@ -246,33 +247,32 @@ class ReceiverConnection:
         )
 
 
+# The connect retry and backoff state is the Importer's: one set of rules for both receivers.
+RetryState = _RetryState
+
+
 @dataclass
-class RetryState:
-    """Retry policy and transient counters for the connection-attempt loop."""
+class PendingUpdates:
+    """Script TOP updates the engine owes after a connect or a format change.
 
-    connect_attempts: int = 0
-    max_connect_attempts: int = 20
-    backoff_intervals: tuple = (1, 2, 4, 8, 16, 32, 64, 120)
-    retry_interval_frames: int = 1
-    frames_since_last_retry: int = 0
-    needs_resolution_update: bool = False
-    needs_format_update: bool = False  # set when bits_per_comp/format_kind/num_comps changes
+    They are applied outside the cook that found them (update_receiver_resolution /
+    update_receiver_format), or taken by script_top_callbacks through the consume methods.
+    """
 
-    def request_immediate_reconnect(self) -> None:
-        """Force the next import_frame call to attempt reconnection."""
-        self.frames_since_last_retry = self.retry_interval_frames
+    resolution: bool = False
+    format: bool = False  # set when bits_per_comp/format_kind/num_comps changes
 
-    def consume_resolution_update(self) -> bool:
+    def consume_resolution(self) -> bool:
         """Return True and clear the flag if a resolution update is pending."""
-        if self.needs_resolution_update:
-            self.needs_resolution_update = False
+        if self.resolution:
+            self.resolution = False
             return True
         return False
 
-    def consume_format_update(self) -> bool:
+    def consume_format(self) -> bool:
         """Return True and clear the flag if a pixel-format update is pending."""
-        if self.needs_format_update:
-            self.needs_format_update = False
+        if self.format:
+            self.format = False
             return True
         return False
 
@@ -315,6 +315,7 @@ class TDReceiverEngine:
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
         self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
+        self._pending = PendingUpdates()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
         self._f16_cpu_buf = None
@@ -391,7 +392,7 @@ class TDReceiverEngine:
 
         Called from script_top_callbacks.onCook to drive ImportBuffer Script TOP par updates.
         """
-        if self._retry.consume_resolution_update():
+        if self._pending.consume_resolution():
             return (self._format.width, self._format.height)
         return None
 
@@ -403,7 +404,7 @@ class TDReceiverEngine:
 
         Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
         """
-        if self._retry.consume_format_update():
+        if self._pending.consume_format():
             return td_format_string(self._format)
         return None
 
@@ -582,22 +583,17 @@ class TDReceiverEngine:
 
         # Lazy initialization with exponential backoff retry logic
         if not self._initialized:
-            self._retry.frames_since_last_retry += 1
-            if self._retry.frames_since_last_retry < self._retry.retry_interval_frames:
+            if not self._retry.tick():
                 return False  # Wait before retrying
 
-            self._retry.frames_since_last_retry = 0
-            self._retry.connect_attempts += 1
-
             if not self.initialize_receiver():
-                backoff_idx = min(self._retry.connect_attempts, len(self._retry.backoff_intervals) - 1)
-                self._retry.retry_interval_frames = self._retry.backoff_intervals[backoff_idx]
-                if self._retry.connect_attempts <= self._retry.max_connect_attempts:
+                notice = self._retry.back_off()
+                if notice is BackoffNotice.WAITING:
                     self._log(
                         f"Waiting for sender... (attempt {self._retry.connect_attempts}, "
                         f"next retry in {self._retry.retry_interval_frames} frames)"
                     )
-                elif self._retry.connect_attempts == self._retry.max_connect_attempts + 1:
+                elif notice is BackoffNotice.NOW_SILENT:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
 
@@ -779,12 +775,12 @@ class TDReceiverEngine:
         Returns:
             True if resolution was updated, False if no update needed or not applicable
         """
-        if not self._retry.needs_resolution_update:
+        if not self._pending.resolution:
             return False
 
         try:
             handle.set_resolution(self._format.width, self._format.height)
-            self._retry.needs_resolution_update = False
+            self._pending.resolution = False
             self._log(
                 f"Set ImportBuffer resolution to {self._format.width}x{self._format.height} (from Execute DAT)",
                 force=True,
@@ -808,12 +804,12 @@ class TDReceiverEngine:
         Returns:
             True if the format was updated, False if no update needed or not applicable.
         """
-        if not self._retry.needs_format_update:
+        if not self._pending.format:
             return False
         try:
             fmt = td_format_string(self._format)
             handle.set_format(fmt)
-            self._retry.needs_format_update = False
+            self._pending.format = False
             self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
             return True
         except (AttributeError, RuntimeError) as e:
@@ -844,7 +840,10 @@ class TDReceiverEngine:
         # leaks the SHM mapping on every failed attempt / backoff retry.
         shm_handle = None
         try:
-            self.cuda = get_cuda_runtime(device=self.device)
+            # The `cuda` constructor argument wins (tests, and a caller that already holds a
+            # port). Without one, wrap the process-wide runtime in the production adapter.
+            if self.cuda is None:
+                self.cuda = CTypesCUDAAdapter(get_cuda_runtime(device=self.device))
             if not getattr(self, "_runtime_load_logged", False):
                 self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
                 self._runtime_load_logged = True
@@ -856,36 +855,21 @@ class TDReceiverEngine:
                 self._log(f"SharedMemory '{self.shm_name}' not found. Sender not ready?")
                 return False
 
-            # Validate protocol magic number (new in this version)
-            try:
-                magic = read_magic(shm_handle.buf)
-                if magic != PROTOCOL_MAGIC:
-                    self._log(protocol_mismatch_message(magic), force=True)
-                    shm_handle.close()
-                    return False
-                if is_same_process_sender(read_sender_pid(shm_handle.buf), _current_pid()):
-                    self._log(SAME_PROCESS_MESSAGE, force=True)
-                    shm_handle.close()
-                    return False
-            except (struct.error, ValueError, IndexError):
+            # Validate the header: protocol magic, same-process rule, slot count.
+            header = check_header(shm_handle.buf, _current_pid())
+            if header.fault is not None:
                 self._log(
-                    "Cannot read protocol magic. Sender may be using old protocol version.",
+                    {
+                        HeaderFault.BAD_MAGIC: protocol_mismatch_message(header.magic),
+                        HeaderFault.SAME_PROCESS: SAME_PROCESS_MESSAGE,
+                        HeaderFault.UNREADABLE: "Cannot read protocol magic. Sender may be using old protocol version.",
+                        HeaderFault.BAD_NUM_SLOTS: f"Invalid num_slots: {header.num_slots}. Protocol error.",
+                    }[header.fault],
                     force=True,
                 )
                 shm_handle.close()
                 return False
-
-            # Read header
-            ipc_version = read_version(shm_handle.buf)
-            num_slots = read_num_slots(shm_handle.buf)
-
-            if not is_valid_num_slots(num_slots):
-                self._log(
-                    f"Invalid num_slots: {num_slots}. Protocol error.",
-                    force=True,
-                )
-                shm_handle.close()
-                return False
+            ipc_version, num_slots = header.ipc_version, header.num_slots
 
             # Sync UI parameter to show sender's slot count (informational only).
             # Do NOT set self.num_slots — that's the sender-specific working value.
@@ -984,12 +968,9 @@ class TDReceiverEngine:
 
             # Open all IPC handles (per slot)
             for slot in range(num_slots):
-                base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+                raw = read_slot_handle_bytes(shm_handle.buf, layout, slot)
 
-                # Read + open memory handle
-                mem_handle_bytes = bytes(shm_handle.buf[base_offset : base_offset + 64])
-
-                if not any(mem_handle_bytes):
+                if not raw.has_mem:
                     self._log(
                         f"Slot {slot}: IPC mem handle is all zeros - "
                         "sender hasn't written handles yet. Will retry with backoff.",
@@ -999,11 +980,21 @@ class TDReceiverEngine:
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
-                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
-                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {raw.mem[:16].hex()}...")
 
                 try:
-                    dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+                    ipc_handles[slot], dev_ptrs[slot], ipc_events[slot] = open_slot(self.cuda, raw)
+                except SlotEventOpenError as e:
+                    # Without the event the wait has nothing to order against the
+                    # sender, so every frame would be read unsynced: fail the init
+                    # (slot + 1 also releases this slot's just-opened mem handle).
+                    dev_ptrs[slot] = e.dev_ptr
+                    self._log(
+                        f"Slot {slot}: failed to open IPC event: {e.cause}. Will retry with backoff.",
+                        force=True,
+                    )
+                    self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                    return False
                 except RuntimeError as e:
                     self._log(
                         f"Slot {slot}: cudaIpcOpenMemHandle failed: {e}. "
@@ -1013,23 +1004,6 @@ class TDReceiverEngine:
                     )
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
-
-                # Read + open event handle
-                event_handle_bytes = bytes(shm_handle.buf[base_offset + 64 : base_offset + 128])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        # Without the event the wait has nothing to order against the
-                        # sender, so every frame would be read unsynced: fail the init
-                        # (slot + 1 also releases this slot's just-opened mem handle).
-                        self._log(
-                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
-                            force=True,
-                        )
-                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
-                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -1055,7 +1029,7 @@ class TDReceiverEngine:
             self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
 
             # Flag pixel-format update when the resolved format is anything other than the
             # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
@@ -1067,7 +1041,7 @@ class TDReceiverEngine:
             # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
             # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
             if td_format_string(self._format) != "rgba32float":
-                self._retry.needs_format_update = True
+                self._pending.format = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
@@ -1214,7 +1188,7 @@ class TDReceiverEngine:
         try:
             import ctypes as _ctypes
 
-            self._f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
+            self._f16_pinned_ptr = self.cuda.malloc_host_alloc(f16_bytes)
             _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._f16_pinned_ptr.value)
             self._f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
             self._log("float16 receiver: allocated pinned CPU buffer for D2H (async path)", force=True)
@@ -1299,10 +1273,8 @@ class TDReceiverEngine:
         self._release_resources()
 
         self._initialized = False
-        self._retry.connect_attempts = 0
-        self._retry.frames_since_last_retry = 0
         # Drop the backoff from the last connect loop so the first retry after a drop is immediate
-        self._retry.retry_interval_frames = 1
+        self._retry.reset()
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_window.reset()
 
@@ -1352,8 +1324,7 @@ class TDReceiverEngine:
         handles_changed = False
         if self.cuda is not None and conn.ipc_handles:
             for slot in range(conn.num_slots):
-                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-                new_mem_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+                new_mem_bytes = read_slot_handle_bytes(shm.buf, layout, slot).mem
                 old_handle = conn.ipc_handles[slot] if slot < len(conn.ipc_handles) else None
                 if old_handle is None or bytes(old_handle) != new_mem_bytes:
                     handles_changed = True
@@ -1416,7 +1387,7 @@ class TDReceiverEngine:
         # previous session would make its first frame read as already consumed.
         conn.last_write_idx = 0
         if width != prev_format.width or height != prev_format.height:
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
         if (
             bits_per_comp != prev_format.bits
             or format_kind != prev_format.kind
@@ -1426,7 +1397,7 @@ class TDReceiverEngine:
             # flags carries the channel layout (e.g. RG vs Mono+Alpha at the same comps).
             # Script TOP's par.format must be updated so the next copyCUDAMemory writes
             # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
-            self._retry.needs_format_update = True
+            self._pending.format = True
 
         self._log(
             f"Format refreshed in-place: {width}x{height}x{num_comps}, "
@@ -1446,29 +1417,24 @@ class TDReceiverEngine:
         new_dev_ptrs: list = [None] * num_slots
         new_ipc_handles: list = [None] * num_slots
         new_ipc_events: list = [None] * num_slots
+        layout = SHMLayout(num_slots)
         for slot in range(num_slots):
-            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
-            if not any(mem_handle_bytes):
+            raw = read_slot_handle_bytes(shm.buf, layout, slot)
+            if not raw.has_mem:
                 self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
             try:
-                new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
+                new_ipc_handles[slot], new_dev_ptrs[slot], new_ipc_events[slot] = open_slot(self.cuda, raw)
+            except SlotEventOpenError as e:
+                new_dev_ptrs[slot] = e.dev_ptr
+                self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e.cause} — falling back", force=True)
+                self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                return None
             except (RuntimeError, OSError) as e:
                 self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
-            if any(event_handle_bytes):
-                try:
-                    ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                    new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
-                except (RuntimeError, OSError) as e:
-                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
-                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
-                    return None
         return new_dev_ptrs, new_ipc_handles, new_ipc_events
 
     def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:
