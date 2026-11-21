@@ -1,4 +1,4 @@
-// CudaLinkOutTOP custom parameters — page "CUDA Link".
+// CudaLinkOutTOP custom parameters — page "Settings".
 //
 // Ipcmemname, Active, Debug are direct mirrors of the receiver's (and the real .tox's)
 // parameters of the same name. Unlike the receiver, the sender is the side that actually

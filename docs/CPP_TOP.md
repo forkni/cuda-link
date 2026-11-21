@@ -75,8 +75,9 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   type collide.
 - TD locks a loaded DLL. Close TD before you replace it.
 - Keep cuda-link 1.14.1 off TD's Python module path while you test 2.0.0.dev0.
-- Give each stream its own `Ipcmemname`. The default names are the same in 1.x and 2.x. A
-  v0.5 segment is refused with a magic error; the two protocols do not mix.
+- Give each stream its own `Ipcmemname`. A new 2.x C++ TOP uses `cudalink_ipc_CPP`, but a
+  saved node or a `.tox` can still use the same name as a 1.x peer. A v0.5 segment is refused
+  with a magic error; the two protocols do not mix.
 
 ## Build
 
@@ -148,13 +149,13 @@ The tool is built with the TOPs. The `--file` form also works on Linux.
 
 ## Out TOP parameters
 
-These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
 (see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
-| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_TD>>Python` | Name of the shared-memory segment. The receiver must use the same name. |
-| `Active` | Active | Toggle | On | Off stops the publish and frees the ring. |
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. The receiver must use the same name. The In TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off stops the publish and frees the ring. A new node starts Off. |
 | `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
 | `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
 | `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
@@ -168,13 +169,13 @@ example 4K float32, makes the copy expensive.
 
 ## In TOP parameters
 
-These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
 (see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
 |---|---|---|---|---|
-| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_Python>>TD` | Name of the shared-memory segment. Use the name of the sender. |
-| `Active` | Active | Toggle | On | Off closes the segment. |
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. Use the name of the sender. The Out TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off closes the segment. A new node starts Off. |
 | `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
 | `Framewaitms` | Frame Wait (ms) | Integer, 0 to 8 | `3` | On a cook with no new frame, wait for the sender publish for this time. 0 turns the wait off. |
 
@@ -211,7 +212,7 @@ About `Framewaitms`:
 
 ## Info page
 
-Both TOPs have an "Info" page after "CUDA Link". Its parameters have the names of the `.tox`
+Both TOPs have an "Info" page after "Settings". Its parameters have the names of the `.tox`
 Info page, so a script that reads one also reads the other.
 
 | Name | Label | Value |

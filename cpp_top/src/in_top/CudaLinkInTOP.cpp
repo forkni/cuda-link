@@ -143,6 +143,9 @@ CudaLinkInTOP::CudaLinkInTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context) :
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+    if (myFatal) {
+        myFatalError = session.error;
+    }
     myInitNote = session.note;
 }
 
@@ -558,7 +561,6 @@ bool CudaLinkInTOP::openSlotHandlesIfNeeded() {
 void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void*) {
     const auto cookStart = std::chrono::steady_clock::now();
     try {
-        myError.clear();
         myWarning.clear();
 
         // Once a fatal CUDA error has latched (ctor's device/IPC checks, or a
@@ -567,10 +569,26 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
         // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
         // option (it would tear down TD's own CUDA state too).
         if (myFatal) {
-            myError = "fatal CUDA error latched -- recreate this node or restart TouchDesigner "
-                      "to recover (see last_error in the Info DAT)";
+            // Keep the error that latched (the constructor stores its own reason in
+            // myFatalError). This check runs before myError.clear(): if TD did not call
+            // getErrorString() after the failing cook, myError still holds the failing call's
+            // message. If it did, getErrorString() moved that message to myLastError and
+            // cleared myError. Earlier, only myLastError was read, so a cook without
+            // getErrorString() in between gave an empty or stale cause, or the latch text twice.
+            if (myFatalError.empty()) {
+                if (!myError.empty()) {
+                    myFatalError = myError;
+                } else if (!myLastError.empty()) {
+                    myFatalError = myLastError;
+                } else {
+                    myFatalError = "unknown error";
+                }
+            }
+            myError = "fatal CUDA error latched: " + myFatalError +
+                      " -- recreate this node or restart TouchDesigner to recover";
             return;
         }
+        myError.clear();
 
         // Step 0: cached-diff parameter-change detection (no push notification exists).
         checkParameterChanges(inputs);
@@ -800,6 +818,29 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 return;
             }
 
+            // TD can give a texture smaller than the one asked for: TouchDesigner
+            // Non-Commercial caps textures at 1280x1280 (2026-11-21: a 1920x1080 stream made
+            // cudaMemcpy2DToArrayAsync fail with "invalid argument" every cook). cudaArray is
+            // only valid inside the bracket, so the check is here and not after createCUDAArray.
+            {
+                cudaChannelFormatDesc arrayDesc{};
+                cudaExtent arrayExtent{};
+                unsigned int arrayFlags = 0;
+                if (cudaArrayGetInfo(&arrayDesc, &arrayExtent, &arrayFlags, outputInfo->cudaArray) ==
+                    cudaSuccess) {
+                    if (arrayExtent.width < outSize.w || arrayExtent.height < outSize.h) {
+                        myError = "TouchDesigner gave a " + std::to_string(arrayExtent.width) + "x" +
+                                  std::to_string(arrayExtent.height) + " texture for a " +
+                                  std::to_string(outSize.w) + "x" + std::to_string(outSize.h) +
+                                  " output (TouchDesigner Non-Commercial is limited to 1280x1280); set the "
+                                  "Common page Output Resolution to fit";
+                        return;
+                    }
+                } else {
+                    cudaGetLastError(); // diagnostic only: never leave the slot set for TD's own CUDA code
+                }
+            }
+
             const size_t itemsize = myMetadata.bits_per_comp / cudalink::core::BITS_PER_BYTE;
             const size_t rowBytes = static_cast<size_t>(myMetadata.width) * myMetadata.num_comps * itemsize;
 
@@ -868,8 +909,36 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                 outCodec.alpha_only = cudalink::common::isAlphaOnly(targetFormat);
                 const cudalink::common::LinearImageMut dst{scratch, outRowBytes, outSize.w, outSize.h,
                                                            outCodec};
-                CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
-                                          myError, myFatal);
+                // launchResizeConvert() returns cudaGetLastError() after the launch, so an
+                // error an earlier call left in the per-thread slot would be blamed on the
+                // kernel. Take it out first and name it in the message instead.
+                const cudaError_t priorStatus = cudaGetLastError();
+                const cudaError_t convertStatus =
+                    cudalink::common::launchResizeConvert(src, dst, bilinear, myStream);
+                if (convertStatus != cudaSuccess) {
+                    myError =
+                        std::string("Common page convert failed: ") + cudaGetErrorString(convertStatus) +
+                        " (wire " + std::to_string(wireSize.w) + "x" + std::to_string(wireSize.h) + " " +
+                        cudalink::common::pixelFormatName(pixelFormat) + " codec " +
+                        (src.codec.valid ? "ok" : "invalid") + ", out " + std::to_string(outSize.w) + "x" +
+                        std::to_string(outSize.h) + " " + cudalink::common::pixelFormatName(targetFormat) +
+                        " codec " + (dst.codec.valid ? "ok" : "invalid") + ", src " +
+                        (src.data == nullptr ? "null" : "set") + ")";
+                    if (priorStatus != cudaSuccess) {
+                        myError +=
+                            std::string("; an earlier CUDA call left: ") + cudaGetErrorString(priorStatus);
+                    }
+                    if (cudalink::common::isStickyCudaError(convertStatus)) {
+                        myFatal = true;
+                    } else {
+                        cudaGetLastError();
+                    }
+                    return;
+                }
+                if (priorStatus != cudaSuccess) {
+                    cudalink::common::appendWarning(myWarning, std::string("an earlier CUDA call left: ") +
+                                                                   cudaGetErrorString(priorStatus));
+                }
                 CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, scratch,
                                                                    outRowBytes, outRowBytes, outSize.h,
                                                                    cudaMemcpyDeviceToDevice, myStream),

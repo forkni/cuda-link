@@ -48,11 +48,11 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_StringParameter p;
         p.name = IpcmemnameName;
         p.label = IpcmemnameLabel;
-        p.page = "CUDA Link";
-        // Matches the default direction the Python example scripts exercise: TD as
-        // sender, a separate Python process as receiver (td_exporter/
-        // example_receiver_python.py's default CUDALINK_RECEIVER_SHM_NAME).
-        p.defaultValue = "cudalink_ipc_TD>>Python";
+        p.page = "Settings";
+        // Same default as CudaLinkInTOP, so a new Out/In pair connects with no typing. Not
+        // the example .tox Sender's name (cudalink_ipc_TD>>Python): a new Out TOP used to
+        // publish into that example stream the moment it was created.
+        p.defaultValue = "cudalink_ipc_CPP";
 
         TD::OP_ParAppendResult res = manager->appendString(p);
         checkParamAppend(res, IpcmemnameName, "CudaLinkOutTOP");
@@ -62,8 +62,10 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = ActiveName;
         p.label = ActiveLabel;
-        p.page = "CUDA Link";
-        p.defaultValues[0] = 1.0;
+        p.page = "Settings";
+        // Off on a new node: it connects only after the user sets the IPC Mem Name and
+        // turns it on (2026-11-21: a new node joined a live stream the moment it was created).
+        p.defaultValues[0] = 0.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
         checkParamAppend(res, ActiveName, "CudaLinkOutTOP");
@@ -73,7 +75,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = DebugName;
         p.label = DebugLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         p.defaultValues[0] = 0.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
@@ -84,7 +86,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_StringParameter p;
         p.name = NumslotsName;
         p.label = NumslotsLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         p.defaultValue = "3";
         std::array<const char*, 3> names = {"2", "3", "4"};
         std::array<const char*, 3> labels = {"2", "3", "4"};
@@ -98,7 +100,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = StreamidName;
         p.label = StreamidLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         p.defaultValues[0] = 0.0;
         p.minValues[0] = 0.0;
         p.clampMins[0] = true;

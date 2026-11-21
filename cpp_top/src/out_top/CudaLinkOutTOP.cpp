@@ -119,6 +119,9 @@ CudaLinkOutTOP::CudaLinkOutTOP(const TD::OP_NodeInfo*, TD::TOP_Context* context)
     myStream = session.stream;
     myError = session.error;
     myFatal = session.fatal;
+    if (myFatal) {
+        myFatalError = session.error;
+    }
     myInitNote = session.note;
 }
 
@@ -544,7 +547,6 @@ bool CudaLinkOutTOP::reallocate(uint32_t width, uint32_t height, const WireForma
 void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs, void*) {
     const auto cookStart = std::chrono::steady_clock::now();
     try {
-        myError.clear();
         myWarning.clear();
 
         // Once a fatal CUDA error has latched (ctor's device/IPC checks, or a
@@ -553,10 +555,26 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
         // this node (or restarting TD) is the only recovery; cudaDeviceReset() is not an
         // option (it would tear down TD's own CUDA state too).
         if (myFatal) {
-            myError = "fatal CUDA error latched -- recreate this node or restart TouchDesigner "
-                      "to recover (see last_error in the Info DAT)";
+            // Keep the error that latched (the constructor stores its own reason in
+            // myFatalError). This check runs before myError.clear(): if TD did not call
+            // getErrorString() after the failing cook, myError still holds the failing call's
+            // message. If it did, getErrorString() moved that message to myLastError and
+            // cleared myError. Earlier, only myLastError was read, so a cook without
+            // getErrorString() in between gave an empty or stale cause, or the latch text twice.
+            if (myFatalError.empty()) {
+                if (!myError.empty()) {
+                    myFatalError = myError;
+                } else if (!myLastError.empty()) {
+                    myFatalError = myLastError;
+                } else {
+                    myFatalError = "unknown error";
+                }
+            }
+            myError = "fatal CUDA error latched: " + myFatalError +
+                      " -- recreate this node or restart TouchDesigner to recover";
             return;
         }
+        myError.clear();
 
         // Step 0/1: cached-diff parameter-change detection + Active gate.
         checkParameterChanges(inputs);
@@ -772,8 +790,29 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 const cudalink::common::LinearImage src{scratch, inRowBytes, width, height, inCodec};
                 const cudalink::common::LinearImageMut dst{mySlotDevPtrs[slot], rowBytes, myMetadata.width,
                                                            myMetadata.height, outCodec};
-                CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
-                                          myError, myFatal);
+                // launchResizeConvert() returns cudaGetLastError() after the launch, so an
+                // error an earlier call left in the per-thread slot would be blamed on the
+                // kernel. Take it out first and name it in the message instead (as the In TOP).
+                const cudaError_t priorStatus = cudaGetLastError();
+                const cudaError_t convertStatus =
+                    cudalink::common::launchResizeConvert(src, dst, bilinear, myStream);
+                if (convertStatus != cudaSuccess) {
+                    myError = std::string("Common page convert failed: ") + cudaGetErrorString(convertStatus);
+                    if (priorStatus != cudaSuccess) {
+                        myError +=
+                            std::string("; an earlier CUDA call left: ") + cudaGetErrorString(priorStatus);
+                    }
+                    if (cudalink::common::isStickyCudaError(convertStatus)) {
+                        myFatal = true;
+                    } else {
+                        cudaGetLastError();
+                    }
+                    return;
+                }
+                if (priorStatus != cudaSuccess) {
+                    cudalink::common::appendWarning(myWarning, std::string("an earlier CUDA call left: ") +
+                                                                   cudaGetErrorString(priorStatus));
+                }
                 CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
             } else {
                 CUDALINK_CUDA_CHECK_FATAL(
@@ -837,11 +876,17 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                     myPassTimer.recordStop(passTimerIdx, myStream);
                 }
                 if (passThroughStatus != cudaSuccess) {
-                    myWarning = std::string("pass-through output copy failed: ") +
-                                cudaGetErrorString(passThroughStatus);
+                    cudalink::common::appendWarning(myWarning,
+                                                    std::string("pass-through output copy failed: ") +
+                                                        cudaGetErrorString(passThroughStatus));
+                    // Clear the per-thread slot, or the next cook's convert reports this
+                    // error as its own and drops that frame. A sticky error stays set anyway
+                    // and latches at the next CUDALINK_CUDA_CHECK_FATAL.
+                    cudaGetLastError();
                 }
             } else {
-                myWarning = "createCUDAArray failed (pass-through output unavailable this cook)";
+                cudalink::common::appendWarning(
+                    myWarning, "createCUDAArray failed (pass-through output unavailable this cook)");
             }
 
             // Deliberately no CPU-blocking cudaStreamSynchronize here. An earlier revision

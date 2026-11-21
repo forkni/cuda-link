@@ -1,4 +1,4 @@
-// CudaLinkInTOP custom parameters — page "CUDA Link".
+// CudaLinkInTOP custom parameters — page "Settings".
 //
 // Reconciled against the real .tox parameter surface (td_exporter/HELP_DOC.md):
 // Ipcmemname, Active, Debug are direct mirrors. There is no Mode (the two-DLL split

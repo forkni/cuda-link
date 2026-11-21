@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 
+#include "cuda_check.h"
 #include "pixel_codec.h"
 #include "resize_convert.h"
 
@@ -20,6 +21,52 @@ using namespace cudalink::core;   // NOLINT(google-build-using-namespace)
 using namespace cudalink::common; // NOLINT(google-build-using-namespace)
 
 namespace {
+
+// Runs one CUDALINK_CUDA_CHECK_FATAL on a given status, the way execute() does.
+void check_fatal(cudaError_t status, std::string& err, bool& fatal) {
+    CUDALINK_CUDA_CHECK_FATAL(status, err, fatal);
+}
+
+// The hot-path latch: only process-corrupting errors latch (2026-11-21 regression: a plain
+// cudaErrorInvalidValue from the Common page convert latched a new In TOP for good).
+int check_latch_policy() {
+    int failures = 0;
+    for (cudaError_t sticky :
+         {cudaErrorIllegalAddress, cudaErrorLaunchTimeout, cudaErrorAssert, cudaErrorHardwareStackError,
+          cudaErrorIllegalInstruction, cudaErrorMisalignedAddress, cudaErrorInvalidAddressSpace,
+          cudaErrorInvalidPc, cudaErrorLaunchFailure, cudaErrorUnknown, static_cast<cudaError_t>(226),
+          static_cast<cudaError_t>(721), static_cast<cudaError_t>(911)}) {
+        if (!isStickyCudaError(sticky)) ++failures;
+    }
+    for (cudaError_t plain : {cudaSuccess, cudaErrorInvalidValue, cudaErrorInvalidConfiguration,
+                              cudaErrorInvalidResourceHandle, cudaErrorNotReady, cudaErrorMemoryAllocation}) {
+        if (isStickyCudaError(plain)) ++failures;
+    }
+
+    std::string err;
+    bool fatal = false;
+    // A real failing runtime call, so the per-thread last-error slot is set (an enum value
+    // alone never sets it). Baseline first: the call must set the slot, or the check below
+    // would pass without the macro's cudaGetLastError().
+    (void)cudaGetLastError();
+    if (cudaMemset(nullptr, 0, 16) == cudaSuccess || cudaPeekAtLastError() == cudaSuccess) ++failures;
+    (void)cudaGetLastError();
+    check_fatal(cudaMemset(nullptr, 0, 16), err, fatal);
+    if (fatal || err.empty() || cudaPeekAtLastError() != cudaSuccess) ++failures;
+    (void)cudaGetLastError();
+
+    err.clear();
+    check_fatal(cudaErrorIllegalAddress, err, fatal);
+    if (!fatal || err.find("illegal memory access") == std::string::npos) ++failures;
+
+    err.clear();
+    fatal = false;
+    check_fatal(cudaSuccess, err, fatal);
+    if (fatal || !err.empty()) ++failures;
+
+    if (failures != 0) std::fprintf(stderr, "latch policy: %d failures\n", failures);
+    return failures;
+}
 
 int g_failures = 0;
 int g_cases = 0;
@@ -144,6 +191,7 @@ int main() {
     // Invalid input is rejected before any launch.
     LinearImage bad{};
     if (launchResizeConvert(bad, LinearImageMut{}, true, nullptr) != cudaErrorInvalidValue) ++g_failures;
+    g_failures += check_latch_policy();
     std::printf("resize_convert_tests: %d cases, %d failures\n", g_cases, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

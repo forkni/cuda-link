@@ -104,6 +104,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **C++ TOPs: a non-sticky CUDA error no longer kills the node.** Every hot-path CUDA failure
+  set the fatal latch, so a plain bad argument (`cudaErrorInvalidValue` from the In TOP's Common
+  page convert) made the node show "fatal CUDA error latched" until it was recreated. Found on
+  2026-11-21: a new In TOP added from the CUSTOM tab joined the example Python sender's
+  1920x1080 stream and latched in its first cook. Now only the errors the CUDA Runtime API reference
+  calls process-corrupting (226, 700, 702, 710, 714-719, 721, 911, and 999) latch. Any other error is shown for
+  that cook, the CUDA last-error slot is cleared, and the next cook tries again.
+- **C++ TOPs: the latch message keeps the error that caused it.** `execute()` replaced the
+  real error with the latch text one frame later, so `last_error` in the Info DAT could only show
+  "fatal CUDA error latched". The message now reads `fatal CUDA error latched: <first error> --
+  recreate this node ...`, for constructor and hot-path latches alike. The latch reads the cause
+  from the failing cook's own error, so it no longer depends on TD calling `getErrorString()`
+  between cooks.
+- **C++ Out TOP: an earlier CUDA error no longer fails the next convert.** A failed pass-through
+  copy (for example a capped texture on TouchDesigner Non-Commercial) left its error in the CUDA
+  last-error slot, and the next cook's Common page convert reported it as its own and dropped
+  that frame. The pass-through, scratch-allocation and `CUDALINK_CUDA_CHECK_BOOL` failure paths
+  now clear the slot, and the convert names any error an earlier call left.
+- **In TOP: a texture smaller than the output gives a clear error.** TouchDesigner Non-Commercial
+  caps textures at 1280x1280, so a 1920x1080 stream made `cudaMemcpy2DToArrayAsync` fail with
+  "invalid argument" each cook. The In TOP now reads the size of the texture TD gives and, when it
+  is too small, says so and names the Common page Output Resolution as the fix.
+- **In TOP: a failed Common page convert says why.** The error names the wire size and format,
+  the output size and format, whether each codec is valid, and any error an earlier CUDA call
+  left in the last-error slot (the kernel launch used to report that error as its own).
+
 - **`.tox` Receiver: Mono+Alpha arrived as RG.** `copyCUDAMemory` makes an RG texture from every
   2-channel frame, so a `monoalpha*` stream came out with mono in R and alpha in G. A new Reorder
   TOP `MonoAlphaFix` between `ImportBuffer` and the output puts the channels back on the GPU; it
@@ -140,6 +166,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **C++ TOPs: new default `Ipcmemname` `cudalink_ipc_CPP`** (Out TOP and In TOP). The old
+  defaults were the example streams (`cudalink_ipc_TD>>Python` for the Out TOP,
+  `cudalink_ipc_Python>>TD` for the In TOP), so a new node joined someone else's stream at once.
+  An Out TOP in one TD and an In TOP in another now share a name with no typing. TD saves only
+  the values that differ from the default, so a saved node that kept the old default name can
+  load with `cudalink_ipc_CPP`. After the upgrade, set `Ipcmemname` again on those nodes.
+- **C++ TOPs: the parameter page "CUDA Link" is now "Settings"** (Out TOP and In TOP). The
+  parameter names do not change, so saved projects keep their values.
+- **C++ TOPs: `Active` is Off on a new node** (Out TOP and In TOP). A new node used to connect
+  the moment it was created. Turn it on after you set `Ipcmemname`. A saved node that kept the
+  old default (On) can load Off, for the same reason as `Ipcmemname`: turn it on again.
 - **C++ TOPs: CUDA graph path and `CUDALINK_CPP_USE_GRAPHS` removed.** The path was opt-in and
   gave no gain with `Debug` off (measured 2026-11-17, ADR-0010 and ADR-0011). The Info CHOP
   channels `graph_hits` and `graph_builds` are removed from both TOPs (breaking for a network

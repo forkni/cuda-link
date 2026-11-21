@@ -100,7 +100,10 @@ public:
         myBytes = 0;
         void* p = nullptr;
         *status = cudaMalloc(&p, bytes);
-        if (*status != cudaSuccess) return nullptr;
+        if (*status != cudaSuccess) {
+            cudaGetLastError(); // clear the slot: the caller reports *status, a later call must not
+            return nullptr;
+        }
         myBuf.reset(p);
         myBytes = bytes;
         return p;
