@@ -61,14 +61,13 @@ class _Par:
 class _Comp:
     """Stand-in for parent(): `.op('bg')`, `.par.Numslots`, `.showCustomOnly`."""
 
-    def __init__(self, *, bg: object | None = None, mono_alpha_fix: object | None = None) -> None:
+    def __init__(self, *, bg: object | None = None) -> None:
         self._bg = bg
-        self._mono_alpha_fix = mono_alpha_fix
         self.par = types.SimpleNamespace(Numslots=types.SimpleNamespace(enable=None))
         self.showCustomOnly = None
 
     def op(self, name: str) -> object | None:
-        return {"bg": self._bg, "MonoAlphaFix": self._mono_alpha_fix}.get(name)
+        return self._bg if name == "bg" else None
 
 
 def _install_parent(monkeypatch: pytest.MonkeyPatch, comp: _Comp) -> _Comp:
@@ -179,18 +178,6 @@ def test_mode_change_switches_extension_and_retargets_bg_select(
     assert (f"Mode switching: {prev_mode} -> {new_mode}", True) in ext.logs
     assert (f"Mode switch complete: now in {new_mode} mode", True) in ext.logs
     assert (f"Updated bg selectTOP -> {expected_top}", False) in ext.logs
-
-
-def test_mode_change_to_receiver_points_bg_select_at_mono_alpha_fix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the MonoAlphaFix TOP in the COMP, the viewer reads the corrected image."""
-    bg_select = types.SimpleNamespace(par=_Par())
-    _install_parent(monkeypatch, _Comp(bg=bg_select, mono_alpha_fix=object()))
-    ext = _Ext()
-
-    cb.handle_mode_change(ext, "Receiver", "Sender")
-
-    assert bg_select.par.top == "MonoAlphaFix"
-    assert ("Updated bg selectTOP -> MonoAlphaFix", False) in ext.logs
 
 
 def test_mode_change_unchanged_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:

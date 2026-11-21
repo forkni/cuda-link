@@ -80,7 +80,10 @@ class TOPHandle(Protocol):
         ...
 
     def sync_mono_alpha_fix(self, fmt: str) -> None:
-        """Enable the sibling MonoAlphaFix Reorder TOP for a monoalpha ``fmt``, else bypass it."""
+        """Enable the sibling MonoAlphaFix Reorder TOP for a monoalpha ``fmt``, else bypass it.
+
+        The 'bg' Select TOP (node viewer image) reads MonoAlphaFix while it is enabled.
+        """
         ...
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
@@ -200,6 +203,8 @@ class TDHost(Protocol):
 # 2-channel CUDAMemoryShape (the shape has no Mono+Alpha layout), so for a Mono+Alpha stream
 # this TOP moves G to alpha and copies R to RGB, on the GPU. For all other formats it is bypassed.
 MONO_ALPHA_FIX_NAME = "MonoAlphaFix"
+# Select TOP that the COMP uses as its node viewer image (ExportBuffer or ImportBuffer).
+VIEWER_SELECT_NAME = "bg"
 
 
 class RealTOPHandle(TOPHandle):
@@ -257,6 +262,12 @@ class RealTOPHandle(TOPHandle):
             if wanted:
                 fix.par.format = fmt
             fix.bypass = not wanted
+            # The node viewer image ('bg' Select TOP) follows: MonoAlphaFix for a Mono+Alpha
+            # stream, ImportBuffer for all others. In Sender mode it shows ExportBuffer and
+            # is left alone.
+            bg = self._top.parent().op(VIEWER_SELECT_NAME)
+            if bg is not None and bg.par.top.eval() in (self._top, fix):
+                bg.par.top = MONO_ALPHA_FIX_NAME if wanted else self._top.name
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self._top.copyCUDAMemory(ptr, size, shape, stream=stream)
