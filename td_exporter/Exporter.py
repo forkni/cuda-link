@@ -49,7 +49,7 @@ from ExporterPort import (
     FrameSpec,
     GpuFrame,
 )
-from FrameProfile import FrameProfile
+from FrameProfile import STATS_LOG_EVERY, FrameProfile
 from ActivationBarrier import CheckerBarrier
 from CUDARuntimeTypes import (
     CUDART_GRAPHS_MIN_VERSION,
@@ -805,7 +805,7 @@ class Exporter:
             if profile:
                 frame_time = (time.perf_counter() - frame_start) * 1_000_000
                 self._profile.record("export", frame_time)
-                if self.frame_count % 97 == 0:
+                if self.frame_count % STATS_LOG_EVERY == 0:
                     n = self.frame_count
                     avg_wait = self._profile.avg("stream_wait", n)
                     avg_memcpy = self._profile.avg("memcpy", n)

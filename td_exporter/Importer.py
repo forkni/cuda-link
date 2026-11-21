@@ -37,6 +37,7 @@ from ImporterPort import (
     ImportResult,
     ImportSpec,
 )
+from FrameProfile import STATS_LOG_EVERY
 from CUDARuntimeTypes import (
     IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
     CudaIpcError,
@@ -51,7 +52,6 @@ from SHMProtocol import (
     MAX_SLOTS,
     PROTOCOL_MAGIC,
     SAME_PROCESS_MESSAGE,
-    WRITE_IDX_OFFSET,
     AcquireResult,
     DtypeCodec,
     Metadata,
@@ -134,6 +134,42 @@ class _HighResTimer:
     def __exit__(self, *_: object) -> None:
         if self._active:
             _winmm.timeEndPeriod(1)
+
+
+def _python_wait_slot(
+    query: Any, evt: Any, wait_start: float, spin_us: float, deadline: float
+) -> tuple[str, float, float, bool]:
+    """Wait for ``evt`` with the Python spin-then-sleep loop (the path with no native backend).
+
+    Returns (status, waited_us, blocked_us, slept). ``status`` is a WaitStatus name:
+    "READY_SPIN" (the spin phase caught it), "READY_POLL" (the sleep phase caught it) or
+    "TIMEOUT". ``waited_us`` counts from ``wait_start``; ``blocked_us`` is the time in the
+    sleep phase only; ``slept`` says whether that phase slept at least once.
+    """
+    if spin_us > 0:
+        # Clamp spin_deadline to the overall deadline so the loop needs
+        # only one perf_counter() call per iteration — no inner deadline
+        # check required (spin budget << timeout_ms in all practical cases).
+        spin_deadline = min(wait_start + spin_us / 1_000_000, deadline)
+        while (now := time.perf_counter()) < spin_deadline:
+            if query(evt):
+                return "READY_SPIN", (now - wait_start) * 1_000_000, 0.0, False
+        # If we exited because spin_deadline == deadline, we timed out.
+        if time.perf_counter() >= deadline:
+            return "TIMEOUT", (time.perf_counter() - wait_start) * 1_000_000, 0.0, False
+
+    phase2_start = time.perf_counter()
+    slept = False
+    with _HighResTimer():
+        while True:
+            if query(evt):
+                break
+            if time.perf_counter() >= deadline:
+                return "TIMEOUT", (time.perf_counter() - wait_start) * 1_000_000, 0.0, slept
+            time.sleep(0.0001)
+            slept = True
+    end = time.perf_counter()
+    return "READY_POLL", (end - wait_start) * 1_000_000, (end - phase2_start) * 1_000_000, slept
 
 
 # Optional dependencies
@@ -1742,87 +1778,47 @@ class Importer:
                 return (time.perf_counter() - wait_start) * 1_000_000
             raise ProducerTimeoutError(f"IPC event still not signaled (slot={slot})")
 
-        # R5: native wait backend — only engaged when resolved AND this slot has
-        # both an IPC event and an open doorbell (the backend needs both to reach
-        # its <10us target). Everything below this block is the pre-R5 path,
-        # unchanged, so CUDALINK_WAIT_BACKEND=python (or any resolution failure)
-        # reproduces today's behavior exactly.
-        if self._wait_backend is not None and conn.ipc_events[slot] and conn.doorbell_handle is not None:
-            event_ptr = int(conn.ipc_events[slot].value)
-            db_handle = int(conn.doorbell_handle)
-            # Recomputed fresh every call, never cached: a producer restart tears
-            # down and remaps the SHM segment at a new address (_reinitialize),
-            # and _wait_backend/doorbell are re-resolved at that same point, but
-            # the address itself must still be read live here to be correct even
-            # within a single connection's lifetime (the buffer object is stable
-            # per-connection, but computing it once and reusing it buys nothing
-            # and adds a class of staleness bug for free).
-            write_idx_addr = ctypes.addressof(ctypes.c_char.from_buffer(conn.shm_handle.buf)) + WRITE_IDX_OFFSET
+        evt = conn.ipc_events[slot]
+        if not evt:
+            conn.cuda.synchronize()
+            return (time.perf_counter() - wait_start) * 1_000_000
+
+        # R5: native wait backend — only engaged when resolved AND an open doorbell exists
+        # (the backend needs both to reach its <10us target). Otherwise the Python loop
+        # runs, so CUDALINK_WAIT_BACKEND=python (or any resolution failure) gives the
+        # pre-R5 behavior exactly.
+        if self._wait_backend is not None and conn.doorbell_handle is not None:
+            # write_idx_addr (third argument) is 0: the native side has not read it since
+            # the 2026-07-04 torn-frame fix, and the parameter stays only for its ABI.
             result = self._wait_backend.wait_slot(
-                event_ptr,
-                db_handle,
-                write_idx_addr,
+                int(evt.value),
+                int(conn.doorbell_handle),
+                0,
                 self._last_write_idx,
                 policy.wait_spin_us,
                 int(self._spec.timeout_ms),
             )
-            status_name = result.status.name  # avoid importing WaitStatus in core
-            if status_name == "TIMEOUT":
-                raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
-            if status_name == "READY_SPIN":
-                self.total_wait_spin_us += result.waited_us
-                self.wait_spin_hits += 1
-                self._adaptive_observe_wait(False)
-            else:  # READY_DOORBELL / READY_POLL / READY_LATE(retired) all count as the blocked/slept bucket
-                self.total_wait_sleep_us += result.waited_us
-                self.wait_sleep_hits += 1
-                self._adaptive_observe_wait(status_name == "READY_DOORBELL")
-            return result.waited_us
-
-        if conn.ipc_events[slot]:
-            evt = conn.ipc_events[slot]
-            query = conn.cuda.query_event
-
-            if policy.wait_spin_us > 0:
-                # Clamp spin_deadline to the overall deadline so the loop needs
-                # only one perf_counter() call per iteration — no inner deadline
-                # check required (spin budget << timeout_ms in all practical cases).
-                spin_deadline = min(
-                    wait_start + policy.wait_spin_us / 1_000_000,
-                    deadline,
-                )
-                while (now := time.perf_counter()) < spin_deadline:
-                    if query(evt):
-                        spin_us = (now - wait_start) * 1_000_000
-                        self.total_wait_spin_us += spin_us
-                        self.wait_spin_hits += 1
-                        self._adaptive_observe_wait(False)
-                        return spin_us
-                # If we exited because spin_deadline == deadline, we timed out.
-                if time.perf_counter() >= deadline:
-                    raise ProducerTimeoutError(
-                        f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
-                    )
-
-            phase2_start = time.perf_counter()
-            did_sleep = False
-            with _HighResTimer():
-                while True:
-                    if query(evt):
-                        break
-                    if time.perf_counter() >= deadline:
-                        raise ProducerTimeoutError(
-                            f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
-                        )
-                    time.sleep(0.0001)
-                    did_sleep = True
-            self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
-            self.wait_sleep_hits += 1
-            self._adaptive_observe_wait(did_sleep)
+            status = result.status.name  # avoid importing WaitStatus in core
+            waited_us = blocked_us = result.waited_us
+            # READY_DOORBELL / READY_POLL / READY_LATE(retired) all count as blocked;
+            # only READY_DOORBELL counts as a sleep for the adaptive gpu-wait latch.
+            slept = status == "READY_DOORBELL"
         else:
-            conn.cuda.synchronize()
+            status, waited_us, blocked_us, slept = _python_wait_slot(
+                conn.cuda.query_event, evt, wait_start, policy.wait_spin_us, deadline
+            )
 
-        return (time.perf_counter() - wait_start) * 1_000_000
+        if status == "TIMEOUT":
+            raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+        if status == "READY_SPIN":
+            self.total_wait_spin_us += waited_us
+            self.wait_spin_hits += 1
+            self._adaptive_observe_wait(False)
+        else:
+            self.total_wait_sleep_us += blocked_us
+            self.wait_sleep_hits += 1
+            self._adaptive_observe_wait(slept)
+        return waited_us
 
     # ------------------------------------------------------------------
     # R2: Doorbell wait primitive
@@ -2197,7 +2193,7 @@ class Importer:
 
     def _log_frame_stats(self, mode: str, slot: int, conn: IPCConnection) -> None:
         n = self.frame_count
-        if n > 0 and n % 97 == 0:
+        if n > 0 and n % STATS_LOG_EVERY == 0:
             sync_mode = "GPU-Events" if all(conn.ipc_events) else "CPU-Sync"
             spin_hit_pct = 100.0 * self.wait_spin_hits / n if n > 0 else 0.0
             logger.debug(

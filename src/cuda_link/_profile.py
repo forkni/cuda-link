@@ -7,6 +7,11 @@ from __future__ import annotations
 __all__ = ["FrameProfile", "ReportWindow"]
 
 
+# The Exporter and the Importer write their debug stats line every this many frames.
+# A prime, so the line does not lock onto the ring slot count or a round frame rate.
+STATS_LOG_EVERY = 97
+
+
 class FrameProfile:
     """Accumulates microsecond-level timing per named region.
 
