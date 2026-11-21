@@ -843,62 +843,6 @@ def _make_engine_with_initial_format(format_kind: int, bits: int, channels: int)
             shm.unlink()
 
 
-@pytest.mark.parametrize(
-    "format_kind,bits,channels,expect_flag",
-    [
-        (2, 32, 4, False),  # float32 RGBA — Script TOP default, no set_format needed
-        (2, 32, 1, True),  # float32 mono — r32float != rgba32float → must set par.format
-        (2, 32, 2, True),  # float32 RG   — rg32float != rgba32float → must set par.format
-        (1, 16, 4, True),  # uint16 RGBA  — 16 MB into 32 MB without this → quarter-frame
-        (1, 8, 4, True),  # uint8 RGBA   —  8 MB into 32 MB without this → quarter-frame
-        (1, 16, 1, True),  # uint16 mono  — non-float32 bit depth
-        (1, 8, 1, True),  # uint8 mono   — non-float32 bit depth
-    ],
-    ids=[
-        "float32-rgba",
-        "float32-mono",
-        "float32-rg",
-        "uint16-rgba",
-        "uint8-rgba",
-        "uint16-mono",
-        "uint8-mono",
-    ],
-)
-def test_needs_format_update_at_init(format_kind, bits, channels, expect_flag):
-    """needs_format_update must be True at init for all non-rgba32float formats.
-
-    Part 6 regression: without this, a uint8/uint16 receiver connecting fresh to a
-    non-float32 sender never sets par.format → Script TOP stays float32 → copies
-    partial data into an oversized buffer → corruption on every frame, not just
-    after a mid-stream change.
-
-    Note: float32 mono/RG formats are also non-default (r32float / rg32float ≠
-    rgba32float) and therefore also require an explicit set_format call.
-    """
-    from TDReceiver import td_format_string
-
-    from cuda_link.importer import Format
-    from cuda_link.shm_protocol import Metadata
-
-    md = Metadata(
-        width=1,
-        height=1,
-        num_comps=channels,
-        format_kind=format_kind,
-        bits_per_comp=bits,
-        flags=0,
-        data_size=channels * (bits // 8),
-    )
-    fmt = Format.from_metadata(md)
-    flag_would_be_set = td_format_string(fmt) != "rgba32float"
-    assert flag_would_be_set == expect_flag, (
-        f"format_kind={format_kind}, bits={bits}, channels={channels}: "
-        f"needs_format_update at init should be {expect_flag}, "
-        f"but td_format_string={td_format_string(fmt)!r} produces {flag_would_be_set}.\n"
-        "Only rgba32float matches the Script TOP default and needs no explicit set_format."
-    )
-
-
 # ---------------------------------------------------------------------------
 # consume_pending_format — the fallback-path entry point (Part 5)
 # ---------------------------------------------------------------------------

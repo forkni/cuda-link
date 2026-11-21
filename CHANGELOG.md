@@ -104,6 +104,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.tox` Receiver: Mono+Alpha arrived as RG.** `copyCUDAMemory` makes an RG texture from every
+  2-channel frame, so a `monoalpha*` stream came out with mono in R and alpha in G. A new Reorder
+  TOP `MonoAlphaFix` between `ImportBuffer` and the output puts the channels back on the GPU; it
+  is bypassed for all other formats. The Receiver now also sets the Script TOP format on each
+  connect, also for `rgba32float`. A `.tox` built before this change has no `MonoAlphaFix` and
+  keeps the RG output (`docs/TOX_BUILD_GUIDE.md`, Step 6a).
+- **`.tox`: a saved WARNING or ERROR text stayed in the Status parameter.** A project saved with
+  such a text showed it after the next load until a frame arrived. The component now replaces
+  it with `Idle` when it starts; a condition that still holds is reported again.
+- **Example launchers** (`example_sender_launcher.py`, `example_receiver_launcher.py`): after the
+  Python child exited with an error, the "exited unexpectedly" warning was printed on every
+  frame. It is now printed one time.
+
 - **C++ `cudalink::common::CudaDeviceSession` IPC capability probe** (the C++ port of the
   Python fixes from PR #30): the reference to `cudaDevAttrIpcEventSupport` is now behind
   `#if CUDART_VERSION >= 12000` (the attribute is absent from CUDA 11.x `driver_types.h`),

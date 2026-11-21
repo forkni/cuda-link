@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Lightweight TD stubs (shaped like TD runtime objects)
 # ---------------------------------------------------------------------------
@@ -487,3 +489,85 @@ def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
     assert host.cuda_shapes[0] is s1
     assert host.cuda_shapes[1] is s2
     assert s1 is not s2
+
+
+# ---------------------------------------------------------------------------
+# MonoAlphaFix Reorder TOP (RealTOPHandle.set_format / sync_mono_alpha_fix)
+# ---------------------------------------------------------------------------
+
+
+class _TDFixTOP:
+    """Stub shaped like the MonoAlphaFix Reorder TOP."""
+
+    def __init__(self) -> None:
+        self.par = _TDPar(format="useinput")
+        self.bypass = True
+
+
+def _import_buffer_with_fix(fix: _TDFixTOP | None) -> _TDTOP:
+    comp = _TDComp()
+    if fix is not None:
+        comp._ops["MonoAlphaFix"] = fix  # type: ignore[assignment]
+    top = _TDTOP(name="ImportBuffer")
+    top.parent = lambda: comp  # type: ignore[attr-defined]
+    return top
+
+
+def test_set_format_enables_mono_alpha_fix_for_a_monoalpha_format() -> None:
+    from TDHost import RealTOPHandle
+
+    fix = _TDFixTOP()
+    RealTOPHandle(_import_buffer_with_fix(fix)).set_format("monoalpha8fixed")
+
+    assert fix.bypass is False
+    assert fix.par._attrs["format"]._v == "monoalpha8fixed"
+
+
+def test_set_format_bypasses_mono_alpha_fix_for_other_formats() -> None:
+    from TDHost import RealTOPHandle
+
+    fix = _TDFixTOP()
+    handle = RealTOPHandle(_import_buffer_with_fix(fix))
+    handle.set_format("monoalpha32float")
+    handle.set_format("rg32float")
+
+    assert fix.bypass is True
+    assert fix.par._attrs["format"]._v == "monoalpha32float", "a bypassed TOP keeps its last format"
+
+
+def test_set_format_without_mono_alpha_fix_still_sets_the_format() -> None:
+    """A COMP built before 2.0 has no MonoAlphaFix TOP: set_format must not fail."""
+    from TDHost import RealTOPHandle
+
+    top = _import_buffer_with_fix(None)
+    RealTOPHandle(top).set_format("monoalpha8fixed")
+
+    assert top.par._attrs["format"]._v == "monoalpha8fixed"
+
+
+# ---------------------------------------------------------------------------
+# Stale Status par text from a saved project (RealTDHost.__init__)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "saved",
+    ["WARNING: cuda_link 2.0.0 loaded but the component failed to import it (see Textport)", "ERROR: old"],
+    ids=["warning", "error"],
+)
+def test_real_td_host_replaces_a_saved_warning_or_error_status(saved: str) -> None:
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Status=saved)
+    RealTDHost(comp)
+
+    assert comp.par.Status.eval() == "Idle"
+
+
+def test_real_td_host_keeps_a_saved_info_status() -> None:
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Status="1280x720 rgba8fixed")
+    RealTDHost(comp)
+
+    assert comp.par.Status.eval() == "1280x720 rgba8fixed"

@@ -1031,17 +1031,12 @@ class TDReceiverEngine:
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
             self._pending.resolution = True
 
-            # Flag pixel-format update when the resolved format is anything other than the
-            # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
-            # _cached_shape, but par.format controls the output texture allocation (bit depth
-            # AND channel layout).  Only rgba32float matches the saved/default Script TOP
-            # format and therefore needs no explicit set_format call.  All other formats —
-            # uint8, uint16, AND float32 variants with non-RGBA channel layout (monoalpha32float,
-            # rg32float, r32float, etc.) — must be set explicitly so copyCUDAMemory writes into
-            # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
-            # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
-            if td_format_string(self._format) != "rgba32float":
-                self._pending.format = True
+            # Always flag a pixel-format update on connect. The Script TOP and the MonoAlphaFix
+            # Reorder TOP keep the format of the last stream (or the one the project file saved),
+            # so "rgba32float is the default, skip it" left MonoAlphaFix active after a change
+            # from Mono+Alpha back to RGBA. par.format controls the output texture allocation
+            # (bit depth and channel layout); a write of the same value costs nothing.
+            self._pending.format = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:

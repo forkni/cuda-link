@@ -500,6 +500,15 @@ class CUDAIPCExtension:
             handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
             self._engine.update_receiver_format(handle)
 
+    def sync_mono_alpha_fix(self, import_buffer: TOP, fmt: str) -> None:
+        """Set the MonoAlphaFix Reorder TOP for the pixel format ``fmt`` of ImportBuffer.
+
+        script_top_callbacks calls this after it sets par.format in onCook. The path through
+        update_receiver_format does the same step in TOPHandle.set_format.
+        """
+        if import_buffer is not None:
+            self._host.wrap_top(import_buffer).sync_mono_alpha_fix(fmt)
+
     def is_active(self) -> bool:
         """Delegate to host's active-parameter check (hot-path safe)."""
         return self._host.is_active()

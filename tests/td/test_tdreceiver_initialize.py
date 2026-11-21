@@ -415,9 +415,9 @@ def test_initialize_commits_connection_for_every_slot(monkeypatch: pytest.Monkey
     [
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 4},
-            False,
+            True,
             "float32",
-            id="rgba32float-is-script-top-default",
+            id="rgba32float-resets-a-format-left-by-an-earlier-stream",
         ),
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 2, "flags": FLAGS_MONO_ALPHA},

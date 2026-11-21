@@ -76,7 +76,11 @@ class TOPHandle(Protocol):
         ...
 
     def set_format(self, fmt: str) -> None:
-        """Write top.par.format = fmt."""
+        """Write top.par.format = fmt, then call sync_mono_alpha_fix(fmt)."""
+        ...
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        """Enable the sibling MonoAlphaFix Reorder TOP for a monoalpha ``fmt``, else bypass it."""
         ...
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
@@ -192,6 +196,12 @@ class TDHost(Protocol):
 # ---------------------------------------------------------------------------
 
 
+# Reorder TOP between ImportBuffer and out1. copyCUDAMemory makes an RG texture from every
+# 2-channel CUDAMemoryShape (the shape has no Mono+Alpha layout), so for a Mono+Alpha stream
+# this TOP moves G to alpha and copies R to RGB, on the GPU. For all other formats it is bypassed.
+MONO_ALPHA_FIX_NAME = "MonoAlphaFix"
+
+
 class RealTOPHandle(TOPHandle):
     """Wraps a real TD TOP operator."""
 
@@ -233,6 +243,17 @@ class RealTOPHandle(TOPHandle):
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError, RuntimeError):
             self._top.par.format = fmt
+        self.sync_mono_alpha_fix(fmt)
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            fix = self._top.parent().op(MONO_ALPHA_FIX_NAME)
+            if fix is None:
+                return  # a COMP built before 2.0: the output stays RG
+            wanted = fmt.startswith("monoalpha")
+            if wanted:
+                fix.par.format = fmt
+            fix.bypass = not wanted
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self._top.copyCUDAMemory(ptr, size, shape, stream=stream)
@@ -294,6 +315,7 @@ class RealTDHost(TDHost):
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
         self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
         self._reset_stale_tint()
+        self._reset_stale_status_par()
 
     def param_value(self, name: str) -> Any:
         try:
@@ -381,6 +403,17 @@ class RealTDHost(TDHost):
                 self._comp.color = _DEFAULT_NODE_COLOR
                 self._comp.clearScriptErrors(error="*")
                 self._comp.unstore("cuda_link_status_msg")
+
+    def _reset_stale_status_par(self) -> None:
+        """Replace a WARNING or ERROR text that the project file saved in the Status par.
+
+        The condition behind that text belongs to an earlier session. If it still holds, the
+        extension reports it again; if not, nothing else would clear the text.
+        """
+        with contextlib.suppress(AttributeError, RuntimeError):
+            saved = str(self._comp.par.Status.eval())
+            if saved.startswith(("WARNING:", "ERROR:")):
+                self._write_status_par("Idle")
 
     def _capture_default_color(self) -> None:
         if self._default_color is not None:

@@ -95,6 +95,7 @@ def onCook(scriptOp: object) -> None:
     if fmt is not None:
         try:
             scriptOp.par.format = fmt
+            ext.sync_mono_alpha_fix(scriptOp, fmt)
             ext._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
         except (AttributeError, RuntimeError) as e:
             ext._log(f"Could not set ImportBuffer pixel format in onCook: {e}", force=True)
