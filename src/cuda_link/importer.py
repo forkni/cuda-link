@@ -854,7 +854,7 @@ class BackoffNotice(enum.Enum):
 class _RetryState:
     """Retry policy and transient counters for the connection-attempt loop.
 
-    Mirrors RetryState in td_exporter/TDReceiver.py — keep fields in sync.
+    The .tox Receiver uses this class too (RetryState in td_exporter/TDReceiver.py is an alias).
     """
 
     connect_attempts: int = 0
