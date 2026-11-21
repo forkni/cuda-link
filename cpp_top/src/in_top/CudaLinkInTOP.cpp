@@ -935,6 +935,10 @@ void CudaLinkInTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs,
                     }
                     return;
                 }
+                if (priorStatus != cudaSuccess) {
+                    cudalink::common::appendWarning(myWarning, std::string("an earlier CUDA call left: ") +
+                                                                   cudaGetErrorString(priorStatus));
+                }
                 CUDALINK_CUDA_CHECK_FATAL(cudaMemcpy2DToArrayAsync(outputInfo->cudaArray, 0, 0, scratch,
                                                                    outRowBytes, outRowBytes, outSize.h,
                                                                    cudaMemcpyDeviceToDevice, myStream),

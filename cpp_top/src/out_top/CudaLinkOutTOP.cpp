@@ -794,10 +794,24 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                 // error an earlier call left in the per-thread slot would be blamed on the
                 // kernel. Take it out first and name it in the message instead (as the In TOP).
                 const cudaError_t priorStatus = cudaGetLastError();
-                CUDALINK_CUDA_CHECK_FATAL(cudalink::common::launchResizeConvert(src, dst, bilinear, myStream),
-                                          myError, myFatal);
+                const cudaError_t convertStatus =
+                    cudalink::common::launchResizeConvert(src, dst, bilinear, myStream);
+                if (convertStatus != cudaSuccess) {
+                    myError = std::string("Common page convert failed: ") + cudaGetErrorString(convertStatus);
+                    if (priorStatus != cudaSuccess) {
+                        myError +=
+                            std::string("; an earlier CUDA call left: ") + cudaGetErrorString(priorStatus);
+                    }
+                    if (cudalink::common::isStickyCudaError(convertStatus)) {
+                        myFatal = true;
+                    } else {
+                        cudaGetLastError();
+                    }
+                    return;
+                }
                 if (priorStatus != cudaSuccess) {
-                    myWarning = std::string("an earlier CUDA call left: ") + cudaGetErrorString(priorStatus);
+                    cudalink::common::appendWarning(myWarning, std::string("an earlier CUDA call left: ") +
+                                                                   cudaGetErrorString(priorStatus));
                 }
                 CUDALINK_CUDA_CHECK_FATAL(cudaEventRecord(mySlotEvents[slot], myStream), myError, myFatal);
             } else {
@@ -862,15 +876,17 @@ void CudaLinkOutTOP::execute(TD::TOP_Output* output, const TD::OP_Inputs* inputs
                     myPassTimer.recordStop(passTimerIdx, myStream);
                 }
                 if (passThroughStatus != cudaSuccess) {
-                    myWarning = std::string("pass-through output copy failed: ") +
-                                cudaGetErrorString(passThroughStatus);
+                    cudalink::common::appendWarning(myWarning,
+                                                    std::string("pass-through output copy failed: ") +
+                                                        cudaGetErrorString(passThroughStatus));
                     // Clear the per-thread slot, or the next cook's convert reports this
                     // error as its own and drops that frame. A sticky error stays set anyway
                     // and latches at the next CUDALINK_CUDA_CHECK_FATAL.
                     cudaGetLastError();
                 }
             } else {
-                myWarning = "createCUDAArray failed (pass-through output unavailable this cook)";
+                cudalink::common::appendWarning(
+                    myWarning, "createCUDAArray failed (pass-through output unavailable this cook)");
             }
 
             // Deliberately no CPU-blocking cudaStreamSynchronize here. An earlier revision

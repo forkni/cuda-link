@@ -44,9 +44,25 @@ inline bool isStickyCudaError(cudaError_t status) {
         case cudaErrorLaunchFailure:       // 719
         case cudaErrorUnknown:             // 999
             return true;
+        // Same "inconsistent state" text in the CUDA 12.8 driver_types.h. Numbers, not names:
+        // CI builds with CUDA 12.6, whose headers may not have every name.
+        case static_cast<cudaError_t>(226): // cudaErrorContained
+        case static_cast<cudaError_t>(721): // cudaErrorTensorMemoryLeak
+        case static_cast<cudaError_t>(911): // cudaErrorExternalDevice
+            return true;
         default:
             return false;
     }
+}
+
+} // namespace cudalink::common
+
+namespace cudalink::common {
+
+// Adds a warning to 'warning', after any warning already set this cook ("; " between them).
+inline void appendWarning(std::string& warning, const std::string& text) {
+    if (!warning.empty()) warning += "; ";
+    warning += text;
 }
 
 } // namespace cudalink::common

@@ -109,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page convert) made the node show "fatal CUDA error latched" until it was recreated. Found on
   2026-11-21: a new In TOP added from the CUSTOM tab joined the example Python sender's
   1920x1080 stream and latched in its first cook. Now only the errors the CUDA Runtime API reference
-  calls process-corrupting (700, 702, 710, 714-719, and 999) latch. Any other error is shown for
+  calls process-corrupting (226, 700, 702, 710, 714-719, 721, 911, and 999) latch. Any other error is shown for
   that cook, the CUDA last-error slot is cleared, and the next cook tries again.
 - **C++ TOPs: the latch message keeps the error that caused it.** `execute()` replaced the
   real error with the latch text one frame later, so `last_error` in the Info DAT could only show
@@ -169,13 +169,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **C++ TOPs: new default `Ipcmemname` `cudalink_ipc_CPP`** (Out TOP and In TOP). The old
   defaults were the example streams (`cudalink_ipc_TD>>Python` for the Out TOP,
   `cudalink_ipc_Python>>TD` for the In TOP), so a new node joined someone else's stream at once.
-  An Out TOP in one TD and an In TOP in another now share a name with no typing. Saved projects
-  keep the name they hold.
+  An Out TOP in one TD and an In TOP in another now share a name with no typing. TD saves only
+  the values that differ from the default, so a saved node that kept the old default name can
+  load with `cudalink_ipc_CPP`. After the upgrade, set `Ipcmemname` again on those nodes.
 - **C++ TOPs: the parameter page "CUDA Link" is now "Settings"** (Out TOP and In TOP). The
   parameter names do not change, so saved projects keep their values.
 - **C++ TOPs: `Active` is Off on a new node** (Out TOP and In TOP). A new node used to connect
-  the moment it was created. Turn it on after you set `Ipcmemname`. Saved projects keep their
-  value.
+  the moment it was created. Turn it on after you set `Ipcmemname`. A saved node that kept the
+  old default (On) can load Off, for the same reason as `Ipcmemname`: turn it on again.
 - **C++ TOPs: CUDA graph path and `CUDALINK_CPP_USE_GRAPHS` removed.** The path was opt-in and
   gave no gain with `Debug` off (measured 2026-11-17, ADR-0010 and ADR-0011). The Info CHOP
   channels `graph_hits` and `graph_builds` are removed from both TOPs (breaking for a network

@@ -34,7 +34,8 @@ int check_latch_policy() {
     for (cudaError_t sticky :
          {cudaErrorIllegalAddress, cudaErrorLaunchTimeout, cudaErrorAssert, cudaErrorHardwareStackError,
           cudaErrorIllegalInstruction, cudaErrorMisalignedAddress, cudaErrorInvalidAddressSpace,
-          cudaErrorInvalidPc, cudaErrorLaunchFailure, cudaErrorUnknown}) {
+          cudaErrorInvalidPc, cudaErrorLaunchFailure, cudaErrorUnknown, static_cast<cudaError_t>(226),
+          static_cast<cudaError_t>(721), static_cast<cudaError_t>(911)}) {
         if (!isStickyCudaError(sticky)) ++failures;
     }
     for (cudaError_t plain : {cudaSuccess, cudaErrorInvalidValue, cudaErrorInvalidConfiguration,

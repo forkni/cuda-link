@@ -88,8 +88,9 @@ private:
     // process (cudaDeviceReset() is NOT an option here -- it destroys all CUDA resources in
     // this process, which would also kill TD's own CUDA state).
     bool myFatal = false;
-    // The error that set myFatal (ctor reason, or the hot-path error kept from myLastError
-    // on the first latched cook). Shown in the latch message and in last_error.
+    // The error that set myFatal: the ctor reason, or the hot-path error, taken on the first
+    // latched cook from myError (or from myLastError when getErrorString() already moved it).
+    // Shown in the latch message and in last_error.
     std::string myFatalError;
 
     // Cached parameter values for the change-detection diff above.
