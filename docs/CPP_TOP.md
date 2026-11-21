@@ -148,7 +148,7 @@ The tool is built with the TOPs. The `--file` form also works on Linux.
 
 ## Out TOP parameters
 
-These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
 (see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
@@ -168,7 +168,7 @@ example 4K float32, makes the copy expensive.
 
 ## In TOP parameters
 
-These parameters are on the page "CUDA Link". The TOP also has the pages "Info" and "Common"
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
 (see "Info page" and "Common page" below).
 
 | Name | Label | Type | Default | Use |
@@ -211,7 +211,7 @@ About `Framewaitms`:
 
 ## Info page
 
-Both TOPs have an "Info" page after "CUDA Link". Its parameters have the names of the `.tox`
+Both TOPs have an "Info" page after "Settings". Its parameters have the names of the `.tox`
 Info page, so a script that reads one also reads the other.
 
 | Name | Label | Value |

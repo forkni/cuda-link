@@ -164,6 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cudalink_ipc_Python>>TD` for the In TOP), so a new node joined someone else's stream at once.
   An Out TOP in one TD and an In TOP in another now share a name with no typing. Saved projects
   keep the name they hold.
+- **C++ TOPs: the parameter page "CUDA Link" is now "Settings"** (Out TOP and In TOP). The
+  parameter names do not change, so saved projects keep their values.
 - **C++ TOPs: `Active` is Off on a new node** (Out TOP and In TOP). A new node used to connect
   the moment it was created. Turn it on after you set `Ipcmemname`. Saved projects keep their
   value.

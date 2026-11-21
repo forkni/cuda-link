@@ -38,7 +38,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_StringParameter p;
         p.name = IpcmemnameName;
         p.label = IpcmemnameLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         // Same default as CudaLinkOutTOP, so a new Out/In pair connects with no typing. Not
         // the Python example's name: a new In TOP used to join the example Python sender's
         // stream (cudalink_ipc_Python>>TD) the moment it was created.
@@ -52,7 +52,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = ActiveName;
         p.label = ActiveLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         // Off on a new node: it connects only after the user sets the IPC Mem Name and
         // turns it on (2026-11-21: a new node joined a live stream the moment it was created).
         p.defaultValues[0] = 0.0;
@@ -65,7 +65,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = DebugName;
         p.label = DebugLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         p.defaultValues[0] = 0.0;
 
         TD::OP_ParAppendResult res = manager->appendToggle(p);
@@ -81,7 +81,7 @@ void Parameters::setup(TD::OP_ParameterManager* manager) {
         TD::OP_NumericParameter p;
         p.name = FramewaitName;
         p.label = FramewaitLabel;
-        p.page = "CUDA Link";
+        p.page = "Settings";
         p.defaultValues[0] = static_cast<double>(kFramewaitDefault);
         p.minValues[0] = static_cast<double>(kFramewaitMin);
         p.maxValues[0] = static_cast<double>(kFramewaitMax);
