@@ -46,6 +46,31 @@ def test_sender_config_from_env_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg == TDSenderConfig()
 
 
+def test_sender_config_from_env_report_every_and_doorbell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two knobs the engine used to read from the environment itself come through the config."""
+    from TDConfig import TDSenderConfig
+
+    assert TDSenderConfig().report_every == 150
+    assert TDSenderConfig().doorbell is True
+
+    monkeypatch.setenv("CUDALINK_SENDER_REPORT_EVERY", "50")
+    monkeypatch.setenv("CUDALINK_DOORBELL", "0")
+    cfg = TDSenderConfig.from_env()
+    assert cfg.report_every == 50
+    assert cfg.doorbell is False
+
+
+def test_receiver_config_from_env_report_every(monkeypatch: pytest.MonkeyPatch) -> None:
+    from TDConfig import TDReceiverConfig
+
+    monkeypatch.delenv("CUDALINK_RECEIVER_REPORT_EVERY", raising=False)
+    assert TDReceiverConfig.from_env() == TDReceiverConfig()
+    assert TDReceiverConfig().report_every == 150
+
+    monkeypatch.setenv("CUDALINK_RECEIVER_REPORT_EVERY", "30")
+    assert TDReceiverConfig.from_env().report_every == 30
+
+
 def test_sender_config_from_env_export_sync_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     """CUDALINK_EXPORT_SYNC absent → None (auto-select by topology)."""
     from TDConfig import TDSenderConfig
@@ -202,14 +227,15 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
     ext = object.__new__(CUDAIPCExtension)
     ext._host = MagicMock()
     ext._config = TDSenderConfig()
+    ext._receiver_config = TDReceiverConfig(report_every=7)
     ext._mode = "Receiver"
     ext._device = 0
     ext._runtime_state = TDRuntimeState(shm_name="test", num_slots=3, verbose=False)
     ext._log = lambda msg, force=False: None
 
     engine = ext._make_engine()
-    assert isinstance(engine._config, TDReceiverConfig), (
-        "_make_engine() must pass TDReceiverConfig() to TDReceiverEngine, not TDSenderConfig"
+    assert engine._config is ext._receiver_config, (
+        "_make_engine() must pass the receiver config resolved in __init__, not TDSenderConfig"
     )
 
 

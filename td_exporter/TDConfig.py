@@ -41,6 +41,8 @@ class TDSenderConfig:
     stream_high_prio: bool = False
     activation_barrier: bool = True
     barrier_settle_frames: int = 30
+    report_every: int = 150  # published frames between two Debug summary lines
+    doorbell: bool = True  # signal the Win32 named-event doorbell on each publish
 
     @classmethod
     def from_env(cls) -> TDSenderConfig:
@@ -53,6 +55,10 @@ class TDSenderConfig:
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
+            report_every=env_int("CUDALINK_SENDER_REPORT_EVERY", default=150),
+            # Default ON (2.0.0), same as ExportPolicy.from_env(): a C++ In TOP with
+            # Framewaitms > 0 waits on it. One waiter per signal; Windows-only.
+            doorbell=env_bool("CUDALINK_DOORBELL", default=True),
         )
 
     def __post_init__(self) -> None:
@@ -64,10 +70,14 @@ class TDSenderConfig:
 
 @dataclass(frozen=True)
 class TDReceiverConfig:
-    """Immutable receiver configuration.
+    """Immutable receiver configuration, resolved once at init time."""
 
-    No env vars are Receiver-only at present; placeholder for future additions.
-    """
+    report_every: int = 150  # shown frames between two Debug summary lines
+
+    @classmethod
+    def from_env(cls) -> TDReceiverConfig:
+        """Build a config from environment variables (production path)."""
+        return cls(report_every=env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150))
 
 
 @dataclass

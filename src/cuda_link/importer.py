@@ -46,8 +46,7 @@ from .cuda_runtime_types import (
 from .shm_protocol import (
     EMPTY_SLOT_META,
     IPC_HANDLE_SIZE,
-    MAGIC_OFFSET,
-    MAGIC_SIZE,
+    MAX_SLOTS,
     PROTOCOL_MAGIC,
     SAME_PROCESS_MESSAGE,
     WRITE_IDX_OFFSET,
@@ -59,7 +58,9 @@ from .shm_protocol import (
     SlotState,
     acquire_slot,
     is_same_process_sender,
+    is_valid_num_slots,
     protocol_mismatch_message,
+    read_magic,
     read_num_slots,
     read_sender_pid,
     read_version,
@@ -297,13 +298,13 @@ class IPCConnection:
     """
 
     cuda: ImporterCudaPort
-    shm_handle: object  # SharedMemory | None after close()
+    shm_handle: SharedMemory | None  # None after close()
     ipc_version: int
     num_slots: int
-    ipc_handles: list
-    dev_ptrs: list  # [c_void_p | None]
-    ipc_events: list  # [event_t | None]
-    layout: object  # SHMLayout
+    ipc_handles: list[Any]  # cudaIpcMemHandle_t per slot (None until read)
+    dev_ptrs: list[Any]  # c_void_p per slot (None after close_ipc_handles())
+    ipc_events: list[Any]  # CUDA event per slot (None when the sender published none)
+    layout: SHMLayout
     shutdown_offset: int
     # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
     doorbell_handle: object = None
@@ -1230,7 +1231,7 @@ class Importer:
         logger.info("Opened SharedMemory: %s", self._spec.shm_name)
 
         try:
-            magic = struct.unpack("<I", bytes(shm.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]))[0]
+            magic = read_magic(shm.buf)
         except (struct.error, ValueError, IndexError):
             shm.close()
             raise
@@ -1246,9 +1247,9 @@ class Importer:
         ipc_version = read_version(shm.buf)
         num_slots = read_num_slots(shm.buf)
 
-        if num_slots == 0 or num_slots > 10:
+        if not is_valid_num_slots(num_slots):
             shm.close()
-            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
+            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–{MAX_SLOTS})")
 
         shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:

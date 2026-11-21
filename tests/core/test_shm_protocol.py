@@ -1140,3 +1140,63 @@ def test_protocol_mismatch_message_names_v05_magic_read_from_the_segment() -> No
     buf[0:4] = b"DPIC"  # "CIPD", the v0.5 magic, little-endian on the wire
     msg = protocol_mismatch_message(read_magic(buf))
     assert msg == "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6"
+
+
+# ---------------------------------------------------------------------------
+# Header write helpers and the slot limit
+# ---------------------------------------------------------------------------
+
+
+def test_write_header_writes_magic_num_slots_zero_write_idx_and_pid() -> None:
+    from cuda_link.shm_protocol import write_header
+
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    buf[:SHM_HEADER_SIZE] = b"\xff" * SHM_HEADER_SIZE  # stale bytes from an earlier session
+
+    write_header(buf, 3, 4321)
+
+    assert read_magic(buf) == PROTOCOL_MAGIC
+    assert read_num_slots(buf) == 3
+    assert read_write_idx(buf) == 0
+    assert read_sender_pid(buf) == 4321
+
+
+def test_write_header_leaves_the_version_for_bump_version() -> None:
+    """The sender bumps the version last; write_header must not move it."""
+    from cuda_link.shm_protocol import VERSION_OFFSET, VERSION_SIZE, read_version, write_header
+
+    layout = SHMLayout(num_slots=2)
+    buf = _make_buf(layout)
+    buf[VERSION_OFFSET : VERSION_OFFSET + VERSION_SIZE] = (7).to_bytes(VERSION_SIZE, "little")
+
+    write_header(buf, 2, 1)
+
+    assert read_version(buf) == 7
+
+
+def test_clear_slot_zeroes_one_slot_only() -> None:
+    from cuda_link.shm_protocol import clear_slot
+
+    layout = SHMLayout(num_slots=3)
+    buf = _make_buf(layout)
+    buf[:] = b"\xaa" * len(buf)
+
+    clear_slot(buf, layout, 1)
+
+    base = layout.slot_offset(1)
+    assert bytes(buf[base : base + SLOT_SIZE]) == bytes(SLOT_SIZE)
+    assert bytes(buf[layout.slot_offset(0) : base]) == b"\xaa" * SLOT_SIZE
+    assert bytes(buf[base + SLOT_SIZE : base + 2 * SLOT_SIZE]) == b"\xaa" * SLOT_SIZE
+
+
+@pytest.mark.parametrize(
+    ("num_slots", "valid"),
+    [(0, False), (1, True), (10, True), (11, False), (-1, False)],
+    ids=["zero", "lowest", "highest", "one-above", "negative"],
+)
+def test_is_valid_num_slots_bounds(num_slots: int, valid: bool) -> None:
+    from cuda_link.shm_protocol import MAX_SLOTS, is_valid_num_slots
+
+    assert MAX_SLOTS == 10
+    assert is_valid_num_slots(num_slots) is valid
