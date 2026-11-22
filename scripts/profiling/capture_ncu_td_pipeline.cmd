@@ -101,7 +101,6 @@ SET "OUT_DIR=%REPO_ROOT%\benchmarks\results\ncu\%TS%"
 IF NOT EXIST "%OUT_DIR%" MKDIR "%OUT_DIR%"
 
 :: --- v5 async-flush-probe env (matches scripts\probes\v5_capture_producer.cmd:61-67)
-SET CUDALINK_TD_PERSIST_STREAM=1
 SET CUDALINK_TD_STREAM_PRIO=normal
 SET CUDALINK_EXPORT_SYNC=0
 SET CUDALINK_EXPORT_FLUSH_PROBE=1
@@ -161,7 +160,7 @@ ECHO  Pass       : %PASS% (empty = HW pass)
 ECHO  Launch cnt : %LAUNCH_COUNT%
 ECHO  Output     : %OUT_DIR%\sender.ncu-rep
 ECHO  .toe       : %TOE%
-ECHO  Env        : EXPORT_SYNC=0  FLUSH_PROBE=1  PERSIST_STREAM=1
+ECHO  Env        : EXPORT_SYNC=0  FLUSH_PROBE=1
 ECHO  Timeline   : 20 s warmup + 25 s capture = 45 s total
 ECHO ============================================================
 ECHO.

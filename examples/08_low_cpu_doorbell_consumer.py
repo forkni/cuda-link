@@ -14,7 +14,8 @@ HOW THE DOORBELL WORKS
         and signals it after every published frame.
       * The CONSUMER opens it at Importer.open(ImportPolicy(doorbell=True))
         and blocks in wait_for_doorbell(timeout_ms).
-      * BOTH sides must opt in.  If the producer never created the event,
+      * BOTH sides need it on (the default since 2.0.0).  If the producer
+        never created the event (a 1.x or doorbell=False producer),
         wait_for_doorbell() returns False immediately and you are back to
         polling — the degradation is automatic, no error.
     Auto-reset = single consumer: each signal wakes exactly ONE waiter.  Two
@@ -122,7 +123,7 @@ def main() -> int:
     # ------------------------------------------------------------------
     _common.banner("Open Importer (doorbell=True)")
     policy = (
-        # Production defaults + the doorbell opt-in.
+        # Production defaults (doorbell=True is the default since 2.0.0).
         ImportPolicy(doorbell=True)
         if is_real
         # for_testing() strips driver-dependent machinery for the fake; the

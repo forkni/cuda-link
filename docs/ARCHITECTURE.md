@@ -100,13 +100,13 @@ Both directions share the **same v0.6 binary protocol** — the consumer is symm
 The TouchDesigner extension (`CUDAIPCExtension`) uses a **facade-with-delegation** pattern to keep Sender and Receiver concerns in separate engine classes.
 
 ```text
-CUDAIPCExtension  (~300 LOC facade)
+CUDAIPCExtension  (facade)
 ├── TDHost / RealTDHost         ← adapter: isolates all ownerComp.par.*, op(), cudaMemory() calls
-├── TDSenderConfig              ← frozen dataclass: all CUDALINK_* env-var reads in one place
+├── TDSenderConfig              ← frozen dataclass: the TD Sender's CUDALINK_* env-var reads
 └── _engine: TDSenderEngine | TDReceiverEngine
-      ├── TDSenderEngine (~415 LOC thin adapter) ← TD pixel-format bridging + GpuFrame bridge;
-      │     delegates GPU alloc / SHM write / IPC export / CUDA graphs to Exporter
-      └── TDReceiverEngine (~1070 LOC) ← owns SHM attach, IPC open, copyCUDAMemory calls
+      ├── TDSenderEngine (thin adapter) ← TD pixel-format bridging + GpuFrame bridge;
+      │     delegates GPU alloc / SHM write / IPC export to Exporter (CUDA graphs off in the .tox)
+      └── TDReceiverEngine ← owns SHM attach, IPC open, copyCUDAMemory calls
 ```
 
 **Mode switching** tears down the current engine and constructs a fresh one — guaranteeing zero cross-mode state leak. The old engine's `cleanup()` is called first, which frees all CUDA resources before the new engine is constructed.
@@ -289,10 +289,9 @@ slot = (write_idx - 1) % NUM_SLOTS  # same rule as publish_frame / acquire_slot
 
 ```python
 write_idx = read_from_shm()  # Current write_idx
-if write_idx == 0:
-    read_slot = 0  # Special case: no frames written yet
-else:
-    read_slot = (write_idx - 1) % NUM_SLOTS
+if write_idx == 0 or write_idx == last_write_idx:
+    return NO_FRAME  # no frames written yet, or no new frame
+read_slot = (write_idx - 1) % NUM_SLOTS
 # Read frame data from gpu_buffer[read_slot]
 ```
 
@@ -300,12 +299,12 @@ else:
 
 | write_idx | Producer Slot | Consumer Slot |
 |-----------|---------------|---------------|
-| 0         | (init)        | 0 (special)   |
-| 1         | 1             | 0             |
-| 2         | 2             | 1             |
-| 3         | 0 (wraps)     | 2             |
-| 4         | 1             | 0             |
-| 5         | 2             | 1             |
+| 0         | (init)        | NO_FRAME      |
+| 1         | 0             | 0             |
+| 2         | 1             | 1             |
+| 3         | 2             | 2             |
+| 4         | 0 (wraps)     | 0             |
+| 5         | 1             | 1             |
 
 ---
 
@@ -478,13 +477,14 @@ automatically re-captured, then replayed for subsequent frames.  Auto-fallback t
 ### R1: torch GPU-side wait opt-in (v1.11.0)
 
 When `CUDALINK_TORCH_GPU_WAIT=1`, the torch consumer path replaces the host-side
-`cudaEventSynchronize` on the IPC producer event with a GPU-resident dependency edge via
-`cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
+`cudaEventQuery` spin/sleep wait (or the native wait backend) on the IPC producer event with a
+GPU-resident dependency edge via `cudaStreamWaitEvent` on the consumer stream.  This eliminates the CPU round-trip that WDDM
 batches into a multi-hundred-microsecond stall.
 
 ```text
 Default (CUDALINK_TORCH_GPU_WAIT=0):
-  cudaEventSynchronize(ipc_event[slot])              <- CPU blocks until GPU signal, ~50-200 us WDDM-batched
+  cudaEventQuery(ipc_event[slot]) spin, then sleep   <- CPU waits for GPU signal, ~50-200 us WDDM-batched
+  (or the R5 native wait backend when it is active)
 
 R1 GPU-side wait (CUDALINK_TORCH_GPU_WAIT=1):
   cudaStreamWaitEvent(consumer_stream, ipc_event[slot])  <- GPU dependency, ~0.5-2 us CPU overhead
@@ -493,8 +493,9 @@ R1 GPU-side wait (CUDALINK_TORCH_GPU_WAIT=1):
 
 Gain: ~50–200 µs/frame depending on WDDM batch timing; safe alongside CUDA Graphs.
 
-**Adaptive latch** (`CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`): monitors per-frame event-wait time and
-permanently enables GPU-side wait after three consecutive frames exceed the heuristic threshold —
+**Adaptive latch** (`CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`): counts the event waits that slept and
+permanently enables GPU-side wait when that count reaches ceil(window × pct / 100) inside a
+tumbling window (`CUDALINK_GPU_WAIT_ADAPTIVE_WINDOW`, `CUDALINK_GPU_WAIT_ADAPTIVE_SLEEP_PCT`) —
 no manual `CUDALINK_TORCH_GPU_WAIT=1` required.  One-way: once latched it stays enabled for the
 session lifetime.
 
@@ -517,12 +518,12 @@ Producer (after advancing write_idx):
   SetEvent(doorbell_handle)                      <- ~0.02-0.10 ms, cook-thread safe, no FPS dip
 
 Consumer (idle -- get_frame() returned NO_FRAME):
-  importer.wait_for_doorbell(timeout_secs=2.0)   <- blocks on WaitForSingleObject, wakes on SetEvent
+  importer.wait_for_doorbell(timeout_ms=2000)    <- blocks on WaitForSingleObject, wakes on SetEvent
 ```
 
 **Lost-wakeup guard**: before blocking, `wait_for_doorbell` re-checks `write_idx`.  If the
 producer advanced `write_idx` between the `get_frame()` poll and the `WaitForSingleObject` call,
-the function returns immediately — preventing a stall of up to `timeout_secs`.
+the function returns immediately — preventing a stall of up to `timeout_ms`.
 
 **Measured gains** (TD Sender → Python subprocess, 60 FPS):
 
@@ -533,10 +534,11 @@ the function returns immediately — preventing a stall of up to `timeout_secs`.
 **Scope and limitations**:
 
 - Windows-only (`CreateEventW` / `WaitForSingleObject`).
-- Single consumer only — one `SetEvent` releases exactly one waiter.
-- `TDReceiver.py` (in-TD COMP on the cook thread) is **excluded** from doorbell wiring; it returns
-  immediately on `NO_FRAME` and must not block in a cook context.
-- Env var propagates across `subprocess.Popen` boundaries.
+- One `SetEvent` releases exactly one waiter. A second consumer of the same event can take the
+  signal; the wait polls `write_idx` after each 1 ms slice, so a taken signal costs one slice.
+- `TDReceiver.py` (in-TD COMP on the cook thread) waits up to `Framewaitms` (default 3 ms,
+  range 0-8, 0 = off) on the doorbell in 1 ms slices when no new frame is ready, then repeats
+  the frame.
 
 ---
 
@@ -925,7 +927,7 @@ AI inference into a 60 FPS TD project).
 
 See the dedicated subsections in **GPU Synchronization → R1** and **GPU Synchronization → R2** above for full architecture detail.  Summary:
 
-- **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing host-side `cudaEventSynchronize` with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
+- **R1** (`CUDALINK_TORCH_GPU_WAIT=1`): ~50–200 µs/frame gain on torch path by replacing the host-side `cudaEventQuery` spin/sleep wait with a GPU-resident `cudaStreamWaitEvent`.  Adaptive auto-enable latch available via `CUDALINK_TORCH_GPU_WAIT_ADAPTIVE=1`.
 - **R2** (always on since 2.0.0): Win32 named-event replaces poll-sleep on the consumer idle path; CPU ~3-4% → ~0.3-1%, notify latency p95 ~10× tighter.  Single-consumer, Windows-only.
 - **R3**: pinned-memory f16 fallback in CuPy wait path — prevents dtype mismatch on f16 producers.
 
@@ -959,9 +961,8 @@ See `docs/adr/` for the full Architecture Decision Record index:
 
 1. **Adaptive slot count**: Automatically increase slots under high load.
 2. **Multi-consumer support**: Multiple Python processes reading from one producer.
-3. **Timeout on IPC event wait**: Prevent consumer hang if producer crashes mid-frame.
 
 ---
 
-**Last Updated**: 2026-09-26
-**Version**: 1.14.1
+**Last Updated**: 2026-11-22
+**Version**: 2.0.0

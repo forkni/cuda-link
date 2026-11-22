@@ -44,7 +44,7 @@ Movie File In TOP → CUDAIPCExtension (Mode=Sender)
 import torch
 from cuda_link import Importer, ImportSpec, ImportOutcome
 
-# Initialize importer — waits up to 5 s for the TD sender to appear
+# Initialize importer — returns at once; get_frame() connects when the TD sender appears
 with Importer.open(
     ImportSpec(
         shm_name="ai_input",
@@ -438,7 +438,7 @@ exporter = Exporter.open(
         width=WIDTH,
         channels=4,  # BGRA/RGBA
         dtype="uint8",  # uint8 is typical for display
-        num_slots=2,  # Double-buffer (default)
+        num_slots=3,  # Triple-buffer (default)
     )
 )
 
@@ -486,20 +486,14 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 1. **Add `TOXES/CUDAIPCLink_v2.0.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
-4. **Add a Script TOP** as the import target
-5. **Wire**: Script TOP → your display chain
-
-In the Script TOP's `onCook` callback:
-
-```python
-def onCook(scriptOp):
-    ext.CUDAIPCExtension.import_frame(scriptOp)
-```
+4. **Use the built-in output**: the component already holds the `ImportBuffer` Script TOP,
+   wired `ImportBuffer` → `MonoAlphaFix` → `out1`. Do not add your own Script TOP.
+5. **Wire**: the COMP's TOP output → your display chain
 
 **TouchDesigner Network**:
 
 ```text
-Script TOP (receives AI frames via IPC)
+CUDAIPCLink COMP (Receiver; AI frames on its TOP output)
     → Composite TOP
     → Out TOP
 ```
@@ -677,13 +671,12 @@ with Importer.open(ImportSpec(shm_name="my_channel")) as importer:
 
 **Cause**: Python started before TD exporter initialized.
 
-**Solution**: `ImportSpec.timeout_ms` (default 5 000 ms) provides automatic retry with
-exponential backoff — the importer polls until the sender appears or the timeout elapses.
-Increase `timeout_ms` if TD takes longer to initialize:
-
-```python
-importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
-```
+**Solution**: `Importer.open()` does not wait for the sender. With reconnect on (the
+default), it returns at once, and each `get_frame*()` call tries to connect again, with a
+back-off counted in frames. Keep calling `get_frame()` until the outcome is `NEW_FRAME`.
+The error shows only when reconnect is off (`CUDALINK_IMPORT_RECONNECT=0`).
+`ImportSpec.timeout_ms` (default 5 000 ms) does not change this: it bounds the wait for
+the GPU event of one slot.
 
 ### Issue: Black frames or stale data
 
@@ -697,7 +690,8 @@ importer = Importer.open(ImportSpec(shm_name="ai_input", timeout_ms=30_000.0))
 
 **Solution**:
 
-1. Enable IPC events in TD (`Numslots`=3)
+1. Enable **Debug** in TD and read `export=... µs avg` in the `Frame` summary line (IPC
+   events are always on)
 2. Profile AI model: `torch.cuda.synchronize()` before/after inference
 3. Check GPU utilization: `nvidia-smi` should show ~90%+ for real-time AI
 

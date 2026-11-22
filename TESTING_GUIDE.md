@@ -8,18 +8,21 @@ when they do.
 - Suite layout: `tests/{core,cuda,integration,support,td}` next to `src/` and `td_exporter/`.
 - Config: single source of truth in `pyproject.toml` (`[tool.pytest.ini_options]`,
   `[tool.coverage.*]`). No `pytest.ini`, no `sys.path` hacks in `conftest.py`.
-- GPU (`requires_cuda`) and native (`requires_native`) tests are **deliberately
-  local-only** — this is a public repo and self-hosted GPU runners are excluded by
-  policy. CI runs the deselected suite on ubuntu (Python 3.10/3.11/3.12).
+- GPU (`requires_cuda`) tests are **deliberately local-only** — this is a public repo
+  and self-hosted GPU runners are excluded by policy. Native (`requires_native`) tests
+  need only the compiled extension: `native-build.yml` runs
+  `tests/core/test_native_state_machine.py -m requires_native` on Windows when the C++
+  sources change. The `ci.yml` test job runs the deselected suite on ubuntu
+  (Python 3.9-3.12) and windows-2025 (Python 3.11/3.12).
 
 ## Running the suite
 
 ```bash
-# Fast loop (what CI runs, minus coverage):
+# Fast loop (no GPU, no native extension):
 python -m pytest tests/ -m "not requires_cuda and not requires_native" -q
 
-# With coverage (CI invocation — always whole-package, never a dotted submodule):
-python -m pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link -q
+# CI invocation (ci.yml; coverage is always whole-package, never a dotted submodule):
+python -m pytest tests/ -m "not requires_cuda and not requires_native and not integration and not quarantine" --cov=cuda_link --cov-branch -q
 
 # Full suite including GPU/native (local machine with CUDA + built extension):
 python -m pytest tests/ -q
@@ -1163,9 +1166,10 @@ there is the resistance to refactoring the rewrite buys.
 
 ### Phase J, Windows follow-up (2026-11-18)
 
-Items A1-A5 of [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md), run on the Windows
-box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept:
-`uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
+Items A1-A5 of the Phase J plan ([`TESTING_PHASE_J_PLAN.md`](https://github.com/forkni/cuda-link/blob/82ad70847a9227891390d4bade602a59848be4e4/docs/TESTING_PHASE_J_PLAN.md),
+removed from the tree at the 2.0.0 release), run on the Windows box at `c21fa14`: RTX 4090,
+driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept: `uv run --no-sync`;
+`hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
 
 | Item | Command | Result |
 |------|---------|--------|
@@ -1190,7 +1194,8 @@ against the v0.6 rows, re-run once and not blocking. Tables and notes:
 ### Still open
 
 The full list, with the Windows-only checks and a ready-to-paste message for the agent that
-finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
+finishes them, is the Phase J plan,
+[`TESTING_PHASE_J_PLAN.md`](https://github.com/forkni/cuda-link/blob/82ad70847a9227891390d4bade602a59848be4e4/docs/TESTING_PHASE_J_PLAN.md) (commit `82ad708`).
 
 | Item | What | Notes |
 |------|------|-------|
@@ -1203,7 +1208,7 @@ finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
 | `pytest-xdist -n auto` | fast loop > ~5 min | no-GPU 18-20 s (Linux, Phase J), full GPU suite ~29 s (Windows, last measured Phase H) — far below |
 | `pytest-split` sharding | per-runner > ~10 min after xdist | n/a |
 | Test tiering (unit/slow dirs) | fast loop > 30 s | no-GPU 18-20 s on Linux (Phase J); full GPU suite ~29 s, local-only (Phase H) |
-| `@pytest.mark.slow` markers | individual test > 5 s | slowest 1.9-4.5 s (the two subprocess `-O` import tests, warm vs cold interpreter cache; Phase J, Linux). Was 22.5 s for the GPU roundtrips before H1 |
+| `@pytest.mark.slow` gate | individual test > 5 s | The marker is registered and set on the GPU roundtrip/integration tests (`test_integration.py`, `test_roundtrip.py`), but no gate deselects it. Slowest 1.9-4.5 s (the two subprocess `-O` import tests, warm vs cold interpreter cache; Phase J, Linux). Was 22.5 s for the GPU roundtrips before H1 |
 | Snapshot testing (syrupy) | complex pure outputs hard to assert by hand | none exist |
 | New mutation targets | module's mock density approaches zero | backlog above. Re-run whenever a target changes: J2 (`shm_protocol`) and J5 (port modules) were re-runs after v0.6 |
 | Self-hosted GPU runner | **never** — public repo, excluded by policy | GPU tests local-only |
@@ -1211,5 +1216,5 @@ finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
 | `Exporter.export` (CC 43) / `_do_cleanup` (CC 26) Humble-Object split | Complexity ratchet driven below 26 | Both over the CRAP-30 ceiling on complexity alone — see F3. Phase J: ruff C901 still 43 (at the ceiling); crap4py CRAP 47 (was 46) |
 | Mutation targets `_exporter_port.py`, `_importer_port.py`, `_env.py` | Done in I4 | All three at 100 % (pragma'd equivalents excluded) |
 | Hypothesis for `DtypeCodec.encode`/`decode` | Round-trip fuzz coverage desired | Hypothesis and the `ci` profile exist since J4 (slot meta, `classify_frame_step`, `GpuFrame`); `DtypeCodec` is still hand-enumerated across 8 `@parametrize` lists |
-| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4. Bump both together |
+| Ruff version drift | Before the `C901` ratchet is trusted long-term | Pinned in Phase G, drifted by Phase J (`.pre-commit-config.yaml` v0.14.11 vs `uv.lock` 0.17.4); re-aligned in J3 at 0.17.4, both now at 0.17.5. Bump both together |
 | 24 mock tokens in `tests/integration/test_cuda_ipc_exporter.py` | Next mock-density audit | 3rd-highest in the suite, in a nominally *integration* test |

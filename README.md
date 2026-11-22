@@ -107,7 +107,7 @@ system Python 3.11 install, or a dedicated venv (e.g. StreamDiffusionTD's pinned
 ```bash
 # Guided installer (recommended) — auto-downloads the wheel matching your
 # target interpreter's version from GitHub Releases:
-cd C:\path\to\CUDA_IPC
+cd C:\path\to\cuda-link
 python scripts\install_td_library.py --mode 2 --venv D:\path\to\your\venv
 # or: python scripts\install_td_library.py   (interactive menu — pick your target)
 ```
@@ -284,7 +284,7 @@ Per slot (160 bytes each, slot base = 24 + slot*160):
     +156 meta_flags (u32)           - Reserved, 0
 
 [24+NUM_SLOTS*160]        shutdown_flag (1B)   - Reasserted to 0 every frame; set to 1 on exit
-[25+NUM_SLOTS*160]        metadata (20B)       - width/height/num_comps/dtype/buffer_size
+[25+NUM_SLOTS*160]        metadata (20B)       - width/height/num_comps/kind/bits/flags/data_size
 [45+NUM_SLOTS*160]        pad (3B)             - Total is a multiple of 8
 ```
 
@@ -323,7 +323,7 @@ tests/
 Run the full test suite:
 
 ```bash
-cd C:\path\to\CUDA_IPC
+cd C:\path\to\cuda-link
 
 # Run a whole category (no CUDA needed)
 pytest tests/core/ -v
@@ -357,8 +357,8 @@ Disable for a single run: add `-p no:randomly`.
 pytest tests/ -m "not requires_cuda and not requires_native" --cov=cuda_link --cov-report=term-missing
 ```
 
-The gate is `fail_under = 85`, set against the combined bare-`--cov` run (88.21% measured
-2026-10-19, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
+The gate is `fail_under = 91`, set against the combined bare-`--cov` run (93.39% measured
+2026-10-22, includes `td_exporter`); the `--cov=cuda_link` invocation above measures ~99%.
 See `[tool.coverage.report]` in `pyproject.toml`. For line-level inspection add
 `--cov-report=html` and open `htmlcov/index.html`.
 
@@ -587,16 +587,17 @@ install_td_library.cmd             REM interactive menu — auto-downloads the m
 | 1 | `--target DIR` | Install into a custom folder; put it in the `.toe`'s project folder (`cuda_link/` or the folder itself), or set `CUDALINK_LIB_PATH=DIR` before launching TD |
 | 2 | `--venv DIR` | Install into an existing venv that TD is configured to use |
 | 3 | `--conda ENV` | Install into a conda environment |
-| 4 | `--python EXE` | Install into a parallel Python; auto-writes TD Preferences — no env var needed |
-| 5 | `--td-python EXE` | Install directly into TD's bundled Python (`app.pythonExecutable`) |
+| 4 | `--python EXE` | Install into a system / parallel Python 3.11; prints the site-packages path to add in TD Preferences |
+| 5 | `--td-python EXE` | Deprecated: install directly into TD's bundled Python (`app.pythonExecutable`). Prefer mode 2 or 4 |
 
-**Mode 4 (recommended for most setups):** auto-discovers both the registered system Python
-(`py -3`) and the TouchDesigner install path; sets `Python64 Path` in TD Preferences so
-library mode activates on the next TD launch with zero env-var configuration.
+**Mode 4 (recommended for most setups):** installs into a system Python 3.11. Without
+`--python`, the interactive menu lists the Python installs it finds. The installer does not
+edit TD Preferences: it prints the site-packages path, and you add that path under
+Edit → Preferences → Python 64-bit Module Path. Library mode activates on the next TD launch.
 
 ```bat
-REM Non-interactive mode 4 (auto-discover Python + TD):
-install_td_library.cmd --mode 4 --non-interactive
+REM Non-interactive mode 4 (--python is required):
+install_td_library.cmd --mode 4 --python C:\Python311\python.exe --non-interactive
 
 REM Dry-run to preview what would be written:
 install_td_library.cmd --mode 4 --dry-run
