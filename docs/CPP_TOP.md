@@ -1,0 +1,791 @@
+# C++ Custom TOPs (cpp_top)
+
+This page is the user reference for the `CudaLinkOutTOP` and `CudaLinkInTOP` Custom
+Operator DLLs (protocol v0.6, cuda-link 2.0.0).
+
+## Topology
+
+One TouchDesigner (TD) instance sends, and a different TD instance receives:
+
+```text
+TD instance A                                TD instance B
+Orbbec TOP -> Select TOP -> Out TOP  ==SHM==> In TOP -> Info CHOP -> sync rule -> Switch TOP
+             (one Out TOP per stream)         (one In TOP per stream)
+```
+
+- Each stream has its own Out TOP in A and its own In TOP in B, with the same `Ipcmemname`
+  on both sides and a different `Streamid` for each stream.
+- The texture stays on the GPU. The named shared memory (SHM) segment holds only the ring
+  header, the CUDA IPC handles and the slot meta.
+- A and B must be different processes (see "Same-process limitation"). A Python sender or
+  receiver (the `.tox`, or `cuda_link` in a script) can be either side.
+- A and B must use the same GPU.
+- Start after the project opens depends on the install form:
+  - System Plugins folder (Custom OP, the main form): an Out TOP starts on its own, also
+    when nothing pulls it (test R6: publishing 12-14 s after TD started).
+  - CPlusPlus TOP with the Plugin Path parameter (project form): an Out TOP that nothing
+    pulls does not start. TD loads the DLL only on the op's first cook, and `cookOnStart` /
+    `cookEveryFrame` take effect only after that load. Cook each Out TOP once when the
+    project starts, for example `op('out0').cook(force=True)` in an Execute DAT `onStart`.
+    The sync kit's run logger does this for every C++ TOP in its COMP. After one cook the
+    Out TOP cooks every frame.
+  - The In TOP is not affected when the network reads it (the sync rule does).
+
+## Install: system Plugins folder
+
+This is the main form. The ops then show in the OP Create dialog (Custom tab) as
+"CUDA Link Out" and "CUDA Link In".
+
+```text
+<Documents>\Derivative\Plugins\
+└── CudaLink\              one folder, nothing else in it
+    ├── CudaLinkOutTOP.dll  opType Cudalinkout
+    ├── CudaLinkInTOP.dll   opType Cudalinkin
+    └── VERSION.txt         the install record: version, build, protocol, TD header API,
+                            CUDA toolkit, source, DLL hashes (ADR-0016)
+```
+
+- Install: close TouchDesigner, then run `install_cpp_top.cmd` (or
+  `python scripts\install_cpp_top.py install --dll-dir <folder with the two DLLs>`). The
+  script finds the real Documents folder, also when OneDrive moves it. It refuses while
+  TouchDesigner runs. `scripts\install_td_library.py` does the same step after pip when the
+  wheel carries the DLLs (see "Install: from the wheel").
+- The install record (`VERSION.txt`, [ADR-0016](adr/0016-install-record.md)) takes the
+  version, build sha, CUDA toolkit and TD header API from `BUILD_INFO.txt`, which the
+  `cpp_top` build writes next to the DLLs. The `.tox` Info page `Nativetops` row reads the
+  first lines of `VERSION.txt`.
+- First start: TD asks to approve each DLL. It asks again after each DLL change. TD writes the
+  approvals to `Plugins.json` in the `Plugins` folder, so the folder must be writable.
+- Keep one copy on a machine. With a system copy and a copy in a project's `Plugins/` folder,
+  TD uses the system copy and shows a modal "Plugin Load Error" for the project copy. The start
+  waits until someone clicks OK (test R4).
+- Upgrade: close TD (TD locks a loaded DLL), install again, and approve the prompts.
+- Uninstall: `install_cpp_top.cmd uninstall` moves the folder to
+  `<Documents>\Derivative\CudaLink.removed-<time>`. Do not only rename the folder inside
+  `Plugins`: TD loads every subfolder (test R1). Saved projects keep their nodes and parameter
+  values; the nodes show an error until the DLLs are back.
+- `install_cpp_top.cmd status` shows the installed copy and its `VERSION.txt`, and warns about
+  other CUDA Link DLLs under `Plugins`.
+- Builds: the DLLs compile against the vendored headers in `cpp_top/vendor/td/2025/`
+  (`OP_CommonAPIVersion` 1, TOP API 12). TD 2025.32820 ships the same two values, so the DLLs
+  load in 2025.32820 and in 2025.33230 (which ships `OP_CommonAPIVersion` 3). Do not use the
+  newer 33230 API (`saveData`/`loadData`) while 2025.32820 is the minimum
+  ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).
+- Versions: TD 2025.33230 does not check the plugin major or minor version (test R2). A
+  breaking parameter or protocol change therefore needs a new opType. Parameter names and menu
+  tokens stay as they are.
+
+## Install: one project's Plugins folder (portable form)
+
+- Use this form only on a machine that has no system copy (see above).
+- Put `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` in the `Plugins/` folder next to the
+  `.toe`, or point a CPlusPlus TOP's Plugin Path at a DLL. An Out TOP in this form needs the
+  `onStart` cook (see "Topology").
+- Remove any older build (protocol v0.5) from `Documents/Derivative/Plugins` first. Both
+  builds register the op types `Cudalinkout` and `Cudalinkin`, and two DLLs with the same op
+  type collide.
+- TD locks a loaded DLL. Close TD before you replace it.
+- Keep cuda-link 1.14.1 off TD's Python module path when you run 2.0.0.
+- Give each stream its own `Ipcmemname`. A new 2.x C++ TOP uses `cudalink_ipc_CPP`, but a
+  saved node or a `.tox` can still use the same name as a 1.x peer. A v0.5 segment is refused
+  with a magic error; the two protocols do not mix.
+
+## Install: from the wheel
+
+The release platform wheel (`cuda_link-<version>-cp311-cp311-win_amd64.whl`) carries both DLLs
+in `cuda_link/td_plugins/`. They are built from the same tree as the Python package and carry
+its version, so a host that installs the wheel gets one version and one hash for both sides.
+The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
+
+- System install: `scripts\install_td_library.py` copies the wheel's DLLs to
+  `<Documents>\Derivative\Plugins\CudaLink\` after pip and writes the install record
+  (`--no-td-plugins` skips this, `--plugins-dir DIR` changes the folder). When
+  TouchDesigner runs it skips the copy and prints the command to run after you close TD:
+  `python scripts\install_cpp_top.py install --dll-dir <site-packages>\cuda_link\td_plugins`.
+  From the Python that has the wheel, `install_cpp_top.py install --from-wheel` does the same.
+
+- Find them: `cuda_link.td_plugin.plugin_path("out")` and `plugin_path("in")` return the
+  absolute DLL paths, or None when the install has no DLLs. Point a CPlusPlus TOP's Plugin
+  Path at them. This is the portable form above: an Out TOP needs the `onStart` cook, and the
+  machine must have no system copy (`install_cpp_top.cmd status` shows one).
+- Update: close TD first. TD keeps a loaded DLL open, so a `pip install` of a new wheel while a
+  TOP from it is loaded can fail, or can succeed while TD keeps using the old DLL until it
+  restarts (the Python side and the TOPs then differ). Close TD, install, start TD, and approve
+  the prompts again.
+- Editable installs (`pip install -e .`) do not find the DLLs: `plugin_path()` looks next to
+  `cuda_link/td_plugin.py` in `src/`. Dev builds carry no DLLs anyway.
+- Build a wheel with the DLLs: build `cpp_top` first (see "Build"), then
+  `python -m build --wheel -Ccmake.define.CUDALINK_TD_PLUGIN_DIR=<folder with the two DLLs>`.
+  The build refuses a missing DLL, a DLL stamped with another version, a missing or
+  other-version `BUILD_INFO.txt` (configure `cpp_top` again from the same tree) and the
+  `py3-none-any` build. `release.yml` does this and checks the wheels with
+  `scripts/check_wheel_plugins.py --require-plugins`. To check them locally, run
+  `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the script expands
+  the pattern, so it works in PowerShell and cmd too).
+
+## Build
+
+The CMake project is `cpp_top/`. Its presets are in `cpp_top/CMakePresets.json`:
+
+| Preset | Generator | Output | Use |
+|---|---|---|---|
+| `ninja-tooling` | Ninja, MSVC `cl` | `cpp_top/build/` | CI, clang-tidy, clangd (emits `compile_commands.json`) |
+| `msvc-release` | Visual Studio 17 2022, x64 | `cpp_top/build_msvc/` | Shipping DLLs from the IDE |
+| `core-only` | Ninja, default compiler | `cpp_top/build_core/` | Protocol core, `topcore_tests` and `protocol_dump` only; no CUDA, no TD headers; any OS (CI Linux leg) |
+
+Run the Ninja preset from an MSVC developer environment (`vcvars64.bat`):
+
+```bat
+cmake --preset ninja-tooling
+cmake --build --preset ninja-tooling
+```
+
+To build against a different CUDA toolkit, add `-DCUDAToolkit_ROOT=<path>` to the configure
+command.
+
+## Tests
+
+`topcore_tests` checks the protocol core (`cpp_top/src/core/`) against golden SHM images
+in `cpp_top/tests/fixtures/`. `scripts/gen_golden_shm.py` writes those images through
+`src/cuda_link/shm_protocol.py`, which is the source of truth for the wire layout. The test
+runs the same writes through `ring_writer` and compares the bytes. Then it runs
+`acquire_slot` on the Python images (NoFrame, NewFrame, Shutdown, VersionChanged).
+
+```bat
+ctest --preset ninja-tooling
+```
+
+If you change the wire layout, change `shm_protocol.py` first. Then run
+`python scripts/gen_golden_shm.py`, update the C++ side, and make both test suites pass.
+`tests/core/test_golden_shm_fixtures.py` fails while the fixtures are stale.
+`tests/core/test_cpp_protocol_parity.py` fails when a constant differs between the two
+sides.
+
+## Debugging: protocol_dump
+
+`protocol_dump` prints a segment's header (with `sender_pid`), the slot handles, one
+slot-meta line per slot (`host_ts`, `producer_frame`, `source_ts_us`, `stream_id`, `flags`),
+the shutdown flag and the metadata. It also prints what a new receiver would get from
+`acquire_slot`. It opens the
+segment read-only, so it never changes the state of a running sender.
+
+```bat
+protocol_dump <Ipcmemname>
+protocol_dump --full <Ipcmemname>
+protocol_dump --file cpp_top\tests\fixtures\ring_n3.bin
+```
+
+- "cannot open segment ... error 2": no sender has created that name. Compare the
+  `Ipcmemname` of the sender and the receiver.
+- `magic ... (v0.5 sender, cuda-link 1.x: not readable by this build)`: the sender uses
+  protocol v0.5. Update the sender to cuda-link 2.x.
+- `magic ... (MISMATCH)`: the segment does not hold a cuda-link protocol.
+- `sender_pid 0 (unknown)`: the sender did not write its process ID.
+- `producer_frame 0` on every slot: the sender writes no frame number. The C++ Out TOP
+  writes TD's absolute frame. The Python `Exporter` writes `write_idx` unless the caller
+  sets `GpuFrame.producer_frame`.
+- `stream_id 0` on every slot: the default. Set `Streamid` on the Out TOP (or
+  `GpuFrame.stream_id` in Python) to name the stream.
+- `write_idx 0`: the sender made the segment but has not published a frame.
+- `shutdown 1`: the sender has stopped.
+
+The tool is built with the TOPs. The `--file` form also works on Linux.
+
+## Out TOP parameters
+
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
+(see "Info page" and "Common page" below).
+
+| Name | Label | Type | Default | Use |
+|---|---|---|---|---|
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. The receiver must use the same name. The In TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off stops the publish and frees the ring. A new node starts Off. |
+| `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
+| `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. Editable only while `Active` is Off. |
+| `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
+
+The Out TOP also copies the sent frame to its own output (the pass-through copy), so that it
+shows the image in the network. With the Common page at its input size and format, that is
+the input image. On the dev box (RTX 4090) this copy costs about 14 µs CPU
+(`cudaMemcpy2DToArrayAsync`) and 8 µs GPU for each stream and frame. A parameter to skip
+the copy was considered and rejected (2026-11-17). Reopen it only if a show stream, for
+example 4K float32, makes the copy expensive.
+
+## In TOP parameters
+
+These parameters are on the page "Settings". The TOP also has the pages "Info" and "Common"
+(see "Info page" and "Common page" below).
+
+| Name | Label | Type | Default | Use |
+|---|---|---|---|---|
+| `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. Use the name of the sender. The Out TOP has the same default. |
+| `Active` | Active | Toggle | Off | Off closes the segment. A new node starts Off. |
+| `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
+| `Framewaitms` | Frame Wait (ms) | Integer, 0 to 8 | `3` | On a cook with no new frame, wait for the sender publish for this time. 0 turns the wait off. |
+
+About `Framewaitms`:
+
+- The sender and the receiver both cook at the display rate. Their phase drifts. When the
+  receiver cooks just before the sender publishes, it shows the last frame again, and in
+  the next cook it skips one frame.
+- The wait turns these duplicate frames into new frames that come a little later. In
+  2026-11-17 sweeps on the dev box (1280×720 RGBA8, one stream), the duplicate frames
+  were 4 % to 6 % at 0 ms and about 1 % at 3 ms.
+- The cost depends on the phase. When the receiver cooks just before the publish, each
+  cook waits for it. The mean In TOP cook time was 0.2 ms to 1.3 ms at 3 ms and 4 ms,
+  against 0.2 ms at 0 ms.
+- The default 3 ms gives the same wait as the Phase 5 sync kit setting (0.19 %
+  mismatches). That setting was 4, but the older wait code waited about 1 ms less.
+- The wait is in steps of 1 ms. After each step, the TOP reads `write_idx` again. Thus two
+  consumers of one segment (two In TOPs, or an In TOP and a Python receiver)
+  can both use the wait. The sender signal wakes only one waiter.
+- One doorbell waiter per `Ipcmemname` is best. With an In TOP and a Python receiver on one
+  name, the In TOP is not affected. The Python receiver misses the signal on about 3 % of
+  frames and then waits its full `wait_for_doorbell()` timeout (2 ms in the examples).
+  Measured: Python p99 latency 0.09 ms alone, 2.7 ms shared; no lost frames ("Live matrix
+  v0.6", P2).
+- The wait can be up to about 1.5 ms longer than the value. The wait blocks the TD main
+  thread, so increase the value only if the duplicates stay high.
+- The TOP skips the wait when it cannot get a frame: the next publish is not expected within
+  the budget (a sender slower than TD, for example a 30 fps camera into 60 fps), or the newest
+  frame is older than two sender periods (a paused sender). The period comes from the slot
+  meta `host_timestamp` of the shown frames (`cpp_top/src/core/frame_wait.h`,
+  `cadence_wait_useful`). Until four periods are measured, the TOP waits as before. The Info
+  CHOP `frame_wait_skipped` counts the skips. The `.tox` Receiver has the same wait and guard.
+- Before 2026-11-17 the default was 0, and each value waited about 1 ms less than set.
+
+## Info page
+
+Both TOPs have an "Info" page after "Settings". Its parameters have the names of the `.tox`
+Info page, so a script that reads one also reads the other.
+
+| Name | Label | Value |
+|---|---|---|
+| `Cudalinkheader2` | (header) | `CUDA-Link <version> (build <sha>)`: the loaded DLL's package version (`__version__` in `src/cuda_link/__init__.py`) and git sha, both set at configure time. The sha ends in `-dirty` when tracked files differed from HEAD at configure time. A commit or checkout makes the next build configure again by itself; after uncommitted edits, configure again by hand. |
+| `Semverauthor` | Author | `forkni (forkni@gmail.com)` |
+| `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub (`master`). |
+
+The Info DAT of each TOP has the same two values in its last rows, `version` and `build`, for
+scripts.
+
+The version and the build are not string parameters. TD saves the value of a custom string
+parameter in the `.toe`, and a saved value beats the default of a newer DLL. So a `Semverversion`
+or `Semverbuild` row showed the build that the file was saved with, not the loaded build. The
+header label and the Info DAT come from the loaded DLL each time. A `.toe` saved with plugin
+`minorVersion` 2 can have saved values for `Semverversion` and `Semverbuild`. The parameters are
+gone, so read `version` and `build` from the Info DAT instead.
+
+The SDK has no read-only flag for custom parameters, so the TOPs grey out the Author row on each
+cook. The `.tox` has a "Hide built-in Parameters" toggle. The DLLs cannot have it, because the
+SDK cannot hide the Common page. The plugin `minorVersion` is 3: 2 added the Info page, and 3
+removed the Version and Build rows.
+
+## Common page
+
+TD puts its Common page on every TOP. Both TOPs use it as a normal TOP does: the output has the
+size, aspect and pixel format that the Common page asks for.
+
+| Common parameter | Out TOP | In TOP |
+|---|---|---|
+| Output Resolution, Resolution, Use Global Res Multiplier | Resizes the input on the GPU. The Out TOP sends and shows the result: the wire carries the Common size. | Resizes the wire frame on the GPU. "Use Input", the relative sizes, Fit and Limit refer to the wire size. |
+| Output Aspect, Aspect | Sets the output aspect. | Sets the output aspect. "Use Input" means the wire frame size. |
+| Pixel Format | Converts before the send. The wire carries this format. | Converts the wire frame to this format. |
+| Input Smoothness | Sampler of the resize: Nearest or Linear. Mipmap is the same as Linear (a linear IPC buffer has no mip levels). | Same |
+| Fill Viewer, Viewer Smoothness | TD applies them to the viewer only. | Same |
+| Passes | Has no meaning for IPC. Ignored. | Same |
+| Channel Mask, Parameter Color Space, Parameter Reference White | TD disables them on Custom OPs. | Same |
+
+How it works:
+
+- When the Common page asks for the input size and format (Out TOP) or the wire size and format
+  (In TOP), the TOP takes its plain copy path, as before. The Info CHOP channel `converted` is 0.
+- Otherwise the TOP runs one CUDA kernel (`cpp_top/src/common/resize_convert.cu`) between two
+  linear device buffers: decode the source texel to float4, sample (nearest or bilinear,
+  clamp-to-edge, texel centres), encode to the target format. All of it stays on the GPU.
+  `converted` is 1. The Out TOP copies its input to a scratch buffer first, and the kernel writes
+  the IPC slot. The In TOP kernel writes a scratch buffer, and the TOP copies it to its output.
+- The Out TOP takes the target from `TOP_Output::getSuggestedOutputDesc()`, because TD resolves
+  the Common page against the TOP input. The In TOP has no TOP input: TD resolves "Use Input"
+  against a 127×127 placeholder. Thus the In TOP resolves the size and aspect itself against the
+  wire frame (`cpp_top/src/core/common_page.h`), and takes the suggested desc only for Custom and
+  Parameter Panel sizes, a custom aspect and an explicit Pixel Format. A plugin reads the
+  Resolution tuplet as `getParInt("resolution", 0/1)`; `resolutionw` is not found.
+- The pixel codec (`cpp_top/src/core/pixel_codec.h`) maps 4 channels as RGBA (BGRA with
+  `FLAGS_BGRA`), RG as (r, g, 0, 1), mono+alpha as (m, m, m, a), mono as (m, m, m, 1) and the
+  alpha formats (A8 to A32) as (0, 0, 0, a). To mono or alpha, the codec keeps red or alpha.
+  Fixed formats saturate and round; 16-bit float is IEEE half with round-to-nearest-even.
+- A format that has no wire representation (rgb10a2fixed, rgba11float) is an error on the node.
+- The alpha formats and the mono formats have the same wire tuple (one component). An Out TOP
+  set to an alpha format sends its alpha channel, and a receiver reads it as mono.
+
+### Format mapping: differences from the `.tox`
+
+The C++ TOPs map formats in `cpp_top/src/out_top/pixel_format_map.h` and
+`cpp_top/src/in_top/pixel_format_map.h`. The `.tox` maps them in `td_exporter/TDPixelFormat.py`.
+The two mappings agree except in these two points, and both are intended:
+
+| Topic | C++ Out TOP | `.tox` Sender |
+|---|---|---|
+| `FLAGS_BGRA` | Set when the input format is `BGRA8Fixed`. An `RGBA8Fixed` input goes out without the flag. | Set for each 4-channel 8-bit frame, because `cudaMemory()` gives 8-bit RGBA textures in B, G, R, A order. |
+| 16-bit float | Sent as float16. | Sent as float32: `cudaMemory()` cannot share float16, so TouchDesigner converts on the GPU first. The frame has 2x the bytes. |
+
+A receiver gets the correct picture in both cases, because it reads the flag and the format
+from the stream.
+
+### Pixel Format default (migration note)
+
+The Common Pixel Format of a new TOP is `rgba8fixed`, and a plugin cannot change that default.
+Before this change both TOPs ignored the Common page. Now a new Out TOP converts a float input to
+8-bit before the send, and a new In TOP converts a float stream to 8-bit. Each TOP then shows a
+warning that names both formats, for example: "Common page Pixel Format converts the input from
+rgba32float to rgba8fixed (set Pixel Format to Use Input to keep rgba32float)". No warning comes
+for a BGRA to RGBA swap of the same format.
+
+For float streams, set Pixel Format to Use Input on both TOPs. A saved node that already has
+"Use Input" keeps its format. A saved node with a format, for example the default rgba8fixed, now
+converts.
+
+### Live oracle (2026-11-18)
+
+Dev box (RTX 4090, TD 2025.33230 Non-Commercial). Source: a 640×360 rgba32float noise TOP with
+noise in all four channels. For each case the test sets the same Common parameters on the DLL TOP
+and on a TD reference TOP, waits 6 frames, and compares the two images (`numpyArray()`, in the
+test harness only). Out TOP: A local. In TOP: A sends the stream unchanged, and B compares the In
+TOP under test with a reference that reads a pass-through In TOP. 83 cases per TOP: 11 formats ×
+7 resolution modes with Linear, and 6 cases with Nearest.
+
+| Check | Out TOP | In TOP |
+|---|---|---|
+| Cases passed | 83 / 83 | 83 / 83 |
+| Size and pixel format equal to TD | all cases | all cases |
+| Linear, 8-bit and 16-bit fixed | ≤ 1 LSB | ≤ 1 LSB |
+| Linear, 32-bit float, original size and integer ratios | ≤ 1e-5 | ≤ 1e-5 |
+| Linear, 32-bit float, Fit, Limit, Custom | ≤ 6e-4 | ≤ 6e-4 |
+| Nearest, 2x and Custom 333×201: pixels equal within 1 LSB | 100 % | 100 % |
+| Nearest, half: pixels equal | 77 % | 77 % |
+
+Notes:
+
+- The reference TOP matters. A Null TOP ignores its Common page. A Select TOP honors the size
+  and the format but ignores Input Smoothness Nearest. A Level TOP honors Nearest, but its 2x
+  Linear upscale is not plain bilinear. The test uses a Select TOP for Linear and a wired Level
+  TOP for Nearest. At 2x Linear the Out TOP equals a separable bilinear in numpy within 1.2e-7.
+- 32-bit float at a non-integer ratio differs by up to 6e-4: TD samples with the GPU texture
+  filter, whose interpolation weights carry about 8 bits. The kernel interpolates in float.
+- Nearest at half and eighth puts every sample on a texel boundary. The kernel takes the lower
+  texel there. TD takes the lower texel for about 77 % of the pixels; the other picks follow the
+  GPU rasterizer rounding of the texture coordinates, which a CUDA kernel cannot copy exactly.
+- `cpp_top/tests/resize_convert_tests.cu` checks the kernel against a host reference
+  (810 cases: 9 formats × 9 formats × 5 sizes × 2 samplers) and runs in ctest when a GPU is present.
+
+## Slot meta from the Out TOP
+
+Each publish writes these slot meta fields:
+
+- `producer_frame`: TD `OP_TimeInfo::absFrame` of that cook. All Out TOPs that cook in one
+  TD frame write the same value.
+- `stream_id`: the `Streamid` parameter.
+- `host_timestamp`: the publish time in seconds, from `steady_clock`
+  (`cpp_top/src/common/clock.h`). On Windows this clock is QPC, the same clock as Python
+  `time.perf_counter()`. A receiver on the same machine subtracts it from its own clock to
+  get the latency.
+- `source_timestamp_us`: always 0 from the Out TOP.
+
+## Info CHOP and Info DAT
+
+Connect an Info CHOP or an Info DAT to a TOP to read these values.
+
+### Out TOP Info CHOP (12 channels)
+
+| Channel | Value |
+|---|---|
+| `frames` | Frames published in this session |
+| `cook_us` | Time of the last cook, in microseconds |
+| `copy_us` | Time of the slot copy, in microseconds |
+| `begin_us` | Time of `beginCUDAOperations()`, in microseconds |
+| `end_us` | Time of `endCUDAOperations()`, in microseconds |
+| `write_idx` | Last published `write_idx` |
+| `num_slots` | Number of ring slots |
+| `gpu_ipc_us` | GPU time of the slot copy and the event record (0 while `Debug` is off) |
+| `gpu_pass_us` | GPU time of the pass-through copy (0 while `Debug` is off) |
+| `producer_frame` | Last published `producer_frame`, mod 2^24 |
+| `stream_id` | Last published `stream_id` |
+| `converted` | 1 when the Common page resizes or converts the input before the send, 0 on the plain copy path. `gpu_ipc_us` then includes the kernel. |
+
+### In TOP Info CHOP (20 channels)
+
+| Channel | Value |
+|---|---|
+| `frames` | Frames shown in this session |
+| `cook_us` | Time of the last cook, in microseconds |
+| `copy_us` | Time of the copy into the output, in microseconds |
+| `begin_us` | Time of `beginCUDAOperations()`, in microseconds |
+| `end_us` | Time of `endCUDAOperations()`, in microseconds |
+| `write_idx` | `write_idx` of the shown frame |
+| `read_slot` | Ring slot of the shown frame |
+| `num_slots` | Number of ring slots, from the segment header |
+| `event_wait_us` | GPU time of the wait on the sender event (0 while `Debug` is off) |
+| `gpu_copy_us` | GPU time of the copy into the output (0 while `Debug` is off) |
+| `noframe_count` | Cooks with no new frame (only with `Debug` on) |
+| `version_changed_count` | Cooks that saw a sender restart (only with `Debug` on) |
+| `rescued_count` | Frames that the `Framewaitms` wait got (only with `Debug` on) |
+| `producer_frame` | `producer_frame` of the shown frame, mod 2^24 |
+| `stream_id` | `stream_id` of the shown frame |
+| `latency_us` | Time from the sender publish to the copy (now minus `host_timestamp`), in microseconds. 0 when the sender wrote no timestamp. |
+| `frame_gap_count` | Shown frames whose `write_idx` step was more than 1: the ring overwrote frames before this TOP read them |
+| `producer_skip_count` | Shown frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1: the sender skipped TD frames. Not counted when `producer_frame` is 0. |
+| `frame_wait_skipped` | Cooks with no new frame that skipped the `Framewaitms` wait: the next publish was not expected within the budget, or the sender was paused |
+| `converted` | 1 when the Common page resizes or converts the wire frame, 0 on the plain copy path. `gpu_copy_us` then includes the kernel. |
+
+The slot meta channels (`producer_frame` to `producer_skip_count`) change only after a
+successful copy. `cpp_top/src/core/frame_step.h` classifies the step between two shown
+frames, and `topcore_tests` tests it. Python has the same rules in
+`shm_protocol.classify_frame_step()`.
+
+### Info DAT rows
+
+| Row | Out TOP | In TOP |
+|---|---|---|
+| `ipc_version` | yes | yes |
+| `status` | yes | yes |
+| `last_error` | yes | yes |
+| `last_error_frame` | yes | yes |
+| `init_note` | yes | yes |
+| `producer_frame` | yes: last published, full 64-bit value | yes: shown frame, full 64-bit value |
+| `source_timestamp_us` | no | yes: shown frame |
+| `version` | yes: loaded DLL, package version at configure time | yes: loaded DLL, package version at configure time |
+| `build` | yes: loaded DLL, git sha at configure time | yes: loaded DLL, git sha at configure time |
+
+### producer_frame in a CHOP channel
+
+A CHOP channel is float32. A float32 holds an integer exactly only below 2^24 (16,777,216).
+Thus both Info CHOPs show `producer_frame` mod 2^24 (`INFO_CHOP_FRAME_MOD` in
+`shm_protocol.py`, `kInfoChopFrameMod` in C++). At 60 FPS the value wraps after about
+78 hours. To compare two channel values `a` and `b`, use `(a - b) mod 2^24`, not `a - b`.
+For the full value, read the `producer_frame` row of the Info DAT.
+
+## Matching streams on the receiver
+
+Sender A has several Out TOPs (for example color and depth), each with its own
+`Ipcmemname` and `Streamid`. Receiver B has one In TOP for each stream. All Out TOPs that
+cook in one TD frame of A write the same `producer_frame`. Thus two frames on B with an
+equal `producer_frame` come from the same cook of A.
+
+On B, compare the `producer_frame` channels of the In TOPs:
+
+- Equal values: the frames on the outputs come from the same cook of A.
+- Different values: one In TOP shows a newer frame. The difference `(a - b) mod 2^24` is
+  the number of TD frames between them.
+- Use `stream_id` to make sure that each In TOP reads the stream that you expect.
+
+`frame_gap_count` tells you that B was too slow to read every frame. `producer_skip_count`
+tells you that A did not publish in every TD frame.
+
+## Live matrix v0.6 (2026-11-17)
+
+Dev box: RTX 4090, TD 2025.33230 Non-Commercial, two TD instances (A sends, B receives),
+60 FPS, 1280×720 rgba8 Noise source, Debug off, 60 s per cell. DLLs built from 00d7406.
+
+Pixel check: A writes a 4×4 patch at the bottom-left with R = `absFrame % 256`. Both TD
+senders stamp the same `absFrame` as `producer_frame`. B reads one pixel of the patch per cook
+and compares it with `producer_frame % 256`. The Python sender has no patch. It sends solid
+colors, 30 frames each, and stamps `write_idx`. B checks each color against `producer_frame`.
+
+| Cell | Sender (A) | Receiver (B) | Pixel check | Duplicate % | Gaps | Latency p50 / p95 |
+|---|---|---|---|---|---|---|
+| C0 | Out TOP | In TOP, Framewaitms 3 | 3593/3593 | 0.42 | 17 | 0.09 / 3.0 ms |
+| C1 | `.tox` Sender (doorbell on, see notes) | In TOP, Framewaitms 0 | 3595/3595 | 2.87 | 101 | 15.4 / 16.4 ms |
+| C1 | `.tox` Sender (doorbell on, see notes) | In TOP, Framewaitms 3 | 3595/3595 | 1.03 | 29 | 0.14 / 15.7 ms |
+| C2 | Out TOP | `.tox` Receiver | 3598/3598 | 5.25 | 188 | 16.3 / 16.8 ms |
+| C3 | Out TOP | Python `Importer` | 3588/3589, rerun 3596/3596 | n/a | 13, rerun 6 | 0.83 / 1.45 ms |
+| C4 | Python `Exporter`, doorbell off | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 3.95 | 78 | 8.0 / 15.8 ms |
+| C5 | Python `Exporter`, `CUDALINK_DOORBELL=1` | In TOP, Framewaitms 3 | 118 color runs, 0 wrong | 2.67 | 15 | 4.8 / 12.5 ms |
+| P1 | `.tox` Sender, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 3597/3597 | 0.89 | 34 | 0.15 / 15.7 ms |
+| P1 | Python `Exporter`, `CUDALINK_DOORBELL` unset (new default) | In TOP, Framewaitms 3 | 119 color runs, 0 wrong | 2.67 | 31 | 5.3 / 12.8 ms |
+| P2 | Out TOP | In TOP, Framewaitms 3, shared with a Python `Importer` (doorbell on) | 3596/3596 | 0.33 | 12 | 0.93 / 3.6 ms |
+| P2 | Out TOP | Python `Importer` (doorbell on), shared with the In TOP above | 3718 frames, 0 bad | n/a | 4 | 0.019 / 0.070 ms, p99 2.7 ms |
+| F16 | Out TOP, rgba16float | In TOP, Framewaitms 3 | 1199/1199 (20 s) | 0.83 | 10 | 0.10 / 15.1 ms |
+
+Duplicate % is the number of B cooks that show the same `producer_frame` as the cook before,
+divided by all B cooks. Gaps are `frame_gap_count` (TD receivers) or the steps in
+`producer_frame` above 1 (Python receiver). `last_error` was empty in all cells.
+
+Notes:
+
+- C1: TD A had `CUDALINK_DOORBELL=1` in its environment, so the `.tox` Sender signaled the
+  doorbell. The P1 rows use the new default (producer doorbell on, variable unset).
+- C3: the first run had one frame whose pixels and `producer_frame` did not agree (delta 9).
+  The script did not log which frame it was. A rerun with logging had no mismatch. The cause
+  is not known. The 30-minute show-machine run (consolidated plan Phase 5) will show if it
+  comes back.
+- An 8-bit frame from the Out TOP arrives in Python in BGRA byte order: the R value is at
+  channel index 2. Row 0 of the tensor is the bottom row of the TD image.
+- In C4 and C5 the Python sender runs on its own 60 FPS clock, not locked to TD. This causes
+  the higher duplicate and gap counts. The doorbell (C5) lowers duplicates, gaps and latency.
+- `noframe_count` and `rescued_count` in the In TOP Info CHOP advance only while Debug is on.
+  With Debug off they stay 0, also when the In TOP shows a repeat frame.
+- P2: the same Python receiver alone on the name had p99 latency 0.088 ms and 23 waits that
+  timed out while a frame was ready. Shared with the In TOP, it had 118. The Importer used the
+  native wait backend in both runs.
+- An Out TOP that nothing pulls cooks only once. After one `cook(force=True)` it cooks every
+  frame (see "Topology"). The dev-box scenes load the DLLs through the Plugin Path parameter.
+
+### Live matrix 2.0.0.dev0: 9 cells × 6 formats (2026-11-18)
+
+Run before the merge of `feat/orbbec-v0.6` into `development` (merge commit `fefcdb3`). Dev box:
+RTX 4090, TD 2025.33230 Non-Commercial (A sends, B receives), 60 FPS, **1280×1280** (the
+Non-Commercial maximum). The DLL side uses only the installed Custom OPs (`CudalinkoutTOP`,
+`CudalinkinTOP` from `Documents\Derivative\Plugins\CudaLink`, built from `fefcdb3`, no
+cplusplusTOP with a file path). The `.tox` side is `local\CUDAIPCLink_v2.0.0.dev0.tox`, loaded
+fresh. Python peers use the worktree venv. Debug off, Framewaitms 3 (default).
+
+Pixel check: A stamps R = `absFrame % 256` into a 4×4 patch at the bottom-left of a Noise
+source, in the format under test. The Python sender fills the whole frame with
+`frame_count % 256` (channels 0-2, encoded for the dtype). TD receivers read pixel (1,1) with a
+TOP to CHOP (`rgbaunit` u256); the Python receiver reads pixel (1,1) and (H-2,1). Each reading
+is compared with the one before: step 0 = duplicate, step 1 = new, step 2-127 = new with a gap,
+step 128-255 = backward. A hard fail is a backward step, a value that is not a whole number
+(tolerance 0.35 for float16, which cannot hold k/255 exactly), or an error badge. There was
+**no hard fail in any cell.**
+
+Main pass, rgba8fixed, 60 s per cell (latency: TD receivers from slot meta `latency_us`, Python
+from `Importer.last_latency`):
+
+| # | Sender (A) | Receiver (B) | New / samples | Duplicate % | Gaps | Latency p50 / p95 | v0.6 row |
+|---|---|---|---|---|---|---|---|
+| 1 | `.tox` | `.tox` | 3574/3600 | 0.72 | 32 | 11.7 / 14.9 ms | T1 |
+| 2 | Python | `.tox` | 3581/3600 | 0.53 | 12 | 1.6 / 15.0 ms | T3 |
+| 3 | `.tox` | Python | 3601/3601 | 0 | 0 | 0.035 / 0.86 ms | T2 |
+| 4 | Out TOP | In TOP | 3595/3600 | 0.14 | 5 | 4.4 / 5.1 ms (FLAGGED) | C0 |
+| 5 | Python | In TOP | 3600/3600 | 0 | 0 | 12.0 / 12.8 ms | C4 |
+| 6 | Out TOP | Python | 3600/3600 | 0 | 1 | 0.022 / 0.87 ms | C3 |
+| 7 | Python | Python | 3601/3601 | 0 | 0 | 0.71 / 0.86 ms | none |
+| 8 | Out TOP | `.tox` | 3600/3600 | 0 | 0 | 16.2 / 16.4 ms | C2 |
+| 9 | `.tox` | In TOP | 3591/3600 | 0.25 | 20 | 0.86 / 1.6 ms | C1 |
+
+Format sweep, 20 s per cell, duplicate % / gaps:
+
+| Format | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|
+| rgba16fixed | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| rgba16float | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| rgba32float | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| mono8fixed | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| mono32float | 0/0 | 0/0 | 0/5 | 0/0 | 0/0 | 0/0 | 0/0 | 1.42/20 | 1.83/24 (FLAGGED) |
+
+In the sweep, latency p50 in the TD-to-TD cells was 1.8-15.6 ms; in the cells with a Python
+receiver it was 0.018-0.053 ms (TD senders) and 0.10-0.79 ms (Python sender). Receiver cook
+time p50 was 0.10-0.27 ms in all TD cells.
+
+Notes:
+
+- Flags (2× rule against the v0.6 row, each re-run once, not blocking): cell 4 latency p50
+  (4.4 ms against C0 0.09 ms; three runs gave 0.13, 1.8 and 4.4 ms, while p95 stayed at or
+  under C0's 3.0 ms in two of them), and mono32float cell 9 gaps (24 in 20 s against C1 29 in
+  60 s; the first run gave 36). Cell 9 rgba8fixed was also flagged on latency in its first run
+  (11.6 ms against 0.14 ms) and cleared on the re-run (0.86 ms). TD-to-TD latency p50 changes
+  from run to run with the phase between the two TD frame clocks; this is a working
+  hypothesis, not measured.
+- Float16: the Out TOP shares float16 as-is (the Python receiver got `float16`); the `.tox`
+  Sender converts it to float32 (the Python receiver got `float32`). Both In TOP and `.tox`
+  Receiver show it correctly.
+- Out TOP to Python `get_frame` p50 was 0.75 ms for 4-channel frames and 0.18-0.20 ms for
+  mono, against 0.04 ms from the `.tox` Sender. Diagnosed the same day: see
+  "Python receiver call time" below.
+- Harness faults found and fixed during the run (rows superseded, not counted): a file poll
+  in A's `onFrameStart` that read the source TOP every 15 frames made both TD senders publish a
+  stale frame each time (exactly 80 duplicates in 1200); a TD window without focus drops to
+  about 32-50 FPS and gives large gap counts. Keep one TD window in focus during a run.
+- A `.tox` loaded with `loadTox()` and changed in the same script keeps the Mode and
+  Ipcmemname it had at load time until its extension is re-initialized
+  (`par.reinitextensions.pulse()`).
+- The per-cell table, with the superseded rows, is the `m9_results` Table DAT in
+  `/project1/m9_B` of `local/p5_devbox_B.toe`.
+
+### Python receiver call time (2026-11-18)
+
+The Out TOP publishes without a sync, so its slot event completes after the publish:
+0.11-0.28 ms later on the dev box (1280×1280; p50 about 0.2 ms, p95 0.28 ms at rgba32float).
+The copy itself takes 20-43 µs on the GPU, and the delay barely depends on the frame size. The
+`.tox` Sender syncs before it publishes (about 0.37 ms in TD's cook thread), so its event is
+complete at publish and a Python `get_frame` returns in 0.05 ms.
+
+`Importer.get_frame()` (torch, no `stream=`) waits for that event on the CPU: it spins on
+`cudaEventQuery` for `CUDALINK_WAIT_SPIN_US`, then naps on a timer that takes about 0.5 ms
+on Windows. The former default of 200 µs sat inside the completion range, so the call
+flipped between about 0.2 ms and 0.75 ms. The default is now 500 µs. Same sender, same TD
+session, runs alternated, 1280×1280, 60 FPS, `get_frame` p50 / p95 and frames that napped:
+
+| Format | Spin 200 µs (former) | Spin 500 µs (default) |
+|---|---|---|
+| rgba8fixed | 0.12-0.17 / 0.23-0.26 ms, 0-11 of 300 | 0.15-0.18 / 0.22-0.27 ms, 0 of 300 |
+| rgba32float | 0.20-0.22 / 0.77-0.80 ms, 74-118 of 300 | 0.19-0.20 / 0.27-0.33 ms, 0-1 of 300 |
+
+Notes:
+
+- The completion time drifts between TD sessions and inside one (0.11-0.24 ms p50 seen at
+  rgba8fixed). Compare settings only with alternated runs in one session.
+- A flush after the event record (`cudaStreamQuery`) changes nothing here (completion 0.210 ms
+  with it, 0.219 ms without; hardware-accelerated GPU scheduling is on). `Debug` shortens the
+  receiver's wait by up to 0.09 ms, because its event queries add 20-40 µs to the cook and so
+  move the publish later; that is not a gain.
+- A receiver whose next step is GPU work can skip the CPU wait: pass `stream=` to
+  `get_frame()` or set `CUDALINK_TORCH_GPU_WAIT=1` (0.07 ms measured; `TIMEOUT` is then not
+  reported).
+- Live check: `scripts/profiling/bench_get_frame_wait.py <shm_name>` (RED when `get_frame`
+  p50 is above 0.3 ms or more than 2 % of the frames napped). Run it at rgba32float.
+
+### Framewaitms guard (2026-11-17)
+
+A Python `Exporter` at 30 FPS sent to TD B at 60 FPS for 60 s, into an In TOP with
+`Framewaitms` 3. One run used a DLL built from e23a09a (with the guard). The control run used
+the 00d7406 DLL (no guard). Each In TOP was alone on its channel name. Cook time is the In TOP
+`cpuCookTime`, which includes the wait. New and duplicate frames come from `producer_frame`.
+
+| In TOP | Cook time p50 / p95 / p99 / max | New / duplicate | Gaps | `frame_wait_skipped` |
+|---|---|---|---|---|
+| With guard (e23a09a) | 0.12 / 2.56 / 3.71 / 4.92 ms | 1781 / 1818 (50.5 %) | 0 | +1785 |
+| No guard (00d7406) | 3.13 / 4.67 / 5.02 / 7.23 ms | 1782 / 1816 (50.5 %) | 0 | n/a |
+
+The guard skips the wait on about one cook in two, when the next publish cannot arrive in the
+budget. The frames shown are the same. About 50 % duplicates is correct for 30 FPS into 60 FPS.
+Without the guard, 2088 of 3599 cooks took more than 1 ms. The `.tox` Receiver gave the same
+result in the same test: `onFrameStart` p50 3.12 -> 0.22 ms.
+
+## Same-process limitation
+
+CUDA IPC cannot open a handle in the process that exported it. A `CudaLinkInTOP` that
+reads from a `CudaLinkOutTOP` (or a Python sender) in the same TD instance gets this error:
+
+```text
+sender and receiver appear to be in the same process -- CUDA IPC cannot loop back within
+one process; run the sender in a separate TD instance or use the Python peer
+(cudaIpcOpenMemHandle: cudaErrorDeviceUninitialized)
+```
+
+Run the sender and the receiver in two TD instances. To move a texture inside one TD
+instance, use a normal TOP wire or a Select TOP.
+
+How the receiver detects it: a probe on 2026-11-16 (CUDA runtime 12.8, driver 13.05,
+RTX 4090) opened the process's own handles. `cudaIpcOpenMemHandle` and
+`cudaIpcOpenEventHandle` both returned `cudaErrorDeviceUninitialized` (201, "invalid
+device context"). The In TOP in TD gave the same result. The error is not sticky: the CUDA
+context stays usable. The In TOP always has a current context when it opens handles, so it
+reads status 201 at that call as the same-process case.
+
+Since protocol v0.6 the segment header holds the sender's process ID (`sender_pid`). The
+receiver (the In TOP, the Python `Importer` and `TDReceiver`) compares it with its own
+process ID before it opens any handle, and gives the error above without a CUDA call. The
+201 mapping stays as the fallback for a segment with `sender_pid` 0 (unknown).
+
+## Code rules
+
+- No C++ exception crosses the plugin ABI: every TD entry point is fenced (ADR-0009,
+  mitigations). The empty `catch (...) {}` fences are intentional and carry a `NOLINT`.
+- clang-format covers `cpp_top/src/`, `cpp_top/tests/` and `cpp_top/tools/`. clang-tidy
+  runs only on `cpp_top/src/`. The vendored TD headers in `cpp_top/vendor/` are a
+  primary source and are never linted or reformatted.
+
+## Cook order on the receiver
+
+Read `producer_frame` through an Info CHOP with Passive Off, and make it an input of the
+expression that uses it. With Passive Off, TD cooks the In TOP before the Info CHOP reads
+it, so the value belongs to the frame that the In TOP shows in this cook. With Passive On,
+the value can be one frame late. A Python read of `op.info` or a CHOP Execute DAT does not
+have this order.
+
+The sync kit (`examples/td_multistream_sync/`) does this: each Info CHOP has Passive Off,
+the Execute DAT force-cooks the `sync` CHOP once at frame start, and the Cache TOP and
+Switch TOP read `op('sync')` in their expressions.
+
+To check the order: pause A, step A one frame, and look at B in the Performance Monitor.
+The Switch TOP index and the shown texture must change in the same B frame.
+
+## Orbbec wiring
+
+- A: one Orbbec TOP for each camera, with device timer sync on. A Select TOP takes the
+  color (RGBA8) and the depth (Mono32Float, meters) to two Out TOPs. Three cameras give six
+  streams, `Streamid` 0 to 5, for example `Ipcmemname` `cam0_color` to `cam2_depth`.
+- Keep depth at native resolution in Mono32Float. Mono16Float has steps of 2 mm from 2 to
+  4 m and 4 mm from 4 to 8 m, and the camera gives 1 mm.
+- B: build the receiver with `build_receiver()` from `examples/td_multistream_sync/`. Its
+  README has the steps, the sync rule and the run logger.
+
+## WDDM caveat (ADR-0004)
+
+Windows runs the GPU in the Windows display driver model (WDDM) by default. NVIDIA documents
+legacy CUDA IPC (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`) as Linux-only, or Windows in
+TCC mode. cuda-link uses it on WDDM. It works in practice, and the tests have shown no error
+801, but this is outside NVIDIA's support statement.
+
+- Test again after each driver or CUDA update.
+- The `init_note` row of each TOP's Info DAT shows the result of the IPC capability probe
+  (`CudaDeviceSession`), with the same WDDM/TCC note as the Python
+  `CUDARuntimeAPI.check_ipc_capability()`.
+- If the probe or the open of a handle fails after an update, read `last_error` in the Info
+  DAT and the debug log.
+
+## Teardown grace period
+
+When the Out TOP frees its GPU buffers, a receiver can still hold imported handles to them.
+A use of such a handle is undefined behavior. So the Out TOP does these steps first:
+
+1. It sets the shutdown flag and rings the doorbell event.
+2. It writes zeros over the IPC handles in the segment.
+3. It waits 100 ms (`kIpcCloseGracePeriodMs`) so that the receiver can close its handles.
+
+The wait is on TD's main thread. Thus TD drops about 6 frames at 60 FPS when:
+
+- you set `Active` Off, or you remove or close the Out TOP;
+- you change `Ipcmemname` while the Out TOP is active (the old segment is closed);
+- the input changes resolution or pixel format (the ring is made again, and the old buffers
+  are freed after the wait).
+
+`Numslots` is greyed out while `Active` is On. A new value takes effect at the next
+`Active` On.
+
+The first allocation does not wait: there are no old handles. Change these parameters and
+the format before a show, not during it.
+
+## Trust model
+
+- The Out TOP makes the segment with `CreateFileMappingW` and the default security. The name
+  has no `Global\` prefix, so the segment is in the user's session. Other processes of the
+  same user in that session can open it, read it and write to it if they know the name.
+  The default security also gives access to SYSTEM and to elevated administrator
+  processes.
+- cuda-link does not authenticate the sender. Use it on a machine whose processes you trust.
+- The In TOP reads the segment as untrusted input. It refuses a wrong magic, a `num_slots` of
+  0 or more than 64, a layout larger than the mapped size, and metadata with a zero size or a
+  `data_size` that does not agree with the width, height and format. It shows the reason in
+  `last_error`.
+
+## Debug log
+
+With `Debug` on, each TOP appends lines to its own file in the Windows temp folder
+(`GetTempPath`, normally `%TEMP%`, that is `C:\Users\<user>\AppData\Local\Temp`):
+
+| TOP | File |
+|---|---|
+| Out TOP | `%TEMP%\cudalink_out_top_debug.log` |
+| In TOP | `%TEMP%\cudalink_in_top_debug.log` |
+
+The file grows while `Debug` is on; delete it when you no longer need it. Every 97 frames the
+log has a `bench:` line with the mean cook times. With `Debug` off, no file is written and
+the GPU timing channels show 0.
+
+### Measuring cost
+
+Measure the cost of a TOP with `Debug` off:
+
+- Sample `copy_us`, `begin_us` and `end_us` from the Info CHOP over many frames, and
+  compare medians.
+- On the In TOP, do not use `cook_us` for a cost: it includes the `Framewaitms` wait for
+  the producer.
+- `Debug` adds GPU timer events to each cook. They make Out TOP `copy_us` about 3.5 times
+  larger (67 µs to about 230 µs on the dev box). Compare `bench:` lines only between runs
+  that both have `Debug` on.
+
+With `Debug` off, the CUDA graph path gave no gain on either TOP (measured 2026-11-17). 2.0.0
+removes the path, the variable `CUDALINK_CPP_USE_GRAPHS` and the Info CHOP channels
+`graph_hits` and `graph_builds` (ADR-0010, ADR-0011).

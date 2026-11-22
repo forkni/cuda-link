@@ -15,7 +15,9 @@ def test_get_name_known_codes():
     assert CUDAError.get_name(CUDAError.MEMORY_ALLOCATION) == "MEMORY_ALLOCATION"
     assert CUDAError.get_name(CUDAError.INVALID_DEVICE_POINTER) == "INVALID_DEVICE_POINTER"
     assert CUDAError.get_name(CUDAError.INVALID_DEVICE) == "INVALID_DEVICE"
-    assert CUDAError.get_name(CUDAError.INVALID_CONTEXT) == "INVALID_CONTEXT"
+    assert CUDAError.get_name(CUDAError.DEVICE_UNINITIALIZED) == "DEVICE_UNINITIALIZED"
+    # Deprecated alias: same code 201, reported under the canonical Runtime API name.
+    assert CUDAError.get_name(CUDAError.INVALID_CONTEXT) == "DEVICE_UNINITIALIZED"
     assert CUDAError.get_name(CUDAError.NOT_READY) == "NOT_READY"
     assert CUDAError.get_name(CUDAError.PEER_ACCESS_ALREADY_ENABLED) == "PEER_ACCESS_ALREADY_ENABLED"
 

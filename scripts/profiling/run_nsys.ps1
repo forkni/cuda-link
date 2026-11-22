@@ -5,7 +5,8 @@
 #   profile_export  — Python-only Exporter harness (no consumer process).
 #                     Used for Cells A-nsys (graphs OFF) and B-nsys (graphs ON).
 #   bench_sweep     — Full IPC roundtrip (producer + consumer spawn processes).
-#                     Used for Cells C-nsys (graphs OFF) and D-nsys (graphs ON).
+#                     Graphs ON only: the Python Exporter has no environment switch for
+#                     CUDA graphs since 2.0.0, and bench_sweep has no --no-graphs option.
 #
 # Usage:
 #   # Cell A-nsys: Python-only, graphs OFF
@@ -14,10 +15,7 @@
 #   # Cell B-nsys: Python-only, graphs ON
 #   ./scripts/profiling/run_nsys.ps1 -Target profile_export -Graphs 1
 #
-#   # Cell C-nsys: Full IPC roundtrip, graphs OFF
-#   ./scripts/profiling/run_nsys.ps1 -Target bench_sweep -Graphs 0
-#
-#   # Cell D-nsys: Full IPC roundtrip, graphs ON (default)
+#   # Cell D-nsys: Full IPC roundtrip, graphs ON (default; -Graphs 0 is an error here)
 #   ./scripts/profiling/run_nsys.ps1 -Target bench_sweep -Graphs 1
 #
 #   # Open result:
@@ -36,6 +34,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if ($Target -eq "bench_sweep" -and $Graphs -eq 0) {
+    # Without this stop the trace would land in a "graphsOFF" folder with graphs on.
+    throw "-Graphs 0 works only with -Target profile_export (it passes --no-graphs). bench_sweep always runs with CUDA graphs on."
+}
+
 $cellLabel = "graphs$(if ($Graphs -eq 1) { 'ON' } else { 'OFF' })"
 $ts  = (Get-Date -Format "yyyy-MM-dd_HHmmss")
 $out = "benchmarks/results/nsys/${Target}_${cellLabel}_${ts}"
@@ -47,11 +50,10 @@ Write-Host "==> Output  : $out/run.nsys-rep"
 
 $env:CUDALINK_NVTX            = "1"
 $env:CUDALINK_NVTX_VERBOSE    = "1"
-$env:CUDALINK_USE_GRAPHS      = "$Graphs"
-$env:CUDALINK_TD_USE_GRAPHS   = "$Graphs"
 
 if ($Target -eq "profile_export") {
     $cmd = "python scripts/profiling/profile_export.py --frames $Frames --export-profile"
+    if ($Graphs -eq 0) { $cmd += " --no-graphs" }
 } else {
     # bench_sweep --quick runs a single cell (512x512, uint8, 200 frames) for a quick smoke;
     # omit --quick for a full sweep across resolutions. For nsys timing use --quick to keep

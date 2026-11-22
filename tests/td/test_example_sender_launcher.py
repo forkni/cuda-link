@@ -60,3 +60,18 @@ def test_onstart_does_not_spawn_when_no_interpreter_resolved(
     captured = capsys.readouterr()
     assert "ERROR" in captured.out
     assert "CUDALINK_SENDER_PYTHON_EXE" in captured.out
+
+
+def test_onframestart_reports_an_unexpected_exit_one_time(capsys: pytest.CaptureFixture[str]) -> None:
+    """After the child exits with an error, onFrameStart warns on that frame only."""
+    mod = _reset_module()
+    process = MagicMock()
+    process.poll.return_value = 1
+    process.returncode = 1
+    mod._process = process
+
+    for frame in range(3):
+        mod.onFrameStart(frame)
+
+    assert capsys.readouterr().out.count("sender subprocess exited unexpectedly") == 1
+    assert mod._process is None

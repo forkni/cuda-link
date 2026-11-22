@@ -30,8 +30,10 @@ Environment variables (all optional):
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import logging
 import os
+import re
 import sys
 import time
 
@@ -52,6 +54,72 @@ if _probe_log_file:
 # Ensure cuda_link is importable for the console helper (may need sys.path
 # patch when run without a pip install, same pattern as main() below).
 # ---------------------------------------------------------------------------
+
+
+_VERSION_RE = r'^__version__\s*=\s*["\']([^"\']+)["\']'
+_MAGIC_RE = r"^PROTOCOL_MAGIC\s*(?::\s*\w+)?\s*=\s*(0[xX][0-9A-Fa-f]+)"
+
+
+def _first_match(path: str, pattern: str) -> str | None:
+    """First group of ``pattern`` in the file at ``path``; None when not readable or not found."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            match = re.search(pattern, f.read(), re.MULTILINE)
+    except OSError:
+        return None
+    return match.group(1) if match else None
+
+
+def _same_build(package_a: str, package_b: str) -> bool:
+    """True when two cuda_link package folders have one version and one SHM protocol magic."""
+    for rel, pattern in (("__init__.py", _VERSION_RE), ("shm_protocol.py", _MAGIC_RE)):
+        value = _first_match(os.path.join(package_a, rel), pattern)
+        if value is None or value != _first_match(os.path.join(package_b, rel), pattern):
+            return False
+    return True
+
+
+def _forget_cuda_link() -> None:
+    for name in [m for m in sys.modules if m == "cuda_link" or m.startswith("cuda_link.")]:
+        del sys.modules[name]
+
+
+def _use_peer_library() -> None:
+    """Load cuda_link from CUDALINK_PEER_LIB_PATH (set by the TD launcher) when it is set.
+
+    A cuda-link installed in this Python can be another release with another SHM protocol
+    version; it is replaced only then. An installed package with the same version and the same
+    protocol magic stays in use (it has the native wait extension). The two are compared as
+    files: the installed package is not imported for the comparison. The peer package is
+    loaded by file path: sys.path does not change, so no other package in that folder hides
+    the ones of this Python.
+    """
+    root = os.environ.get("CUDALINK_PEER_LIB_PATH", "")
+    init = os.path.join(root, "cuda_link", "__init__.py")
+    if not root or not os.path.isfile(init):
+        return
+    package = os.path.dirname(init)
+    try:
+        installed = importlib.util.find_spec("cuda_link")
+    except (ImportError, ValueError):
+        installed = None
+    if installed is not None and installed.origin and _same_build(os.path.dirname(installed.origin), package):
+        return
+    spec = importlib.util.spec_from_file_location("cuda_link", init, submodule_search_locations=[package])
+    if spec is None or spec.loader is None:
+        return
+    _forget_cuda_link()
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["cuda_link"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 -- fall back to the installed package
+        # Also the submodules: one that stays would be mixed into the installed package.
+        _forget_cuda_link()
+        print(f"[receiver] WARNING: could not load cuda_link from {root}: {exc}", flush=True)
+
+
+_use_peer_library()
 
 try:
     from cuda_link._console import install_console_ctrl_handler
@@ -266,9 +334,9 @@ def main() -> None:
 
             elif result.outcome is ImportOutcome.NO_FRAME:
                 no_frame_count += 1
-                # R2 doorbell: block on the Win32 named event when enabled
-                # (CUDALINK_DOORBELL=1); returns False immediately when disabled
-                # or non-Windows, preserving the existing poll-sleep behaviour.
+                # R2 doorbell: block on the Win32 named event (on by default since
+                # 2.0.0); returns False immediately with doorbell=False in the policy, a
+                # producer without the event, or non-Windows: then poll-sleep.
                 if importer.wait_for_doorbell(2.0):
                     doorbell_wake_count += 1
                 else:

@@ -28,6 +28,7 @@ from cuda_link.exporter import Exporter
 from cuda_link.importer import Importer
 from cuda_link.shm_protocol import (
     PROTOCOL_MAGIC,
+    SLOT_SIZE,
     DtypeCodec,
     Metadata,
     SHMLayout,
@@ -196,8 +197,8 @@ def test_acquire_slot_sees_published_frame(temp_shm_name: str, shared_memory_cle
             assert result.state is SlotState.NEW_FRAME
             assert result.slot == 0  # first frame → write_idx=1 → slot = (1-1) % num_slots = 0
             assert read_write_idx(obs.buf) == 1
-            # timestamp is a producer wall-clock perf_counter; verify it's within bracket
-            assert t_before <= result.timestamp <= t_after + 0.1
+            # host_timestamp is the producer's perf_counter at publish; verify it's within bracket
+            assert t_before <= result.slot_meta.host_timestamp <= t_after + 0.1
         finally:
             obs.close()
     finally:
@@ -488,8 +489,8 @@ def test_close_sets_shutdown_zeroes_handles_and_unlinks(temp_shm_name: str, shar
         # (b) IPC handle slots are zeroed (STEP 1).
         for slot in range(num_slots):
             base = layout.slot_offset(slot)
-            slot_bytes = bytes(obs.buf[base : base + 128])  # 128 = SLOT_SIZE
-            assert slot_bytes == b"\x00" * 128, f"slot {slot} handles not zeroed after close"
+            slot_bytes = bytes(obs.buf[base : base + SLOT_SIZE])  # handles + slot meta
+            assert slot_bytes == b"\x00" * SLOT_SIZE, f"slot {slot} handles not zeroed after close"
     finally:
         obs.close()
 

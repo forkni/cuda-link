@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import enum
 import logging
 import os
 import struct
@@ -35,26 +36,34 @@ from ._importer_port import (
     ImportResult,
     ImportSpec,
 )
+from ._profile import STATS_LOG_EVERY
 from .cuda_runtime_types import (
     IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
     CudaIpcError,
+    IncompatiblePeerError,
     IPCEventOpenError,
     ProducerTimeoutError,
     ProtocolError,
 )
 from .shm_protocol import (
+    EMPTY_SLOT_META,
     IPC_HANDLE_SIZE,
-    MAGIC_OFFSET,
-    MAGIC_SIZE,
+    MAX_SLOTS,
     PROTOCOL_MAGIC,
-    WRITE_IDX_OFFSET,
+    SAME_PROCESS_MESSAGE,
     AcquireResult,
     DtypeCodec,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
+    is_same_process_sender,
+    is_valid_num_slots,
+    protocol_mismatch_message,
+    read_magic,
     read_num_slots,
+    read_sender_pid,
     read_version,
     read_write_idx,
 )
@@ -66,6 +75,15 @@ if TYPE_CHECKING:
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
+
+# wait_for_doorbell() slice: the longest single doorbell wait before write_idx is polled
+# again (same 1 ms as the In TOP's kFrameWaitSliceMs and the .tox Receiver).
+_DOORBELL_SLICE_MS = 1
+
+# The process id the same-process check compares with the segment's sender_pid. A module
+# attribute so tests that run an Exporter and an Importer in one process on fake CUDA can
+# replace it (real CUDA IPC cannot loop back within one process).
+_current_pid = os.getpid
 
 # Pre-built NVTX strings eliminate f-string allocation on the hot path.
 _NVTX_GET_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.importer.get_frame.slot")
@@ -115,6 +133,42 @@ class _HighResTimer:
     def __exit__(self, *_: object) -> None:
         if self._active:
             _winmm.timeEndPeriod(1)
+
+
+def _python_wait_slot(
+    query: Any, evt: Any, wait_start: float, spin_us: float, deadline: float
+) -> tuple[str, float, float, bool]:
+    """Wait for ``evt`` with the Python spin-then-sleep loop (the path with no native backend).
+
+    Returns (status, waited_us, blocked_us, slept). ``status`` is a WaitStatus name:
+    "READY_SPIN" (the spin phase caught it), "READY_POLL" (the sleep phase caught it) or
+    "TIMEOUT". ``waited_us`` counts from ``wait_start``; ``blocked_us`` is the time in the
+    sleep phase only; ``slept`` says whether that phase slept at least once.
+    """
+    if spin_us > 0:
+        # Clamp spin_deadline to the overall deadline so the loop needs
+        # only one perf_counter() call per iteration — no inner deadline
+        # check required (spin budget << timeout_ms in all practical cases).
+        spin_deadline = min(wait_start + spin_us / 1_000_000, deadline)
+        while (now := time.perf_counter()) < spin_deadline:
+            if query(evt):
+                return "READY_SPIN", (now - wait_start) * 1_000_000, 0.0, False
+        # If we exited because spin_deadline == deadline, we timed out.
+        if time.perf_counter() >= deadline:
+            return "TIMEOUT", (time.perf_counter() - wait_start) * 1_000_000, 0.0, False
+
+    phase2_start = time.perf_counter()
+    slept = False
+    with _HighResTimer():
+        while True:
+            if query(evt):
+                break
+            if time.perf_counter() >= deadline:
+                return "TIMEOUT", (time.perf_counter() - wait_start) * 1_000_000, 0.0, slept
+            time.sleep(0.0001)
+            slept = True
+    end = time.perf_counter()
+    return "READY_POLL", (end - wait_start) * 1_000_000, (end - phase2_start) * 1_000_000, slept
 
 
 # Optional dependencies
@@ -281,16 +335,15 @@ class IPCConnection:
     """
 
     cuda: ImporterCudaPort
-    shm_handle: object  # SharedMemory | None after close()
+    shm_handle: SharedMemory | None  # None after close()
     ipc_version: int
     num_slots: int
-    ipc_handles: list
-    dev_ptrs: list  # [c_void_p | None]
-    ipc_events: list  # [event_t | None]
-    layout: object  # SHMLayout
+    ipc_handles: list[Any]  # cudaIpcMemHandle_t per slot (None until read)
+    dev_ptrs: list[Any]  # c_void_p per slot (None after close_ipc_handles())
+    ipc_events: list[Any]  # CUDA event per slot (None when the sender published none)
+    layout: SHMLayout
     shutdown_offset: int
-    timestamp_offset: int
-    # R2: Win32 doorbell handle (None when CUDALINK_DOORBELL=0 or non-Windows)
+    # R2: Win32 doorbell handle (None with ImportPolicy(doorbell=False) or non-Windows)
     doorbell_handle: object = None
 
     def close_ipc_handles(self) -> None:
@@ -675,15 +728,133 @@ class NumpyBuffers:
 
 
 # ---------------------------------------------------------------------------
+# Connect helpers — shared by the Importer and the .tox Receiver (TDReceiver.py)
+# ---------------------------------------------------------------------------
+# Plain functions with typed results and no logging: each caller keeps its own log
+# text, its own exceptions and its own rollback.
+
+
+class HeaderFault(enum.Enum):
+    """Why a segment header cannot be used."""
+
+    UNREADABLE = "unreadable"  # the magic or the sender pid could not be read
+    BAD_MAGIC = "bad_magic"  # another protocol version, or not a cuda-link segment
+    SAME_PROCESS = "same_process"  # the sender is this process
+    BAD_NUM_SLOTS = "bad_num_slots"
+
+
+@dataclass(frozen=True)
+class HeaderCheck:
+    """Result of check_header(). ``fault`` is None when the header is usable.
+
+    ``magic`` is set from BAD_MAGIC on, ``num_slots`` and ``ipc_version`` from
+    BAD_NUM_SLOTS on. ``error`` is the exception behind UNREADABLE.
+    """
+
+    fault: HeaderFault | None = None
+    magic: int = 0
+    num_slots: int = 0
+    ipc_version: int = 0
+    error: Exception | None = None
+
+
+def check_header(buf: Any, current_pid: int) -> HeaderCheck:
+    """Validate the segment header: magic, then the same-process rule, then num_slots."""
+    try:
+        magic = read_magic(buf)
+        if magic != PROTOCOL_MAGIC:
+            return HeaderCheck(HeaderFault.BAD_MAGIC, magic=magic)
+        if is_same_process_sender(read_sender_pid(buf), current_pid):
+            return HeaderCheck(HeaderFault.SAME_PROCESS, magic=magic)
+    except (struct.error, ValueError, IndexError) as e:
+        return HeaderCheck(HeaderFault.UNREADABLE, error=e)
+    ipc_version = read_version(buf)
+    num_slots = read_num_slots(buf)
+    fault = None if is_valid_num_slots(num_slots) else HeaderFault.BAD_NUM_SLOTS
+    return HeaderCheck(fault, magic=magic, num_slots=num_slots, ipc_version=ipc_version)
+
+
+@dataclass(frozen=True)
+class SlotHandleBytes:
+    """The raw IPC handle bytes of one ring slot, copied out of the segment."""
+
+    mem: bytes
+    event: bytes
+
+    @property
+    def has_mem(self) -> bool:
+        """False while the sender has not written the memory handle (all zeros)."""
+        return any(self.mem)
+
+    @property
+    def has_event(self) -> bool:
+        """False for a sender that publishes no IPC event for this slot."""
+        return any(self.event)
+
+
+def read_slot_handle_bytes(buf: Any, layout: SHMLayout, slot: int) -> SlotHandleBytes:
+    """Copy the memory handle and the event handle of ``slot`` out of the segment."""
+    mem_off = layout.mem_handle_offset(slot)
+    evt_off = layout.event_handle_offset(slot)
+    return SlotHandleBytes(
+        mem=bytes(buf[mem_off : mem_off + IPC_HANDLE_SIZE]),
+        event=bytes(buf[evt_off : evt_off + IPC_HANDLE_SIZE]),
+    )
+
+
+class SlotEventOpenError(Exception):
+    """open_slot() opened the memory handle of a slot, then failed on its event.
+
+    Not a RuntimeError, so a caller's ``except RuntimeError`` for the memory open does
+    not take it. ``dev_ptr`` is still open: the caller must close it in its rollback.
+    """
+
+    def __init__(self, cause: Exception, ipc_handle: Any, dev_ptr: Any) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.ipc_handle = ipc_handle
+        self.dev_ptr = dev_ptr
+
+
+def open_slot(cuda: Any, raw: SlotHandleBytes) -> tuple[Any, Any, Any]:
+    """Open one slot's IPC handles. Returns (ipc_handle, dev_ptr, event).
+
+    ``event`` is None when the slot has no event handle. A failed memory open raises
+    whatever the CUDA port raises and leaves nothing open. A failed event open raises
+    SlotEventOpenError: without the event the wait has nothing to order against the
+    sender, so the caller must fail the connect instead of reading unsynced frames.
+    """
+    from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
+
+    ipc_handle = cudaIpcMemHandle_t.from_buffer_copy(raw.mem)
+    dev_ptr = cuda.ipc_open_mem_handle(ipc_handle, flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
+    event = None
+    if raw.has_event:
+        try:
+            event = cuda.ipc_open_event_handle(cudaIpcEventHandle_t.from_buffer_copy(raw.event))
+        except (RuntimeError, OSError) as e:
+            raise SlotEventOpenError(e, ipc_handle, dev_ptr) from e
+    return ipc_handle, dev_ptr, event
+
+
+# ---------------------------------------------------------------------------
 # Reconnect state machine
 # ---------------------------------------------------------------------------
+
+
+class BackoffNotice(enum.Enum):
+    """What a caller should log after a failed connect attempt (_RetryState.back_off)."""
+
+    WAITING = "waiting"  # report the attempt and the wait before the next one
+    NOW_SILENT = "now_silent"  # the last report: later attempts are not reported
+    SILENT = "silent"
 
 
 @dataclass
 class _RetryState:
     """Retry policy and transient counters for the connection-attempt loop.
 
-    Mirrors RetryState in td_exporter/TDReceiver.py — keep fields in sync.
+    The .tox Receiver uses this class too (RetryState in td_exporter/TDReceiver.py is an alias).
     """
 
     connect_attempts: int = 0
@@ -695,6 +866,31 @@ class _RetryState:
     def request_immediate_reconnect(self) -> None:
         """Force the next get_frame*() call to attempt reconnection without waiting."""
         self.frames_since_last_retry = self.retry_interval_frames
+
+    def tick(self) -> bool:
+        """Count one frame. True when a connect attempt is due; that attempt is then counted."""
+        self.frames_since_last_retry += 1
+        if self.frames_since_last_retry < self.retry_interval_frames:
+            return False
+        self.frames_since_last_retry = 0
+        self.connect_attempts += 1
+        return True
+
+    def back_off(self) -> BackoffNotice:
+        """After a failed attempt: set the wait before the next one and say what to log."""
+        backoff_idx = min(self.connect_attempts, len(self.backoff_intervals) - 1)
+        self.retry_interval_frames = self.backoff_intervals[backoff_idx]
+        if self.connect_attempts <= self.max_connect_attempts:
+            return BackoffNotice.WAITING
+        if self.connect_attempts == self.max_connect_attempts + 1:
+            return BackoffNotice.NOW_SILENT
+        return BackoffNotice.SILENT
+
+    def reset(self) -> None:
+        """Forget the attempts and the backoff, so the next attempt is immediate."""
+        self.connect_attempts = 0
+        self.frames_since_last_retry = 0
+        self.retry_interval_frames = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1212,8 @@ class Importer:
         self._event_open_warned = False
         self.frame_count = 0
         self.last_latency = 0.0
+        # Slot meta of the last acquired frame (protocol v0.6): producer_frame, stream_id, ...
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
 
         # NVML telemetry (attached after open() via attach_nvml_observer())
         self._nvml_observer: NVMLObserver | None = None
@@ -1212,25 +1410,19 @@ class Importer:
 
         logger.info("Opened SharedMemory: %s", self._spec.shm_name)
 
-        try:
-            magic = struct.unpack("<I", bytes(shm.buf[MAGIC_OFFSET : MAGIC_OFFSET + MAGIC_SIZE]))[0]
-        except (struct.error, ValueError, IndexError):
+        header = check_header(shm.buf, _current_pid())
+        if header.fault is not None:
             shm.close()
-            raise
-
-        if magic != PROTOCOL_MAGIC:
-            shm.close()
-            raise ProtocolError(
-                f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
-                "Update both TD and Python sides to the same protocol version."
-            )
-
-        ipc_version = read_version(shm.buf)
-        num_slots = read_num_slots(shm.buf)
-
-        if num_slots == 0 or num_slots > 10:
-            shm.close()
-            raise ProtocolError(f"Invalid num_slots={num_slots} in SHM (expected 1–10)")
+            if header.fault is HeaderFault.UNREADABLE:
+                # ProtocolError is a ValueError, so the reconnect driver (_connect_silent)
+                # takes it as one more failed attempt. A bare struct.error went through it.
+                raise ProtocolError(f"Cannot read the SHM header: {header.error}") from header.error
+            if header.fault is HeaderFault.BAD_MAGIC:
+                raise IncompatiblePeerError(protocol_mismatch_message(header.magic))
+            if header.fault is HeaderFault.SAME_PROCESS:
+                raise IncompatiblePeerError(SAME_PROCESS_MESSAGE)
+            raise ProtocolError(f"Invalid num_slots={header.num_slots} in SHM (expected 1–{MAX_SLOTS})")
+        ipc_version, num_slots = header.ipc_version, header.num_slots
 
         shutdown_offset = SHMLayout(num_slots).shutdown_offset
         try:
@@ -1294,8 +1486,6 @@ class Importer:
         method rolls back only the resources it opened itself (dev_ptrs, ipc_events,
         doorbell), so a partial slot-open never leaks a GPU IPC mapping.
         """
-        from .cuda_runtime_types import cudaIpcEventHandle_t, cudaIpcMemHandle_t
-
         cuda = self._cuda
         ipc_handles: list = [None] * num_slots
         dev_ptrs: list = [None] * num_slots
@@ -1305,26 +1495,18 @@ class Importer:
 
         try:
             for slot in range(num_slots):
-                mem_off = layout.mem_handle_offset(slot)
-                evt_off = layout.event_handle_offset(slot)
-
-                mem_handle_bytes = bytes(shm.buf[mem_off : mem_off + IPC_HANDLE_SIZE])
-                logger.debug("Slot %d IPC read handle prefix: %s...", slot, mem_handle_bytes[:16].hex())
-                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
-                dev_ptrs[slot] = cuda.ipc_open_mem_handle(ipc_handles[slot], flags=IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
-
-                event_handle_bytes = bytes(shm.buf[evt_off : evt_off + IPC_HANDLE_SIZE])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        ipc_events[slot] = cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        # A published event that won't open leaves the wait with nothing to
-                        # order against the producer, so every frame would be read unsynced.
-                        # Fail the connect (rolled back below) instead of degrading silently.
-                        raise IPCEventOpenError(
-                            f"Failed to open IPC event for slot {slot}: {e}", code=getattr(e, "code", None)
-                        ) from e
+                raw = read_slot_handle_bytes(shm.buf, layout, slot)
+                logger.debug("Slot %d IPC read handle prefix: %s...", slot, raw.mem[:16].hex())
+                try:
+                    ipc_handles[slot], dev_ptrs[slot], ipc_events[slot] = open_slot(cuda, raw)
+                except SlotEventOpenError as e:
+                    # A published event that won't open leaves the wait with nothing to
+                    # order against the producer, so every frame would be read unsynced.
+                    # Fail the connect (rolled back below) instead of degrading silently.
+                    ipc_handles[slot], dev_ptrs[slot] = e.ipc_handle, e.dev_ptr
+                    raise IPCEventOpenError(
+                        f"Failed to open IPC event for slot {slot}: {e.cause}", code=getattr(e.cause, "code", None)
+                    ) from e.cause
 
                 logger.info(
                     "Slot %d: GPU ptr=0x%016x, event=%s",
@@ -1373,7 +1555,6 @@ class Importer:
                 ipc_events=ipc_events,
                 layout=layout,
                 shutdown_offset=layout.shutdown_offset,
-                timestamp_offset=layout.timestamp_offset,
                 doorbell_handle=db_handle,
             ).close_ipc_handles()
             raise
@@ -1388,7 +1569,6 @@ class Importer:
             ipc_events=ipc_events,
             layout=layout,
             shutdown_offset=layout.shutdown_offset,
-            timestamp_offset=layout.timestamp_offset,
             doorbell_handle=db_handle,
         )
 
@@ -1449,16 +1629,18 @@ class Importer:
             return False
 
     def _log_connect_failure(self, exc: Exception, level: int, msg: str) -> None:
-        """Log a failed connect at ``level``, except a failed IPC event open.
+        """Log a failed connect at ``level``, except a failed IPC event open or an
+        incompatible peer (other protocol version, same process).
 
-        That one means the producer is up but this consumer cannot order against it,
-        which retrying quietly would hide: warn on the first failure of a streak, then
-        drop to DEBUG until a connect succeeds (``_connect`` clears the flag).
+        Those mean the producer is up but this consumer cannot use it, which retrying
+        quietly would hide: warn on the first failure of a streak, then drop to DEBUG
+        until a connect succeeds (``_connect`` clears the flag).
         """
-        if isinstance(exc, IPCEventOpenError) and not self._event_open_warned:
+        persistent = isinstance(exc, (IPCEventOpenError, IncompatiblePeerError))
+        if persistent and not self._event_open_warned:
             self._event_open_warned = True
             logger.warning("%s — will keep retrying", exc)
-        elif isinstance(exc, IPCEventOpenError):
+        elif persistent:
             logger.debug(msg, exc)
         else:
             logger.log(level, msg, exc)
@@ -1466,25 +1648,20 @@ class Importer:
     def _drive_retry(self) -> bool:
         """Advance the reconnect state machine by one frame. Returns True if just connected."""
         retry = self._retry
-        retry.frames_since_last_retry += 1
-        if retry.frames_since_last_retry < retry.retry_interval_frames:
+        if not retry.tick():
             return False
-
-        retry.frames_since_last_retry = 0
-        retry.connect_attempts += 1
 
         if self._connect_silent():
             return True
 
-        backoff_idx = min(retry.connect_attempts, len(retry.backoff_intervals) - 1)
-        retry.retry_interval_frames = retry.backoff_intervals[backoff_idx]
-        if retry.connect_attempts <= retry.max_connect_attempts:
+        notice = retry.back_off()
+        if notice is BackoffNotice.WAITING:
             logger.info(
                 "Waiting for producer... (attempt %d, next retry in %d frames)",
                 retry.connect_attempts,
                 retry.retry_interval_frames,
             )
-        elif retry.connect_attempts == retry.max_connect_attempts + 1:
+        elif notice is BackoffNotice.NOW_SILENT:
             logger.warning("Producer not found. Will keep retrying silently.")
         return False
 
@@ -1600,87 +1777,47 @@ class Importer:
                 return (time.perf_counter() - wait_start) * 1_000_000
             raise ProducerTimeoutError(f"IPC event still not signaled (slot={slot})")
 
-        # R5: native wait backend — only engaged when resolved AND this slot has
-        # both an IPC event and an open doorbell (the backend needs both to reach
-        # its <10us target). Everything below this block is the pre-R5 path,
-        # unchanged, so CUDALINK_WAIT_BACKEND=python (or any resolution failure)
-        # reproduces today's behavior exactly.
-        if self._wait_backend is not None and conn.ipc_events[slot] and conn.doorbell_handle is not None:
-            event_ptr = int(conn.ipc_events[slot].value)
-            db_handle = int(conn.doorbell_handle)
-            # Recomputed fresh every call, never cached: a producer restart tears
-            # down and remaps the SHM segment at a new address (_reinitialize),
-            # and _wait_backend/doorbell are re-resolved at that same point, but
-            # the address itself must still be read live here to be correct even
-            # within a single connection's lifetime (the buffer object is stable
-            # per-connection, but computing it once and reusing it buys nothing
-            # and adds a class of staleness bug for free).
-            write_idx_addr = ctypes.addressof(ctypes.c_char.from_buffer(conn.shm_handle.buf)) + WRITE_IDX_OFFSET
+        evt = conn.ipc_events[slot]
+        if not evt:
+            conn.cuda.synchronize()
+            return (time.perf_counter() - wait_start) * 1_000_000
+
+        # R5: native wait backend — only engaged when resolved AND an open doorbell exists
+        # (the backend needs both to reach its <10us target). Otherwise the Python loop
+        # runs, so CUDALINK_WAIT_BACKEND=python (or any resolution failure) gives the
+        # pre-R5 behavior exactly.
+        if self._wait_backend is not None and conn.doorbell_handle is not None:
+            # write_idx_addr (third argument) is 0: the native side has not read it since
+            # the 2026-07-04 torn-frame fix, and the parameter stays only for its ABI.
             result = self._wait_backend.wait_slot(
-                event_ptr,
-                db_handle,
-                write_idx_addr,
+                int(evt.value),
+                int(conn.doorbell_handle),
+                0,
                 self._last_write_idx,
                 policy.wait_spin_us,
                 int(self._spec.timeout_ms),
             )
-            status_name = result.status.name  # avoid importing WaitStatus in core
-            if status_name == "TIMEOUT":
-                raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
-            if status_name == "READY_SPIN":
-                self.total_wait_spin_us += result.waited_us
-                self.wait_spin_hits += 1
-                self._adaptive_observe_wait(False)
-            else:  # READY_DOORBELL / READY_POLL / READY_LATE(retired) all count as the blocked/slept bucket
-                self.total_wait_sleep_us += result.waited_us
-                self.wait_sleep_hits += 1
-                self._adaptive_observe_wait(status_name == "READY_DOORBELL")
-            return result.waited_us
-
-        if conn.ipc_events[slot]:
-            evt = conn.ipc_events[slot]
-            query = conn.cuda.query_event
-
-            if policy.wait_spin_us > 0:
-                # Clamp spin_deadline to the overall deadline so the loop needs
-                # only one perf_counter() call per iteration — no inner deadline
-                # check required (spin budget << timeout_ms in all practical cases).
-                spin_deadline = min(
-                    wait_start + policy.wait_spin_us / 1_000_000,
-                    deadline,
-                )
-                while (now := time.perf_counter()) < spin_deadline:
-                    if query(evt):
-                        spin_us = (now - wait_start) * 1_000_000
-                        self.total_wait_spin_us += spin_us
-                        self.wait_spin_hits += 1
-                        self._adaptive_observe_wait(False)
-                        return spin_us
-                # If we exited because spin_deadline == deadline, we timed out.
-                if time.perf_counter() >= deadline:
-                    raise ProducerTimeoutError(
-                        f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
-                    )
-
-            phase2_start = time.perf_counter()
-            did_sleep = False
-            with _HighResTimer():
-                while True:
-                    if query(evt):
-                        break
-                    if time.perf_counter() >= deadline:
-                        raise ProducerTimeoutError(
-                            f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})"
-                        )
-                    time.sleep(0.0001)
-                    did_sleep = True
-            self.total_wait_sleep_us += (time.perf_counter() - phase2_start) * 1_000_000
-            self.wait_sleep_hits += 1
-            self._adaptive_observe_wait(did_sleep)
+            status = result.status.name  # avoid importing WaitStatus in core
+            waited_us = blocked_us = result.waited_us
+            # READY_DOORBELL / READY_POLL / READY_LATE(retired) all count as blocked;
+            # only READY_DOORBELL counts as a sleep for the adaptive gpu-wait latch.
+            slept = status == "READY_DOORBELL"
         else:
-            conn.cuda.synchronize()
+            status, waited_us, blocked_us, slept = _python_wait_slot(
+                conn.cuda.query_event, evt, wait_start, policy.wait_spin_us, deadline
+            )
 
-        return (time.perf_counter() - wait_start) * 1_000_000
+        if status == "TIMEOUT":
+            raise ProducerTimeoutError(f"IPC event wait timed out after {self._spec.timeout_ms}ms (slot={slot})")
+        if status == "READY_SPIN":
+            self.total_wait_spin_us += waited_us
+            self.wait_spin_hits += 1
+            self._adaptive_observe_wait(False)
+        else:
+            self.total_wait_sleep_us += blocked_us
+            self.wait_sleep_hits += 1
+            self._adaptive_observe_wait(slept)
+        return waited_us
 
     # ------------------------------------------------------------------
     # R2: Doorbell wait primitive
@@ -1699,13 +1836,14 @@ class Importer:
                     Caller should fall back to its poll-sleep path.
 
         Notes:
-            * This is a single-consumer primitive (auto-reset event).
-            * The 2 ms default cap in the example loop keeps the lost-wakeup
-              window bounded: worst-case latency is one timeout_ms slice, not
-              infinite.  Caller always re-checks with get_frame() after True.
-            * Returns False immediately when CUDALINK_DOORBELL=0 or on
-              non-Windows — existing behaviour is preserved without any guards
-              in the caller.
+            * The event is auto-reset and wakes ONE waiter. Another consumer of
+              the same name (an In TOP, a `.tox` Receiver, a second Importer) can
+              take a signal, so the wait runs in slices of _DOORBELL_SLICE_MS and
+              polls write_idx after each: a taken signal costs one slice, not the
+              whole timeout. Caller always re-checks with get_frame() after True.
+            * Returns False immediately with ImportPolicy(doorbell=False), on non-Windows,
+              or when the producer made no event (1.x, doorbell off) — the caller
+              falls back to its poll-sleep path without any guards.
         """
         conn = self._conn
         h = conn.doorbell_handle if conn is not None else None
@@ -1720,8 +1858,22 @@ class Importer:
         if cur != 0 and cur != self._last_write_idx:
             return True
 
-        # Block until signaled; auto-reset clears the event on wake.
-        return _doorbell.wait(h, int(timeout_ms))
+        if timeout_ms <= 0:
+            return _doorbell.wait(h, 0)
+        # Block in slices; auto-reset clears the event on wake. A slice that times out
+        # polls write_idx (the signal may have gone to another consumer). The iteration
+        # cap stops a failed wait (returns False at once) from spinning to the deadline.
+        deadline = time.perf_counter() + timeout_ms / 1000.0
+        for _ in range(int(timeout_ms / _DOORBELL_SLICE_MS) + 2):
+            remaining_ms = (deadline - time.perf_counter()) * 1000.0
+            if remaining_ms <= 0:
+                break
+            if _doorbell.wait(h, max(1, min(_DOORBELL_SLICE_MS, int(remaining_ms + 0.999)))):
+                return True
+            cur = read_write_idx(conn.shm_handle.buf)
+            if cur != 0 and cur != self._last_write_idx:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Frame consumers
@@ -1813,7 +1965,8 @@ class Importer:
             return ImportResult(outcome=outcome), -1, 0.0, debug, frame_start
 
         read_slot = slot_result.slot
-        producer_timestamp = slot_result.timestamp
+        self.last_slot_meta = slot_result.slot_meta
+        producer_timestamp = slot_result.slot_meta.host_timestamp
         latency_ms = (time.perf_counter() - producer_timestamp) * 1000 if producer_timestamp > 0 else 0.0
         return None, read_slot, latency_ms, debug, frame_start
 
@@ -1840,6 +1993,18 @@ class Importer:
         Returns:
             ImportResult[torch.Tensor] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, RECONNECTING, or TIMEOUT.
+
+        Frame lifetime:
+            The tensor is a view of one slot of the producer's ring buffer, not a
+            copy. The producer starts to write that slot again during its
+            ``num_slots``-th next export (3 slots by default: less than 50 ms after
+            the publish at 60 fps, and less from the time you get it). Read
+            the tensor before then, or copy it with ``tensor.clone()`` to keep it
+            longer. A read that takes longer shows a mix of two frames. A first
+            read can be slow: torch builds its kernels on first use.
+            close() and a reconnect (RECONNECTING) unmap all slots at once. A GPU
+            read of an uncopied tensor after them, even with no new frame, can
+            raise an illegal-address error that stops all later CUDA work.
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
@@ -1861,6 +2026,11 @@ class Importer:
         frame with +1 frame latency, hiding D2H copy time behind consumer CPU work.
         A producer restart re-primes: the first call after RECONNECTING returns
         NO_FRAME again rather than the previous session's last frame.
+
+        The array is a host buffer that the importer uses again: the next call
+        writes into it. close() and a format change free the buffer, so reading
+        the array after them can crash the process. Use ``array.copy()`` to keep
+        a frame past the next call or past close().
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
@@ -1882,6 +2052,14 @@ class Importer:
         Returns:
             ImportResult[cp.ndarray] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, or RECONNECTING.
+
+        Frame lifetime:
+            The array is a view of one ring slot, as for get_frame(). Read it
+            before the producer starts its ``num_slots``-th next export, or copy
+            it with ``arr.copy()``. CuPy compiles its kernels per dtype on first
+            use, so the first read after open() can take longer than that.
+            close() and a reconnect (RECONNECTING) unmap all slots at once; a GPU
+            read of the array after them can raise an illegal-address error.
 
         Note:
             TIMEOUT is not reachable via this path — streamWaitEvent is a
@@ -2039,7 +2217,7 @@ class Importer:
 
     def _log_frame_stats(self, mode: str, slot: int, conn: IPCConnection) -> None:
         n = self.frame_count
-        if n > 0 and n % 97 == 0:
+        if n > 0 and n % STATS_LOG_EVERY == 0:
             sync_mode = "GPU-Events" if all(conn.ipc_events) else "CPU-Sync"
             spin_hit_pct = 100.0 * self.wait_spin_hits / n if n > 0 else 0.0
             logger.debug(

@@ -37,22 +37,25 @@ class TDSenderConfig:
     export_sync: bool | None = None
     export_profile: bool = False
     export_flush_probe: bool = True
-    use_graphs: bool = False
     stream_high_prio: bool = False
     activation_barrier: bool = True
     barrier_settle_frames: int = 30
+    report_every: int = 150  # published frames between two Debug summary lines
+    # Signal the Win32 named-event doorbell on each publish. Not read from the environment
+    # (CUDALINK_DOORBELL is gone since 2.0.0): always on in the .tox.
+    doorbell: bool = True
 
     @classmethod
     def from_env(cls) -> TDSenderConfig:
         """Build a config from environment variables (production path)."""
         return cls(
-            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → async (default)
+            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → blocking (default)
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
-            use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),
+            report_every=env_int("CUDALINK_SENDER_REPORT_EVERY", default=150),
         )
 
     def __post_init__(self) -> None:
@@ -64,10 +67,14 @@ class TDSenderConfig:
 
 @dataclass(frozen=True)
 class TDReceiverConfig:
-    """Immutable receiver configuration.
+    """Immutable receiver configuration, resolved once at init time."""
 
-    No env vars are Receiver-only at present; placeholder for future additions.
-    """
+    report_every: int = 150  # shown frames between two Debug summary lines
+
+    @classmethod
+    def from_env(cls) -> TDReceiverConfig:
+        """Build a config from environment variables (production path)."""
+        return cls(report_every=env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150))
 
 
 @dataclass

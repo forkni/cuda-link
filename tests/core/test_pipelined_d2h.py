@@ -78,7 +78,6 @@ def _make_conn_and_backend(nb: NumpyBuffers, shape=(4, 4, 4), dtype=np.uint8):
         ipc_events=[None],
         layout=layout,
         shutdown_offset=layout.shutdown_offset,
-        timestamp_offset=layout.timestamp_offset,
     )
 
     fmt = _make_fmt(shape, dtype)

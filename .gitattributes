@@ -42,6 +42,8 @@
 *.toe binary
 *.tox binary
 *.sqlite binary
+# Golden SHM images for cpp_top/tests (written by scripts/gen_golden_shm.py)
+*.bin binary
 
 # ============================================================================
 # MERGE STRATEGIES

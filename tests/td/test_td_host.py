@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Lightweight TD stubs (shaped like TD runtime objects)
 # ---------------------------------------------------------------------------
@@ -487,3 +489,198 @@ def test_fake_tdhost_make_cuda_shape_multiple_calls() -> None:
     assert host.cuda_shapes[0] is s1
     assert host.cuda_shapes[1] is s2
     assert s1 is not s2
+
+
+# ---------------------------------------------------------------------------
+# MonoAlphaFix Reorder TOP (RealTOPHandle.set_format / sync_mono_alpha_fix)
+# ---------------------------------------------------------------------------
+
+
+class _TDFixTOP:
+    """Stub shaped like the MonoAlphaFix Reorder TOP."""
+
+    bypass = True
+
+    def __init__(self) -> None:
+        self.par = _TDPar(format="useinput")
+
+
+def _import_buffer_with_fix(fix: _TDFixTOP | None) -> _TDTOP:
+    comp = _TDComp()
+    if fix is not None:
+        comp._ops["MonoAlphaFix"] = fix  # type: ignore[assignment]
+    top = _TDTOP(name="ImportBuffer")
+    top.parent = lambda: comp  # type: ignore[attr-defined]
+    return top
+
+
+def test_set_format_enables_mono_alpha_fix_for_a_monoalpha_format() -> None:
+    from TDHost import RealTOPHandle
+
+    fix = _TDFixTOP()
+    RealTOPHandle(_import_buffer_with_fix(fix)).set_format("monoalpha8fixed")
+
+    assert fix.bypass is False
+    assert fix.par._attrs["format"]._v == "monoalpha8fixed"
+
+
+def test_set_format_bypasses_mono_alpha_fix_for_other_formats() -> None:
+    from TDHost import RealTOPHandle
+
+    fix = _TDFixTOP()
+    handle = RealTOPHandle(_import_buffer_with_fix(fix))
+    handle.set_format("monoalpha32float")
+    handle.set_format("rg32float")
+
+    assert fix.bypass is True
+    assert fix.par._attrs["format"]._v == "monoalpha32float", "a bypassed TOP keeps its last format"
+
+
+def test_set_format_without_mono_alpha_fix_still_sets_the_format() -> None:
+    """A COMP built before 2.0 has no MonoAlphaFix TOP: set_format must not fail."""
+    from TDHost import RealTOPHandle
+
+    top = _import_buffer_with_fix(None)
+    RealTOPHandle(top).set_format("monoalpha8fixed")
+
+    assert top.par._attrs["format"]._v == "monoalpha8fixed"
+
+
+# ---------------------------------------------------------------------------
+# Stale Status par text from a saved project (RealTDHost.__init__)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "saved",
+    ["WARNING: cuda_link 2.0.0 loaded but the component failed to import it (see Textport)", "ERROR: old"],
+    ids=["warning", "error"],
+)
+def test_real_td_host_replaces_a_saved_warning_or_error_status(saved: str) -> None:
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Status=saved)
+    RealTDHost(comp)
+
+    assert comp.par.Status.eval() == "Idle"
+
+
+def test_real_td_host_replaces_a_saved_format_status() -> None:
+    """The format of the stream at save time is stale too: no sender is connected at start."""
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Status="1280x720 rgba8fixed")
+    RealTDHost(comp)
+
+    assert comp.par.Status.eval() == "Idle"
+
+
+class _TDError(Exception):
+    """Shaped like td.tdError: derives from Exception, not from RuntimeError."""
+
+
+class _RaisingStatusPar(_TDPar):
+    def __getattr__(self, name: str) -> Any:
+        if name == "Status":
+            raise _TDError("simulated td.tdError")
+        return super().__getattr__(name)
+
+
+def test_real_td_host_init_survives_a_td_error_from_the_status_par() -> None:
+    from TDHost import RealTDHost
+
+    comp = _TDComp(Mode="Sender")
+    comp.par = _RaisingStatusPar(Mode="Sender")
+
+    host = RealTDHost(comp)
+
+    assert host.param_value("Mode") == "Sender"
+
+
+def test_sync_mono_alpha_fix_survives_a_td_error() -> None:
+    from TDHost import RealTOPHandle
+
+    class _RaisingFix(_TDFixTOP):
+        @property
+        def bypass(self) -> bool:
+            return True
+
+        @bypass.setter
+        def bypass(self, value: bool) -> None:
+            raise _TDError("simulated td.tdError")
+
+    top = _import_buffer_with_fix(_RaisingFix.__new__(_RaisingFix))
+    top.parent().op("MonoAlphaFix").par = _TDPar(format="useinput")
+
+    RealTOPHandle(top).set_format("monoalpha8fixed")  # must not raise
+
+    assert top.par._attrs["format"]._v == "monoalpha8fixed"
+
+
+# ---------------------------------------------------------------------------
+# 'bg' Select TOP (node viewer image) follows MonoAlphaFix
+# ---------------------------------------------------------------------------
+
+
+def _import_buffer_with_fix_and_bg(bg_source: str) -> tuple[_TDTOP, _TDFixTOP, Any]:
+    """ImportBuffer, MonoAlphaFix and a bg Select TOP whose TOP par evals to an operator."""
+    fix = _TDFixTOP()
+    top = _import_buffer_with_fix(fix)
+    comp = top.parent()
+    export_buffer = _TDTOP(name="ExportBuffer")
+    by_name = {"ImportBuffer": top, "MonoAlphaFix": fix, "ExportBuffer": export_buffer}
+
+    class _OpPar:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def eval(self) -> Any:
+            return by_name[self.value]
+
+    class _BgPars:
+        def __init__(self) -> None:
+            object.__setattr__(self, "_top", _OpPar(bg_source))
+
+        @property
+        def top(self) -> _OpPar:
+            return self._top
+
+        @top.setter
+        def top(self, value: str) -> None:
+            self._top.value = value
+
+    bg = type("_Bg", (), {})()
+    bg.par = _BgPars()
+    comp._ops["bg"] = bg
+    return top, fix, bg
+
+
+def test_bg_select_reads_mono_alpha_fix_for_a_monoalpha_stream() -> None:
+    from TDHost import RealTOPHandle
+
+    top, _fix, bg = _import_buffer_with_fix_and_bg("ImportBuffer")
+
+    RealTOPHandle(top).set_format("monoalpha8fixed")
+
+    assert bg.par.top.value == "MonoAlphaFix"
+
+
+def test_bg_select_goes_back_to_import_buffer_for_other_formats() -> None:
+    from TDHost import RealTOPHandle
+
+    top, _fix, bg = _import_buffer_with_fix_and_bg("MonoAlphaFix")
+
+    RealTOPHandle(top).set_format("rgba32float")
+
+    assert bg.par.top.value == "ImportBuffer"
+
+
+def test_bg_select_on_export_buffer_is_left_alone() -> None:
+    """Sender mode: the viewer shows ExportBuffer and the receiver path must not move it."""
+    from TDHost import RealTOPHandle
+
+    top, _fix, bg = _import_buffer_with_fix_and_bg("ExportBuffer")
+
+    RealTOPHandle(top).set_format("monoalpha8fixed")
+
+    assert bg.par.top.value == "ExportBuffer"

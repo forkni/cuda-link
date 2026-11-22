@@ -12,9 +12,9 @@ Operational guide for the `compute-sanitizer → nsys → ncu` workflow in cuda-
 | `nsys` | System timeline: which streams collide and when, cross-process boundary | After correctness is confirmed |
 | `ncu` | Kernel deep dive: Speed-of-Light, memory bandwidth, warp stalls | After `nsys` narrows to specific kernels |
 
-cuda-link's multi-stream topology (Sender `ipc_stream`, Receiver `_rx_stream`, Importer
-`_numpy_stream`, optional `_d2h_streams[1..n-1]`, cudart graph stream) means timeline-level
-visibility is required to diagnose interaction between streams. CPU-side `CUDALINK_EXPORT_PROFILE`
+cuda-link's multi-stream topology (Sender `ipc_stream`, TD Receiver `_connection.stream`, Importer
+NumPy `primary_stream`, optional extra `d2h_streams[1..n-1]`, cudart graph stream) means
+timeline-level visibility is required to diagnose interaction between streams. CPU-side `CUDALINK_EXPORT_PROFILE`
 timers capture aggregate latency but cannot show GPU-side serialisation. nsys shows both.
 
 ---
@@ -83,8 +83,8 @@ $env:PATH += ";C:/Program Files/NVIDIA Corporation/Nsight Compute 2024.3.2"
 ### Clock control on WDDM
 
 WDDM (Windows Display Driver Model) does **not** support `nvidia-smi -pm 1` persistent mode.
-All runner scripts use `--clock-control base` instead, which tells ncu to use the boost clock
-without locking it. Results are comparable across runs on the same machine but may vary more
+All runner scripts use `--clock-control base` instead, which tells ncu to lock the GPU clock
+to its base frequency. Results are comparable across runs on the same machine but may vary more
 than on bare-metal Linux. Do not attempt `nvidia-smi -ac` on WDDM — it has no effect and
 masks the issue.
 
@@ -92,23 +92,52 @@ masks the issue.
 
 ## 2. Workflow
 
+> **Workload:** `run_compute_sanitizer.ps1`, `run_ncu.ps1`, `run_ncu_receiver.ps1` and the
+> default `run_nsys.ps1` target launch `python benchmarks/bench_sweep.py --quick`. That script is
+> not in the repository (see §3). Supply your own `benchmarks/bench_sweep.py`, or edit the
+> command in the runner. `run_nsys.ps1 -Target profile_export` runs
+> `scripts/profiling/profile_export.py`, which is in the repository.
+
 ### Step 1 — Correctness gate
 
 ```powershell
 ./scripts/profiling/run_compute_sanitizer.ps1
 # expect: exit 0, no memcheck violations
-# output: memcheck.log in your working directory
+# output: benchmarks/results/sanitizer/<timestamp>/memcheck.log (copied to _latest/)
 ```
 
 Fix any violations before proceeding. CUDA IPC uses cross-process device pointers; a single
 out-of-bounds write can corrupt another process's GPU allocation without triggering a page fault.
+
+### Field debugging: `CUDA_LAUNCH_BLOCKING=1`
+
+When an async CUDA error surfaces far from its origin — the classic symptom is a `cudaMemcpy`
+or `cudaEventRecord` reporting `invalid argument`/`illegal address` that was actually raised by
+an earlier asynchronous call — set the switch in the shell that launches TouchDesigner or
+Python **before** starting the process:
+
+```bat
+:: cmd.exe
+SET CUDA_LAUNCH_BLOCKING=1
+```
+
+Every launch and async call becomes synchronous, so the **first** failing call is the one that
+reports the error — turning "an error somewhere in the last N frames" into an exact call site.
+
+Two warnings (PLAN-005 §2.5):
+
+- The switch is **process-wide**: every submission round-trips to the GPU, and TD cook times
+  explode while it is set. Expect the app to be barely interactive.
+- **Never ship or benchmark with it enabled.** Unset it as soon as the call site is found; any
+  timing captured under it is meaningless.
 
 ### Step 2 — System timeline
 
 ```powershell
 $env:CUDALINK_NVTX = "1"
 $env:CUDALINK_NVTX_VERBOSE = "1"
-./scripts/profiling/run_nsys.ps1
+./scripts/profiling/run_nsys.ps1 -Target profile_export
+# producer only: the receiver ranges need a consumer process (bench_sweep target)
 # output: run.nsys-rep in your local results directory
 #         analyze.txt (anti-pattern report)
 ```
@@ -129,9 +158,10 @@ nsys-ui run.nsys-rep
 **What to look for:**
 
 - NVTX ranges aligned with CUDA kernel activity on the correct stream
-- No unexpected serialisation between `ipc_stream` and `_rx_stream` in the steady state
+- No unexpected serialisation between `ipc_stream` and the Receiver `_connection.stream` in the
+  steady state
 - `cudalink.sender.export_frame.*` and `cudalink.receiver.import_frame.*` do not overlap when
-  `CUDALINK_TD_STREAM_PRIO=normal` and `CUDALINK_TD_PERSIST_STREAM=1` (see §4 below)
+  `CUDALINK_TD_STREAM_PRIO=normal` (see §4 below)
 
 ### Step 3 — Kernel deep dive
 
@@ -194,13 +224,14 @@ at the **TouchDesigner COMP** level (shim: `td_exporter/NVTXShim.py`). Both shim
 
 | Phase | Top-level range | Sub-ranges (verbose only) | Color |
 |---|---|---|---|
-| TD Sender export | `cudalink.sender.export_frame.slot<N>` | `cudalink.sender.memcpy`, `cudalink.sender.record_event` | green |
+| TD Sender export | `cudalink.sender.export_frame.slot<N>` | none of its own; the `cudalink.exporter.*` ranges of the next row nest inside it | green |
 | Python Exporter | `cudalink.exporter.slot<N>` | `cudalink.exporter.memcpy`, `cudalink.exporter.record_event`, `cudalink.exporter.flush_probe`, `cudalink.exporter.shm_write` | green |
 | TD Receiver import | `cudalink.receiver.import_frame.slot<N>` | `cudalink.receiver.event_wait` | blue |
 | Python Importer GPU | `cudalink.importer.get_frame.slot<N>` | `cudalink.importer.event_wait` | purple |
 | Python Importer numpy | `cudalink.importer.get_frame_numpy.slot<N>` | `cudalink.importer.event_wait`, `cudalink.importer.d2h_copy` | orange |
+| Python Importer CuPy | `cudalink.importer.get_frame_cupy.slot<N>` | `cudalink.importer.event_wait` | green |
 
-**Slot identity, not frame number** — slot count is bounded (1–3), frame count is unbounded.
+**Slot identity, not frame number** — slot count is bounded (1–10), frame count is unbounded.
 This keeps the `nsys stats` symbol table compact and timeline labels readable.
 
 **Sub-ranges** appear only when `CUDALINK_NVTX_VERBOSE=1`. They nest inside the top-level range
@@ -226,23 +257,23 @@ stream lanes, not stack vertically (which would indicate stream priority content
 
 ## 4. Multi-Stream Topology and Load-Bearing Flags
 
-Two env flags are required for stable concurrent topology. They were discovered by subtractive
-probing (see `SESSION_LOG.md` Phase 3.6 for the full timeline).
+One env flag, `CUDALINK_TD_STREAM_PRIO`, is required for stable concurrent topology. The v4
+captures needed two. They were discovered by subtractive probing (see `SESSION_LOG.md` Phase 3.6
+for the full timeline).
 
 > **Historical:** `CUDALINK_TD_PERSIST_STREAM` is no longer read. The ADR-0001 step 7 collapse
 > (`8eebda5c`) moved the Sender onto the canonical `Exporter`, and the TD config dropped the flag.
 > Only `CUDALINK_TD_STREAM_PRIO` is still honoured. The `PERSIST_STREAM` steps below describe the
 > v4 captures and cannot be reproduced on current builds.
 
-### Correct topology (flags set)
+### Correct topology (flag set)
 
 ```cmd
 SET CUDALINK_TD_STREAM_PRIO=normal
-SET CUDALINK_TD_PERSIST_STREAM=1
 ```
 
 On the nsys timeline, the Sender export stream (`ipc_stream`) and Receiver import stream
-(`_rx_stream`) run concurrently on separate GPU SM lanes. `cudalink.sender.export_frame.*`
+(`_connection.stream`) run concurrently on separate GPU SM lanes. `cudalink.sender.export_frame.*`
 and `cudalink.receiver.import_frame.*` NVTX ranges run in parallel without head-of-line
 blocking. Post-settle latency stabilises within 3 frames.
 
@@ -276,7 +307,8 @@ On the nsys timeline you will see:
 This deliberate regression is useful for validating that the NVTX instrumentation can see
 the failure mode that motivated this work.
 
-> **Note:** `scripts\probes\v4_capture_*.cmd` isolate the `PERSIST_STREAM=0` flag only
+> **Note (historical):** the v4 capture scripts (`scripts\probes\v4_capture_*.cmd`) are not
+> shipped in the repository. They isolated the `PERSIST_STREAM=0` flag only
 > (`STREAM_PRIO` is left at the correct value `normal`). A separate v4b run with both
 > `STREAM_PRIO=high` and `PERSIST_STREAM=0` is needed to observe symptom #1 (stream stacking).
 > v4 data is sufficient for NVTX coverage validation of symptoms #2 and #3.
@@ -449,13 +481,15 @@ HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers
 ### Runbook: v4 HWS comparison
 
 Run the same protocol as v4 twice — once with HWS off (verify `HwSchMode=0`) and once with
-HWS on (`HwSchMode=2`). Use the standard v4 capture scripts:
+HWS on (`HwSchMode=2`).
 
-```cmd
-scripts\probes\run_v4_regression_capture.cmd
-```
+> **Historical:** the v4 capture and analysis scripts
+> (`scripts\probes\run_v4_regression_capture.cmd`, `v4_analyze.cmd`) are not shipped in the
+> repository, and the file names below come from them.
+> Capture the producer and the TD consumer with `nsys profile --trace=cuda,nvtx,wddm` (see §5).
+> `scripts/profiling/analyze_td_pipeline.py` computes cross-process latency from the two exports.
 
-After each capture, run `v4_analyze.cmd` and compare:
+After each capture, compare:
 
 1. `producer_cuda_api_sum.csv` — `cudaStreamSynchronize` avg should drop from ~630 µs to < 100 µs.
 2. `td_consumer_wddm_queue_sum.csv` — engine 6 (Copy) max queue entry should drop from > 100 ms to < 20 ms.
@@ -507,8 +541,9 @@ SET CUDALINK_EXPORT_SYNC=0
 SET CUDALINK_EXPORT_FLUSH_PROBE=1
 ```
 
-These complement the standard topology flags from §4 and work best after enabling
-HWS=2 (§7).
+Both values are already the library `Exporter` defaults (`CUDALINK_EXPORT_FLUSH_PROBE` defaults
+to `1`). Set them to make the configuration explicit. They complement the standard topology flag
+from §4 and work best after enabling HWS=2 (§7).
 
 ### Measured trade-off (v4 blocking → v5 async, same HWS=2 machine)
 
@@ -550,8 +585,9 @@ The default differs between the two producer implementations:
 1. **Receiver-side teardown TDR** (fixed since v1.4.1, `0918914`/F8 `0556197`): WDDM
    held stale CUDA↔D3D11 interop registrations when the receiver stream and IPC handles
    were torn down across deactivate→reactivate cycles → `DXGI_ERROR_DEVICE_REMOVED` → TDR.
-   Fixed by **dedicated, persistent per-engine streams** (`CUDALINK_TD_PERSIST_STREAM=1`,
-   default; `b7d51c1`, F7/F8 `3f6d1c2`/`0556197`). A blunt per-frame
+   Fixed by **dedicated, persistent per-engine streams** (`b7d51c1`, F7/F8
+   `3f6d1c2`/`0556197`). Until ADR-0001 step 7 this was the `CUDALINK_TD_PERSIST_STREAM=1`
+   default; that flag is no longer read. A blunt per-frame
    `cudaStreamSynchronize` on the sender never addressed this teardown-lifecycle hazard.
 
 2. **Producer-side cross-stream race** (fixed since v1.9.0, `d2d4674` / SD `346a59f`):
@@ -582,7 +618,8 @@ The default differs between the two producer implementations:
 
 ### Verification
 
-Run `v5_analyze.cmd` after a capture and check:
+After a capture, check the producer report (the v5 `v5_analyze.cmd` script is not shipped in
+the repository):
 
 ```cmd
 nsys stats --report cuda_api_sum producer.nsys-rep | findstr cudaStreamSynchronize

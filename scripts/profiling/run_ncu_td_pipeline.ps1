@@ -45,7 +45,6 @@ $out = "benchmarks/results/ncu/$ts"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 # v5 async-flush-probe env — matches scripts/probes/v5_capture_producer.cmd:37-46
-$env:CUDALINK_TD_PERSIST_STREAM  = "1"
 $env:CUDALINK_TD_STREAM_PRIO     = "normal"
 $env:CUDALINK_EXPORT_SYNC        = "0"
 $env:CUDALINK_EXPORT_FLUSH_PROBE = "1"
@@ -63,7 +62,7 @@ $resolvedCount = if ($LaunchCount -gt 0) { $LaunchCount } else { $autoCount }
 
 Write-Host "==> ncu (TD pipeline — sender path) → $out/sender.ncu-rep"
 Write-Host "    [$sectionFlag $sectionVal]  --launch-count $resolvedCount"
-Write-Host "    Env: EXPORT_SYNC=0  FLUSH_PROBE=1  PERSIST_STREAM=1  STREAM_PRIO=normal"
+Write-Host "    Env: EXPORT_SYNC=0  FLUSH_PROBE=1  STREAM_PRIO=normal"
 Write-Host ""
 Write-Host "    Prerequisites:"
 Write-Host "      1. TouchDesigner with CUDA_Link_Example.toe already open and streaming."

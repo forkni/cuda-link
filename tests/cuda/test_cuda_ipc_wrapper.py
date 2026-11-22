@@ -1,8 +1,11 @@
 """
 Tests for CUDARuntimeAPI CUDA wrapper.
 
-These tests require a CUDA-capable GPU.
+These tests require a CUDA-capable GPU. The GPU-free tests of the same class
+(_check_pointer_attributes_abi, check_ipc_capability) live in test_wrapper_cov_methods.py.
 """
+
+from __future__ import annotations
 
 import ctypes
 

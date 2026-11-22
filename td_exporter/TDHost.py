@@ -76,7 +76,14 @@ class TOPHandle(Protocol):
         ...
 
     def set_format(self, fmt: str) -> None:
-        """Write top.par.format = fmt."""
+        """Write top.par.format = fmt, then call sync_mono_alpha_fix(fmt)."""
+        ...
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        """Enable the sibling MonoAlphaFix Reorder TOP for a monoalpha ``fmt``, else bypass it.
+
+        The 'bg' Select TOP (node viewer image) reads MonoAlphaFix while it is enabled.
+        """
         ...
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
@@ -133,6 +140,10 @@ class TDHost(Protocol):
         """Write ownerComp.par.<name>.enable = enabled."""
         ...
 
+    def set_param_label(self, name: str, label: str) -> None:
+        """Write ownerComp.par.<name>.label = label (no-op when the par does not exist)."""
+        ...
+
     def show_custom_only(self, value: bool) -> None:
         """Write ownerComp.showCustomOnly = value."""
         ...
@@ -163,26 +174,58 @@ class TDHost(Protocol):
         """
         ...
 
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        """Set the condition ``key`` to a "warning" or an "error" with ``msg``.
+
+        Each key holds one condition until clear_condition(key). The COMP shows the most severe
+        one (an error over a warning; of equal ones, the one set last): its tint, and
+        "WARNING: msg" or "ERROR: msg" in the Status par. Keys: STATUS_ENGINE, STATUS_LIBRARY,
+        STATUS_NATIVE_TOPS.
+        """
+        ...
+
+    def clear_condition(self, key: str) -> None:
+        """Remove the condition ``key``. The next one shows, or the info text and default color."""
+        ...
+
     def set_warning_status(self, msg: str) -> None:
-        """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
+        """set_condition(STATUS_ENGINE, "warning", msg): a recoverable engine warning."""
         ...
 
     def set_error_status(self, msg: str) -> None:
-        """Tint ownerComp red and emit a persistent script-error badge for fatal failures."""
+        """set_condition(STATUS_ENGINE, "error", msg): an engine error, with a script-error badge."""
         ...
 
     def clear_status(self) -> None:
-        """Restore ownerComp to its original color and clear any script-error badges."""
+        """Clear the engine condition and reset the info text to "Idle".
+
+        Conditions of other keys stay (for example C++ TOPs of another version).
+        """
         ...
 
     def set_info_status(self, msg: str) -> None:
-        """Write an informational status message to the Status par (no tint/cook side effects)."""
+        """Set the info text: the Status par shows it while no condition is set. No tint."""
+        ...
+
+    def abs_frame(self) -> int | None:
+        """TD absolute frame of the current cook (``int(absTime.frame)``), or None if unknown.
+
+        The sender stamps it into the slot meta producer_frame (the cross-stream match key).
+        """
         ...
 
 
 # ---------------------------------------------------------------------------
 # Production adapters
 # ---------------------------------------------------------------------------
+
+
+# Reorder TOP between ImportBuffer and out1. copyCUDAMemory makes an RG texture from every
+# 2-channel CUDAMemoryShape (the shape has no Mono+Alpha layout), so for a Mono+Alpha stream
+# this TOP moves G to alpha and copies R to RGB, on the GPU. For all other formats it is bypassed.
+MONO_ALPHA_FIX_NAME = "MonoAlphaFix"
+# Select TOP that the COMP uses as its node viewer image (ExportBuffer or ImportBuffer).
+VIEWER_SELECT_NAME = "bg"
 
 
 class RealTOPHandle(TOPHandle):
@@ -226,6 +269,26 @@ class RealTOPHandle(TOPHandle):
     def set_format(self, fmt: str) -> None:
         with contextlib.suppress(AttributeError, RuntimeError):
             self._top.par.format = fmt
+        self.sync_mono_alpha_fix(fmt)
+
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        # Exception, not (AttributeError, RuntimeError): td.tdError derives from Exception only,
+        # and an error here must not stop the frame path (set_format runs before the pending
+        # flag is cleared, so it would repeat on every frame).
+        with contextlib.suppress(Exception):
+            fix = self._top.parent().op(MONO_ALPHA_FIX_NAME)
+            if fix is None:
+                return  # a COMP built before 2.0: the output stays RG
+            wanted = fmt.startswith("monoalpha")
+            if wanted:
+                fix.par.format = fmt
+            fix.bypass = not wanted
+            # The node viewer image ('bg' Select TOP) follows: MonoAlphaFix for a Mono+Alpha
+            # stream, ImportBuffer for all others. In Sender mode it shows ExportBuffer and
+            # is left alone.
+            bg = self._top.parent().op(VIEWER_SELECT_NAME)
+            if bg is not None and bg.par.top.eval() in (self._top, fix):
+                bg.par.top = MONO_ALPHA_FIX_NAME if wanted else self._top.name
 
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self._top.copyCUDAMemory(ptr, size, shape, stream=stream)
@@ -245,6 +308,12 @@ class RealTOPHandle(TOPHandle):
         except (AttributeError, RuntimeError):
             return False
 
+
+# Status condition keys (TDHost.set_condition). Each holds one warning or error.
+STATUS_ENGINE = "engine"  # the Sender/Receiver engine: set_warning_status / set_error_status
+STATUS_LIBRARY = "library"  # cuda_link not loaded (CUDAIPCExtension._notify_library_unavailable)
+STATUS_NATIVE_TOPS = "native_tops"  # C++ TOPs of another version (the Info page)
+_SEVERITY = {"warning": 1, "error": 2}
 
 _WARNING_COLOR: tuple[float, float, float] = (0.9137, 1.0, 0.0)
 _ERROR_COLOR: tuple[float, float, float] = (0.7, 0.0, 0.0)
@@ -282,10 +351,15 @@ class RealTDHost(TDHost):
         # _reset_stale_tint() clears any visible managed-colour tint immediately
         # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
-        self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
-        self._status_msg: str | None = None  # current stored status; drives cook-on-transition
+        self._warning_emitter: Any = None  # lazily resolved; None = not found yet, look again
+        self._status_msg: str | None = None  # the condition now shown ("WARNING: .."); drives cook-on-transition
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
+        self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
+        # key -> (kind, msg). Insertion order is set order: of equal severity, the last set shows.
+        self._conditions: dict[str, tuple[str, str]] = {}
+        self._info_msg = "Idle"  # shown in the Status par while no condition is set
         self._reset_stale_tint()
+        self._reset_stale_status_par()
 
     def param_value(self, name: str) -> Any:
         try:
@@ -301,6 +375,12 @@ class RealTDHost(TDHost):
         with contextlib.suppress(AttributeError):
             getattr(self._comp.par, name).enable = enabled
 
+    def set_param_label(self, name: str, label: str) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            par = getattr(self._comp.par, name)
+            if par.label != label:
+                par.label = label
+
     def show_custom_only(self, value: bool) -> None:
         with contextlib.suppress(AttributeError):
             self._comp.showCustomOnly = value
@@ -312,6 +392,19 @@ class RealTDHost(TDHost):
             return bool(self._active_par.eval())
         except (AttributeError, RuntimeError):
             return True
+
+    def abs_frame(self) -> int | None:
+        if self._abs_time is None:
+            try:
+                import td  # noqa: PLC0415 -- TD-only module; absent outside TouchDesigner
+
+                self._abs_time = td.absTime
+            except (ImportError, AttributeError):
+                return None
+        try:
+            return int(self._abs_time.frame)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def find_top(self, name: str) -> RealTOPHandle | None:
         try:
@@ -341,7 +434,9 @@ class RealTDHost(TDHost):
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:
             with contextlib.suppress(AttributeError, RuntimeError):
-                self._warning_emitter = self._comp.op("warning_emitter") or False
+                # A miss is not cached: during a .toe load the child may not exist yet, and a
+                # cached miss would drop every later badge on this COMP for the session.
+                self._warning_emitter = self._comp.op("warning_emitter") or None
         if self._warning_emitter:
             with contextlib.suppress(AttributeError, RuntimeError):
                 self._warning_emitter.cook(force=True)
@@ -361,6 +456,18 @@ class RealTDHost(TDHost):
                 self._comp.clearScriptErrors(error="*")
                 self._comp.unstore("cuda_link_status_msg")
 
+    def _reset_stale_status_par(self) -> None:
+        """Replace the Status text that the project file saved (a format, a WARNING, an ERROR).
+
+        That text belongs to an earlier session. The engine writes the format again on the
+        first frame, and the extension reports a condition that still holds again
+        (CUDAIPCExtension.__init__ schedules the library notice on every init).
+        """
+        # Exception: td.tdError derives from Exception only, and __init__ must not fail here.
+        with contextlib.suppress(Exception):
+            if str(self._comp.par.Status.eval()) != "Idle":
+                self._write_status_par("Idle")
+
     def _capture_default_color(self) -> None:
         if self._default_color is not None:
             return
@@ -376,40 +483,66 @@ class RealTDHost(TDHost):
         if self._default_color is None:
             self._default_color = _DEFAULT_NODE_COLOR
 
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        if kind not in _SEVERITY:
+            raise ValueError(f"kind must be 'warning' or 'error', not {kind!r}")
+        if self._conditions.get(key) != (kind, msg):
+            self._conditions.pop(key, None)  # re-insert: it is now the latest set
+            self._conditions[key] = (kind, msg)
+        self._show()
+
+    def clear_condition(self, key: str) -> None:
+        self._conditions.pop(key, None)
+        self._show()
+
     def set_warning_status(self, msg: str) -> None:
-        self._capture_default_color()
-        full_msg = f"WARNING: {msg}"
-        if self._status_msg == full_msg:
-            # Called every cook while the condition lasts. The COMP is already marked; only the
-            # Status par can have moved on (set_info_status), and the write dedups when it has not.
-            self._write_status_par(full_msg)
-            return
-        with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.color = _WARNING_COLOR
-            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
-                self._comp.clearScriptErrors(error="*")  # drop the badge the earlier error left
-            self._comp.store("cuda_link_status_msg", full_msg)
-            self._status_msg = full_msg  # last, so a failed write above is retried next cook
-        self._write_status_par(full_msg)
-        self._cook_warning_emitter()
+        self.set_condition(STATUS_ENGINE, "warning", msg)
 
     def set_error_status(self, msg: str) -> None:
-        self._capture_default_color()
-        full_msg = f"ERROR: {msg}"
-        if self._status_msg == full_msg:
-            self._write_status_par(full_msg)  # see set_warning_status
+        self.set_condition(STATUS_ENGINE, "error", msg)
+
+    def clear_status(self) -> None:
+        self._info_msg = "Idle"
+        self.clear_condition(STATUS_ENGINE)
+
+    def set_info_status(self, msg: str) -> None:
+        self._info_msg = msg
+        if not self._conditions:
+            self._write_status_par(msg)
+
+    def _top_condition(self) -> tuple[str, str] | None:
+        """The condition to show: the most severe; of equal ones, the one set last."""
+        top: tuple[str, str] | None = None
+        for condition in self._conditions.values():
+            if top is None or _SEVERITY[condition[0]] >= _SEVERITY[top[0]]:
+                top = condition
+        return top
+
+    def _show(self) -> None:
+        top = self._top_condition()
+        if top is None:
+            self._show_no_condition()
             return
+        kind, msg = top
+        full_msg = f"{kind.upper()}: {msg}"
+        if self._status_msg == full_msg:
+            # Set again every cook while the condition lasts. The COMP is already marked; only
+            # the Status par can differ, and the write dedups when it does not.
+            self._write_status_par(full_msg)
+            return
+        self._capture_default_color()
         with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.color = _ERROR_COLOR
+            self._comp.color = _ERROR_COLOR if kind == "error" else _WARNING_COLOR
             if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
-                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
+                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the earlier badge
             self._comp.store("cuda_link_status_msg", full_msg)
-            self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
+            if kind == "error":
+                self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
             self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
         self._cook_warning_emitter()
 
-    def clear_status(self) -> None:
+    def _show_no_condition(self) -> None:
         needs_cook = self._status_msg is not None
         self._status_msg = None
         with contextlib.suppress(AttributeError, RuntimeError):
@@ -417,9 +550,6 @@ class RealTDHost(TDHost):
                 self._comp.color = self._default_color
             self._comp.clearScriptErrors(error="*")
             self._comp.unstore("cuda_link_status_msg")
-        self._write_status_par("Idle")
+        self._write_status_par(self._info_msg)
         if needs_cook:
             self._cook_warning_emitter()
-
-    def set_info_status(self, msg: str) -> None:
-        self._write_status_par(msg)

@@ -14,7 +14,14 @@ from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 
-from cuda_link.shm_protocol import MAGIC_OFFSET, NUM_SLOTS_OFFSET, SHMLayout
+from cuda_link.shm_protocol import (
+    MAGIC_OFFSET,
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC_V05,
+    SAME_PROCESS_MESSAGE,
+    SHMLayout,
+    write_sender_pid,
+)
 
 from .test_tdreceiver_shm_leak import _FakeCudaFailsOnStreamCreate, _make_receiver, _write_valid_shm_frame
 
@@ -62,6 +69,29 @@ def test_foreign_magic_is_rejected(producer_shm: SharedMemory, monkeypatch: pyte
 
     assert result is False
     assert any("Protocol magic mismatch" in m and "0xDEADBEEF" in m for m in logs)
+    assert [h.closed for h in opened] == [True]
+
+
+def test_v05_sender_is_named(producer_shm: SharedMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    struct.pack_into("<I", producer_shm.buf, MAGIC_OFFSET, PROTOCOL_MAGIC_V05)
+
+    result, logs, opened = _initialize(producer_shm, monkeypatch)
+
+    assert result is False
+    assert "sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6" in logs
+    assert [h.closed for h in opened] == [True]
+
+
+@pytest.mark.same_process_check
+def test_same_process_sender_is_rejected(producer_shm: SharedMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    write_sender_pid(producer_shm.buf, os.getpid())
+
+    result, logs, opened = _initialize(producer_shm, monkeypatch)
+
+    assert result is False
+    assert SAME_PROCESS_MESSAGE in logs
     assert [h.closed for h in opened] == [True]
 
 

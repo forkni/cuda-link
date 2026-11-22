@@ -65,7 +65,7 @@ def test_export_policy_defaults() -> None:
 
 def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CUDALINK_EXPORT_SYNC", "0")
-    monkeypatch.setenv("CUDALINK_USE_GRAPHS", "0")
+    monkeypatch.setenv("CUDALINK_USE_GRAPHS", "0")  # removed in 2.0.0: no effect
     monkeypatch.setenv("CUDALINK_EXPORT_FLUSH_PROBE", "0")
     monkeypatch.setenv("CUDALINK_STRICT_DEVICE", "1")
     monkeypatch.setenv("CUDALINK_ACTIVATION_BARRIER", "0")
@@ -75,7 +75,7 @@ def test_export_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     pol = ExportPolicy.from_env()
     assert pol.export_sync is False
-    assert pol.use_graphs is False
+    assert pol.use_graphs is True
     assert pol.flush_probe is False
     assert pol.strict_device is True
     assert pol.barrier_enabled is False
@@ -117,19 +117,17 @@ _EXPORT_DEFAULTS = {
     "barrier_stale_ns": 5_000_000_000,
     "high_priority_stream": True,
     "export_profile": False,
-    "doorbell": False,
+    "doorbell": True,  # 2.0.0: producer doorbell on by default
 }
 
 # env var -> policy field, for the plain "1"/"0" booleans
 _EXPORT_BOOL_ENV = {
     "CUDALINK_EXPORT_SYNC": "export_sync",
-    "CUDALINK_USE_GRAPHS": "use_graphs",
     "CUDALINK_EXPORT_FLUSH_PROBE": "flush_probe",
     "CUDALINK_STRICT_DEVICE": "strict_device",
     "CUDALINK_REQUIRE_SOURCE_SYNC": "require_source_sync",
     "CUDALINK_ACTIVATION_BARRIER": "barrier_enabled",
     "CUDALINK_EXPORT_PROFILE": "export_profile",
-    "CUDALINK_DOORBELL": "doorbell",
 }
 
 
@@ -138,6 +136,13 @@ def clean_export_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for var in (*_EXPORT_BOOL_ENV, "CUDALINK_BARRIER_STALE_NS", "CUDALINK_LIB_STREAM_PRIO"):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
+
+
+def test_export_policy_from_env_ignores_the_removed_doorbell_variable(clean_export_env: pytest.MonkeyPatch) -> None:
+    """CUDALINK_DOORBELL is gone since 2.0.0: the producer doorbell is on."""
+    clean_export_env.setenv("CUDALINK_DOORBELL", "0")
+
+    assert ExportPolicy.from_env().doorbell is True
 
 
 def test_frame_spec_extra_flags_default() -> None:
@@ -529,12 +534,6 @@ def test_cuda_port_declares_set_device() -> None:
 def test_cuda_port_declares_restore_context() -> None:
     """restore_context must be a declared member of the CudaPort Protocol."""
     assert "restore_context" in get_protocol_members(CudaPort)
-
-
-def test_fake_adapter_satisfies_protocol_with_new_methods() -> None:
-    """FakeCUDAAdapter must satisfy isinstance(fake, CudaPort) after C3a additions."""
-    fake = FakeCUDAAdapter()
-    assert isinstance(fake, CudaPort)
 
 
 def test_fake_adapter_set_device_returns_token() -> None:

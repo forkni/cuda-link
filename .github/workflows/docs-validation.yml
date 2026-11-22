@@ -32,9 +32,9 @@ jobs:
           persist-credentials: false
 
       - name: Run markdownlint
-        # v24.2.0 bundles markdownlint-cli2 0.23.2 -- keep CGW_MARKDOWNLINT_CMD
+        # v25.0.0 bundles markdownlint-cli2 0.24.0 -- keep CGW_MARKDOWNLINT_CMD
         # in .cgw.conf pinned to the same version when bumping this SHA.
-        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # v24.2.0
+        uses: DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34  # v25.0.0
         with:
           globs: |
             **/*.md
@@ -75,7 +75,7 @@ jobs:
           persist-credentials: false
 
       - name: Check spelling
-        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b  # v1.51.1
+        uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888  # v1.52.2
         with:
           files: docs/ README.md
         continue-on-error: true

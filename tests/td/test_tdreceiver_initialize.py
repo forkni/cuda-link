@@ -90,7 +90,7 @@ class _FakeCuda:
     def destroy_stream(self, stream: object) -> None:
         self.streams_destroyed.append(stream)
 
-    def malloc_host(self, size: int):
+    def malloc_host_alloc(self, size: int, flags: int = 0x01):
         raise RuntimeError("no pinned memory in tests")  # exercise the pageable path
 
     def free_host(self, ptr) -> None:
@@ -406,7 +406,7 @@ def test_initialize_commits_connection_for_every_slot(monkeypatch: pytest.Monkey
     assert rig.engine._initialized is True
     assert rig.engine._diag_frames_since_reinit == 0
     assert rig.engine._last_fmt_status == ""
-    assert rig.engine._retry.needs_resolution_update is True
+    assert rig.engine._pending.resolution is True
     assert any("Receiver initialized: 3 slots, 64x64x4" in m for m in rig.logs)
 
 
@@ -415,9 +415,9 @@ def test_initialize_commits_connection_for_every_slot(monkeypatch: pytest.Monkey
     [
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 4},
-            False,
+            True,
             "float32",
-            id="rgba32float-is-script-top-default",
+            id="rgba32float-resets-a-format-left-by-an-earlier-stream",
         ),
         pytest.param(
             {"kind": FORMAT_KIND_FLOAT, "bits": 32, "comps": 2, "flags": FLAGS_MONO_ALPHA},
@@ -441,7 +441,7 @@ def test_initialize_resolves_format_and_shape_dtype_from_metadata(
     assert shape.dataType.__name__ == shape_dtype
     assert rig.engine._format.bits == fmt["bits"]
     assert rig.engine._format.num_comps == fmt["comps"]
-    assert rig.engine._retry.needs_format_update is needs_format_update
+    assert rig.engine._pending.format is needs_format_update
 
 
 def test_initialize_float16_presents_float32_shape_and_stages_conversion_buffers(
@@ -464,6 +464,21 @@ def test_initialize_float16_presents_float32_shape_and_stages_conversion_buffers
     assert rig.engine._f32_cpu_buf.dtype.name == "float32"
     # Pinned alloc was refused, so the pageable fallback is page-locked.
     assert rig.cuda.host_registered == [(rig.engine._f16_cpu_buf.ctypes.data, 8 * 4 * 4 * 2)]
+
+
+def test_initialize_uses_the_cuda_port_given_to_the_constructor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a port passed in, the engine does not load the process-wide runtime."""
+    import TDReceiver as TDReceiverMod
+
+    def _must_not_load(device):
+        raise AssertionError("get_cuda_runtime() called although a port was given")
+
+    rig = _rig(monkeypatch, _segment())
+    monkeypatch.setattr(TDReceiverMod, "get_cuda_runtime", _must_not_load)
+    rig.engine.cuda = rig.cuda
+
+    assert rig.engine.initialize_receiver() is True
+    assert rig.engine.cuda is rig.cuda
 
 
 def test_initialize_cuda_runtime_failure_returns_false_without_touching_segment(
@@ -544,3 +559,16 @@ def test_initialize_against_real_shared_memory_round_trips(monkeypatch: pytest.M
         engine._release_resources()
         shm.close()
         shm.unlink()
+
+
+def test_cleanup_after_a_stream_clears_the_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Status text is the format of the stream: it must not stay after the stream ends."""
+    rig = _rig(monkeypatch, _segment(width=32, height=16, kind=FORMAT_KIND_UNSIGNED, bits=8, comps=4))
+    assert rig.engine.initialize_receiver() is True
+
+    cleared: list[bool] = []
+    rig.engine._host.clear_status = lambda: cleared.append(True)
+
+    rig.engine.cleanup()
+
+    assert cleared == [True]

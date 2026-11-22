@@ -123,6 +123,9 @@ class FakeTOPHandle(TOPHandle):
     def set_format(self, fmt: str) -> None:
         self.format_set.append(fmt)
 
+    def sync_mono_alpha_fix(self, fmt: str) -> None:
+        """No sibling TOPs in the fake: set_format records the format, nothing else to do."""
+
     def copy_cuda_memory(self, ptr: int, size: int, shape: Any, *, stream: int) -> None:
         self.copy_cuda_calls.append((ptr, size, shape, stream))
 
@@ -151,13 +154,19 @@ class FakeTDHost(TDHost):
         self._tops: dict[str, FakeTOPHandle] = dict(tops or {})
         self.param_writes: list[tuple[str, Any]] = []
         self.enable_writes: list[tuple[str, bool]] = []
+        self.param_labels: dict[str, str] = {}  # last label written per par name
         self.custom_only_calls: list[bool] = []
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
         # Records every status/tint side-effect call as (kind, msg); kind is one of
-        # "warning" / "error" / "info" / "clear" (msg is None for clear). Additive —
+        # "warning" / "error" / "info" / "clear" (msg None), or "clear_condition" (msg = the key).
+        # set_condition records (its kind, msg). Additive —
         # existing callers that ignore the return value (always None) are unaffected.
         self.status_calls: list[tuple[str, str | None]] = []
+        # The conditions set through set_condition, by key (the wrappers do not add here).
+        self.conditions: dict[str, tuple[str, str]] = {}
+        # Value abs_frame() returns (None = unknown, like a host outside TD).
+        self.abs_frame_value: int | None = None
 
     def param_value(self, name: str) -> Any:
         return self._params.get(name)
@@ -169,11 +178,17 @@ class FakeTDHost(TDHost):
     def set_param_enabled(self, name: str, enabled: bool) -> None:
         self.enable_writes.append((name, enabled))
 
+    def set_param_label(self, name: str, label: str) -> None:
+        self.param_labels[name] = label
+
     def show_custom_only(self, value: bool) -> None:
         self.custom_only_calls.append(value)
 
     def is_active(self) -> bool:
         return bool(self._params.get("Active", True))
+
+    def abs_frame(self) -> int | None:
+        return self.abs_frame_value
 
     def find_top(self, name: str) -> FakeTOPHandle | None:
         return self._tops.get(name)
@@ -202,3 +217,13 @@ class FakeTDHost(TDHost):
 
     def set_info_status(self, msg: str) -> None:
         self.status_calls.append(("info", msg))
+
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        if kind not in ("warning", "error"):  # as RealTDHost: catches swapped key and kind
+            raise ValueError(f"kind must be 'warning' or 'error', not {kind!r}")
+        self.status_calls.append((kind, msg))
+        self.conditions[key] = (kind, msg)
+
+    def clear_condition(self, key: str) -> None:
+        self.status_calls.append(("clear_condition", key))
+        self.conditions.pop(key, None)

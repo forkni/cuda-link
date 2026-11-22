@@ -86,7 +86,7 @@ def handle_active_change(ext: object, new_value: object, prev: object) -> None:
         ext._log("Component deactivated - cleaning up", force=True)
         # Clean up current mode resources
         ext.cleanup()
-        ext._host.clear_status()
+        ext.clear_status()
 
     # Disable Numslots while active to prevent runtime array size mismatch.
     # Receiver mode always keeps Numslots disabled (sender controls slot count).
@@ -221,6 +221,8 @@ def handle_mode_change(ext: object, new_value: object, prev: object) -> None:
                     bg_select.par.top = "ExportBuffer"
                     ext._log("Updated bg selectTOP -> ExportBuffer", force=False)
                 elif new_value == "Receiver":
+                    # For a Mono+Alpha stream, TOPHandle.sync_mono_alpha_fix moves it to
+                    # MonoAlphaFix when the stream connects.
                     bg_select.par.top = "ImportBuffer"
                     ext._log("Updated bg selectTOP -> ImportBuffer", force=False)
         except (AttributeError, RuntimeError) as e:

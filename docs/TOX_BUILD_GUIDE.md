@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v1.14.1.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v2.0.0.tox` component in TouchDesigner.
 
-> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.12.2`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each shipped build.
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.14.1`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each release Semantic Version Control has written (from 2.0.0).
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -11,6 +11,12 @@ Step-by-step instructions for building the `CUDAIPCLink_v1.14.1.tox` component i
 ## Component Structure
 
 There are two assembly modes. Choose one:
+
+> **Names in the shipped `.tox`**: the trees and steps below use the build names
+> `CUDAIPCExporter` (extension Text DAT), `callbacks`, `parexecute` and `script_top_callbacks`.
+> In the shipped `.tox` these DATs are `CUDAIPCExtension`, `execute1`, `parexec1` and
+> `script1_callbacks`. Both sets work. If you use `CUDAIPCExtension` as the DAT name, set the
+> Step 4 Object to `op('CUDAIPCExtension').module.CUDAIPCExtension`.
 
 ### Library mode (recommended — fewer DATs)
 
@@ -26,6 +32,7 @@ CUDAIPCExporter (Base COMP)
 ├── CUDALinkBootstrap (Text DAT)     ← NEW — must be FIRST; copy from td_exporter/CUDALinkBootstrap.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDPixelFormat     (Text DAT)     ← Copy from td_exporter/TDPixelFormat.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
 ├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
 ├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
@@ -34,8 +41,14 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_top_callbacks (Text DAT)  ← Copy from td_exporter/script_top_callbacks.py (ImportBuffer + warning_emitter)
+├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
+├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
+├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
+├── Help/HELP_DOC     (Text DAT)     ← Copy from td_exporter/HELP_DOC.md (Help page text)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -66,6 +79,7 @@ CUDAIPCExporter (Base COMP)
 ├── Importer          (Text DAT)     ← Copy from td_exporter/Importer.py
 ├── TDHost            (Text DAT)     ← Copy from td_exporter/TDHost.py
 ├── TDConfig          (Text DAT)     ← Copy from td_exporter/TDConfig.py
+├── TDPixelFormat     (Text DAT)     ← Copy from td_exporter/TDPixelFormat.py
 ├── TDSender          (Text DAT)     ← Copy from td_exporter/TDSender.py
 ├── TDReceiver        (Text DAT)     ← Copy from td_exporter/TDReceiver.py
 ├── CUDAIPCExporter   (Text DAT)     ← Copy from td_exporter/CUDAIPCExtension.py  (facade)
@@ -74,8 +88,14 @@ CUDAIPCExporter (Base COMP)
 ├── input             (In TOP)       ← User wires their source TOP here
 ├── ExportBuffer      (Null TOP)     ← Receives input directly; cudaMemory() reads from here
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
+├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_top_callbacks (Text DAT)  ← Copy from td_exporter/script_top_callbacks.py (ImportBuffer + warning_emitter)
+├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
+├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
+├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
+├── Help/HELP_DOC     (Text DAT)     ← Copy from td_exporter/HELP_DOC.md (Help page text)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -93,25 +113,31 @@ CUDAIPCExporter (Base COMP)
 
 Right-click the `CUDAIPCExporter` COMP and select **Customize Component** to open the Component Editor.
 
-#### Create "CUDA IPC" Parameter Page
+#### Create the "Settings" Parameter Page
 
-Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
+Click the **+** button to add a new parameter page, name it `"Settings"`. The pars in the
+table below go on this page. The second custom page, Info, is shared with the embedded
+Semantic Version Control COMP (see [Info page](#info-page)).
 
 #### Add Parameters
 
 | Name | Label | Type | Default | Help Text |
 |------|-------|------|---------|-----------|
-| `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
-| `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
-| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
-| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2–10 (2–5 recommended/tested; 6–10 supported but less exercised) |
+| `Status` | Status | String (read-only) | `Idle` | Live status text. The extension writes it; users cannot edit it. |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
+| `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
+| `Active` | Active | Toggle | `False` (0) | Enable/disable IPC export. When off, export_frame() returns immediately. |
+| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3 or 4, as in the shipped 1.14.1 and 2.0.0 `.tox` |
+| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
+| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. |
+| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints a summary line every 150 published frames). |
+| `Cudalinkheader` | (any) | Header | — | Last par of the Settings page. |
 
 **For `Numslots` menu parameter**:
 
 - Menu Source: **Constant**
-- Menu Names: `2 3 4 5 6 7 8 9 10`
-- Menu Labels: `2 Slots 3 Slots 4 Slots 5 Slots 6 Slots 7 Slots 8 Slots 9 Slots 10 Slots`
+- Menu Names: `2 3 4`
+- Menu Labels: `2 Slots 3 Slots 4 Slots`
 
 **For `Mode` menu parameter**:
 
@@ -119,7 +145,25 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 - Menu Names: `Sender Receiver`
 - Menu Labels: `Sender Receiver`
 
-**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Debug).
+**For `Streamid` parameter**: add it directly after `Numslots`, on the same page. Set
+Minimum `0` and turn on Clamp Minimum. Optional: Slider Range `0`–`15`, like the C++ Out
+TOP. The Sender reads it with `param_value("Streamid")`; a .tox without the parameter
+sends `stream_id = 0`.
+
+**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Status → Mode → Ipcmemname → Active → Numslots → Streamid → Framewaitms → Debug →
+Cudalinkheader), as in the shipped `.tox`.
+
+#### Info page
+
+The `Semver*` pars and `Hidebuiltin` on the Info page belong to the embedded Semantic Version
+Control COMP. Two pars on that page belong to cuda-link:
+
+| Name | Label | Type | Read Only | Notes |
+|------|-------|------|-----------|-------|
+| `Cudalinkheader2` | (any) | Header | — | First par of the Info page. On each init the extension sets its label to `CUDA-Link <version> (<library mode \| classic mode \| not loaded>) \| Zero-copy GPU texture sharing via CUDA IPC`. TD saves the label, but each init writes it again, so it cannot go stale. |
+| `Nativetops` | C++ TOPs | String | On | Add it after `Semvertoxsavebuild`. On each init the extension writes the installed C++ TOPs from `<Documents>/Derivative/Plugins/CudaLink/VERSION.txt`: `<version> (build <sha>)` when the record has a `build` line, else `<version> (CUDA <x.y>)` or `<version>`; also `not installed`, `installed, version unknown` or `unreadable: <error>`. A version that differs adds `- differs from <.tox version>` and, 5 frames after init, tints the COMP yellow; the Status par then shows that warning instead of the per-frame text. |
+
+A `.tox` without these pars still works: the extension skips the writes.
 
 ### Step 3: Create Text DATs
 
@@ -153,15 +197,15 @@ imported; a different `cuda_link` already loaded in the process stops resolution
 Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link 1.14.1 from <folder>`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 2.0.0 from <folder>`
 >
 > **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
 > siblings does the extension additionally print a cause-specific line, e.g.
-> `[CUDAIPCExtension] cuda_link 1.14.1 not found - install it next to this .toe or set
+> `[CUDAIPCExtension] cuda_link 2.0.0 not found - install it next to this .toe or set
 > CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
 > layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
 > CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
-> the component's 1.14.1`). The short line names the specific cause — not found, wrong
+> the component's 2.0.0`). The short line names the specific cause — not found, wrong
 > version, a rival install already loaded, or this extension's own glue import failing — and
 > the COMP's Status par mirrors that same short line; the full per-layer reason is
 > Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
@@ -180,6 +224,13 @@ This module provides the `RealTDHost` and `RealTOPHandle` adapters that isolate 
 2. Paste the entire contents of `td_exporter/TDConfig.py`
 
 This module provides the `TDSenderConfig` frozen dataclass that centralises all `CUDALINK_*` environment-variable reads.
+
+#### 3c-2. TDPixelFormat Text DAT
+
+1. Create a **Text DAT**, rename to `TDPixelFormat`
+2. Paste the entire contents of `td_exporter/TDPixelFormat.py`
+
+This module holds the mapping between TouchDesigner pixel format names and the wire format. `TDSender` and `TDReceiver` both import it, so it must exist in both build modes.
 
 #### 3d. TDSender Text DAT
 
@@ -291,6 +342,25 @@ You should see: `<CUDAIPCExporter.CUDAIPCExtension object at 0x...>`
 
 On warnings: change the source TOP's Pixel Format to 8/16-bit fixed or 32-bit float and the COMP recovers within one frame. Float16 sources whose format name is one of the five float16 menu entries do not warn: the Sender asks `cudaMemory(pixelFormat=...)` for the matching 32-bit float format and shares that (see ARCHITECTURE.md, pixel format compatibility). The COMP body tint is the primary visual; opening the COMP shows the `warning_emitter` Script TOP with the warning message attached as a local badge. Note that TD does not propagate child-operator warnings to the parent COMP boundary tile (H5b — see ARCHITECTURE.md).
 
+### Step 6a: Add MonoAlphaFix (Reorder TOP)
+
+`copyCUDAMemory` makes an RG texture from every 2-channel frame, because `CUDAMemoryShape` has
+no Mono+Alpha layout. For a Mono+Alpha stream the Receiver uses this TOP to put the channels
+back, on the GPU. For all other formats the component sets its Bypass flag, so it costs nothing.
+
+1. Add a **Reorder TOP** inside the component and name it `MonoAlphaFix`.
+2. Connect `ImportBuffer` to its first input, and connect its output to the Out TOP (in place
+   of the direct wire from `ImportBuffer`).
+3. Set Output Red, Output Green and Output Blue to `Input 1` / `Red`, and Output Alpha to
+   `Input 1` / `Green`.
+4. Turn its Bypass flag on. The component sets the flag and the Pixel Format of this TOP when
+   the stream format changes.
+5. The `bg` Select TOP (the node viewer image) needs no change. In Receiver mode the component
+   points it at `MonoAlphaFix` for a Mono+Alpha stream and at `ImportBuffer` for all others.
+
+A component without this TOP still works: a Mono+Alpha stream then arrives as RG (mono in R,
+alpha in G).
+
 ### Step 6b: Configure ImportBuffer for TD 2025+ (Optional Optimization)
 
 If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the ImportBuffer Script TOP for improved receiver performance:
@@ -305,7 +375,7 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 - Removes 1-frame resolution change delay
 - Simplifies data flow (Execute DAT drives import directly)
 
-**Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
+**Note**: If `modoutsidecook` is OFF, the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
 
 ### Step 6c: Create warning_emitter Script TOP
 
@@ -324,16 +394,33 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 when the next cook finds no message (after `clear_status` unstores the key and
 force-cooks the TOP). The badge is visible inside the COMP alongside the COMP-body tint.
 
+### Step 6d: Create the slot_meta Script CHOP
+
+1. Inside the `CUDAIPCExporter` COMP, create a **Text DAT**, rename to
+   `script_chop_callbacks`, and paste the contents of `td_exporter/script_chop_callbacks.py`.
+2. Create a **Script CHOP**, rename to `slot_meta`. Set its **Callbacks DAT** to
+   `op('script_chop_callbacks')`.
+3. Create an **Out CHOP**, rename to `out_slot_meta`, and wire `slot_meta` → `out_slot_meta`.
+   The Out CHOP makes the channels available on the COMP's CHOP output.
+
+**What it does**: `onCook` calls `ext.slot_meta_channels()` and writes one sample per
+channel: `producer_frame` (mod 2^24), `stream_id`, `latency_us`, `frame_gap_count`,
+`producer_skip_count`. These are the same names as the C++ In TOP Info CHOP channels.
+The names must stay `slot_meta` and `out_slot_meta`: `callbacks_template.py` (Sender,
+after each export) and `script_top_callbacks.py` (Receiver, after each import) find the
+CHOP by name and force-cook it. A .tox without the CHOP still works; it only has no slot
+meta channels.
+
 ### Step 7: Optional Info DAT
 
 Create a **Text DAT** named `info` with version/author information:
 
 ```text
-CUDA IPC Exporter v1.14.1
+CUDA IPC Exporter v2.0.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-08-11
+Date: 2026-11-22
 License: MIT
 ```
 
@@ -360,16 +447,22 @@ No code reads this DAT. It only travels with the .tox so the license ships with 
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v1.14.1.tox` inside the project root
+3. Save to: `TOXES\CUDAIPCLink_v2.0.0.tox` inside the project root. A release is saved by
+   Semantic Version Control's Release (it writes the file read-only and appends the
+   `RELEASES.tsv` row; it never overwrites a file).
 
-**Naming convention**: Use `CUDAIPCLink_v1.14.1.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v2.0.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
-**Release manifest**: `TOXES/RELEASES.tsv` records the current release only — one row for the tracked `.tox`
-with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+**Development builds**: save a dev build (for example `CUDAIPCLink_v2.0.0.dev0.tox`) to
+`local\` in the project root. `local\` is gitignored. Never save a dev build over the
+released `TOXES\CUDAIPCLink_v2.0.0.tox`. The 2.0.0 release `.tox` is Library mode only: it
+holds the TD glue DATs and no mirror DATs, so it needs an installed `cuda_link` 2.0.0.
+
+**Release manifest**: `TOXES/RELEASES.tsv` has one row per release (Semantic Version Control appends it), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
 saved from. To verify a download matches the manifest:
 
 ```bash
-sha256sum TOXES/CUDAIPCLink_v1.14.1.tox   # compare with the sha256 column
+sha256sum TOXES/CUDAIPCLink_v2.0.0.tox   # compare with the sha256 column
 ```
 
 ---
@@ -378,7 +471,7 @@ sha256sum TOXES/CUDAIPCLink_v1.14.1.tox   # compare with the sha256 column
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v1.14.1.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v2.0.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -396,19 +489,16 @@ sha256sum TOXES/CUDAIPCLink_v1.14.1.tox   # compare with the sha256 column
    - This MUST match the `shm_name` in your Python `Importer`/`Exporter` code
 3. **Active**: Toggle ON to start exporting/importing
 4. **Numslots**: Leave at 3 (optimal for most cases; ignored in Receiver mode)
-5. **Debug**: Toggle ON to see performance metrics every ~97 frames
+5. **Debug**: Toggle ON to see a performance summary line every 150 published frames
 
 ### Verify Operation (Sender Mode)
 
 Open the **Textport** (Alt+T) and look for:
 
 ```text
-[CUDAIPCExporter] Extension initialized on <CUDAIPCExporter>
-[CUDAIPCExporter] Loaded CUDA runtime
-[CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
-[CUDAIPCExporter] Created 3 IPC buffer slots with events
-[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (433 bytes)
-[CUDAIPCExporter] Initialization complete - ready for zero-copy GPU transfer
+[CUDAIPCExtension:Sender] Extension initialized on <COMP path> [Mode: Sender]
+[CUDAIPCExtension:Sender] CUDALINK_EXPORT_SYNC not set — defaulting to blocking export (TD source-lifetime safety; set =0 to opt into async)
+[CUDAIPCExtension:Sender] Initialization complete — ready for zero-copy GPU transfer
 ```
 
 ### Receiver Mode
@@ -417,11 +507,12 @@ When **Mode** = `Receiver`, the component imports GPU frames from a Python `Expo
 
 1. Set **Mode** to `Receiver`
 2. Set **Ipcmemname** to match your Python `Exporter`'s `shm_name`
-3. Add a **Script TOP** (name it `ImportBuffer`) inside the COMP
-4. In the Script TOP's **DAT** field, reference `script_top_callbacks.py`
-5. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
+3. Use the built-in `ImportBuffer` Script TOP: the component already holds it, wired
+   `ImportBuffer` → `MonoAlphaFix` → `out1`, with its Callbacks DAT set. Wire the COMP's TOP
+   output to your chain.
+4. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
 
-The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it calls `import_frame(ImportBuffer)` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
+The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it force-cooks `ImportBuffer`, and the `onCook()` in `script_top_callbacks.py` calls `import_frame()` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
 
 If you see errors, check:
 
@@ -472,7 +563,7 @@ This error means the extension registration itself is missing. A missing or unre
 
 **Symptom**: The extension accessor exists, but no frames are transferred, and — only when
 none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
-cause-specific line, e.g. `cuda_link 1.14.1 not found - install it next to this .toe or set
+cause-specific line, e.g. `cuda_link 2.0.0 not found - install it next to this .toe or set
 CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
 mismatch, a rival install already loaded, or this extension's own glue import failing after
 a successful bootstrap.
@@ -520,7 +611,7 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 ### CUDA runtime DLL not found
 
-**Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
+**Error**: `[CUDAIPCExtension:Sender] Initialization failed: ... cudart64_110.dll not found`
 
 **Solution**: The extension probes full CUDA Toolkit 13.x and 12.x install paths first, then falls back to bare DLL names already loaded in the process, including legacy 11.x names. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
@@ -541,7 +632,8 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
-3. Enable **Debug** in TD and look for `"Frame N: wrote to slot X"` messages every ~97 frames
+3. Enable **Debug** in TD and look for `Frame  150 | ... FPS | ... export=... µs avg (write_idx=...)`
+   lines every 150 published frames
 
 ---
 
@@ -592,12 +684,14 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDALinkBootstrap.py` | `td_exporter/` | **NEW** — sys.path injector + sys.modules alias registry; must be first DAT |
 | `TDHost.py` | `td_exporter/` | `RealTDHost`/`RealTOPHandle` adapters isolating TD runtime access |
 | `TDConfig.py` | `td_exporter/` | `TDSenderConfig` frozen dataclass for all `CUDALINK_*` env-var reads |
+| `TDPixelFormat.py` | `td_exporter/` | TD pixel format name ↔ wire format (dtype, channels, flags); float16 share targets |
 | `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
 | `TDReceiver.py` | `td_exporter/` | `TDReceiverEngine` — Receiver-mode engine (SHM attach, IPC open, copyCUDAMemory) |
-| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
+| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade — delegates to `TDSenderEngine` or `TDReceiverEngine` |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Shared Script TOP onCook — ImportBuffer frame import (Receiver mode) **and** warning_emitter status badge (both Script TOPs point their Callbacks DAT here) |
+| `script_chop_callbacks.py` | `td_exporter/` | `slot_meta` Script CHOP onCook — slot meta channels (`producer_frame`, `stream_id`, `latency_us`, `frame_gap_count`, `producer_skip_count`) |
 | `benchmark_timestamp.py` | `td_exporter/` | Benchmark helper: SharedMemory timestamp channel |
 
 **Classic/fallback mode only — mirror DATs (auto-generated by `scripts/sync_td_wrapper.py`):**
@@ -612,6 +706,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `NVMLObserver.py` | `td_exporter/` | `src/cuda_link/nvml_observer.py` |
 | `SHMProtocol.py` | `td_exporter/` | `src/cuda_link/shm_protocol.py` |
 | `ActivationBarrier.py` | `td_exporter/` | `src/cuda_link/activation_barrier.py` |
+| `Doorbell.py` | `td_exporter/` | `src/cuda_link/_doorbell.py` |
 | `NVTXShim.py` | `td_exporter/` | `src/cuda_link/_nvtx.py` |
 | `ExporterPort.py` | `td_exporter/` | `src/cuda_link/_exporter_port.py` |
 | `ImporterPort.py` | `td_exporter/` | `src/cuda_link/_importer_port.py` |
@@ -623,10 +718,10 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v1.14.1.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v2.0.0.tox` | `TOXES/` | Final built .tox component |
 | `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
-| `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
+| `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: 1 `pip --target` folder, 2 venv, 3 conda, 4 system/parallel Python (TD Preferences), 5 TD's own Python (deprecated) |
 
 ---
 
@@ -638,6 +733,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-05-29
-**Component Version**: 1.14.1
-**TouchDesigner Version**: 2022.x or later (2025.x recommended for `modoutsidecook` optimization)
+**Build Date**: 2026-11-22
+**Component Version**: 2.0.0
+**TouchDesigner Version**: 2025.32820 or later, for 2.0.0 and later. Save the release
+`.tox` in TD 2025.32820, so the `td_build` column of `TOXES/RELEASES.tsv` names the minimum
+build ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).

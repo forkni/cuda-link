@@ -23,7 +23,7 @@ explains, these execute.
 | [01_fake_adapter_tour.py](01_fake_adapter_tour.py) | Full API surface, ring-buffer slot cycling, outcome enums, stats, shutdown handshake — single process via `FakeCUDAAdapter` | `get_frame_numpy()` (fake pixels) | **none** | yes |
 | [02_two_process_roundtrip.py](02_two_process_roundtrip.py) | The mandatory `multiprocessing("spawn")` pattern; real GPU roundtrip with pixel verification | `get_frame_numpy()` — CPU readback IS the proof | NVIDIA GPU¹ | yes |
 | [03_td_to_pytorch_pipeline.py](03_td_to_pytorch_pipeline.py) | **Zero-copy `get_frame()`** → torch tensors that live in the ring buffer; the lifetime contract; FPS/latency monitoring | **zero-copy `get_frame()`** | NVIDIA GPU + CUDA torch | yes² |
-| [04_td_to_opencv_numpy.py](04_td_to_opencv_numpy.py) | `get_frame_numpy()` CPU path (your own copy, no lifetime contract); RGBA→BGRA; optional cv2 display | `get_frame_numpy()` — the copy IS the lesson | NVIDIA GPU¹ | yes² |
+| [04_td_to_opencv_numpy.py](04_td_to_opencv_numpy.py) | `get_frame_numpy()` CPU path (a host copy in a buffer that the next call overwrites); RGBA→BGRA; optional cv2 display | `get_frame_numpy()` — the copy IS the lesson | NVIDIA GPU¹ | yes² |
 | [05_multi_stream_and_dynamic_resolution.py](05_multi_stream_and_dynamic_resolution.py) | N streams = N SHM names = N Importers; `shape=None` auto-detect; following a producer resolution change | **zero-copy `get_frame()`**³ | NVIDIA GPU¹ | yes |
 | [06_graceful_shutdown_and_reconnect.py](06_graceful_shutdown_and_reconnect.py) | The production template: SHUTDOWN vs RECONNECTING vs TIMEOUT, reconnect loop, Ctrl+C / console-close cleanup | **zero-copy `get_frame()`**³ | NVIDIA GPU¹ | yes |
 | [07_python_to_td_exporter_and_benchmark.py](07_python_to_td_exporter_and_benchmark.py) | The producer side: `Exporter`/`GpuFrame`/`record_source_sync` ordering rule; p50/p95/p99 export cost | — (produces: `export()` straight from a GPU tensor) | NVIDIA GPU¹ | yes |
@@ -52,7 +52,7 @@ numbered script on purpose.
 From a checkout of this repository (the examples use an editable source install):
 
 ```bash
-pip install -e .                  # core (numpy comes in via the demo producers' needs)
+pip install -e ".[numpy]"         # core + numpy (the demos need numpy; core alone has no deps)
 pip install -e ".[torch]"         # + PyTorch: zero-copy consumption in 03/05/06/08, torch render path in 07
 pip install -e ".[all]"           # + torch, numpy, cupy, nvml
 pip install opencv-python         # for 04's display window — deliberately NOT a cuda-link extra
@@ -75,7 +75,7 @@ Documented once here; every script supports `--help`.
 |---|---|
 | `--frames N` | Bounded run length. Examples stop after N frames; production consumers loop until `SHUTDOWN`. |
 | `--force-fake` | Use `FakeCUDAAdapter` even if a real GPU is present (protocol only, no real pixels). |
-| `--shm-name NAME` | Attach to a live producer (e.g. a TouchDesigner sender) instead of generating a unique name. |
+| `--shm-name NAME` | (03, 04) Attach to a live producer (e.g. a TouchDesigner sender) instead of generating a unique name. |
 | `--no-demo-producer` | (03, 04) Don't spawn the demo producer; requires `--shm-name`. |
 | `--width / --height / --fps` | Geometry and rate of the demo producer where it applies. |
 
@@ -130,7 +130,8 @@ example 06.
 
 ### Doorbell never fires (example 08 reports 0 wakes)
 
-Both sides must opt in (`ExportPolicy(doorbell=True)` **and**
-`ImportPolicy(doorbell=True)`), and it is Windows-only. When unavailable,
+The doorbell is on by default on both sides since 2.0.0. It is off only if a
+side passes `doorbell=False` (`ImportPolicy` or `ExportPolicy`).
+It is Windows-only. When unavailable,
 `wait_for_doorbell()` returns `False` immediately and the loop degrades to
 1 ms polling — functional, just not low-CPU.

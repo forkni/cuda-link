@@ -26,6 +26,20 @@ project(cuda_link LANGUAGES NONE)
 # Build the native extension only on Windows. Force with -DBUILD_NATIVE_WAITER=ON.
 option(BUILD_NATIVE_WAITER "Build the native _native_waiter extension (Windows only)" ${WIN32})
 
+# TouchDesigner Custom TOP DLLs (cpp_top/, built on their own with the CUDA Toolkit) ship as
+# package data in the platform wheel, so a wheel installer delivers them together with the
+# Python side: one version, one hash. Release builds pass the folder that holds the two DLLs;
+# local and dev CI builds leave it empty and the wheel carries none. See docs/CPP_TOP.md
+# "Install: from the wheel".
+set(CUDALINK_TD_PLUGIN_DIR "" CACHE PATH
+    "Folder with CudaLinkOutTOP.dll and CudaLinkInTOP.dll to ship in cuda_link/td_plugins")
+
+if(CUDALINK_TD_PLUGIN_DIR AND NOT BUILD_NATIVE_WAITER)
+  # The fallback wheel is tagged py3-none-any; Windows DLLs in it would install anywhere.
+  message(FATAL_ERROR "cuda-link: CUDALINK_TD_PLUGIN_DIR is set but BUILD_NATIVE_WAITER is OFF. "
+                      "The TOP DLLs ship only in the platform wheel.")
+endif()
+
 if(NOT BUILD_NATIVE_WAITER)
   message(STATUS "cuda-link: skipping native _native_waiter; packaging a pure-Python wheel. "
                  "To build the extension, configure on Windows "
@@ -55,3 +69,52 @@ target_link_libraries(_native_waiter PRIVATE
 # Install the compiled module next to the Python package so it imports as
 # cuda_link._native_waiter.
 install(TARGETS _native_waiter LIBRARY DESTINATION cuda_link)
+
+if(CUDALINK_TD_PLUGIN_DIR)
+  # cpp_top stamps __version__ from src/cuda_link/__init__.py (the single version source) into
+  # each DLL at configure time (the Info page `version` row). Read it the same way and refuse
+  # DLLs built for another version.
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda_link/__init__.py" CUDALINK_INIT_VERSION_LINE
+       REGEX "^__version__ = \"[^\"]+\"" LIMIT_COUNT 1)
+  string(REGEX REPLACE "^__version__ = \"([^\"]+)\".*" "\\1" CUDALINK_WHEEL_VERSION
+         "${CUDALINK_INIT_VERSION_LINE}")
+  if(NOT CUDALINK_WHEEL_VERSION)
+    message(FATAL_ERROR "cuda-link: no __version__ line in src/cuda_link/__init__.py")
+  endif()
+  # A version holds digits, letters and . + - _ !; of those, . and + are regex operators.
+  string(REPLACE "." "\\." CUDALINK_WHEEL_VERSION_RE "${CUDALINK_WHEEL_VERSION}")
+  string(REPLACE "+" "\\+" CUDALINK_WHEEL_VERSION_RE "${CUDALINK_WHEEL_VERSION_RE}")
+  # A Windows path with backslashes would turn into escapes in the generated install script.
+  file(TO_CMAKE_PATH "${CUDALINK_TD_PLUGIN_DIR}" CUDALINK_TD_PLUGIN_DIR_CMAKE)
+  foreach(CUDALINK_DLL IN ITEMS CudaLinkOutTOP.dll CudaLinkInTOP.dll)
+    set(CUDALINK_DLL_PATH "${CUDALINK_TD_PLUGIN_DIR_CMAKE}/${CUDALINK_DLL}")
+    if(NOT EXISTS "${CUDALINK_DLL_PATH}")
+      message(FATAL_ERROR "cuda-link: ${CUDALINK_DLL} not found in CUDALINK_TD_PLUGIN_DIR "
+                          "(${CUDALINK_TD_PLUGIN_DIR_CMAKE}). Build cpp_top first.")
+    endif()
+    file(STRINGS "${CUDALINK_DLL_PATH}" CUDALINK_DLL_VERSION_HIT
+         REGEX "^${CUDALINK_WHEEL_VERSION_RE}$" LIMIT_COUNT 1)
+    if(NOT CUDALINK_DLL_VERSION_HIT)
+      message(FATAL_ERROR "cuda-link: ${CUDALINK_DLL_PATH} does not carry version "
+                          "${CUDALINK_WHEEL_VERSION}. Configure and build cpp_top again from this tree.")
+    endif()
+    file(SHA256 "${CUDALINK_DLL_PATH}" CUDALINK_DLL_SHA)
+    message(STATUS "cuda-link: shipping ${CUDALINK_DLL} ${CUDALINK_WHEEL_VERSION} sha256 ${CUDALINK_DLL_SHA}")
+    install(FILES "${CUDALINK_DLL_PATH}" DESTINATION cuda_link/td_plugins)
+  endforeach()
+  # cpp_top writes BUILD_INFO.txt (version, build sha, CUDA toolkit, TD header API) next to
+  # the DLLs; the installers read those values from it for the install record (ADR-0016).
+  set(CUDALINK_BUILD_INFO "${CUDALINK_TD_PLUGIN_DIR_CMAKE}/BUILD_INFO.txt")
+  set(CUDALINK_BUILD_INFO_VERSION "")
+  # file(STRINGS) on a missing file is a CMake error of its own; check first, so a build
+  # from before the sidecar gets the message below.
+  if(EXISTS "${CUDALINK_BUILD_INFO}")
+    file(STRINGS "${CUDALINK_BUILD_INFO}" CUDALINK_BUILD_INFO_VERSION
+         REGEX "^cuda-link ${CUDALINK_WHEEL_VERSION_RE}$" LIMIT_COUNT 1)
+  endif()
+  if(NOT CUDALINK_BUILD_INFO_VERSION)
+    message(FATAL_ERROR "cuda-link: ${CUDALINK_BUILD_INFO} is missing or not for version "
+                        "${CUDALINK_WHEEL_VERSION}. Configure and build cpp_top again from this tree.")
+  endif()
+  install(FILES "${CUDALINK_BUILD_INFO}" DESTINATION cuda_link/td_plugins)
+endif()

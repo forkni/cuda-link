@@ -19,7 +19,7 @@ from TDSender import TDSenderEngine
 
 
 def _make_engine(host: FakeTDHost) -> TDSenderEngine:
-    config = TDSenderConfig(activation_barrier=True, use_graphs=False)
+    config = TDSenderConfig(activation_barrier=True)
     engine = TDSenderEngine(
         host=host,
         config=config,

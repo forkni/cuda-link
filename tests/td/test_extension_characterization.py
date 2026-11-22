@@ -114,7 +114,7 @@ def test_sender_shm_size_matches_protocol(
     ext._engine.cuda = cuda_runtime
     ext.initialize(width=16, height=16, channels=4)
 
-    # 20 header + 3*128 slots + 1 shutdown + 20 metadata + 8 timestamp = 433
+    # v0.6: 24 header + 3*160 slots + 1 shutdown + 20 metadata + 3 pad = 528
     expected = SHMLayout(NUM_SLOTS).total_size
     assert len(ext._engine.shm_handle.buf) >= expected, f"SHM too small: {len(ext._engine.shm_handle.buf)} < {expected}"
 

@@ -57,7 +57,14 @@ class ImportPolicy:
     on the per-frame hot path.
     """
 
-    wait_spin_us: int = 200
+    # Spin budget on cudaEventQuery before the wait falls back to a timer nap. The nap takes
+    # about 0.5 ms on Windows (waitable-timer floor), so the budget must cover the normal
+    # completion time of the sender's slot event. A C++ Out TOP publishes without a sync and
+    # its event completes 0.11-0.28 ms after publish (measured 2026-11-18, 1280x1280, p95
+    # 0.28 ms); the former 200 us sat inside that range, so get_frame() flipped between
+    # 0.2 ms and 0.75 ms. The spin ends when the event is ready: a sender that syncs before
+    # publish (the .tox Sender) costs nothing extra.
+    wait_spin_us: int = 500
     d2h_num_streams: int = 1
     d2h_stream_high_priority: bool = False
     allow_pageable_fallback: bool = False
@@ -91,10 +98,13 @@ class ImportPolicy:
     reconnect_max_attempts: int = 20
     reconnect_backoff_frames: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 120)
     # R2: Win32 named-event doorbell. When True the consumer opens the named
-    # event published by the producer and blocks on it instead of poll-sleeping
-    # on NO_FRAME. Set the same env var on both sides. Single-consumer only
-    # (auto-reset wakes exactly one waiter). Default OFF; Windows-only.
-    doorbell: bool = False
+    # event the producer creates and wait_for_doorbell() blocks on it instead of
+    # returning False. On since 2.0.0 (the producer signals too); there is no
+    # environment variable, code can pass doorbell=False. Auto-reset wakes ONE waiter: with
+    # several consumers on one name the wait runs in 1 ms slices and polls
+    # write_idx after each, so a taken signal costs one slice. Windows-only; when
+    # the event does not exist (a 1.x or doorbell-off producer) the consumer polls.
+    doorbell: bool = True
     # R5: native notification-wait backend (compiled _native_waiter extension,
     # built into this wheel on Windows). "auto" (default) uses the native
     # backend when the extension is built, os.name=="nt", and a cudart instance
@@ -113,7 +123,7 @@ class ImportPolicy:
     def from_env(cls) -> ImportPolicy:
         """Read all CUDALINK_* env vars and return a frozen policy."""
         return cls(
-            wait_spin_us=env_int("CUDALINK_WAIT_SPIN_US", default=200),
+            wait_spin_us=env_int("CUDALINK_WAIT_SPIN_US", default=500),
             # default=1 vs 0 is equivalent: max(1, ...) clamps either to 1
             d2h_num_streams=max(1, env_int("CUDALINK_D2H_STREAMS", default=1)),  # pragma: no mutate
             d2h_stream_high_priority=env_str("CUDALINK_D2H_STREAM_PRIO", default="normal") == "high",
@@ -126,7 +136,6 @@ class ImportPolicy:
             debug=False,
             reconnect_enabled=env_bool("CUDALINK_IMPORT_RECONNECT", default=True),
             reconnect_max_attempts=env_int("CUDALINK_IMPORT_RECONNECT_MAX_ATTEMPTS", default=20),
-            doorbell=env_bool("CUDALINK_DOORBELL", default=False),
             wait_backend=env_str("CUDALINK_WAIT_BACKEND", default="auto"),
         )
 
@@ -149,6 +158,7 @@ class ImportPolicy:
             allow_pageable_fallback=True,
             debug=False,
             reconnect_enabled=False,
+            doorbell=False,
             wait_backend="python",
         )
 

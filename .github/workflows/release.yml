@@ -12,13 +12,16 @@ permissions:
 
 jobs:
   # Windows-only: cuda-link is locked to Windows (see docs/adr/0013-prebuilt-wheel-distribution.md),
-  # and the native wheel needs the MSVC + Windows SDK that windows-latest runners ship. Builds and
-  # smoke-tests both distributed wheels so end users never need a local compiler -- see
-  # scripts/install_td_library.py, which downloads whichever of these assets matches its target.
+  # and the native wheel needs MSVC + the Windows SDK. Builds and smoke-tests both distributed
+  # wheels so end users never need a local compiler -- see scripts/install_td_library.py, which
+  # downloads whichever of these assets matches its target. The cp311 wheel also carries the
+  # TouchDesigner Custom TOP DLLs (cuda_link/td_plugins/, docs/CPP_TOP.md "Install: from the wheel").
+  # windows-2022, not windows-latest: the CUDA 12.6 nvcc that builds the DLLs rejects the
+  # VS 18 toolchain of windows-latest (same reason as cpp-top.yml).
   build-wheels:
     name: Build wheels (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 30
+    runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -26,7 +29,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.11'
           # No pip cache here: this job builds the wheels that ship in the GitHub
@@ -39,9 +42,35 @@ jobs:
       - name: Verify td_exporter mirror is in sync with src
         run: python scripts/sync_td_wrapper.py --check
 
-      - name: Build native wheel (cp311, compiles _native_waiter)
+      # The TOP DLLs: the same toolkit, MSVC setup and ninja-tooling preset as cpp-top.yml, so
+      # the shipped DLLs are built the way CI tests them. cudart + nvcc only; no GPU needed.
+      - name: Install CUDA toolkit (cudart + nvcc only)
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d  # v0.2.19
+        with:
+          cuda: '12.6.2'
+          sub-packages: '["cudart","nvcc"]'
+          method: network
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Build the Custom TOP DLLs (CudaLinkOutTOP, CudaLinkInTOP)
+        # The toolkit path goes through an env var, not a ${{ }} expansion inside the script
+        # (zizmor template-injection rule). cpp_top stamps __version__ (src/cuda_link/__init__.py)
+        # into each DLL; the native wheel build below refuses DLLs of another version.
+        working-directory: cpp_top
+        env:
+          CUDA_TOOLKIT_ROOT: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: |
+          cmake --preset ninja-tooling "-DCUDAToolkit_ROOT=$env:CUDA_TOOLKIT_ROOT"
+          cmake --build --preset ninja-tooling --target CudaLinkOutTOP CudaLinkInTOP
+
+      - name: Build native wheel (cp311, compiles _native_waiter, ships the TOP DLLs)
         # BUILD_NATIVE_WAITER defaults ON on Windows -- no flag needed.
-        run: python -m build --wheel
+        run: python -m build --wheel "-Ccmake.define.CUDALINK_TD_PLUGIN_DIR=$env:GITHUB_WORKSPACE/cpp_top/build"
 
       - name: Build fallback wheel (py3-none-any, no compiler)
         # -C cmake.define... is the only PEP 517-correct way to reach CMake through
@@ -55,6 +84,11 @@ jobs:
       - name: List built wheels
         run: Get-ChildItem dist\*.whl
 
+      - name: Check the TOP DLLs in the wheels
+        # cp311 wheel: both DLLs, stamped with the wheel version. py3-none-any wheel: none.
+        shell: pwsh
+        run: python scripts/check_wheel_plugins.py --require-plugins (Get-ChildItem dist\cuda_link-*.whl).FullName
+
       - name: Install native wheel and exercise the compiled extension
         # First real compile-and-run of the C++ state machine in CI.
         # test_native_state_machine.py needs only the compiled extension (no
@@ -62,9 +96,13 @@ jobs:
         # which needs a loaded cudart and can't run on these GPU-less runners.
         shell: pwsh
         run: |
+          # Stop on the first failing python/pip line: without this, pwsh runs on and the step
+          # takes the exit code of the last line only (pwsh 7.3+).
+          $PSNativeCommandUseErrorActionPreference = $true
           $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
           python -m pip install "$($wheel.FullName)"
           python -c "import cuda_link._native_waiter; print('native extension imported OK')"
+          python -c "from cuda_link import td_plugin as t; assert t.has_plugins(), t.plugin_dir(); print('TOP DLLs found:', t.plugin_path('out'), t.plugin_path('in'))"
           python -m pip install pytest pytest-randomly
           pytest tests/core/test_native_state_machine.py -m requires_native -v
 
@@ -110,7 +148,7 @@ jobs:
       - name: Create GitHub Release with binary assets
         # Kept over a `gh release` script for now; swapping it is a release-flow change.
         # zizmor: ignore[superfluous-actions]
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md

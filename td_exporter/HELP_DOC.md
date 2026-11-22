@@ -10,7 +10,7 @@
 
 ## Overview
 
-CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~433 bytes) is exchanged through OS shared memory to coordinate access.
+CUDAIPCLink transfers GPU textures between TouchDesigner and a Python process without copying data through CPU memory. Texture data stays on the GPU at all times — only a small control packet (~528 bytes) is exchanged through OS shared memory to coordinate access.
 
 The component operates in two modes: **Sender** (TouchDesigner exports textures to Python) and **Receiver** (Python sends frames back into TouchDesigner). Both directions use the same underlying protocol, so two TouchDesigner instances can also communicate directly with each other.
 
@@ -25,7 +25,7 @@ Per-frame *coordination* overhead (GPU event record + `write_idx` update) is typ
 1. Each frame, the component calls `top_op.cudaMemory()` to get a raw GPU pointer to the upstream texture.
 2. That texture is copied into a pre-allocated ring buffer slot on the GPU using `cudaMemcpyAsync` (device-to-device, never touching CPU memory).
 3. A CUDA IPC event is recorded on that slot — a lightweight GPU-side signal (~1 µs).
-4. A shared memory channel is updated with the current slot index and a producer timestamp.
+4. The sender writes the slot metadata (a producer timestamp, the TD absolute frame `producer_frame` and the `Streamid` value), then updates the slot index in shared memory.
 5. The Python process reads the slot index, waits on the GPU event (without blocking the CPU), and accesses the texture as a zero-copy `torch.Tensor` or `cupy.ndarray`.
 
 ### Receiver Mode — Python → TD
@@ -53,17 +53,20 @@ The shared memory channel carries only control data (no pixel data):
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic number | 4 B | Protocol validation (`CIPD`) |
-| Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
+| Magic number | 4 B | Protocol validation (`CIP6`, protocol v0.6) |
 | Slot count | 4 B | Number of ring buffer slots |
+| Version counter | 8 B | Increments on sender re-init; receiver detects reconnection |
 | Write index | 4 B | Current producer slot (atomic counter) |
+| Sender process id | 4 B | Lets a receiver refuse a sender in its own process (0 = unknown) |
 | IPC mem handle × N | 64 B each | GPU memory handle per slot |
 | IPC event handle × N | 64 B each | GPU sync event handle per slot |
+| Slot metadata × N | 32 B each | Producer timestamp (`perf_counter()`, for latency), producer frame number, stream id |
 | Shutdown flag | 1 B | Reasserted to 0 every frame; set to 1 on exit |
 | Texture metadata | 20 B | Width, height, components, dtype, buffer size |
-| Producer timestamp | 8 B | `perf_counter()` for latency measurement |
+| Padding | 3 B | Total is a multiple of 8 |
 
-Total for 3 slots: **433 bytes**.
+Total for 3 slots: **528 bytes** (`48 + N × 160`). Protocol v0.6 does not interoperate with
+the v0.5 protocol of cuda-link 1.x: update the sender and the receiver together.
 
 ### Lazy Initialization
 
@@ -126,12 +129,12 @@ Use different names to run multiple independent sender/receiver pairs simultaneo
 
 ### Numslots
 
-**Type:** Integer Menu | **Default:** 3 | **Supported range:** 2–10 (2–5 recommended/tested)
+**Type:** Menu | **Options:** 2, 3, 4 | **Default:** 3
 
-Number of ring buffer slots in the GPU pipeline.
+Number of ring buffer slots in the GPU pipeline. The C++ Out TOP has the same three options.
 
-- **Hard bounds:** values outside 2–10 are rejected outright (below 2 there is no double-buffering; above 10 overflows internal fixed-size tables). Values 6–10 work but are less exercised in testing than 2–5.
-- **Higher values** (e.g., 4–5) reduce the chance of producer/consumer contention when frame processing takes variable time. Each additional slot uses one full texture worth of GPU memory (`ceil(W × H × C × sizeof(dtype) / 2 MiB) × 2 MiB`).
+- **Library bounds:** a Python `Exporter` (`FrameSpec(num_slots=...)`) accepts 1–10. With 1 there is no double-buffering; above 10 overflows internal fixed-size tables. A receiver (the `.tox` in Receiver mode, or the In TOP) reads the slot count from the sender.
+- **Higher values** (e.g., 4) reduce the chance of producer/consumer contention when frame processing takes variable time. Each additional slot uses one full texture worth of GPU memory (`ceil(W × H × C × sizeof(dtype) / 2 MiB) × 2 MiB`).
 - **Lower values** (e.g., 2) reduce GPU memory usage at the cost of slightly increased contention risk.
 - **3 slots (default)** is sufficient for the vast majority of use cases.
 
@@ -141,7 +144,41 @@ Number of ring buffer slots in the GPU pipeline.
 - Locked automatically when `Active` is turned On.
 - In Receiver mode: always locked. The actual slot count is read from the sender's shared memory and displayed here for reference.
 
-Changing this parameter while active is silently ignored. Changing it while inactive triggers a cleanup and lazy re-initialization on the next frame.
+Changing this parameter while active is ignored, and a Textport line says so. Changing it while inactive triggers a cleanup and lazy re-initialization on the next frame.
+
+---
+
+### Streamid
+
+**Type:** Integer | **Default:** 0 | **Range:** 0 to 2^32 − 1
+
+A number that names the stream. Sender mode only: each published frame carries this value
+in its slot metadata as `stream_id`. Give each stream a different value when one receiver
+reads several streams, so the receiver can tell them apart. A value outside the range is
+sent as 0. Receiver mode ignores this parameter; the `slot_meta` CHOP shows the sender's
+value instead.
+
+---
+
+### Framewaitms
+
+**Type:** Integer | **Range:** 0 to 8 | **Default:** 3 (ms)
+
+Receiver mode only. When a frame starts and the sender has not published a new frame, the
+Receiver waits up to this time for the sender's doorbell. It then shows the new frame instead
+of the last frame again. 0 turns the wait off. The C++ In TOP has the same parameter and
+default.
+
+- The wait blocks the TD main thread on a frame with no new frame. Dev box, 2026-11-17,
+  1280×720: at equal 60 fps the duplicate frames went from 0.81 % to 0.50 % and the
+  `onFrameStart` p95 from 0.4 ms to 2.7 ms. With drifting rates the duplicates went from
+  1.06 % to 0.17 %.
+- The Receiver skips the wait when it cannot get a frame: the sender publishes slower than
+  TD cooks (for example a 30 fps camera into a 60 fps project), or the sender has paused. It
+  finds this from the sender's publish times in the slot metadata.
+- The wait needs the sender's doorbell: a 2.0 Sender, Python `Exporter` or C++ Out TOP with
+  default settings. With a 1.x sender the Receiver checks once per frame, as
+  before.
 
 ---
 
@@ -190,11 +227,14 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
   **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
 
   ```text
-  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | export=45.2 µs avg (write_idx=150)
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | cuda_memory=310.4 µs avg | export=45.2 µs avg (write_idx=150)
   ```
 
-  The `export=` figure is a **windowed (~150-frame) average** that resets with each report;
-  it reflects the current session's performance, not a lifetime mean.
+  The `cuda_memory=` and `export=` figures are **windowed (~150-frame) averages** that reset
+  with each report; they reflect the current session's performance, not a lifetime mean.
+  `cuda_memory=` is TD's `top.cudaMemory()` call before the export: it waits for TD's GPU work
+  on the source texture, so a slow source network shows here. `export=` is the copy and
+  publish.
 
 #### Receiver mode
 
@@ -225,10 +265,10 @@ Hot-swappable in both modes: can be toggled at runtime without affecting the pip
 
 **Type:** Toggle | **Default:** Off
 
-Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the parameter dialog, leaving only the CUDA IPC page visible.
+Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the parameter dialog, leaving only the custom pages (Settings, Info) visible.
 
-- **Off:** All parameter pages are shown — Common, Extensions, and CUDA IPC.
-- **On:** Only the CUDA IPC parameter page is shown. Built-in pages are not deleted; they are just hidden from the UI. Toggling Off restores them immediately.
+- **Off:** All parameter pages are shown — Common, Extensions, Settings and Info.
+- **On:** Only the custom pages (Settings, Info) are shown. Built-in pages are not deleted; they are just hidden from the UI. Toggling Off restores them immediately.
 
 Hot-swappable: takes effect instantly without restarting or reinitializing the component. The setting is also applied automatically at component load time.
 
@@ -236,11 +276,37 @@ Use this when distributing the component to end-users who should not need to int
 
 ---
 
+## Slot Meta CHOP
+
+The component has a Script CHOP `slot_meta` inside it. It shows the slot metadata of the
+current frame, one sample per channel. The Out CHOP `out_slot_meta` makes it available on
+the COMP's CHOP output. The channel names are the same as the C++ `CudaLinkInTOP` Info
+CHOP channels, so a network reads both the same way.
+
+| Channel | Sender mode | Receiver mode |
+|---------|-------------|---------------|
+| `producer_frame` | TD absolute frame of the last published frame | Sender's TD absolute frame of the frame on the output |
+| `stream_id` | This COMP's `Streamid` | Sender's `stream_id` |
+| `latency_us` | 0 | Time from the sender publish to the import, in µs (0 when the sender wrote no timestamp) |
+| `frame_gap_count` | 0 | Imported frames whose `write_idx` step was more than 1 (the ring overwrote frames first) |
+| `producer_skip_count` | 0 | Imported frames whose `write_idx` step was 1 but whose `producer_frame` step was more than 1 (the sender skipped TD frames) |
+
+- **`producer_frame` is mod 2^24.** A CHOP sample is float32, which holds an integer
+  exactly only below 2^24. Compare two values with `(a - b) mod 2^24`.
+- **Match streams with `producer_frame`.** All senders that cook in one TD frame write the
+  same `producer_frame`. On the receiver, two streams with an equal `producer_frame` come
+  from the same sender cook.
+- **Update timing.** In Sender mode the `callbacks` Execute DAT cooks `slot_meta` after
+  each export. In Receiver mode the `ImportBuffer` Script TOP cooks it after each import,
+  so the values always belong to the frame on the output.
+
+---
+
 ## Quick Start
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v1.14.1.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v2.0.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -312,7 +378,7 @@ variables for consumer-side wait behavior. The headline ones:
 | Variable | Purpose |
 |----------|---------|
 | `CUDALINK_WAIT_BACKEND` | Native notification-wait backend (`auto` / `python` / `native`). Target p50 < 10 µs vs the ~136–286 µs poll-sleep baseline. Honest caveat: benchmarked as **not measurably faster** than the doorbell in practice — it ships because it never regresses, not because it's proven faster. |
-| `CUDALINK_DOORBELL` | Win32 named-event doorbell wake (single consumer, Windows-only). Sub-300 µs notify latency, ~zero idle CPU while waiting. Must be set on both producer and consumer. |
+| `CUDALINK_DOORBELL` | Removed in 2.0.0. The doorbell is always on: the producer signals a Win32 named event after each publish and a consumer waits on it. Measured 2026-11-20 (1280x720, Python `Exporter`): off saved under 1 µs per publish, inside the run spread, and raised the consumer notify latency from 0.03 ms to 0.93 ms. A value left in the environment has no effect. In code, `ExportPolicy(doorbell=False)` and `ImportPolicy(doorbell=False)` still turn it off. |
 | `CUDALINK_TORCH_GPU_WAIT` | GPU-side wait for `get_frame()` (torch backend) — issues `cudaStreamWaitEvent` instead of CPU spin/sleep. Trade-off: `ImportOutcome.TIMEOUT` becomes unreachable on this path. |
 
 This is not the full list — CUDA-Link exposes roughly 40 `CUDALINK_*` tuning variables in
@@ -366,17 +432,17 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 **Sender `export=` windowed average is higher than expected**
 
-- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region and is not broken out as a separate Debug metric — it is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
+- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region; the summary line shows it as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
 
 - This indicates a producer-side source-buffer lifetime race: the D2D memcpy read the TD
   texture after TD reclaimed it. From v1.10.1 the TD Sender **blocks by default** (post-copy
-  `stream_synchronize`) so the source is live until `export()` returns — upgrade to
-  `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
-  set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
+  `stream_synchronize`) so the source is live until `export()` returns. If you are on
+  v1.10.0 and cannot upgrade immediately, set `CUDALINK_EXPORT_SYNC=1` in the environment
+  that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v1.14.1.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v2.0.0.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 
@@ -389,5 +455,5 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   envelope.
 - **CUDA:** 11.x, 12.x, or 13.x runtime (the loader prefers 13.x/12.x, tested with 12.4 and 12.8; 11.x accepted as a fallback for systems that haven't migrated)
 - **GPU:** Any NVIDIA GPU supporting the CUDA runtime IPC and Graphs APIs used above
-- **TouchDesigner:** 2022.x or later
+- **TouchDesigner:** 2025.32820 or later (ADR-0017 in `docs/adr/`)
 - **Python (consumer side):** 3.11+ recommended (matches TouchDesigner's bundled interpreter). The prebuilt native wheel targets **cp311 (Python 3.11)**; a `py3-none-any` pure-Python fallback wheel also installs on 3.9+ interpreters if needed. Not published on PyPI — see [Quick Start](#quick-start) for install instructions.

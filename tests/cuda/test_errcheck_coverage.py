@@ -1,6 +1,6 @@
 """
 Test that errcheck is installed on every cudart function whose restype is c_int,
-and that the explicit errcheck list (_strict_funcs inside _install_errcheck) stays
+and that the explicit errcheck list (the strict column of _CUDART_SIGNATURES) stays
 in sync with the argtypes block (_setup_function_signatures).
 
 Background
@@ -8,7 +8,7 @@ Background
 _install_errcheck (cuda_ipc_wrapper.py) attaches _strict_errcheck to a
 hand-maintained tuple of 44 function names.  The argtypes block registers ~50
 functions.  If a developer adds a new cudart function to _setup_function_signatures
-but forgets to add it to _strict_funcs (or vice versa), CUDA errors from that
+but forgets to mark it strict (or vice versa), CUDA errors from that
 function are silently swallowed.  This test converts that drift risk into a CI
 failure.
 
@@ -90,13 +90,13 @@ def test_every_c_int_cudart_func_has_errcheck() -> None:
     assert not missing_errcheck, (
         "These c_int-restype cudart functions are missing errcheck:\n"
         + "".join(f"  {n}\n" for n in sorted(missing_errcheck))
-        + "Add them to _strict_funcs inside _install_errcheck, "
+        + "Add them to the strict column of _CUDART_SIGNATURES, "
         "or document why they are exempt and add them to _ERRCHECK_EXEMPTIONS here."
     )
     assert not unexpected_errcheck, (
         "These _ERRCHECK_EXEMPTIONS functions unexpectedly have errcheck set:\n"
         + "".join(f"  {n}\n" for n in sorted(unexpected_errcheck))
-        + "Either remove them from _ERRCHECK_EXEMPTIONS or from _strict_funcs."
+        + "Either remove them from _ERRCHECK_EXEMPTIONS or from the strict column."
     )
 
 
@@ -156,7 +156,7 @@ def test_every_bound_func_has_argtypes() -> None:
     assert not missing_argtypes, (
         "These explicitly-bound cudart functions are missing argtypes:\n"
         + "".join(f"  {n}\n" for n in sorted(missing_argtypes))
-        + "Add argtypes to _setup_function_signatures for each listed function.  "
+        + "Add argtypes to _CUDART_SIGNATURES for each listed function.  "
         "Without argtypes, pointer arguments are silently truncated to 32-bit int "
         "on 64-bit platforms (ctypes reference, 'Specifying the required argument types')."
     )
@@ -166,13 +166,13 @@ def test_every_errcheck_func_is_typed() -> None:
     """Reverse of test_every_c_int_cudart_func_has_errcheck.
 
     Every cudart function that received a real errcheck (i.e. appears in
-    _strict_funcs inside _install_errcheck) must ALSO have been typed with
+    the strict column of _CUDART_SIGNATURES) must ALSO have been typed with
     restype=c_int in _setup_function_signatures.
 
     An errcheck'd-but-untyped function runs with default argtypes — pointer
     arguments are silently truncated to 32-bit on 64-bit platforms (the exact
     hazard the forward test guards against, only mirror-imaged).  This closes
-    the reverse drift path: adding a name to _strict_funcs without first adding
+    the reverse drift path: marking a name strict without first adding
     it to the signature table.
     """
     api = _make_api()
@@ -189,11 +189,11 @@ def test_every_errcheck_func_is_typed() -> None:
             errcheck_without_restype.append(name)
 
     assert not errcheck_without_restype, (
-        "These _strict_funcs entries have errcheck installed but were never typed "
-        "(restype=c_int) in _setup_function_signatures:\n"
+        "These strict entries have errcheck installed but were never typed "
+        "(restype=c_int) in _CUDART_SIGNATURES:\n"
         + "".join(f"  {n}\n" for n in sorted(errcheck_without_restype))
-        + "Add argtypes+restype=c_int to _setup_function_signatures for each, or "
-        "remove them from _strict_funcs in _install_errcheck."
+        + "Add argtypes+restype=c_int to _CUDART_SIGNATURES for each, or "
+        "remove them from the strict column of _CUDART_SIGNATURES."
     )
 
 

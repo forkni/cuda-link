@@ -30,9 +30,16 @@ import pytest
 
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._importer_port import ImportPolicy, ImportSpec
-from cuda_link.cuda_runtime_types import CudaIpcError, IPCEventOpenError, ProtocolError
+from cuda_link.cuda_runtime_types import CudaIpcError, IncompatiblePeerError, IPCEventOpenError, ProtocolError
 from cuda_link.importer import Format, Importer
-from cuda_link.shm_protocol import NUM_SLOTS_OFFSET, Metadata, SHMLayout
+from cuda_link.shm_protocol import (
+    NUM_SLOTS_OFFSET,
+    PROTOCOL_MAGIC_V05,
+    SAME_PROCESS_MESSAGE,
+    Metadata,
+    SHMLayout,
+    write_sender_pid,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,7 +114,7 @@ def test_open_and_validate_shm_raises_file_not_found_when_missing() -> None:
 
 
 def test_open_and_validate_shm_raises_on_truncated_magic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Buffer too short for the 4-byte magic read -> struct.error, shm.close() called, re-raised.
+    """Buffer too short for the 4-byte magic read -> shm.close() called, ProtocolError raised.
 
     Windows rounds SharedMemory segment allocations up to page granularity, so a
     real segment can't be made shorter than MAGIC_SIZE bytes -- a fake stand-in
@@ -127,10 +134,28 @@ def test_open_and_validate_shm_raises_on_truncated_magic(monkeypatch: pytest.Mon
     monkeypatch.setattr(_imp_mod, "SharedMemory", _FakeShm)
     imp = _make_importer(_extra_name())
 
-    with pytest.raises(struct.error):
+    with pytest.raises(ProtocolError, match="Cannot read the SHM header") as raised:
         imp._open_and_validate_shm()
 
     assert closed == [True]
+    assert isinstance(raised.value.__cause__, struct.error)
+
+
+def test_connect_silent_treats_an_unreadable_header_as_a_failed_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reconnect driver must get False, not an exception, from a segment it cannot read."""
+    import cuda_link.importer as _imp_mod
+
+    class _FakeShm:
+        def __init__(self, name: str | None = None) -> None:
+            self.buf = bytearray(2)  # shorter than MAGIC_SIZE=4
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(_imp_mod, "SharedMemory", _FakeShm)
+    imp = _make_importer(_extra_name())
+
+    assert imp._connect_silent() is False
 
 
 def test_open_and_validate_shm_raises_protocol_error_on_bad_magic(
@@ -142,6 +167,54 @@ def test_open_and_validate_shm_raises_protocol_error_on_bad_magic(
         imp = _make_importer(temp_shm_name)
         with pytest.raises(ProtocolError, match="Protocol magic mismatch"):
             imp._open_and_validate_shm()
+    finally:
+        writer.close()
+
+
+def test_open_and_validate_shm_names_a_v05_sender(temp_shm_name: str, shared_memory_cleanup: list) -> None:
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=1)
+    try:
+        struct.pack_into("<I", writer.buf, 0, PROTOCOL_MAGIC_V05)
+        imp = _make_importer(temp_shm_name)
+        with pytest.raises(IncompatiblePeerError, match=r"sender uses protocol v0\.5 \(cuda-link 1\.x\)"):
+            imp._open_and_validate_shm()
+    finally:
+        writer.close()
+
+
+def test_incompatible_peer_warns_once_per_retry_streak(caplog: pytest.LogCaptureFixture) -> None:
+    imp = _make_importer(_extra_name())
+    exc = IncompatiblePeerError("sender uses protocol v0.5 (cuda-link 1.x); this receiver needs v0.6")
+    with caplog.at_level(logging.DEBUG, logger="cuda_link.importer"):
+        imp._log_connect_failure(exc, logging.INFO, "Producer not yet available (%s)")
+        imp._log_connect_failure(exc, logging.DEBUG, "Connect attempt failed: %s")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "sender uses protocol v0.5" in warnings[0].getMessage()
+
+
+@pytest.mark.same_process_check
+def test_open_and_validate_shm_rejects_a_same_process_sender(temp_shm_name: str, shared_memory_cleanup: list) -> None:
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=1)
+    try:
+        write_sender_pid(writer.buf, os.getpid())
+        imp = _make_importer(temp_shm_name)
+        with pytest.raises(IncompatiblePeerError) as excinfo:
+            imp._open_and_validate_shm()
+        assert str(excinfo.value) == SAME_PROCESS_MESSAGE
+    finally:
+        writer.close()
+
+
+@pytest.mark.same_process_check
+def test_open_and_validate_shm_accepts_another_process_sender(temp_shm_name: str, shared_memory_cleanup: list) -> None:
+    writer, _ = _make_valid_shm(temp_shm_name, shared_memory_cleanup, num_slots=1)
+    try:
+        write_sender_pid(writer.buf, os.getpid() + 1)
+        imp = _make_importer(temp_shm_name)
+        shm, num_slots, _ = imp._open_and_validate_shm()
+        assert num_slots == 1
+        shm.close()
     finally:
         writer.close()
 

@@ -12,6 +12,7 @@ textDAT name: TDReceiver  (must match the importable module name inside the COMP
 from __future__ import annotations
 
 import contextlib
+import os
 import struct
 import time
 import traceback
@@ -25,63 +26,131 @@ try:
 except ImportError:
     numpy = None  # Will be imported at runtime in TD
 
+import Doorbell as _doorbell  # noqa: E402
+from CUDAAdapters import CTypesCUDAAdapter  # noqa: E402
 from CUDAIPCWrapper import get_cuda_runtime  # noqa: E402
-from CUDARuntimeTypes import cudaIpcEventHandle_t, cudaIpcMemHandle_t  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push
 from NVTXShim import verbose_range as _nvtx_verbose
-from Env import env_int  # noqa: E402
 from FrameProfile import ReportWindow  # noqa: E402
-from Importer import Format  # noqa: E402
+from Importer import (  # noqa: E402
+    BackoffNotice,
+    Format,
+    HeaderFault,
+    SlotEventOpenError,
+    _RetryState,
+    check_header,
+    open_slot,
+    read_slot_handle_bytes,
+)
 from SHMProtocol import (  # noqa: E402
-    FLAGS_MONO_ALPHA,
-    FORMAT_KIND_FLOAT,
     METADATA_SIZE,
-    PROTOCOL_MAGIC,
-    SHM_HEADER_SIZE,
+    SAME_PROCESS_MESSAGE,
     SHUTDOWN_FLAG_SIZE,
-    SLOT_SIZE,
+    EMPTY_SLOT_META,
+    INFO_CHOP_FRAME_MOD,
+    SLOT_META_CHANNELS,
+    FrameStep,
     Metadata,
     SHMLayout,
+    SlotMeta,
     SlotState,
     acquire_slot,
-    read_magic,
-    read_num_slots,
+    classify_frame_step,
+    protocol_mismatch_message,
     read_version,
     read_write_idx,
 )
 from TDConfig import TDReceiverConfig  # noqa: E402
 from TDHost import TDHost  # noqa: E402
+from TDPixelFormat import to_name as td_format_string  # noqa: E402
+
+# The process id the same-process check compares with the segment's sender_pid; tests that
+# run a sender and a receiver in one process on fake CUDA replace it.
+_current_pid = os.getpid
+
+# Framewaitms: on a frame start with no new frame, wait this long for the sender's doorbell
+# before the frame is a repeat. Same rules as the C++ In TOP (cpp_top/src/core/frame_wait.h,
+# CudaLinkInTOP::waitForFreshFrame): default 3 ms, range 0-8, 0 turns the wait off.
+FRAME_WAIT_DEFAULT_MS = 3
+FRAME_WAIT_MAX_MS = 8
+# The doorbell is an auto-reset event that wakes ONE waiter, so a second consumer of the
+# same name can take the signal. The wait runs in slices and polls write_idx after each:
+# a lost signal costs one slice, not the budget.
+_FRAME_WAIT_SLICE_MS = 1
+
+
+def next_wait_slice_ms(remaining_us: float, slice_ms: int = _FRAME_WAIT_SLICE_MS) -> int:
+    """Timeout (ms) of the next doorbell wait; 0 when the budget is spent.
+
+    Rounds up, so a remainder under 1 ms still waits (port of next_wait_slice_ms in
+    cpp_top/src/core/frame_wait.h).
+    """
+    if remaining_us <= 0 or slice_ms <= 0:
+        return 0
+    return min(slice_ms, -(-int(remaining_us) // 1000) or 1)
+
+
+# Framewaitms guard: the sender's publish cadence, from the slot meta host_timestamp of each
+# shown frame (perf_counter seconds; QueryPerformanceCounter, shared by all processes on a
+# Windows machine). Skips a wait that cannot get a frame: a sender slower than this receiver
+# (a 30 fps camera into a 60 fps project) or a paused sender. Port of PublishCadence /
+# cadence_add / cadence_wait_useful in cpp_top/src/core/frame_wait.h: same rules, same numbers.
+CADENCE_MIN_SAMPLES = 4  # samples before the guard trusts the period
+CADENCE_MAX_OUTLIERS = 4  # consecutive samples over 3 periods: the rate changed, start over
+CADENCE_MAX_PERIOD_S = 1.0  # a gap of 1 s or more is a pause, never a sample
+CADENCE_SLACK_S = 0.001  # one wait slice of slack on "next publish within the budget"
+
+
+@dataclass
+class PublishCadence:
+    """Smoothed seconds per published frame, and the timestamp of the newest frame shown."""
+
+    last_ts: float = 0.0
+    period_s: float = 0.0
+    samples: int = 0
+    outliers: int = 0
+
+
+def cadence_add(c: PublishCadence, ts: float, idx_step: int) -> None:
+    """Add the shown frame with host_timestamp ts, idx_step ring writes after the one before.
+
+    ts <= 0 (a sender that writes no timestamp) leaves the cadence unknown.
+    """
+    if ts <= 0.0:
+        return
+    if c.last_ts > 0.0 and ts > c.last_ts and idx_step > 0:
+        dt = (ts - c.last_ts) / idx_step
+        if dt < CADENCE_MAX_PERIOD_S:
+            if c.samples >= CADENCE_MIN_SAMPLES and dt > 3.0 * c.period_s:
+                c.outliers += 1
+                if c.outliers >= CADENCE_MAX_OUTLIERS:
+                    c.samples = 0
+                    c.outliers = 0
+            else:
+                c.period_s = dt if c.samples == 0 else c.period_s + (dt - c.period_s) / 8.0
+                c.samples = min(c.samples + 1, CADENCE_MIN_SAMPLES)
+                c.outliers = 0
+    c.last_ts = ts
+
+
+def cadence_wait_useful(c: PublishCadence, now_s: float, wait_ms: int) -> bool:
+    """True when a wait of wait_ms can get a frame; an unknown cadence returns True.
+
+    False when the next publish is not expected within the budget plus one slice, or the
+    newest frame is older than two periods (a paused or stalled sender).
+    """
+    if c.samples < CADENCE_MIN_SAMPLES or c.period_s <= 0.0 or c.last_ts <= 0.0:
+        return True
+    since = now_s - c.last_ts
+    if since > 2.0 * c.period_s:
+        return False
+    ahead = c.period_s - since  # time to the next expected publish
+    return ahead <= wait_ms / 1000.0 + CADENCE_SLACK_S
+
 
 # Pre-built NVTX range name strings — eliminates per-frame f-string allocation when NVTX is enabled.
 _NVTX_RECEIVER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.receiver.import_frame.slot{i}" for i in range(10))
-
-
-def td_format_string(fmt: Format) -> str:
-    """Map a Format value object → TouchDesigner Script TOP par.format string.
-
-    Produces strings matching TD's internal par.format menu values, e.g.:
-      (FLOAT, 32, 4, flags=0)               → "rgba32float"
-      (UNSIGNED, 16, 4, flags=0)            → "rgba16fixed"
-      (UNSIGNED, 8, 1, flags=0)             → "r8fixed"
-      (FLOAT, 32, 2, flags=FLAGS_MONO_ALPHA) → "monoalpha32float"
-      (FLOAT, 32, 2, flags=0)               → "rg32float"
-
-    TD uses these to allocate the Script TOP's output texture. Setting
-    par.format before copyCUDAMemory ensures the texture is the right size
-    for the incoming dtype, preventing partial writes into an oversized buffer.
-
-    FLAGS_MONO_ALPHA is preserved in fmt.flags so that mono+alpha sources are
-    correctly labelled in the par.format string and in Info/Status messages —
-    the user's only signal that the channel layout is R+A (not R+G).
-    """
-    format_kind, bits_per_comp, num_comps, flags = fmt.kind, fmt.bits, fmt.num_comps, fmt.flags
-    if num_comps == 2 and flags & FLAGS_MONO_ALPHA:
-        ch = "monoalpha"
-    else:
-        ch = {1: "r", 2: "rg", 3: "rgb", 4: "rgba"}.get(num_comps, "rgba")
-    suffix = "float" if format_kind == FORMAT_KIND_FLOAT else "fixed"
-    return f"{ch}{bits_per_comp}{suffix}"
 
 
 # CuPy import deferred (heavy; only needed for float16 receiver path)
@@ -178,33 +247,32 @@ class ReceiverConnection:
         )
 
 
+# The connect retry and backoff state is the Importer's: one set of rules for both receivers.
+RetryState = _RetryState
+
+
 @dataclass
-class RetryState:
-    """Retry policy and transient counters for the connection-attempt loop."""
+class PendingUpdates:
+    """Script TOP updates the engine owes after a connect or a format change.
 
-    connect_attempts: int = 0
-    max_connect_attempts: int = 20
-    backoff_intervals: tuple = (1, 2, 4, 8, 16, 32, 64, 120)
-    retry_interval_frames: int = 1
-    frames_since_last_retry: int = 0
-    needs_resolution_update: bool = False
-    needs_format_update: bool = False  # set when bits_per_comp/format_kind/num_comps changes
+    They are applied outside the cook that found them (update_receiver_resolution /
+    update_receiver_format), or taken by script_top_callbacks through the consume methods.
+    """
 
-    def request_immediate_reconnect(self) -> None:
-        """Force the next import_frame call to attempt reconnection."""
-        self.frames_since_last_retry = self.retry_interval_frames
+    resolution: bool = False
+    format: bool = False  # set when bits_per_comp/format_kind/num_comps changes
 
-    def consume_resolution_update(self) -> bool:
+    def consume_resolution(self) -> bool:
         """Return True and clear the flag if a resolution update is pending."""
-        if self.needs_resolution_update:
-            self.needs_resolution_update = False
+        if self.resolution:
+            self.resolution = False
             return True
         return False
 
-    def consume_format_update(self) -> bool:
+    def consume_format(self) -> bool:
         """Return True and clear the flag if a pixel-format update is pending."""
-        if self.needs_format_update:
-            self.needs_format_update = False
+        if self.format:
+            self.format = False
             return True
         return False
 
@@ -247,6 +315,7 @@ class TDReceiverEngine:
         self._format = Format.from_overrides((0, 0, 0), "float32")  # zero-value until connected
         self._last_fmt_status: str = ""  # cached set_info_status string; rebuilt on format change
         self._retry = RetryState()
+        self._pending = PendingUpdates()
 
         # Engine-private F16 conversion scratch (mutable per-format caches; not value objects)
         self._f16_cpu_buf = None
@@ -262,9 +331,29 @@ class TDReceiverEngine:
         # frame_count mirrored from sender SHM - exposed for get_stats()
         self.frame_count = 0
 
+        # Slot meta of the frame on the output (set after a successful copy), plus the
+        # session-lifetime gap counters the In TOP shows as frame_gap_count /
+        # producer_skip_count.
+        self.last_slot_meta: SlotMeta = EMPTY_SLOT_META
+        # write_idx of the last frame that reached the output; 0 = none on this connection.
+        # Not _connection.last_write_idx: that one also advances for a frame the copy drops.
+        self._shown_write_idx: int = 0
+        self.last_latency_us: float = 0.0
+        self.frame_gap_count: int = 0
+        self.producer_skip_count: int = 0
+
+        # Framewaitms doorbell wait: handle opened on the first waiting frame start (None
+        # until the sender has made the event), and the frames the wait got.
+        self._doorbell_handle: object = None
+        self.frame_wait_rescued_count: int = 0
+        # Guard: publish cadence from _record_slot_meta(), and the no-frame frame starts
+        # that skipped the wait because it could not get a frame.
+        self.publish_cadence: PublishCadence = PublishCadence()
+        self.frame_wait_skipped_count: int = 0
+
         # Per-frame performance tracking for Debug summary line — shares
         # ReportWindow with TDSenderEngine.
-        self._rx_report_every: int = env_int("CUDALINK_RECEIVER_REPORT_EVERY", default=150)
+        self._rx_report_every: int = config.report_every
         self._rx_window = ReportWindow()
 
     # --- Facade-compat property wrappers (keep CUDAIPCExtension getattr calls working) ---
@@ -303,7 +392,7 @@ class TDReceiverEngine:
 
         Called from script_top_callbacks.onCook to drive ImportBuffer Script TOP par updates.
         """
-        if self._retry.consume_resolution_update():
+        if self._pending.consume_resolution():
             return (self._format.width, self._format.height)
         return None
 
@@ -315,8 +404,22 @@ class TDReceiverEngine:
 
         Returns a string like 'rgba16fixed', 'r32float', 'rgba8fixed', etc., or None.
         """
-        if self._retry.consume_format_update():
+        if self._pending.consume_format():
             return td_format_string(self._format)
+        return None
+
+    # --- Sender verbs: no-ops here, so the facade calls the engine in either mode ---
+    # (CUDAIPCExtension._Engine). Each returns what the facade returned in Receiver mode.
+
+    def initialize(
+        self, width: int, height: int, channels: int = 4, buffer_size: int | None = None, extra_flags: int = 0
+    ) -> bool:
+        return False
+
+    def export_frame(self, top_op: object = None) -> bool:
+        return False
+
+    def _check_deferred_cleanup(self) -> None:
         return None
 
     # --- Core API ---
@@ -362,6 +465,99 @@ class TDReceiverEngine:
         except (AttributeError, struct.error, ValueError, IndexError, OSError):
             return True  # SHM unreadable; let import_frame handle it
 
+    def frame_wait_ms(self) -> int:
+        """Framewaitms par as a wait budget in ms, clamped to 0..FRAME_WAIT_MAX_MS.
+
+        A COMP without the par (a .tox built before it existed) gets the default.
+        """
+        value = self._host.param_value("Framewaitms")
+        if value is None:
+            return FRAME_WAIT_DEFAULT_MS
+        try:
+            wait_ms = int(value)
+        except (TypeError, ValueError):
+            return FRAME_WAIT_DEFAULT_MS
+        return min(max(wait_ms, 0), FRAME_WAIT_MAX_MS)
+
+    def wait_for_new_frame(self, wait_ms: int | None = None) -> bool:
+        """Wait up to wait_ms for the sender's doorbell; True when has_new_frame() turned True.
+
+        Called from onFrameStart after has_new_frame() returned False. Sender and receiver
+        cook at the same rate with a slowly drifting phase; when the publish lands just
+        after this poll, jitter makes repeat/skip pairs. The wait turns those repeats into
+        new frames that come a little later. It blocks TD's main thread for at most the
+        budget plus one slice. Returns False at once when the wait is off, the receiver is
+        not connected, or the sender made no doorbell (doorbell=False in its policy, a 1.x sender,
+        non-Windows): the classic poll-once behaviour.
+        """
+        if wait_ms is None:
+            wait_ms = self.frame_wait_ms()
+        if wait_ms <= 0 or not self._initialized or self._connection.shm_handle is None:
+            return False
+        if not cadence_wait_useful(self.publish_cadence, time.perf_counter(), wait_ms):
+            # Next publish not due within the budget (slower sender) or sender paused.
+            self.frame_wait_skipped_count += 1
+            return False
+        if self._doorbell_handle is None:
+            # Retried on each waiting frame start until the sender has made the event.
+            self._doorbell_handle = _doorbell.open_doorbell(_doorbell.doorbell_event_name(self.shm_name))
+            if self._doorbell_handle is None:
+                return False
+
+        deadline = time.perf_counter() + wait_ms / 1000.0
+        # Iteration cap: _doorbell.wait() returns False for a timeout and for a failed wait,
+        # and a failed wait returns at once. Without the cap a dead handle would spin here.
+        for _ in range(2 * wait_ms + 2):
+            slice_ms = next_wait_slice_ms((deadline - time.perf_counter()) * 1e6)
+            if slice_ms == 0:
+                break
+            # A wake can be a stale signal from a publish already read, and a timeout can
+            # hide a signal another consumer took: poll after both.
+            _doorbell.wait(self._doorbell_handle, slice_ms)
+            if self.has_new_frame():
+                self.frame_wait_rescued_count += 1
+                return True
+        return False
+
+    def _close_doorbell(self) -> None:
+        """Close the Framewaitms doorbell handle (idempotent)."""
+        if self._doorbell_handle is not None:
+            _doorbell.close(self._doorbell_handle)
+            self._doorbell_handle = None
+
+    def _record_slot_meta(self, prev_write_idx: int, write_idx: int, meta: SlotMeta) -> None:
+        """Store the shown frame's slot meta and count gaps (same rules as the C++ In TOP)."""
+        step = classify_frame_step(prev_write_idx, self.last_slot_meta.producer_frame, write_idx, meta.producer_frame)
+        if step is FrameStep.FRAME_GAP:
+            self.frame_gap_count += 1
+        elif step is FrameStep.PRODUCER_SKIP:
+            self.producer_skip_count += 1
+        self.last_slot_meta = meta
+        ts = meta.host_timestamp
+        self.last_latency_us = (time.perf_counter() - ts) * 1e6 if ts > 0 else 0.0
+        # A new connection or producer session (prev_write_idx 0) starts the cadence over.
+        if prev_write_idx == 0:
+            self.publish_cadence = PublishCadence()
+        cadence_add(self.publish_cadence, ts, (write_idx - prev_write_idx) & 0xFFFFFFFF)
+
+    def slot_meta_channels(self) -> dict[str, float]:
+        """Slot meta of the frame on the output, as the `slot_meta` Script CHOP channels.
+
+        Same names and meaning as the C++ In TOP Info CHOP: producer_frame is shown mod
+        2^24 (exact in float32); ``last_slot_meta.producer_frame`` has the full value.
+        """
+        meta = self.last_slot_meta
+        # No zip(strict=True): it needs Python 3.10 and this file runs on 3.9. The test
+        # suite checks that the result has exactly SLOT_META_CHANNELS, in order.
+        values = (
+            float(meta.producer_frame % INFO_CHOP_FRAME_MOD),
+            float(meta.stream_id),
+            float(self.last_latency_us),
+            float(self.frame_gap_count),
+            float(self.producer_skip_count),
+        )
+        return dict(zip(SLOT_META_CHANNELS, values))
+
     def get_stats(self) -> dict:
         """Receiver statistics dict."""
         return {
@@ -377,6 +573,8 @@ class TDReceiverEngine:
             ),
             "rx_buffer_size_mb": self._format.frame_nbytes / 1024 / 1024 if self._format.frame_nbytes > 0 else 0,
             "rx_last_write_idx": self._connection.last_write_idx,
+            "rx_frame_wait_rescued": self.frame_wait_rescued_count,
+            "rx_frame_wait_skipped": self.frame_wait_skipped_count,
             "rx_dev_ptrs": [f"0x{ptr.value:016x}" if ptr else "NULL" for ptr in self._connection.dev_ptrs],
         }
 
@@ -399,22 +597,17 @@ class TDReceiverEngine:
 
         # Lazy initialization with exponential backoff retry logic
         if not self._initialized:
-            self._retry.frames_since_last_retry += 1
-            if self._retry.frames_since_last_retry < self._retry.retry_interval_frames:
+            if not self._retry.tick():
                 return False  # Wait before retrying
 
-            self._retry.frames_since_last_retry = 0
-            self._retry.connect_attempts += 1
-
             if not self.initialize_receiver():
-                backoff_idx = min(self._retry.connect_attempts, len(self._retry.backoff_intervals) - 1)
-                self._retry.retry_interval_frames = self._retry.backoff_intervals[backoff_idx]
-                if self._retry.connect_attempts <= self._retry.max_connect_attempts:
+                notice = self._retry.back_off()
+                if notice is BackoffNotice.WAITING:
                     self._log(
                         f"Waiting for sender... (attempt {self._retry.connect_attempts}, "
                         f"next retry in {self._retry.retry_interval_frames} frames)"
                     )
-                elif self._retry.connect_attempts == self._retry.max_connect_attempts + 1:
+                elif notice is BackoffNotice.NOW_SILENT:
                     self._log("Sender not found. Will keep retrying silently.", force=True)
                 return False
 
@@ -445,10 +638,13 @@ class TDReceiverEngine:
             if result.state is SlotState.NO_FRAME:
                 return False
 
+            if self._connection.last_write_idx == 0:
+                # New connection or sender re-init: no previous shown frame to step from.
+                self._shown_write_idx = 0
             self._connection.last_write_idx = result.write_idx
             write_idx = result.write_idx
             read_slot = result.slot
-            _ts = result.timestamp  # producer wall-clock (time.perf_counter()) for latency
+            _ts = result.slot_meta.host_timestamp  # producer perf_counter() at publish, for latency
             if not self._rx_window.started:
                 # Session baseline for windowed FPS (frame_count is never reset).
                 self._rx_window.start(time.perf_counter(), self.frame_count)
@@ -547,6 +743,8 @@ class TDReceiverEngine:
 
             self.frame_count += 1
             self._connection.last_write_idx = write_idx
+            self._record_slot_meta(self._shown_write_idx, write_idx, result.slot_meta)
+            self._shown_write_idx = write_idx
 
             if not self._last_fmt_status:
                 # Rebuild only when format changed (initialize_receiver and update_receiver_format
@@ -591,12 +789,12 @@ class TDReceiverEngine:
         Returns:
             True if resolution was updated, False if no update needed or not applicable
         """
-        if not self._retry.needs_resolution_update:
+        if not self._pending.resolution:
             return False
 
         try:
             handle.set_resolution(self._format.width, self._format.height)
-            self._retry.needs_resolution_update = False
+            self._pending.resolution = False
             self._log(
                 f"Set ImportBuffer resolution to {self._format.width}x{self._format.height} (from Execute DAT)",
                 force=True,
@@ -620,12 +818,12 @@ class TDReceiverEngine:
         Returns:
             True if the format was updated, False if no update needed or not applicable.
         """
-        if not self._retry.needs_format_update:
+        if not self._pending.format:
             return False
         try:
             fmt = td_format_string(self._format)
             handle.set_format(fmt)
-            self._retry.needs_format_update = False
+            self._pending.format = False
             self._log(f"Set ImportBuffer pixel format to {fmt!r}", force=True)
             return True
         except (AttributeError, RuntimeError) as e:
@@ -656,7 +854,10 @@ class TDReceiverEngine:
         # leaks the SHM mapping on every failed attempt / backoff retry.
         shm_handle = None
         try:
-            self.cuda = get_cuda_runtime(device=self.device)
+            # The `cuda` constructor argument wins (tests, and a caller that already holds a
+            # port). Without one, wrap the process-wide runtime in the production adapter.
+            if self.cuda is None:
+                self.cuda = CTypesCUDAAdapter(get_cuda_runtime(device=self.device))
             if not getattr(self, "_runtime_load_logged", False):
                 self._log(f"Loaded CUDA runtime on device {self.cuda.get_device()}", force=True)
                 self._runtime_load_logged = True
@@ -668,36 +869,21 @@ class TDReceiverEngine:
                 self._log(f"SharedMemory '{self.shm_name}' not found. Sender not ready?")
                 return False
 
-            # Validate protocol magic number (new in this version)
-            try:
-                magic = read_magic(shm_handle.buf)
-                if magic != PROTOCOL_MAGIC:
-                    self._log(
-                        f"Protocol magic mismatch: expected 0x{PROTOCOL_MAGIC:08X}, got 0x{magic:08X}. "
-                        "Sender using incompatible protocol version.",
-                        force=True,
-                    )
-                    shm_handle.close()
-                    return False
-            except (struct.error, ValueError, IndexError):
+            # Validate the header: protocol magic, same-process rule, slot count.
+            header = check_header(shm_handle.buf, _current_pid())
+            if header.fault is not None:
                 self._log(
-                    "Cannot read protocol magic. Sender may be using old protocol version.",
+                    {
+                        HeaderFault.BAD_MAGIC: protocol_mismatch_message(header.magic),
+                        HeaderFault.SAME_PROCESS: SAME_PROCESS_MESSAGE,
+                        HeaderFault.UNREADABLE: "Cannot read protocol magic. Sender may be using old protocol version.",
+                        HeaderFault.BAD_NUM_SLOTS: f"Invalid num_slots: {header.num_slots}. Protocol error.",
+                    }[header.fault],
                     force=True,
                 )
                 shm_handle.close()
                 return False
-
-            # Read header
-            ipc_version = read_version(shm_handle.buf)
-            num_slots = read_num_slots(shm_handle.buf)
-
-            if num_slots == 0 or num_slots > 10:
-                self._log(
-                    f"Invalid num_slots: {num_slots}. Protocol error.",
-                    force=True,
-                )
-                shm_handle.close()
-                return False
+            ipc_version, num_slots = header.ipc_version, header.num_slots
 
             # Sync UI parameter to show sender's slot count (informational only).
             # Do NOT set self.num_slots — that's the sender-specific working value.
@@ -796,12 +982,9 @@ class TDReceiverEngine:
 
             # Open all IPC handles (per slot)
             for slot in range(num_slots):
-                base_offset = SHM_HEADER_SIZE + (slot * SLOT_SIZE)
+                raw = read_slot_handle_bytes(shm_handle.buf, layout, slot)
 
-                # Read + open memory handle
-                mem_handle_bytes = bytes(shm_handle.buf[base_offset : base_offset + 64])
-
-                if not any(mem_handle_bytes):
+                if not raw.has_mem:
                     self._log(
                         f"Slot {slot}: IPC mem handle is all zeros - "
                         "sender hasn't written handles yet. Will retry with backoff.",
@@ -811,11 +994,21 @@ class TDReceiverEngine:
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
 
-                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {mem_handle_bytes[:16].hex()}...")
-                ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
+                self._log(f"[IPC-HEX] slot{slot} read handle prefix: {raw.mem[:16].hex()}...")
 
                 try:
-                    dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(ipc_handles[slot], flags=1)
+                    ipc_handles[slot], dev_ptrs[slot], ipc_events[slot] = open_slot(self.cuda, raw)
+                except SlotEventOpenError as e:
+                    # Without the event the wait has nothing to order against the
+                    # sender, so every frame would be read unsynced: fail the init
+                    # (slot + 1 also releases this slot's just-opened mem handle).
+                    dev_ptrs[slot] = e.dev_ptr
+                    self._log(
+                        f"Slot {slot}: failed to open IPC event: {e.cause}. Will retry with backoff.",
+                        force=True,
+                    )
+                    self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
+                    return False
                 except RuntimeError as e:
                     self._log(
                         f"Slot {slot}: cudaIpcOpenMemHandle failed: {e}. "
@@ -825,23 +1018,6 @@ class TDReceiverEngine:
                     )
                     self._cleanup_partial(slot, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
                     return False
-
-                # Read + open event handle
-                event_handle_bytes = bytes(shm_handle.buf[base_offset + 64 : base_offset + 128])
-                if any(event_handle_bytes):
-                    try:
-                        ipc_event_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                        ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_event_handle)
-                    except (RuntimeError, OSError) as e:
-                        # Without the event the wait has nothing to order against the
-                        # sender, so every frame would be read unsynced: fail the init
-                        # (slot + 1 also releases this slot's just-opened mem handle).
-                        self._log(
-                            f"Slot {slot}: failed to open IPC event: {e}. Will retry with backoff.",
-                            force=True,
-                        )
-                        self._cleanup_partial(slot + 1, dev_ptrs, ipc_events, stream, stream_is_new, shm_handle)
-                        return False
 
                 self._log(
                     f"Opened slot {slot}: GPU at 0x{dev_ptrs[slot].value:016x}, "
@@ -867,19 +1043,14 @@ class TDReceiverEngine:
             self._last_fmt_status = ""  # force status string rebuild on first imported frame
 
             # Flag that Script TOP resolution needs to be updated (applied outside cook cycle).
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
 
-            # Flag pixel-format update when the resolved format is anything other than the
-            # Script TOP default (rgba32float).  copyCUDAMemory adapts channel count from
-            # _cached_shape, but par.format controls the output texture allocation (bit depth
-            # AND channel layout).  Only rgba32float matches the saved/default Script TOP
-            # format and therefore needs no explicit set_format call.  All other formats —
-            # uint8, uint16, AND float32 variants with non-RGBA channel layout (monoalpha32float,
-            # rg32float, r32float, etc.) — must be set explicitly so copyCUDAMemory writes into
-            # a correctly-sized texture.  The previous guard (bits_per_comp != 32) was too broad:
-            # it skipped the update for ALL float32 sources, including 2-channel monoalpha32float.
-            if td_format_string(self._format) != "rgba32float":
-                self._retry.needs_format_update = True
+            # Always flag a pixel-format update on connect. The Script TOP and the MonoAlphaFix
+            # Reorder TOP keep the format of the last stream (or the one the project file saved),
+            # so "rgba32float is the default, skip it" left MonoAlphaFix active after a change
+            # from Mono+Alpha back to RGBA. par.format controls the output texture allocation
+            # (bit depth and channel layout); a write of the same value costs nothing.
+            self._pending.format = True
 
             # Cache CUDAMemoryShape to avoid per-frame object creation
             if numpy is None:
@@ -993,6 +1164,8 @@ class TDReceiverEngine:
         outer except in initialize_receiver()).
         """
         self._connection.close(self.cuda, self._log)
+        self._close_doorbell()
+        self.publish_cadence = PublishCadence()
         self._release_f16_staging()
         self._cached_shape = None
 
@@ -1024,7 +1197,7 @@ class TDReceiverEngine:
         try:
             import ctypes as _ctypes
 
-            self._f16_pinned_ptr = self.cuda.malloc_host(f16_bytes)
+            self._f16_pinned_ptr = self.cuda.malloc_host_alloc(f16_bytes)
             _buf = (_ctypes.c_ubyte * f16_bytes).from_address(self._f16_pinned_ptr.value)
             self._f16_cpu_buf = np_module.frombuffer(_buf, dtype=np_module.float16)
             self._log("float16 receiver: allocated pinned CPU buffer for D2H (async path)", force=True)
@@ -1107,12 +1280,12 @@ class TDReceiverEngine:
             return
 
         self._release_resources()
+        # The Status text was the format of this stream (set_info_status in import_frame).
+        self._host.clear_status()
 
         self._initialized = False
-        self._retry.connect_attempts = 0
-        self._retry.frames_since_last_retry = 0
         # Drop the backoff from the last connect loop so the first retry after a drop is immediate
-        self._retry.retry_interval_frames = 1
+        self._retry.reset()
         # Reset per-session perf tracking so reconnects get a fresh window baseline
         self._rx_window.reset()
 
@@ -1162,8 +1335,7 @@ class TDReceiverEngine:
         handles_changed = False
         if self.cuda is not None and conn.ipc_handles:
             for slot in range(conn.num_slots):
-                base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-                new_mem_bytes = bytes(shm.buf[base_offset : base_offset + 64])
+                new_mem_bytes = read_slot_handle_bytes(shm.buf, layout, slot).mem
                 old_handle = conn.ipc_handles[slot] if slot < len(conn.ipc_handles) else None
                 if old_handle is None or bytes(old_handle) != new_mem_bytes:
                     handles_changed = True
@@ -1226,7 +1398,7 @@ class TDReceiverEngine:
         # previous session would make its first frame read as already consumed.
         conn.last_write_idx = 0
         if width != prev_format.width or height != prev_format.height:
-            self._retry.needs_resolution_update = True
+            self._pending.resolution = True
         if (
             bits_per_comp != prev_format.bits
             or format_kind != prev_format.kind
@@ -1236,7 +1408,7 @@ class TDReceiverEngine:
             # flags carries the channel layout (e.g. RG vs Mono+Alpha at the same comps).
             # Script TOP's par.format must be updated so the next copyCUDAMemory writes
             # into a correctly-sized output texture (e.g. uint16 → float32 half-fills).
-            self._retry.needs_format_update = True
+            self._pending.format = True
 
         self._log(
             f"Format refreshed in-place: {width}x{height}x{num_comps}, "
@@ -1256,29 +1428,24 @@ class TDReceiverEngine:
         new_dev_ptrs: list = [None] * num_slots
         new_ipc_handles: list = [None] * num_slots
         new_ipc_events: list = [None] * num_slots
+        layout = SHMLayout(num_slots)
         for slot in range(num_slots):
-            base_offset = SHM_HEADER_SIZE + slot * SLOT_SIZE
-            mem_handle_bytes = bytes(shm.buf[base_offset : base_offset + 64])
-            if not any(mem_handle_bytes):
+            raw = read_slot_handle_bytes(shm.buf, layout, slot)
+            if not raw.has_mem:
                 self._log(f"Refresh: slot {slot} handle is zero — falling back to full reinit", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            new_ipc_handles[slot] = cudaIpcMemHandle_t.from_buffer_copy(mem_handle_bytes)
             try:
-                new_dev_ptrs[slot] = self.cuda.ipc_open_mem_handle(new_ipc_handles[slot], flags=1)
+                new_ipc_handles[slot], new_dev_ptrs[slot], new_ipc_events[slot] = open_slot(self.cuda, raw)
+            except SlotEventOpenError as e:
+                new_dev_ptrs[slot] = e.dev_ptr
+                self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e.cause} — falling back", force=True)
+                self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
+                return None
             except (RuntimeError, OSError) as e:
                 self._log(f"Refresh: slot {slot} ipc_open_mem_handle failed: {e} — falling back", force=True)
                 self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
                 return None
-            event_handle_bytes = bytes(shm.buf[base_offset + 64 : base_offset + 128])
-            if any(event_handle_bytes):
-                try:
-                    ipc_evt_handle = cudaIpcEventHandle_t.from_buffer_copy(event_handle_bytes)
-                    new_ipc_events[slot] = self.cuda.ipc_open_event_handle(ipc_evt_handle)
-                except (RuntimeError, OSError) as e:
-                    self._log(f"Refresh: slot {slot} ipc_open_event_handle failed: {e} — falling back", force=True)
-                    self._close_refresh_handles(new_dev_ptrs, new_ipc_events)
-                    return None
         return new_dev_ptrs, new_ipc_handles, new_ipc_events
 
     def _close_refresh_handles(self, dev_ptrs: list, ipc_events: list) -> None:

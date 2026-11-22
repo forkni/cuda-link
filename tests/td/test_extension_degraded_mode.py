@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import CUDAIPCExtension as ext_module  # noqa: N813
 import pytest
 from fakes import FakeTDHost
+from TDHost import STATUS_LIBRARY
 
 
 def _degraded_host(mode: str = "Sender") -> FakeTDHost:
@@ -39,7 +40,6 @@ def test_extension_compiles_when_library_unavailable(monkeypatch: object) -> Non
     """Simulates the reported bug: cuda_link import failed.  Construction must not raise."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
 
     ext = ext_module.CUDAIPCExtension(None, host=_degraded_host())
 
@@ -50,7 +50,6 @@ def test_extension_compiles_when_library_unavailable(monkeypatch: object) -> Non
 def test_degraded_sender_public_methods_never_raise(monkeypatch: object) -> None:
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "OSError: nvcuda.dll not found")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
 
     sender = ext_module.CUDAIPCExtension(None, host=_degraded_host("Sender"))
     assert sender.initialize(16, 16, 4) is False
@@ -72,7 +71,6 @@ def test_degraded_sender_public_methods_never_raise(monkeypatch: object) -> None
 def test_degraded_receiver_public_methods_never_raise(monkeypatch: object) -> None:
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "OSError: nvcuda.dll not found")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
 
     receiver = ext_module.CUDAIPCExtension(None, host=_degraded_host("Receiver"))
     assert isinstance(receiver._engine, ext_module._NullEngine)
@@ -90,30 +88,39 @@ def test_degraded_receiver_public_methods_never_raise(monkeypatch: object) -> No
 
 def test_library_ready_true_when_engine_is_real(monkeypatch: object) -> None:
     """Sanity check the property's other branch: real engine -> library_ready True."""
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     ext = ext_module.CUDAIPCExtension(None, host=_degraded_host())
     assert not isinstance(ext._engine, ext_module._NullEngine)
     assert ext.library_ready is True
 
 
-def test_bootstrap_helpers_survive_missing_bootstrap_module(monkeypatch: object) -> None:
-    """_bootstrap_active/_bootstrap_error must not raise even when CUDALinkBootstrap is absent
+def test_load_state_survives_missing_bootstrap_module(monkeypatch: object) -> None:
+    """LoadState.read() must not raise even when CUDALinkBootstrap is absent
     (the sibling Text DAT does not exist as a COMP-local import)."""
     monkeypatch.setattr(ext_module, "CUDALinkBootstrap", None)
-    assert ext_module._bootstrap_active() is False
-    assert ext_module._bootstrap_error() == ""
+    state = ext_module.LoadState.read()
+    assert (state.active, state.detail, state.version, state.failure_kind) == (False, "", "", "")
 
 
-def test_bootstrap_helpers_read_real_bootstrap_state(monkeypatch: object) -> None:
-    fake_bootstrap = SimpleNamespace(_active=True, last_error="")
+def test_load_state_reads_real_bootstrap_state(monkeypatch: object) -> None:
+    fake_bootstrap = SimpleNamespace(_active=True, last_error="", MIRROR_VERSION="2.0.0")
     monkeypatch.setattr(ext_module, "CUDALinkBootstrap", fake_bootstrap)
-    assert ext_module._bootstrap_active() is True
-    assert ext_module._bootstrap_error() == ""
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", True)
+    state = ext_module.LoadState.read()
+    assert (state.active, state.detail, state.version, state.mode) == (True, "", "2.0.0", "library mode")
 
     fake_bootstrap._active = False
     fake_bootstrap.last_error = "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
-    assert ext_module._bootstrap_active() is False
-    assert ext_module._bootstrap_error() == "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
+    fake_bootstrap.failure_kind = "missing"
+    state = ext_module.LoadState.read()
+    assert (state.active, state.failure_kind, state.mode) == (False, "missing", "classic mode")
+    assert state.detail == "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
+
+
+def test_load_state_mode_not_loaded(monkeypatch: object) -> None:
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
+    monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: x")
+    state = ext_module.LoadState.read()
+    assert (state.mode, state.library_error) == ("not loaded", "ModuleNotFoundError: x")
 
 
 def test_foreign_alias_error_flags_a_file_backed_shm_module() -> None:
@@ -144,7 +151,6 @@ def test_notify_library_unavailable_status_names_version_and_how_to_install(monk
     'Base Folder' wording."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -162,6 +168,25 @@ def test_notify_library_unavailable_status_names_version_and_how_to_install(monk
     assert "restart" in msg.lower()
     assert "Libpath" not in msg
     assert "StreamDiffusionTD" not in msg
+    # The library condition, not the engine status: deactivation must not clear it.
+    assert host.conditions[STATUS_LIBRARY] == (kind, msg)
+
+
+def test_ext_clear_status_clears_the_engine_status_and_keeps_the_library_condition(
+    monkeypatch: object,
+) -> None:
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
+    monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
+    host = _degraded_host()
+    ext = ext_module.CUDAIPCExtension(None, host=host)
+    ext._notify_library_unavailable()
+    library = host.conditions[STATUS_LIBRARY]
+
+    ext.clear_status()
+
+    assert host.status_calls[-1] == ("clear", None)
+    assert ("clear_condition", STATUS_LIBRARY) not in host.status_calls
+    assert host.conditions[STATUS_LIBRARY] == library
 
 
 def test_notify_library_unavailable_status_names_the_mismatched_version(monkeypatch: object) -> None:
@@ -169,7 +194,6 @@ def test_notify_library_unavailable_status_names_the_mismatched_version(monkeypa
     match -- the Status must say so, not the generic "not found" text (R3)."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -191,7 +215,6 @@ def test_notify_library_unavailable_status_names_a_rival_install(monkeypatch: ob
     must say so and point at a restart, not "not found" (R3)."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -215,7 +238,6 @@ def test_notify_library_unavailable_status_names_a_broken_install(monkeypatch: o
     Textport, distinct from the plain "mismatch" and "rival" wording (fix 3)."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -241,7 +263,6 @@ def test_notify_library_unavailable_status_names_the_extension_import_bug(monkey
     monkeypatch.setattr(
         ext_module, "LIBRARY_ERROR", "AttributeError: module 'cuda_link' has no attribute 'shm_protocol'"
     )
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -265,7 +286,6 @@ def test_notify_library_unavailable_detail_prints_both_bootstrap_and_library_err
     when it is non-empty and distinct -- dropping either one loses real information."""
     monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
     monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     monkeypatch.setattr(
         ext_module,
         "CUDALinkBootstrap",
@@ -291,7 +311,6 @@ def test_claim_notice_once_fires_once_per_process(monkeypatch: object) -> None:
     """The dedup sentinel is a plain ``sys`` attribute (R8) -- shared across all four
     sibling COMPs' separately-compiled module objects, and never pickled into the saved
     .toe, unlike the old COMP-storage flag it replaces."""
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     ext = ext_module.CUDAIPCExtension(None, host=_degraded_host())
 
     reason = ("cuda_link not found", "detail")
@@ -304,7 +323,6 @@ def test_claim_notice_once_fires_again_for_a_different_reason(monkeypatch: objec
     """A second sibling COMP whose failure reason differs from one already printed must
     still get its own notice -- dedup on message content, not on PID, so a genuinely
     different reason is never silently swallowed by an earlier COMP's notice."""
-    monkeypatch.setattr(ext_module, "_banner_shown_for_comps", set())
     ext = ext_module.CUDAIPCExtension(None, host=_degraded_host())
 
     first = ("cuda_link not found", "detail A")
@@ -312,3 +330,23 @@ def test_claim_notice_once_fires_again_for_a_different_reason(monkeypatch: objec
     assert ext._claim_notice_once(first) is True
     assert ext._claim_notice_once(first) is False
     assert ext._claim_notice_once(second) is True
+
+
+def test_library_notice_is_scheduled_again_on_every_init(monkeypatch: object) -> None:
+    """Re-Init Extensions builds a new host with a clean Status, so the notice must be
+    scheduled again while the library is still not ready (it was one time per COMP path)."""
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
+    monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'cuda_link'")
+    scheduled: list[object] = []
+    monkeypatch.setattr(ext_module, "run", lambda code, fn, **kwargs: scheduled.append(fn), raising=False)
+    monkeypatch.setattr(ext_module, "op", SimpleNamespace(TDResources=None), raising=False)
+
+    hosts = [_degraded_host(), _degraded_host()]
+    for host in hosts:
+        ext_module.CUDAIPCExtension(None, host=host)
+    for notify in scheduled:
+        notify()
+
+    assert len(scheduled) == 2
+    for host in hosts:
+        assert [kind for kind, _ in host.status_calls] == ["warning"]

@@ -61,7 +61,8 @@ def _make_engine(report_every: int | None = 150, verbose: bool = True, shm_name:
     logs: list[str] = []
     engine = TDSenderEngine(
         host=_SpyHost(),
-        config=TDSenderConfig(),
+        # from_env(), as the extension builds it: the env var reaches the engine through the config.
+        config=TDSenderConfig.from_env(),
         cuda=None,
         log_fn=lambda msg, force=False: logs.append(msg),
         num_slots=3,
@@ -138,6 +139,23 @@ def test_report_emitted_at_report_every(monkeypatch):
     assert "dtype=uint8" in line
     assert "export=100.0 µs avg" in line
     assert "write_idx=150" in line
+    assert "cuda_memory=" not in line  # no cuda_memory() sample in this window
+
+
+def test_report_shows_cuda_memory_time_apart():
+    """cuda_memory() time is reported apart from export() and the window resets."""
+    engine, logs = _make_engine(report_every=150, verbose=True)
+    _inject_exporter(engine, frame_count=150)
+    engine._tx_window.start(1.0, 0)
+    engine._tx_window._acc_sum = 0.015
+    engine._tx_window._acc_n = 150
+    engine._cm_acc_s, engine._cm_acc_n = 0.045, 150  # 300 µs per call
+
+    engine._maybe_report_stats(write_idx=150, now=4.0)
+
+    assert len(logs) == 1
+    assert "cuda_memory=300.0 µs avg | export=100.0 µs avg" in logs[0]
+    assert (engine._cm_acc_s, engine._cm_acc_n) == (0.0, 0)
 
 
 def test_report_not_emitted_on_frame_zero():
@@ -182,7 +200,7 @@ def test_consecutive_reports_use_windowed_fps_and_avg():
 
 
 def test_report_every_env_override(monkeypatch):
-    """CUDALINK_SENDER_REPORT_EVERY env var is respected at engine construction time."""
+    """CUDALINK_SENDER_REPORT_EVERY reaches the engine through TDSenderConfig.from_env()."""
     monkeypatch.setenv("CUDALINK_SENDER_REPORT_EVERY", "50")
     # Pass report_every=None so _make_engine does NOT override the env-sourced value.
     engine, logs = _make_engine(report_every=None, verbose=True)

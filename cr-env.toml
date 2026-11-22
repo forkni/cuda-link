@@ -8,9 +8,12 @@
 module-path = "src/cuda_link/_env.py"
 timeout = 30.0
 excluded-modules = []
-# Absolute interpreter path: bare "python" resolves through the Windows App Paths
-# registry to a potentially different environment.
-test-command = "F:/RD_PROJECTS/COMPONENTS/cuda-link/.venv/Scripts/python.exe -m pytest tests/support/test_env.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
+# `uv run --no-sync python`: the venv of the checkout cosmic-ray runs in (worktrees too),
+# on Windows and Linux. Not an absolute path: another checkout's venv imports that
+# checkout's src through its editable install, so every mutant would survive. Not a
+# relative .venv path: CreateProcess cannot find it, every run is INCOMPETENT and the
+# baseline still says passed. --no-sync keeps a hand-installed CUDA torch.
+test-command = "uv run --no-sync python -m pytest tests/support/test_env.py -x -q --tb=no -p no:cacheprovider --randomly-seed=1"
 
 [cosmic-ray.distributor]
 name = "local"

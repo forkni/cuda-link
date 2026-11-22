@@ -57,9 +57,18 @@ def _region_stats(samples_us: list[float]) -> dict[str, float]:
 
 
 def run(
-    frames: int, width: int, height: int, channels: int, dtype: str, slot_count: int, export_profile: bool = False
+    frames: int,
+    width: int,
+    height: int,
+    channels: int,
+    dtype: str,
+    slot_count: int,
+    export_profile: bool = False,
+    use_graphs: bool = True,
 ) -> dict[str, Any]:
-    from cuda_link import FrameSpec, GpuFrame
+    from dataclasses import replace
+
+    from cuda_link import ExportPolicy, FrameSpec, GpuFrame
     from cuda_link.cuda_ipc_wrapper import get_cuda_runtime
     from cuda_link.exporter import Exporter
 
@@ -87,7 +96,8 @@ def run(
                 channels=channels,
                 dtype=dtype,
                 num_slots=slot_count,
-            )
+            ),
+            policy=replace(ExportPolicy.from_env(), use_graphs=use_graphs),
         ) as exporter:
             # Arm ordering once before the timing loop.  The profiler measures raw export()
             # cost including the per-frame stream_wait_event overhead (a realistic baseline).
@@ -156,13 +166,18 @@ def main() -> int:
         dest="export_profile",
         help="Enable CUDALINK_EXPORT_PROFILE and collect per-region averages from FrameProfile.",
     )
+    parser.add_argument(
+        "--no-graphs",
+        action="store_true",
+        dest="no_graphs",
+        help="Run the legacy export path (ExportPolicy(use_graphs=False)) for an A/B comparison.",
+    )
     args = parser.parse_args()
 
-    graphs_flag = os.environ.get("CUDALINK_USE_GRAPHS", "1")
     print(
         f"cuda-link export harness: {args.width}x{args.height} {args.dtype} "
         f"{args.channels}ch, {args.slot_count} slots, {args.frames} frames  "
-        f"[graphs={'ON' if graphs_flag != '0' else 'OFF'}]"
+        f"[graphs={'OFF' if args.no_graphs else 'ON'}]"
     )
 
     try:
@@ -174,6 +189,7 @@ def main() -> int:
             dtype=args.dtype,
             slot_count=args.slot_count,
             export_profile=args.export_profile,
+            use_graphs=not args.no_graphs,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
