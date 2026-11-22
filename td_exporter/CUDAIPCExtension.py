@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -176,6 +177,96 @@ def _bootstrap_failure_kind() -> str:
     return str(getattr(CUDALinkBootstrap, "failure_kind", "") or "")
 
 
+# ---------------------------------------------------------------------------
+# Info page: live version label and the C++ TOPs row
+# ---------------------------------------------------------------------------
+
+#: Header par on the Info page. Its label is set from the loaded code on every init: TD
+#: saves a par *value* in the .toe/.tox (a stale Semverversion showed 1.10.2 in a 1.14.1
+#: project), but this label is written again on each load, so it cannot go stale.
+INFO_HEADER_PAR = "Cudalinkheader2"  # the Info page header; Cudalinkheader is on Settings
+INFO_HEADER_TAGLINE = "Zero-copy GPU texture sharing via CUDA IPC"
+#: Read-only string par on the Info page: are the C++ TOPs installed, and which version.
+NATIVE_TOPS_PAR = "Nativetops"
+#: install_cpp_top.py layout: <Documents>/Derivative/Plugins/CudaLink/VERSION.txt
+_NATIVE_TOPS_SUBPATH = ("Derivative", "Plugins", "CudaLink", "VERSION.txt")
+
+
+def _documents_dir() -> Path:
+    """The user's real Documents folder (FOLDERID_Documents, follows a OneDrive redirect).
+
+    The same lookup as scripts/install_cpp_top.py, which writes the file this reads. Falls
+    back to ~/Documents. Never raises.
+    """
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            import ctypes  # noqa: PLC0415 -- Windows-only, used once per init
+            import uuid  # noqa: PLC0415
+            from ctypes import wintypes  # noqa: PLC0415
+
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ("d1", wintypes.DWORD),
+                    ("d2", wintypes.WORD),
+                    ("d3", wintypes.WORD),
+                    ("d4", ctypes.c_ubyte * 8),
+                ]
+
+            u = uuid.UUID("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}")  # FOLDERID_Documents
+            g = _GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+            out = ctypes.c_wchar_p()
+            shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+            if shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
+                try:
+                    if out.value:
+                        return Path(out.value)
+                finally:
+                    ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
+    return Path.home() / "Documents"
+
+
+def native_tops_version_file() -> Path:
+    """Where install_cpp_top.py writes VERSION.txt for the installed C++ TOPs."""
+    return _documents_dir().joinpath(*_NATIVE_TOPS_SUBPATH)
+
+
+def native_tops_status(tox_version: str, version_file: Path | None = None) -> tuple[str, str]:
+    """(row text, warning) for the C++ TOPs row. warning is "" when there is nothing to fix.
+
+    Reads the first "cuda-link <version>", "build <sha>" and "cuda toolkit <x.y>" lines of
+    VERSION.txt (the install record). The row shows the build sha when the record has one,
+    else the CUDA toolkit. Not installed is not a warning: the C++ TOPs are optional. A
+    version that differs from this .tox is one. Never raises.
+    """
+    path = version_file if version_file is not None else native_tops_version_file()
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return "not installed", ""
+    except OSError as e:
+        return f"unreadable: {type(e).__name__}", ""
+    fields: dict[str, str] = {}
+    for line in lines:
+        for key in ("cuda-link ", "build ", "cuda toolkit "):
+            if line.startswith(key):
+                fields.setdefault(key, line[len(key) :].strip())
+    version = fields.get("cuda-link ", "")
+    if not version or version == "unknown":
+        return "installed, version unknown", ""
+    build = fields.get("build ", "")
+    cuda = fields.get("cuda toolkit ", "")
+    if build and build != "unknown":
+        text = f"{version} (build {build})"
+    elif cuda and cuda != "unknown":
+        text = f"{version} (CUDA {cuda})"
+    else:
+        text = version
+    if tox_version and version != tox_version:
+        warning = f"C++ TOPs are {version}, this .tox is {tox_version}: install the same version of both"
+        return f"{text} - differs from {tox_version}", warning
+    return text, ""
+
+
 class _NullEngine:
     """Inert engine used when cuda_link is unresolved.
 
@@ -297,6 +388,8 @@ class CUDAIPCExtension:
         if self._mode == "Receiver":
             self._host.set_param_enabled("Numslots", False)
 
+        self._show_build_info()
+
         # Non-blocking availability notice.  NEVER ui.messageBox here: it is modal and
         # blocks TD's main thread, and each of the four shmem COMPs compiles its OWN
         # module object -- a module-level set cannot dedup across them (that is what
@@ -313,6 +406,34 @@ class CUDAIPCExtension:
                     delayFrames=5,
                     delayRef=op.TDResources,  # noqa: F821
                 )
+
+    # ------------------------------------------------------------------
+    # Info page
+    # ------------------------------------------------------------------
+
+    def _load_mode(self) -> str:
+        if not LIBRARY_READY:
+            return "not loaded"
+        return "library mode" if _bootstrap_active() else "classic mode"
+
+    def _show_build_info(self) -> None:
+        """Set the Info header label and the C++ TOPs row from the loaded code. Never raises.
+
+        A .tox without these pars (older builds) is left as it is: the host writes are no-ops.
+        """
+        try:
+            version = _mirror_version()
+            self._host.set_param_label(
+                INFO_HEADER_PAR,
+                f"CUDA-Link {version or 'unknown'} ({self._load_mode()})   |   {INFO_HEADER_TAGLINE}",
+            )
+            text, warning = native_tops_status(version)
+            self._host.set_param_value(NATIVE_TOPS_PAR, text)
+            if warning:
+                self._host.set_standing_warning(warning)
+                self._log(warning, force=True)
+        except Exception as e:  # noqa: BLE001 -- the Info page must never break the extension
+            self._log(f"Info page update failed: {type(e).__name__}: {e}", force=True)
 
     # ------------------------------------------------------------------
     # Library availability detection + install banner
