@@ -411,7 +411,8 @@ Findings:
   400 µs and about 550-650 µs), and most of the time is `top.cudaMemory()`, not `export()`
   (14-45 µs in the library benchmarks). The versions also ran in different modes and in
   sequence (all 2.0 cells first). Open: a same-mode, interleaved run that times
-  `cudaMemory()` and `export()` apart.
+  `cudaMemory()` and `export()` apart. Closed 2026-11-21: the two versions cost the same; see
+  [`.tox` Sender on TD 2025.32820 at 1080p](#tox-sender-on-td-202532820-at-1080p-2026-11-21).
 - Import cost: the same in both versions (`ImportBuffer` p50 0.14-0.23 ms).
 - TD → TD duplicate %: one 60 s run does not rank versions. 2.0 gave 0.08-10.4 % over four runs,
   with no relation to the env. The `.tox` Receiver polls `write_idx` once per frame start and
@@ -634,4 +635,113 @@ For an A/B run, `profile_export.py --no-graphs` selects the legacy export path, 
 
 Not measured here: `CUDALINK_TD_USE_GRAPHS` (the `.tox` Sender, default off). It needs two
 TouchDesigner processes on a quiet machine. `CUDALINK_CPP_USE_GRAPHS` was measured on 2026-11-17
-(no gain, see ADR-0010 and ADR-0011).
+(no gain, see ADR-0010 and ADR-0011). `CUDALINK_TD_USE_GRAPHS` was measured on 2026-11-21: see
+the next section.
+
+## `.tox` Sender on TD 2025.32820 at 1080p (2026-11-21)
+
+Dev box: RTX 4090, driver 621.24, TD 2025.32820 with a Commercial key (no 1280x1280 cap), three
+TD processes with empty projects. A: 2.0 `.tox` Sender (`TOXES/CUDAIPCLink_v2.0.0.tox`,
+`cuda_link` 2.0.0.dev0 in library mode). B: 2.0 `.tox` Receiver. C: 1.14.1 `.tox` Sender
+(`cuda_link` 1.14.1 from tag `v1.14.1` on `CUDALINK_LIB_PATH`). Source: animated Noise TOP,
+1920x1080 `rgba8fixed`, 60 fps. Both Senders: blocking export (`CUDALINK_EXPORT_SYNC` unset).
+
+Method: Debug on with `CUDALINK_SENDER_REPORT_EVERY=30`, so each `export=` value is the mean
+over 30 frames (0.5 s). p50 and p95 are over those windows, about 120 per run. `export=` times
+only `Exporter.export()` in both versions. Each run: extension restarted, Active on, 10 s
+warm-up, 60 s measured, Active off. A script in each TD ran the runs from one shared timed plan,
+so the conditions alternated without a person between runs.
+
+Two 32820 instances run 1920x1080 at the same time: Sender 60.0 fps, Receiver 58-60 fps,
+latency 0.19-0.21 ms, `copy` 93-115 µs.
+
+### `CUDALINK_TD_USE_GRAPHS` on against off
+
+A sends to B; the variable alternated, 3 runs per state, in one pass.
+
+| Graphs | export p50 | export p95 | Run p50s | `cuda_memory` p50 |
+|---|---|---|---|---|
+| off | 540.4 µs | 725.3 µs | 527.1, 541.7, 640.8 | 111.8 µs |
+| on | 541.0 µs | 604.4 µs | 528.8, 540.0, 549.8 | 114.0 µs |
+
+On against off: p50 +0.1 %, inside the 3 % noise band. No gain: the variable goes, the `.tox`
+Sender keeps the plain export path. Not shown by the run: the Sender prints no line that says
+graphs are in use, so the run shows only that the variable was set before each restart.
+
+### 2.0 against 1.14.1 (Sender only)
+
+Receiver B off; A (2.0) and C (1.14.1) alternated, 3 runs each, in one pass. The pass ran
+twice, once with A's TD window in front and once with C's (set by process ID, checked every 5 s).
+
+| Window in front | 2.0 export p50 | 1.14.1 export p50 | 2.0 / 1.14.1 |
+|---|---|---|---|
+| A (2.0) | 466.9 µs (531.4, 451.6, 446.6) | 460.2 µs (374.6, 488.0, 494.1) | 1.015 |
+| C (1.14.1) | 297.4 µs (301.1, 295.7, 295.7) | 299.8 µs (305.9, 282.5, 321.2) | 0.992 |
+
+- 2.0 is within 1.5 % of 1.14.1 in both passes (pass rule: 2.0 p50 <= 1.10 x 1.14.1). In the
+  C pass the 2.0 p95 is lower (353.8 against 488.8 µs).
+- The window in front sets the level for both versions: about 460 µs with A's window in front,
+  about 297 µs with C's. Why is not known; both TDs show the same network. A first pass with
+  the window in front not controlled gave a ratio of 1.60 (464 against 290 µs), which is this
+  effect, not a version difference. Rule for TD A/B runs: record the window in front and
+  compare only inside one pass.
+- With `CUDALINK_EXPORT_PROFILE=1`, the exporter's per-region times (µs, mean of 3 runs; the
+  window in front was not recorded for this pass):
+
+  | Version | memcpy | record | sync | sticky | shm | other | total |
+  |---|---|---|---|---|---|---|---|
+  | 1.14.1 | 20.6 | 8.3 | 203.6 | 2.4 | 11.0 | 4.6 | 264.2 |
+  | 2.0 | 24.7 | 9.5 | 252.6 | 2.6 | 16.0 | 4.0 | 323.2 |
+
+  `sync` (the host wait for the copy on the IPC stream) is most of the export in both
+  versions. `shm` +5 µs is the 2.0 slot meta write. The profiled runs varied from run to run
+  (2.0 totals 361, 269 and 340 µs), so the `sync` difference is inside the spread.
+- `top.cudaMemory()` is called once per frame by both versions with the same arguments; 2.0
+  only times it (`cuda_memory=` p50 106-130 µs). It is not part of `export=`.
+
+This closes the open item of the 2026-11-17 section: in a same-mode, interleaved run that times
+`cudaMemory()` and `export()` apart, the 2.0 send path costs the same as 1.14.1.
+
+### Python `Exporter` graphs on against off at 1920x1080
+
+The 2026-11-20 run of the Python `Exporter` was at 1280x720. This run repeats it at 1920x1080:
+`scripts/profiling/profile_export.py --frames 2000 --width 1920 --height 1080 --dtype uint8`,
+`CUDALINK_EXPORT_SYNC=0`, `--no-graphs` for off, 3 runs per state, states interleaved, with the
+three 32820 TD processes above open. `cuda_link` from `development` (d8ff756), `torch`
+2.11.0+cu128. `export_frame` median / p95 in µs.
+
+| Graphs | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| on | 13.6 / 36.1 | 13.6 / 36.8 | 13.5 / 37.9 |
+| off | 20.1 / 63.2 | 19.2 / 42.7 | 20.0 / 38.3 |
+
+On is about 6 µs (30 %) faster per frame, as at 1280x720. The Python `Exporter` keeps graphs on.
+This is a different path from the `.tox` Sender, where `CUDALINK_TD_USE_GRAPHS` gave no gain.
+
+### C++ Out TOP against the 1.14.1 `.tox` Sender
+
+One TD process (C, the 1.14.1 TD), C's window in front (109 of 110 checks). A `CudalinkoutTOP`
+fed by the same 1920x1080 `rgba8fixed` Noise TOP, on its own stream, and the 1.14.1 `.tox`
+Sender alternated, 3 runs each, Active on for one at a time, no Receiver. Each run: 10 s warm-up,
+60 s measured, 3600 frames. `.tox`: a `perf_counter` timer around the extension's
+`export_frame()`, which is the whole send (format checks, `cudaMemory()`, `export()`), with
+Debug on and `CUDALINK_SENDER_REPORT_EVERY=30` as above. Out TOP (installed DLLs, build `852b350-dirty`):
+the Info CHOP `cook_us`, `begin_us`, `copy_us` and `end_us` channels, read once per cook, Debug
+off. Median / p95 in µs.
+
+| Run | `.tox` `export_frame()` | Out TOP `cook_us` | Out TOP `begin_us` / `copy_us` / `end_us` (median) |
+|---|---|---|---|
+| 1 | 768.0 / 1078.5 | 126.3 / 166.3 | 75.8 / 30.4 / 7.9 |
+| 2 | 649.7 / 1068.0 | 136.1 / 177.7 | 81.9 / 32.6 / 8.4 |
+| 3 | 693.6 / 1046.2 | 125.5 / 169.9 | 74.7 / 30.6 / 8.0 |
+
+- The Out TOP uses about one fifth of the `.tox` Sender's time on TD's main thread. Part of the
+  difference is the design: the `.tox` waits on the host for the copy (`sync` above), and the
+  Out TOP does not wait. `begin_us` (`beginCUDAOperations()`, the interop map) is the Out TOP's
+  counterpart of `cudaMemory()`.
+- One more Out TOP run with Debug on gave the GPU copy time: `gpu_ipc_us` median 22.5 µs. Debug
+  raises `cook_us` to 294 µs median, so the Debug-on cook times are not comparable.
+- The 1.14.1 `export=` level in this pass (median 558.6 µs in run 1) is higher than in the
+  C-in-front pass above (1.14.1 p50 299.8 µs). With Active off the Out TOP returns before any GPU work
+  (`CudaLinkOutTOP.cpp`, the `evalActive()` check in `execute()`), so it did not cause this.
+  As above: compare only inside one pass.

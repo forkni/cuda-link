@@ -55,7 +55,8 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
   support envelope.
 - **CUDA**: 11.x / 12.x / 13.x (the loader prefers 13.x, then 12.x; tested with 12.4 and 12.8)
 - **GPU**: Any NVIDIA GPU supporting the CUDA runtime IPC and Graphs APIs used above
-- **TouchDesigner**: 2022.x or later (for producer side)
+- **TouchDesigner**: 2025.32820 or later (for producer side). Tested on 2025.32820 and
+  2025.33230; see [ADR-0017](docs/adr/0017-minimum-td-build-2025-32820.md).
 - **Python**: 3.11+ recommended (for consumer side; matches TouchDesigner's bundled interpreter). The pure-Python fallback wheel also installs on 3.9+ — see [Distribution](#distribution).
 
 ### Python Dependencies

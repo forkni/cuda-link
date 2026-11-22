@@ -60,6 +60,11 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   values; the nodes show an error until the DLLs are back.
 - `install_cpp_top.cmd status` shows the installed copy and its `VERSION.txt`, and warns about
   other CUDA Link DLLs under `Plugins`.
+- Builds: the DLLs compile against the vendored headers in `cpp_top/vendor/td/2025/`
+  (`OP_CommonAPIVersion` 1, TOP API 12). TD 2025.32820 ships the same two values, so the DLLs
+  load in 2025.32820 and in 2025.33230 (which ships `OP_CommonAPIVersion` 3). Do not use the
+  newer 33230 API (`saveData`/`loadData`) while 2025.32820 is the minimum
+  ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).
 - Versions: TD 2025.33230 does not check the plugin major or minor version (test R2). A
   breaking parameter or protocol change therefore needs a new opType. Parameter names and menu
   tokens stay as they are.
