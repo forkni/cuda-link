@@ -12,6 +12,12 @@ Step-by-step instructions for building the `CUDAIPCLink_v2.0.0.tox` component in
 
 There are two assembly modes. Choose one:
 
+> **Names in the shipped `.tox`**: the trees and steps below use the build names
+> `CUDAIPCExporter` (extension Text DAT), `callbacks`, `parexecute` and `script_top_callbacks`.
+> In the shipped `.tox` these DATs are `CUDAIPCExtension`, `execute1`, `parexec1` and
+> `script1_callbacks`. Both sets work. If you use `CUDAIPCExtension` as the DAT name, set the
+> Step 4 Object to `op('CUDAIPCExtension').module.CUDAIPCExtension`.
+
 ### Library mode (recommended — fewer DATs)
 
 Requires `cuda_link` installed externally (for example, via `install_td_library.cmd`) where the
@@ -37,10 +43,12 @@ CUDAIPCExporter (Base COMP)
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_top_callbacks (Text DAT)  ← Copy from td_exporter/script_top_callbacks.py (ImportBuffer + warning_emitter)
 ├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
 ├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
 ├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
+├── Help/HELP_DOC     (Text DAT)     ← Copy from td_exporter/HELP_DOC.md (Help page text)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -82,10 +90,12 @@ CUDAIPCExporter (Base COMP)
 ├── ImportBuffer      (Script TOP)   ← Receiver mode only; set Callbacks DAT → op('script_top_callbacks')
 ├── MonoAlphaFix      (Reorder TOP)  ← Between ImportBuffer and the output; see "MonoAlphaFix" below
 ├── warning_emitter   (Script TOP)   ← Status badge; set Callbacks DAT → op('script_top_callbacks')
+├── script_top_callbacks (Text DAT)  ← Copy from td_exporter/script_top_callbacks.py (ImportBuffer + warning_emitter)
 ├── script_chop_callbacks (Text DAT) ← Copy from td_exporter/script_chop_callbacks.py
 ├── slot_meta         (Script CHOP)  ← Slot meta channels; set Callbacks DAT → op('script_chop_callbacks')
 ├── out_slot_meta     (Out CHOP)     ← slot_meta → out_slot_meta (COMP CHOP output)
 ├── LICENSE           (Text DAT)     ← Embedded MIT text + credits + trademarks (Step 7)
+├── Help/HELP_DOC     (Text DAT)     ← Copy from td_exporter/HELP_DOC.md (Help page text)
 └── info              (Text DAT)     ← Optional version/author info
 ```
 
@@ -103,20 +113,25 @@ CUDAIPCExporter (Base COMP)
 
 Right-click the `CUDAIPCExporter` COMP and select **Customize Component** to open the Component Editor.
 
-#### Create "CUDA IPC" Parameter Page
+#### Create the "Settings" Parameter Page
 
-Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
+Click the **+** button to add a new parameter page, name it `"Settings"`. The pars in the
+table below go on this page. The second custom page, Info, is shared with the embedded
+Semantic Version Control COMP (see [Info page](#info-page)).
 
 #### Add Parameters
 
 | Name | Label | Type | Default | Help Text |
 |------|-------|------|---------|-----------|
+| `Status` | Status | String (read-only) | `Idle` | Live status text. The extension writes it; users cannot edit it. |
+| `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
-| `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
-| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
+| `Active` | Active | Toggle | `False` (0) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3 or 4, as in the shipped 1.14.1 and 2.0.0 `.tox` |
 | `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
-| `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
+| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. |
+| `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints a summary line every 150 published frames). |
+| `Cudalinkheader` | (any) | Header | — | Last par of the Settings page. |
 
 **For `Numslots` menu parameter**:
 
@@ -135,7 +150,8 @@ Minimum `0` and turn on Clamp Minimum. Optional: Slider Range `0`–`15`, like t
 TOP. The Sender reads it with `param_value("Streamid")`; a .tox without the parameter
 sends `stream_id = 0`.
 
-**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Streamid → Debug).
+**Appearance tip**: Use Page Order to arrange parameters in a logical flow (Status → Mode → Ipcmemname → Active → Numslots → Streamid → Framewaitms → Debug →
+Cudalinkheader), as in the shipped `.tox`.
 
 #### Info page
 
@@ -473,19 +489,16 @@ sha256sum TOXES/CUDAIPCLink_v2.0.0.tox   # compare with the sha256 column
    - This MUST match the `shm_name` in your Python `Importer`/`Exporter` code
 3. **Active**: Toggle ON to start exporting/importing
 4. **Numslots**: Leave at 3 (optimal for most cases; ignored in Receiver mode)
-5. **Debug**: Toggle ON to see performance metrics every ~97 frames
+5. **Debug**: Toggle ON to see a performance summary line every 150 published frames
 
 ### Verify Operation (Sender Mode)
 
 Open the **Textport** (Alt+T) and look for:
 
 ```text
-[CUDAIPCExporter] Extension initialized on <CUDAIPCExporter>
-[CUDAIPCExporter] Loaded CUDA runtime
-[CUDAIPCExporter] Allocated GPU buffer slot 0: 8.0 MB at 0x00007fff12340000
-[CUDAIPCExporter] Created 3 IPC buffer slots with events
-[CUDAIPCExporter] Created new SharedMemory: my_project_ipc (528 bytes)
-[CUDAIPCExporter] Initialization complete - ready for zero-copy GPU transfer
+[CUDAIPCExtension:Sender] Extension initialized on <COMP path> [Mode: Sender]
+[CUDAIPCExtension:Sender] CUDALINK_EXPORT_SYNC not set — defaulting to blocking export (TD source-lifetime safety; set =0 to opt into async)
+[CUDAIPCExtension:Sender] Initialization complete — ready for zero-copy GPU transfer
 ```
 
 ### Receiver Mode
@@ -494,11 +507,12 @@ When **Mode** = `Receiver`, the component imports GPU frames from a Python `Expo
 
 1. Set **Mode** to `Receiver`
 2. Set **Ipcmemname** to match your Python `Exporter`'s `shm_name`
-3. Add a **Script TOP** (name it `ImportBuffer`) inside the COMP
-4. In the Script TOP's **DAT** field, reference `script_top_callbacks.py`
-5. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
+3. Use the built-in `ImportBuffer` Script TOP: the component already holds it, wired
+   `ImportBuffer` → `MonoAlphaFix` → `out1`, with its Callbacks DAT set. Wire the COMP's TOP
+   output to your chain.
+4. The extension uses `copyCUDAMemory()` to import each frame into the Script TOP
 
-The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it calls `import_frame(ImportBuffer)` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
+The `callbacks_template.py` `onFrameStart()` handles Receiver mode automatically: it force-cooks `ImportBuffer`, and the `onCook()` in `script_top_callbacks.py` calls `import_frame()` to pull the latest frame from Python and write it into the Script TOP. The Script TOP's resolution auto-updates to match the incoming frame size.
 
 If you see errors, check:
 
@@ -597,7 +611,7 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 ### CUDA runtime DLL not found
 
-**Error**: `[CUDAIPCExporter] Initialization failed: ... cudart64_110.dll not found`
+**Error**: `[CUDAIPCExtension:Sender] Initialization failed: ... cudart64_110.dll not found`
 
 **Solution**: The extension probes full CUDA Toolkit 13.x and 12.x install paths first, then falls back to bare DLL names already loaded in the process, including legacy 11.x names. If TD is installed correctly this error should not occur. Verify your CUDA Toolkit installation or reinstall from [NVIDIA's website](https://developer.nvidia.com/cuda-downloads).
 
@@ -618,7 +632,8 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
-3. Enable **Debug** in TD and look for `"Frame N: wrote to slot X"` messages every ~97 frames
+3. Enable **Debug** in TD and look for `Frame  150 | ... FPS | ... export=... µs avg (write_idx=...)`
+   lines every 150 published frames
 
 ---
 
@@ -672,7 +687,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `TDPixelFormat.py` | `td_exporter/` | TD pixel format name ↔ wire format (dtype, channels, flags); float16 share targets |
 | `TDSender.py` | `td_exporter/` | `TDSenderEngine` — Sender-mode engine (GPU alloc, IPC export, SHM write) |
 | `TDReceiver.py` | `td_exporter/` | `TDReceiverEngine` — Receiver-mode engine (SHM attach, IPC open, copyCUDAMemory) |
-| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade (`~300 LOC`) — delegates to `TDSenderEngine` or `TDReceiverEngine` |
+| `CUDAIPCExtension.py` | `td_exporter/` | Thin facade — delegates to `TDSenderEngine` or `TDReceiverEngine` |
 | `callbacks_template.py` | `td_exporter/` | Execute DAT callback template |
 | `parexecute_callbacks.py` | `td_exporter/` | Parameter Execute DAT callbacks (Active, Mode, Debug, etc.) |
 | `script_top_callbacks.py` | `td_exporter/` | Shared Script TOP onCook — ImportBuffer frame import (Receiver mode) **and** warning_emitter status badge (both Script TOPs point their Callbacks DAT here) |
@@ -691,6 +706,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `NVMLObserver.py` | `td_exporter/` | `src/cuda_link/nvml_observer.py` |
 | `SHMProtocol.py` | `td_exporter/` | `src/cuda_link/shm_protocol.py` |
 | `ActivationBarrier.py` | `td_exporter/` | `src/cuda_link/activation_barrier.py` |
+| `Doorbell.py` | `td_exporter/` | `src/cuda_link/_doorbell.py` |
 | `NVTXShim.py` | `td_exporter/` | `src/cuda_link/_nvtx.py` |
 | `ExporterPort.py` | `td_exporter/` | `src/cuda_link/_exporter_port.py` |
 | `ImporterPort.py` | `td_exporter/` | `src/cuda_link/_importer_port.py` |
@@ -705,7 +721,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | `CUDAIPCLink_v2.0.0.tox` | `TOXES/` | Final built .tox component |
 | `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
-| `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: system site-packages, user, conda, TD Preferences, custom |
+| `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: 1 `pip --target` folder, 2 venv, 3 conda, 4 system/parallel Python (TD Preferences), 5 TD's own Python (deprecated) |
 
 ---
 

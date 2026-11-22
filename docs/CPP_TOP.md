@@ -51,8 +51,9 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   TouchDesigner runs. `scripts\install_td_library.py` does the same step after pip when the
   wheel carries the DLLs (see "Install: from the wheel").
 - The install record (`VERSION.txt`, [ADR-0016](adr/0016-install-record.md)) takes the
-  version, build sha and CUDA toolkit from `BUILD_INFO.txt`, which the `cpp_top` build
-  writes next to the DLLs. The `.tox` Info page `Nativetops` row reads its first lines.
+  version, build sha, CUDA toolkit and TD header API from `BUILD_INFO.txt`, which the
+  `cpp_top` build writes next to the DLLs. The `.tox` Info page `Nativetops` row reads the
+  first lines of `VERSION.txt`.
 - First start: TD asks to approve each DLL. It asks again after each DLL change. TD writes the
   approvals to `Plugins.json` in the `Plugins` folder, so the folder must be writable.
 - Keep one copy on a machine. With a system copy and a copy in a project's `Plugins/` folder,
@@ -84,7 +85,7 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   builds register the op types `Cudalinkout` and `Cudalinkin`, and two DLLs with the same op
   type collide.
 - TD locks a loaded DLL. Close TD before you replace it.
-- Keep cuda-link 1.14.1 off TD's Python module path while you test 2.0.0.dev0.
+- Keep cuda-link 1.14.1 off TD's Python module path when you run 2.0.0.
 - Give each stream its own `Ipcmemname`. A new 2.x C++ TOP uses `cudalink_ipc_CPP`, but a
   saved node or a `.tox` can still use the same name as a 1.x peer. A v0.5 segment is refused
   with a magic error; the two protocols do not mix.
@@ -117,9 +118,10 @@ The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
   `python -m build --wheel -Ccmake.define.CUDALINK_TD_PLUGIN_DIR=<folder with the two DLLs>`.
   The build refuses a missing DLL, a DLL stamped with another version, a missing or
   other-version `BUILD_INFO.txt` (configure `cpp_top` again from the same tree) and the
-  `py3-none-any` build. `release.yml` does this and checks
-  the wheels with `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the
-  script expands the pattern, so it works in PowerShell and cmd too).
+  `py3-none-any` build. `release.yml` does this and checks the wheels with
+  `scripts/check_wheel_plugins.py --require-plugins`. To check them locally, run
+  `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the script expands
+  the pattern, so it works in PowerShell and cmd too).
 
 ## Build
 
@@ -199,7 +201,7 @@ These parameters are on the page "Settings". The TOP also has the pages "Info" a
 | `Ipcmemname` | IPC Mem Name | String | `cudalink_ipc_CPP` | Name of the shared-memory segment. The receiver must use the same name. The In TOP has the same default. |
 | `Active` | Active | Toggle | Off | Off stops the publish and frees the ring. A new node starts Off. |
 | `Debug` | Debug | Toggle | Off | Writes the debug log and fills the GPU timing channels. |
-| `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. |
+| `Numslots` | Num Slots | Menu (`2`, `3`, `4`) | `3` | Number of ring slots. Editable only while `Active` is Off. |
 | `Streamid` | Stream ID | Integer, min 0 | `0` | Written to the slot meta `stream_id` of each frame. Give each stream a different value. |
 
 The Out TOP also copies the sent frame to its own output (the pass-through copy), so that it
@@ -261,7 +263,7 @@ Info page, so a script that reads one also reads the other.
 |---|---|---|
 | `Cudalinkheader2` | (header) | `CUDA-Link <version> (build <sha>)`: the loaded DLL's package version (`__version__` in `src/cuda_link/__init__.py`) and git sha, both set at configure time. The sha ends in `-dirty` when tracked files differed from HEAD at configure time. A commit or checkout makes the next build configure again by itself; after uncommitted edits, configure again by hand. |
 | `Semverauthor` | Author | `forkni (forkni@gmail.com)` |
-| `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub, on the `development` branch until the 2.0.0 release |
+| `Semvershowhelp` | Show Help | Pulse: opens this page on GitHub (`master`). |
 
 The Info DAT of each TOP has the same two values in its last rows, `version` and `build`, for
 scripts.
@@ -393,7 +395,7 @@ Each publish writes these slot meta fields:
 
 Connect an Info CHOP or an Info DAT to a TOP to read these values.
 
-### Out TOP Info CHOP (14 channels)
+### Out TOP Info CHOP (12 channels)
 
 | Channel | Value |
 |---|---|
@@ -410,7 +412,7 @@ Connect an Info CHOP or an Info DAT to a TOP to read these values.
 | `stream_id` | Last published `stream_id` |
 | `converted` | 1 when the Common page resizes or converts the input before the send, 0 on the plain copy path. `gpu_ipc_us` then includes the kernel. |
 
-### In TOP Info CHOP (22 channels)
+### In TOP Info CHOP (20 channels)
 
 | Channel | Value |
 |---|---|
@@ -736,8 +738,11 @@ The wait is on TD's main thread. Thus TD drops about 6 frames at 60 FPS when:
 
 - you set `Active` Off, or you remove or close the Out TOP;
 - you change `Ipcmemname` while the Out TOP is active (the old segment is closed);
-- you change `Numslots`, or the input changes resolution or pixel format (the ring is made
-  again, and the old buffers are freed after the wait).
+- the input changes resolution or pixel format (the ring is made again, and the old buffers
+  are freed after the wait).
+
+`Numslots` is greyed out while `Active` is On. A new value takes effect at the next
+`Active` On.
 
 The first allocation does not wait: there are no old handles. Change these parameters and
 the format before a show, not during it.

@@ -52,7 +52,7 @@ numbered script on purpose.
 From a checkout of this repository (the examples use an editable source install):
 
 ```bash
-pip install -e .                  # core (numpy comes in via the demo producers' needs)
+pip install -e ".[numpy]"         # core + numpy (the demos need numpy; core alone has no deps)
 pip install -e ".[torch]"         # + PyTorch: zero-copy consumption in 03/05/06/08, torch render path in 07
 pip install -e ".[all]"           # + torch, numpy, cupy, nvml
 pip install opencv-python         # for 04's display window — deliberately NOT a cuda-link extra
@@ -75,7 +75,7 @@ Documented once here; every script supports `--help`.
 |---|---|
 | `--frames N` | Bounded run length. Examples stop after N frames; production consumers loop until `SHUTDOWN`. |
 | `--force-fake` | Use `FakeCUDAAdapter` even if a real GPU is present (protocol only, no real pixels). |
-| `--shm-name NAME` | Attach to a live producer (e.g. a TouchDesigner sender) instead of generating a unique name. |
+| `--shm-name NAME` | (03, 04) Attach to a live producer (e.g. a TouchDesigner sender) instead of generating a unique name. |
 | `--no-demo-producer` | (03, 04) Don't spawn the demo producer; requires `--shm-name`. |
 | `--width / --height / --fps` | Geometry and rate of the demo producer where it applies. |
 
@@ -130,8 +130,8 @@ example 06.
 
 ### Doorbell never fires (example 08 reports 0 wakes)
 
-The consumer must opt in (`ImportPolicy(doorbell=True)`). The producer
-signals by default since 2.0.0, unless it uses `ExportPolicy(doorbell=False)`.
+The doorbell is on by default on both sides since 2.0.0. It is off only if a
+side passes `doorbell=False` (`ImportPolicy` or `ExportPolicy`).
 It is Windows-only. When unavailable,
 `wait_for_doorbell()` returns `False` immediately and the loop degrades to
 1 ms polling — functional, just not low-CPU.

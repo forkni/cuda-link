@@ -144,7 +144,7 @@ Number of ring buffer slots in the GPU pipeline. The C++ Out TOP has the same th
 - Locked automatically when `Active` is turned On.
 - In Receiver mode: always locked. The actual slot count is read from the sender's shared memory and displayed here for reference.
 
-Changing this parameter while active is silently ignored. Changing it while inactive triggers a cleanup and lazy re-initialization on the next frame.
+Changing this parameter while active is ignored, and a Textport line says so. Changing it while inactive triggers a cleanup and lazy re-initialization on the next frame.
 
 ---
 
@@ -265,10 +265,10 @@ Hot-swappable in both modes: can be toggled at runtime without affecting the pip
 
 **Type:** Toggle | **Default:** Off
 
-Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the parameter dialog, leaving only the CUDA IPC page visible.
+Hides the built-in TouchDesigner parameter pages (Common, Extensions) from the parameter dialog, leaving only the custom pages (Settings, Info) visible.
 
-- **Off:** All parameter pages are shown — Common, Extensions, and CUDA IPC.
-- **On:** Only the CUDA IPC parameter page is shown. Built-in pages are not deleted; they are just hidden from the UI. Toggling Off restores them immediately.
+- **Off:** All parameter pages are shown — Common, Extensions, Settings and Info.
+- **On:** Only the custom pages (Settings, Info) are shown. Built-in pages are not deleted; they are just hidden from the UI. Toggling Off restores them immediately.
 
 Hot-swappable: takes effect instantly without restarting or reinitializing the component. The setting is also applied automatically at component load time.
 
@@ -438,9 +438,9 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 - This indicates a producer-side source-buffer lifetime race: the D2D memcpy read the TD
   texture after TD reclaimed it. From v1.10.1 the TD Sender **blocks by default** (post-copy
-  `stream_synchronize`) so the source is live until `export()` returns — upgrade to
-  `CUDAIPCLink_v1.10.1.tox` to fix this. If you are on v1.10.0 and cannot upgrade immediately,
-  set `CUDALINK_EXPORT_SYNC=1` in the environment that launches TouchDesigner as a stopgap.
+  `stream_synchronize`) so the source is live until `export()` returns. If you are on
+  v1.10.0 and cannot upgrade immediately, set `CUDALINK_EXPORT_SYNC=1` in the environment
+  that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
   `CUDAIPCLink_v2.0.0.tox` (current) to have the fix and all subsequent fixes included.
 
