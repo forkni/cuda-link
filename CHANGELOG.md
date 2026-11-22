@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The library installer installs the C++ TOPs**: after pip, `scripts/install_td_library.py`
+  copies the TOP DLLs of the cp311 release wheel to `<Documents>/Derivative/Plugins/CudaLink/`
+  with the install record, as `scripts/install_cpp_top.py` does. It skips the copy, and says
+  why, for a wheel without DLLs, mode 5, an unknown site-packages folder, or a running
+  TouchDesigner (then it prints the command to run later). `--no-td-plugins` skips it,
+  `--plugins-dir` changes the folder. `install_cpp_top.py install --from-wheel` copies the
+  DLLs of the wheel installed in the running Python (ADR-0016).
+- **Install record with the build sha**: `VERSION.txt` gains a `build <sha>` line, from the
+  new `BUILD_INFO.txt` that the `cpp_top` build writes next to the DLLs and the platform
+  wheel ships in `cuda_link/td_plugins/`. The `.tox` `Nativetops` row then shows
+  `<version> (build <sha>)`. `cuda_link.td_plugin` now holds the install, status and
+  uninstall code for both installers.
 - **`.tox` Info page shows the loaded version and the C++ TOPs**: on each init the extension
   sets the Info page header label to `CUDA-Link <version> (<load mode>)` from the loaded code,
   so a saved project never shows a stale version. The new read-only `Nativetops` par shows the

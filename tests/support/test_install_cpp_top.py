@@ -106,3 +106,61 @@ def test_main_refuses_while_td_runs(dll_dir: Path, plugins: Path, monkeypatch: p
 
 def test_documents_dir_is_absolute() -> None:
     assert ict.documents_dir().is_absolute()
+
+
+def test_build_info_wins_over_the_repo_files(dll_dir: Path) -> None:
+    (dll_dir / ict.tp.BUILD_INFO_FILE).write_text(
+        "cuda-link 9.9.9\nbuild abc1234\ncuda toolkit 12.6\n", encoding="utf-8"
+    )
+    record = ict.repo_record(dll_dir, now=_NOW)
+    assert (record.version, record.build, record.cuda_toolkit) == ("9.9.9", "abc1234", "12.6")  # type: ignore[attr-defined]
+
+
+def _site_package(tmp_path: Path) -> Path:
+    """<site-packages>/cuda_link as the cp311 wheel installs it."""
+    package = tmp_path / "site-packages" / "cuda_link"
+    dll_dir = package / ict.tp.PLUGIN_DIR_NAME
+    dll_dir.mkdir(parents=True)
+    for n in ict.DLL_NAMES:
+        (dll_dir / n).write_bytes(n.encode())
+    (dll_dir / ict.tp.BUILD_INFO_FILE).write_text("cuda-link 2.0.0\nbuild ba5e5ab\n", encoding="utf-8")
+    (package / "shm_protocol.py").write_text("PROTOCOL_MAGIC: int = 0x43495036\n", encoding="utf-8")
+    return package
+
+
+def test_dll_dir_of_an_installed_wheel_uses_the_wheel_record(tmp_path: Path, plugins: Path) -> None:
+    package = _site_package(tmp_path)
+    assert (
+        ict.main(["install", "--plugins-dir", str(plugins), "--dll-dir", str(package / "td_plugins"), "--force"]) == 0
+    )
+    record = ict.tp.read_record(plugins)
+    assert (record.version, record.build) == ("2.0.0", "ba5e5ab")
+    assert record.protocol == "v0.6 (magic 0x43495036)"
+    assert record.installed.endswith(f"from {package / 'td_plugins'}")
+
+
+def test_a_relative_dll_dir_is_resolved(tmp_path: Path, plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # "--dll-dir ." from inside td_plugins: Path(".").name is "", so it must be resolved first.
+    package = _site_package(tmp_path)
+    monkeypatch.chdir(package / "td_plugins")
+    assert ict.main(["install", "--plugins-dir", str(plugins), "--dll-dir", ".", "--force"]) == 0
+    record = ict.tp.read_record(plugins)
+    assert record.build == "ba5e5ab"
+    assert record.installed.endswith(f"from {(package / 'td_plugins').resolve()}")
+
+
+def test_from_wheel(tmp_path: Path, plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = _site_package(tmp_path)
+    monkeypatch.setattr(ict, "installed_package_dir", lambda: package)
+    assert ict.main(["install", "--from-wheel", "--plugins-dir", str(plugins), "--force"]) == 0
+    assert ict.tp.read_record(plugins).version == "2.0.0"
+
+
+def test_from_wheel_without_dlls_or_package(tmp_path: Path, plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ict, "installed_package_dir", lambda: None)
+    assert ict.install_from_wheel(plugins) == 2
+    package = _site_package(tmp_path)
+    (package / "td_plugins" / "CudaLinkInTOP.dll").unlink()
+    monkeypatch.setattr(ict, "installed_package_dir", lambda: package)
+    assert ict.install_from_wheel(plugins) == 2
+    assert not (plugins / ict.VENDOR_FOLDER).exists()
