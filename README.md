@@ -167,8 +167,8 @@ importer.close()
 **How long a zero-copy frame stays valid.** `get_frame()` and `get_frame_cupy()` return a
 view of one slot of the producer's ring buffer, not a copy. The producer starts to write that
 slot again during its `num_slots`-th next export. The default is 3 slots, so at 60 fps a frame
-is valid for less than 50 ms after its publish; with 2 slots, less than 33 ms. The `.tox`
-Sender offers 2 to 10 slots, the C++ Out TOP 2, 3 or 4. Read the frame before then, or copy
+is valid for less than 50 ms after its publish; with 2 slots, less than 33 ms. The TD
+Senders (`.tox` and C++ Out TOP) offer 2, 3 or 4 slots. Read the frame before then, or copy
 it (`tensor.clone()`, `arr.copy()`) to keep it longer. A read that takes longer gets a mix of
 two frames. The first read after `Importer.open()` can be slow, because torch and CuPy build
 their kernels on first use (CuPy compiles them per dtype). `close()` (also the end of a
