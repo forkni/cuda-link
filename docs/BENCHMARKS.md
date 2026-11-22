@@ -745,3 +745,52 @@ off. Median / p95 in µs.
   C-in-front pass above (1.14.1 p50 299.8 µs). With Active off the Out TOP returns before any GPU work
   (`CudaLinkOutTOP.cpp`, the `evalActive()` check in `execute()`), so it did not cause this.
   As above: compare only inside one pass.
+
+### C++ Out/In TOP pair against TD's own sharing ops
+
+Sender in TD C, receiver in TD A (the same TD processes as above; the runs did not record
+whether the `.tox` Senders in A and C were off), C's window in front (250 of 250 checks).
+Source as above (1920x1080 `rgba8fixed` Noise TOP, 60 fps). One pair ran at a time and the
+other pairs were bypassed: 3 runs of 60 s per pair, pairs interleaved, 10 s warm-up. A receiver with no viewer
+does not cook by itself, so each receiver got one forced cook at each frame end. Times are TD's
+own `cpuCookTime` and `gpuCookTime` per frame (µs) and the Perform CHOP `cpumsec` (ms, whole TD,
+median). All pairs ran at 60 fps, with no errors or warnings in the 15 runs (sender and
+receiver).
+
+| Pair | Sender CPU cook median (runs) | Sender GPU cook | Sender `cpumsec` | Receiver CPU cook median (runs) | Receiver GPU cook | Receiver `cpumsec` |
+|---|---|---|---|---|---|---|
+| C++ Out TOP / In TOP | 138.8 (149.1, 135.0, 130.9) | 2195 | 2.77 | 249.1 (291.1, 140.1, 256.8) | 2209 | 2.86 |
+| Touch Out/In, HAP Q (default) | 129.8 (115.8, 134.6, 157.5) | 4663 | 2.84 | 113.4 | 11 | 4.53 |
+| Touch Out/In, uncompressed | 135.2 (119.1, 154.1, 147.9) | 6519 | 3.00 | 68.8 | 0 | 3.01 |
+| Shared Mem Out/In (next frame) | 898.6 | 3015 | 3.63 | 714.2 | 0 | 3.60 |
+| Spout Out/In | 78.9 | 10.5 | 2.70 | 58.7 | 11.8 | 2.59 |
+
+- The C++ In TOP waits up to `Framewaitms` (3 ms default) when it cooks and no new frame is
+  there (`CudaLinkInTOP.cpp`, `waitForFreshFrame()` called from `execute()`), so its receiver
+  cook includes that wait. The built-in receivers show the frame that is there. The next table
+  removes the wait.
+- TD's GPU cook time for the CUDA ops (about 2.2 ms) is much more than the real GPU copy
+  (`gpu_ipc_us` median 22.5 µs, above). It probably includes the interop waits. Do not compare
+  GPU cook times across op kinds.
+- Perform `msec` (wall time per frame) on the TD in front was 9-16 ms with vsync. It is not a
+  cost metric.
+- Not measured: latency and a fresh-frame check for the built-in pairs (they carry no frame
+  counter).
+
+### C++ In TOP `Framewaitms` 0 against 3
+
+Same setup as the table above, C++ pair only, 3 runs of 30 s per value, values interleaved.
+CPU cook in µs.
+
+| `Framewaitms` | Receiver CPU cook median (runs) | Receiver p95 / p99 | Sender CPU cook median |
+|---|---|---|---|
+| 0 | 159.6 (155.6, 156.6, 163.8) | 253.5 / 1078.2 | 146.3 |
+| 3 (default) | 299.1 (270.1, 314.1, 321.6) | 565.1 / 1875.5 | 155.3 |
+
+- The wait adds about 140 µs to each receiver cook at the median.
+- With `Framewaitms` 0 the C++ In TOP still costs about 100 µs more than Spout In (58.7 µs) and
+  uncompressed Touch In (68.8 µs). These two values come from the first table, a different
+  pass, so the 100 µs is a rough guide only. Its cook includes the CUDA copy into its own
+  output texture.
+- The C++ In TOP cooked once per frame (cooked = 1.000) and also cooked without the forced cook.
+  The built-in receivers cooked only on the forced cook.
