@@ -139,7 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `out_slot_meta` show the same channels as the In TOP; it is force-cooked after each
     export (Sender) or import (Receiver). See `docs/TOX_BUILD_GUIDE.md` Step 6d.
 - TOX artifact `TOXES/CUDAIPCLink_v2.0.0.tox`: exported with Semantic Version Control in
-  TD 2025.32820, sha256 `b9526ba39b259aa98662399723ef97a262e784d0cd66a696255b57383d4f449d`
+  TD 2025.32820, sha256 `2cef5e333548d5b3267172c87e438856c372c8c6ae573babbc4fe90610a04873`
   (also in `TOXES/RELEASES.tsv`). Library mode only (no mirror DATs): it needs an installed
   `cuda_link` 2.0.0. It includes the `slot_meta` Script CHOP and `out_slot_meta`
   (callbacks DAT `script_chop_callbacks`), `MonoAlphaFix`, `TDPixelFormat`, and the
