@@ -208,7 +208,55 @@ def test_td_running_skips_and_prints_the_command(
     assert not plugins.exists()
     out = capsys.readouterr().out
     assert "TouchDesigner is running" in out
-    assert f'install_cpp_top.py" install --dll-dir "{site / "cuda_link" / "td_plugins"}"' in out
+    dll_dir = site / "cuda_link" / "td_plugins"
+    assert f'install_cpp_top.py" install --dll-dir "{dll_dir}" --plugins-dir "{plugins}"' in out
+
+
+def test_the_default_plugins_folder_adds_no_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(itl._cpp, "td_running", lambda: True)
+    assert itl.install_td_plugins(_site(tmp_path), plugins_dir=None, dry_run=False) == "skipped"
+    assert "--plugins-dir" not in capsys.readouterr().out
+
+
+def test_dry_run_changes_nothing_and_ignores_td(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def td_check() -> bool:
+        raise AssertionError("a dry run must not check for TouchDesigner")
+
+    monkeypatch.setattr(itl._cpp, "td_running", td_check)
+    plugins = tmp_path / "Plugins"
+    assert itl.install_td_plugins(_site(tmp_path), plugins_dir=plugins, dry_run=True) == "installed"
+    assert not plugins.exists()
+
+
+def test_dry_run_without_site_packages_says_what_pip_will_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Modes 3 and 4 find site-packages with a query that a dry run does not run.
+    assert itl.install_td_plugins(None, plugins_dir=tmp_path, dry_run=True, wheel=_WHEEL) == "skipped"
+    out = capsys.readouterr().out
+    assert "[dry-run] After pip: find site-packages" in out
+    assert "not known" not in out
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real"])
+def test_a_none_any_wheel_carries_no_dlls(tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool) -> None:
+    wheel = Path("dist/cuda_link-2.0.0.dev0-py3-none-any.whl")
+    plugins = tmp_path / "Plugins"
+    assert itl.install_td_plugins(None, plugins_dir=plugins, dry_run=dry_run, wheel=wheel) == "skipped"
+    assert "carries no TOP DLLs" in capsys.readouterr().out
+    assert not plugins.exists()
+
+
+def test_the_installer_runs_without_scripts_on_sys_path() -> None:
+    # python -P (and PYTHONSAFEPATH) leave the script's folder off sys.path.
+    import subprocess
+
+    script = _PROJECT_ROOT / "scripts" / "install_td_library.py"
+    done = subprocess.run([sys.executable, "-P", str(script), "--help"], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "--no-td-plugins" in done.stdout
 
 
 def test_a_wheel_without_dlls_skips(tmp_path: Path, td_closed: None, capsys: pytest.CaptureFixture[str]) -> None:

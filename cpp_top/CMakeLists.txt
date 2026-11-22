@@ -224,8 +224,10 @@ target_compile_definitions(CudaLinkOutTOP PRIVATE _CRT_SECURE_NO_WARNINGS)
 set_target_properties(CudaLinkOutTOP PROPERTIES PREFIX "" SUFFIX ".dll")
 
 # --- BUILD_INFO.txt -- the build sidecar next to the DLLs ---
-# The installers (cuda_link.td_plugin: wheel and install_cpp_top.py) copy it with the DLLs and
-# read the build sha from it for the install record (ADR-0016). Same values as the Info page.
+# The root CMakeLists.txt ships it in the wheel next to the DLLs. The installers
+# (cuda_link.td_plugin, for install_cpp_top.py and install_td_library.py) read it from the
+# source folder for the install record (ADR-0016); it is not copied to the Plugins folder.
+# Same values as the Info page.
 # file(GENERATE) puts it in the DLLs' own folder for single- and multi-config generators.
 file(STRINGS "${TD_VENDOR_DIR}/CPlusPlus_Common.h" CUDALINK_TD_API_LINE
      REGEX "^const int OP_CommonAPIVersion = [0-9]+;" LIMIT_COUNT 1)

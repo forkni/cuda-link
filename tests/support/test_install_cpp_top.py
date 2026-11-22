@@ -139,6 +139,16 @@ def test_dll_dir_of_an_installed_wheel_uses_the_wheel_record(tmp_path: Path, plu
     assert record.installed.endswith(f"from {package / 'td_plugins'}")
 
 
+def test_a_relative_dll_dir_is_resolved(tmp_path: Path, plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # "--dll-dir ." from inside td_plugins: Path(".").name is "", so it must be resolved first.
+    package = _site_package(tmp_path)
+    monkeypatch.chdir(package / "td_plugins")
+    assert ict.main(["install", "--plugins-dir", str(plugins), "--dll-dir", ".", "--force"]) == 0
+    record = ict.tp.read_record(plugins)
+    assert record.build == "ba5e5ab"
+    assert record.installed.endswith(f"from {(package / 'td_plugins').resolve()}")
+
+
 def test_from_wheel(tmp_path: Path, plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = _site_package(tmp_path)
     monkeypatch.setattr(ict, "installed_package_dir", lambda: package)

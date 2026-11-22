@@ -117,6 +117,7 @@ def wheel_record(package_dir: Path, now: _dt.datetime | None = None) -> object:
 
 
 def install(plugins_dir: Path, dll_dir: Path, dry_run: bool = False) -> int:
+    dll_dir = dll_dir.resolve()  # '.' has no name: source_record reads name and parent
     if not all((dll_dir / n).is_file() for n in DLL_NAMES):
         print(f"[ERROR] Not found in {dll_dir}: build cpp_top first or pass --dll-dir.", flush=True)
         return 2

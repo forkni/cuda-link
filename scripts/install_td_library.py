@@ -71,6 +71,7 @@ TouchDesigner Custom TOPs (the C++ CUDA Link Out / In DLLs):
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -78,9 +79,25 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
-# scripts/ is on sys.path when this file runs as a script (and in the tests).
-import install_cpp_top as _cpp
+
+def _load_install_cpp_top() -> ModuleType:
+    """scripts/install_cpp_top.py, loaded by path: `python -P` and PYTHONSAFEPATH leave
+    scripts/ off sys.path. An already imported copy is reused."""
+    name = "install_cpp_top"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / "install_cpp_top.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load scripts/install_cpp_top.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_cpp = _load_install_cpp_top()
 
 # Force UTF-8 output on Windows so box-drawing/arrow characters print correctly.
 # reconfigure() is available on Python 3.7+; safe to call on all platforms.
@@ -715,30 +732,57 @@ def run_install(target: InstallTarget, *, dry_run: bool, set_env: bool) -> Path 
 
 
 def install_td_plugins(
-    site_pkgs: Path | None, *, plugins_dir: Path | None, dry_run: bool, td_python: bool = False
+    site_pkgs: Path | None,
+    *,
+    plugins_dir: Path | None,
+    dry_run: bool,
+    td_python: bool = False,
+    wheel: Path | None = None,
 ) -> str:
     """Copy the TOP DLLs of the wheel just installed into <Plugins>/CudaLink, with the install
-    record (ADR-0016). Returns "installed", "skipped" (the reason is printed) or "failed"."""
+    record (ADR-0016). Returns "installed", "skipped" (the reason is printed) or "failed".
+
+    A dry run runs no command, so it may not know site-packages (modes 3, 4) or have the
+    wheel on disk; the wheel's file name tag then says whether it carries DLLs.
+    """
     print()
     print(_bold("  TouchDesigner Custom TOPs (C++ CUDA Link Out / In):"))
     script = REPO_ROOT / "scripts" / "install_cpp_top.py"
-    if td_python or site_pkgs is None:
-        why = "mode 5 does not install them" if td_python else "the site-packages folder is not known"
-        print(_yellow(f"  [skip] {why}. To install them, run:"))
-        print(f'    python "{script}" install --dll-dir "<site-packages>\\cuda_link\\{_cpp.tp.PLUGIN_DIR_NAME}"')
+    to_plugins = f' --plugins-dir "{plugins_dir}"' if plugins_dir else ""
+    dest = plugins_dir or _cpp.default_plugins_dir()
+    if td_python:
+        print(_yellow("  [skip] mode 5 does not install them. To install them, run:"))
+        print(
+            f'    python "{script}" install --dll-dir "<site-packages>\\cuda_link\\{_cpp.tp.PLUGIN_DIR_NAME}"{to_plugins}'
+        )
+        return "skipped"
+    if wheel is not None and wheel.name.endswith("-none-any.whl"):
+        print("  [skip] This wheel carries no TOP DLLs (only the cp311 release wheel does).")
+        return "skipped"
+    if site_pkgs is None:
+        if dry_run:
+            print(
+                _yellow(
+                    f"  [dry-run] After pip: find site-packages, then copy the TOP DLLs to {dest / _cpp.VENDOR_FOLDER}."
+                )
+            )
+        else:
+            print(_yellow("  [skip] The site-packages folder is not known. To install them, run:"))
+            print(
+                f'    python "{script}" install --dll-dir "<site-packages>\\cuda_link\\{_cpp.tp.PLUGIN_DIR_NAME}"{to_plugins}'
+            )
         return "skipped"
     dll_dir = site_pkgs / "cuda_link" / _cpp.tp.PLUGIN_DIR_NAME
-    dest = plugins_dir or _cpp.default_plugins_dir()
     if not all((dll_dir / n).is_file() for n in _cpp.DLL_NAMES):
         if dry_run:
-            print(_yellow(f"  [dry-run] After pip: copy the DLLs in {dll_dir} to {dest / _cpp.VENDOR_FOLDER}."))
+            print(_yellow(f"  [dry-run] After pip: copy the TOP DLLs in {dll_dir} to {dest / _cpp.VENDOR_FOLDER}."))
         else:
             print("  [skip] This wheel carries no TOP DLLs (only the cp311 release wheel does).")
         return "skipped"
     if not dry_run and _cpp.td_running():
         print(_yellow("  [skip] TouchDesigner is running, and it locks the plugin DLLs."))
         print("  Close TouchDesigner, then run:")
-        print(_green(f'    python "{script}" install --dll-dir "{dll_dir}"'))
+        print(_green(f'    python "{script}" install --dll-dir "{dll_dir}"{to_plugins}'))
         return "skipped"
     record = _cpp.wheel_record(site_pkgs / "cuda_link")
     rc = _cpp.tp.install(dest, dll_dir, record, dry_run=dry_run, say=lambda msg: print(f"  {msg}"))
@@ -1077,7 +1121,11 @@ def main() -> int:
     if args.no_td_plugins:
         return 0
     outcome = install_td_plugins(
-        site_pkgs, plugins_dir=args.plugins_dir, dry_run=args.dry_run, td_python=target.td_python
+        site_pkgs,
+        plugins_dir=args.plugins_dir,
+        dry_run=args.dry_run,
+        td_python=target.td_python,
+        wheel=target.wheel,
     )
     return 1 if outcome == "failed" else 0
 
