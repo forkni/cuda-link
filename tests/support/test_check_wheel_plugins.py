@@ -32,10 +32,16 @@ def _wheel(tmp_path: Path, name: str, plugins: dict[str, bytes], init: str = "")
     return path
 
 
+def _build_info(version: str = _VERSION, td_header: str = "1") -> bytes:
+    return (
+        f"cuda-link {version}\nbuild bd1d7e1\ncuda toolkit 12.6\ntd header OP_CommonAPIVersion {td_header}\n"
+    ).encode()
+
+
 def _both(version: str = _VERSION) -> dict[str, bytes]:
     """Both DLLs and the BUILD_INFO.txt sidecar, as cpp_top writes them."""
     files = {n: _dll(version) for n in cwp.DLL_NAMES}
-    files[cwp.BUILD_INFO] = f"cuda-link {version}\nbuild bd1d7e1\ncuda toolkit 12.6\n".encode()
+    files[cwp.BUILD_INFO] = _build_info(version)
     return files
 
 
@@ -123,6 +129,18 @@ def test_missing_build_info_fails(tmp_path: Path) -> None:
 
 
 def test_build_info_of_another_version_fails(tmp_path: Path) -> None:
-    plugins = {**_both(), cwp.BUILD_INFO: b"cuda-link 1.14.1\nbuild x\n"}
+    plugins = {**_both(), cwp.BUILD_INFO: _build_info("1.14.1")}
     problems = cwp.check_wheel(_wheel(tmp_path, _PLATFORM, plugins))
     assert problems == [f"{_PLATFORM}: {cwp.BUILD_INFO} is not for version {_VERSION}"]
+
+
+@pytest.mark.parametrize(
+    "td_header",
+    ["const int OP_CommonAPIVersion = 1\\;", "unknown", ""],
+    ids=["unparsed-cmake-line", "unknown", "empty"],
+)
+def test_build_info_without_a_numeric_td_header_fails(tmp_path: Path, td_header: str) -> None:
+    # The first one is what cpp_top wrote before the parse fix: the whole escaped header line.
+    plugins = {**_both(), cwp.BUILD_INFO: _build_info(td_header=td_header)}
+    problems = cwp.check_wheel(_wheel(tmp_path, _PLATFORM, plugins))
+    assert problems == [f"{_PLATFORM}: {cwp.BUILD_INFO} has no numeric td header line"]

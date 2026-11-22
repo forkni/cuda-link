@@ -116,6 +116,16 @@ def test_build_info_wins_over_the_repo_files(dll_dir: Path) -> None:
     assert (record.version, record.build, record.cuda_toolkit) == ("9.9.9", "abc1234", "12.6")  # type: ignore[attr-defined]
 
 
+def test_a_build_info_td_header_that_is_not_a_number_uses_the_repo_header(dll_dir: Path) -> None:
+    # What cpp_top wrote before the BUILD_INFO parse fix: the whole escaped C++ line.
+    (dll_dir / ict.tp.BUILD_INFO_FILE).write_text(
+        "cuda-link 2.0.0\nbuild abc1234\ntd header OP_CommonAPIVersion const int OP_CommonAPIVersion = 1\\;\n",
+        encoding="utf-8",
+    )
+    record = ict.repo_record(dll_dir, now=_NOW)
+    assert record.td_header == "1"  # type: ignore[attr-defined]  # cpp_top/vendor/td/2025/CPlusPlus_Common.h
+
+
 def _site_package(tmp_path: Path) -> Path:
     """<site-packages>/cuda_link as the cp311 wheel installs it."""
     package = tmp_path / "site-packages" / "cuda_link"

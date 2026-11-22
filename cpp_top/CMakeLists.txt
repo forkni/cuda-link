@@ -231,9 +231,14 @@ set_target_properties(CudaLinkOutTOP PROPERTIES PREFIX "" SUFFIX ".dll")
 # file(GENERATE) puts it in the DLLs' own folder for single- and multi-config generators.
 file(STRINGS "${TD_VENDOR_DIR}/CPlusPlus_Common.h" CUDALINK_TD_API_LINE
      REGEX "^const int OP_CommonAPIVersion = [0-9]+;" LIMIT_COUNT 1)
-string(REGEX REPLACE "^const int OP_CommonAPIVersion = ([0-9]+);.*" "\\1" CUDALINK_TD_API "${CUDALINK_TD_API_LINE}")
-if(NOT CUDALINK_TD_API)
+# file(STRINGS) returns the line with its ";" escaped as "\;" (a list separator), so a REPLACE
+# pattern that ends in ";" never matches and passes the whole line through: match the number.
+string(REGEX MATCH "OP_CommonAPIVersion = ([0-9]+)" CUDALINK_TD_API_MATCH "${CUDALINK_TD_API_LINE}")
+if(CUDALINK_TD_API_MATCH)
+    set(CUDALINK_TD_API "${CMAKE_MATCH_1}")
+else()
     set(CUDALINK_TD_API "unknown")
+    message(WARNING "OP_CommonAPIVersion not found in ${TD_VENDOR_DIR}/CPlusPlus_Common.h: BUILD_INFO.txt says unknown")
 endif()
 file(GENERATE OUTPUT "$<TARGET_FILE_DIR:CudaLinkOutTOP>/BUILD_INFO.txt"
     CONTENT "cuda-link ${CUDALINK_VERSION}\nbuild ${CUDALINK_BUILD_SHA}\ncuda toolkit ${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}\ntd header OP_CommonAPIVersion ${CUDALINK_TD_API}\n")
