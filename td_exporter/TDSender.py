@@ -476,7 +476,10 @@ class TDSenderEngine:
             policy = ExportPolicy(
                 export_sync=effective_sync,
                 flush_probe=self._config.export_flush_probe,
-                use_graphs=self._config.use_graphs,
+                # The .tox Sender keeps the plain stream path: graphs on vs off measured
+                # +0.1 % at 1920x1080 on TD 2025.32820 (docs/BENCHMARKS.md, 2026-11-21),
+                # so CUDALINK_TD_USE_GRAPHS was removed in 2.0.0.
+                use_graphs=False,
                 high_priority_stream=self._config.stream_high_prio,
                 export_profile=self._config.export_profile,
                 # HolderBarrier is managed by this adapter; disable Exporter's CheckerBarrier

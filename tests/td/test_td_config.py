@@ -18,7 +18,7 @@ def test_sender_config_defaults() -> None:
     assert cfg.export_sync is None
     assert cfg.export_profile is False
     assert cfg.export_flush_probe is True
-    assert cfg.use_graphs is False
+    assert not hasattr(cfg, "use_graphs")  # CUDALINK_TD_USE_GRAPHS removed in 2.0.0
     assert cfg.stream_high_prio is False
     assert cfg.activation_barrier is True
     assert cfg.barrier_settle_frames == 30
@@ -116,15 +116,6 @@ def test_sender_config_from_env_export_flush_probe_off(monkeypatch: pytest.Monke
     assert cfg.export_flush_probe is False
 
 
-def test_sender_config_from_env_use_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CUDALINK_TD_USE_GRAPHS=1 enables use_graphs."""
-    from TDConfig import TDSenderConfig
-
-    monkeypatch.setenv("CUDALINK_TD_USE_GRAPHS", "1")
-    cfg = TDSenderConfig.from_env()
-    assert cfg.use_graphs is True
-
-
 def test_sender_config_from_env_stream_high_prio(monkeypatch: pytest.MonkeyPatch) -> None:
     """CUDALINK_TD_STREAM_PRIO=high enables stream_high_prio."""
     from TDConfig import TDSenderConfig
@@ -173,8 +164,8 @@ def test_sender_config_equality() -> None:
     """Two TDSenderConfig instances with same values compare equal."""
     from TDConfig import TDSenderConfig
 
-    a = TDSenderConfig(export_sync=False, use_graphs=True, barrier_settle_frames=10)
-    b = TDSenderConfig(export_sync=False, use_graphs=True, barrier_settle_frames=10)
+    a = TDSenderConfig(export_sync=False, stream_high_prio=True, barrier_settle_frames=10)
+    b = TDSenderConfig(export_sync=False, stream_high_prio=True, barrier_settle_frames=10)
     assert a == b
 
 

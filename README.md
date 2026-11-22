@@ -390,7 +390,7 @@ The six variables most consumers reach for:
 | `CUDALINK_WAIT_BACKEND` | `auto` | R5 native notification-wait backend (compiled into the core wheel on Windows, [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)). `auto` uses it when available with silent fallback; `python` forces the pre-R5 path; `native` skips the `auto` gate. Target: p50 < 10 µs vs 136–286 µs poll-sleep baseline. |
 | `CUDALINK_D2H_PIPELINED` | `0` | Opt-in pipelined D2H for `get_frame_numpy()` — overlaps the copy with consumer CPU work at the cost of +1 frame latency. Gain: 1080p −6% / 4K −20% with 5 ms consumer work. |
 | `CUDALINK_IMPORT_RECONNECT` | `1` | Enable automatic reconnect in the importer when the SHM segment disappears (e.g., producer restart). Set to `0` to raise immediately on a missing segment. |
-| `CUDALINK_TD_USE_GRAPHS` | `0` | CUDA Graphs for the TouchDesigner-side `CUDAIPCExtension` Sender — collapses 3 WDDM kernel-mode submissions into 1. Auto-disabled on CUDA runtimes older than 11.3; falls back to the legacy stream path on any capture or launch failure. |
+| `CUDALINK_TD_USE_GRAPHS` | (removed) | Removed in 2.0.0. The `.tox` Sender always uses the plain stream export path. Measured 2026-11-21 at 1920x1080 on TD 2025.32820: graphs on against off gave `export` p50 +0.1 %, inside the run noise. A value left in the environment has no effect. |
 
 > Full reference (~40 variables, including TD-internal, profiling, and adaptive-barrier
 > knobs): [docs/ENV_VARS.md](docs/ENV_VARS.md).

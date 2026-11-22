@@ -50,7 +50,6 @@ Write-Host "==> Output  : $out/run.nsys-rep"
 
 $env:CUDALINK_NVTX            = "1"
 $env:CUDALINK_NVTX_VERBOSE    = "1"
-$env:CUDALINK_TD_USE_GRAPHS   = "$Graphs"
 
 if ($Target -eq "profile_export") {
     $cmd = "python scripts/profiling/profile_export.py --frames $Frames --export-profile"

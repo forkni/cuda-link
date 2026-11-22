@@ -73,7 +73,7 @@ def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:
     # activation_barrier=False: HolderBarrier is an unrelated TD-side lifecycle concern
     # (ActivationBarrier.HolderBarrier); disabling it keeps this test focused on the
     # grow-safety guard alone.
-    config = TDSenderConfig(activation_barrier=False, use_graphs=False)
+    config = TDSenderConfig(activation_barrier=False)
     return TDSenderEngine(
         host=host,
         config=config,

@@ -37,7 +37,6 @@ class TDSenderConfig:
     export_sync: bool | None = None
     export_profile: bool = False
     export_flush_probe: bool = True
-    use_graphs: bool = False
     stream_high_prio: bool = False
     activation_barrier: bool = True
     barrier_settle_frames: int = 30
@@ -53,7 +52,6 @@ class TDSenderConfig:
             export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → async (default)
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
-            use_graphs=env_bool("CUDALINK_TD_USE_GRAPHS", default=False),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
             activation_barrier=env_bool("CUDALINK_TD_ACTIVATION_BARRIER", default=True),
             barrier_settle_frames=env_int("CUDALINK_TD_BARRIER_SETTLE_FRAMES", default=30),

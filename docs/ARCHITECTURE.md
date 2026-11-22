@@ -459,8 +459,8 @@ torch.cuda.synchronize()  # ← Blocks CPU until GPU idle
 
 ### CUDA Graphs (v1.10.0+)
 
-In the Python `Exporter` (always, since 2.0.0; `ExportPolicy(use_graphs=False)` turns it off in code)
-and in the TD Sender with `CUDALINK_TD_USE_GRAPHS=1` (default off in TD), the per-frame export path captures a CUDA graph once and replays
+In the Python `Exporter` (always, since 2.0.0; `ExportPolicy(use_graphs=False)` turns it off in code),
+the per-frame export path captures a CUDA graph once and replays
 it on every subsequent frame.  The graph folds `stream_wait_event` + `cudaMemcpyAsync` +
 `cudaEventRecord` into a **single WDDM submission** (`cudaGraphLaunch`) instead of three separate
 kernel dispatches.

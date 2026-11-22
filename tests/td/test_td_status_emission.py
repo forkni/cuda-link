@@ -59,7 +59,7 @@ class _FakeExporter:
 
 
 def _make_engine(shm_name: str, host: FakeTDHost) -> TDSenderEngine:
-    config = TDSenderConfig(activation_barrier=False, use_graphs=False)
+    config = TDSenderConfig(activation_barrier=False)
     return TDSenderEngine(
         host=host,
         config=config,
