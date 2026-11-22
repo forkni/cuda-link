@@ -2002,6 +2002,8 @@ class Importer:
             the tensor before then, or copy it with ``tensor.clone()`` to keep it
             longer. A read that takes longer shows a mix of two frames. A first
             read can be slow: torch and CuPy build their kernels on first use.
+            close() and a reconnect (RECONNECTING) unmap all slots at once, so
+            an uncopied tensor is invalid after them, even with no new frame.
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
@@ -2025,7 +2027,9 @@ class Importer:
         NO_FRAME again rather than the previous session's last frame.
 
         The array is a host buffer that the importer uses again: the next call
-        writes into it. Use ``array.copy()`` to keep a frame past the next call.
+        writes into it. close() and a format change free the buffer, so reading
+        the array after them can crash the process. Use ``array.copy()`` to keep
+        a frame past the next call or past close().
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
@@ -2051,8 +2055,9 @@ class Importer:
         Frame lifetime:
             The array is a view of one ring slot, as for get_frame(). Read it
             before the producer publishes its ``num_slots``-th next frame, or copy
-            it with ``arr.copy()``. CuPy compiles a reduction kernel per dtype on
-            first use, so the first read after open() can take longer than that.
+            it with ``arr.copy()``. CuPy compiles its kernels per dtype on first
+            use, so the first read after open() can take longer than that.
+            close() and a reconnect (RECONNECTING) unmap all slots at once.
 
         Note:
             TIMEOUT is not reachable via this path — streamWaitEvent is a

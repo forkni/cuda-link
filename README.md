@@ -170,9 +170,14 @@ again when it publishes its `num_slots`-th next frame. The default is 3 slots (t
 offer 2, 3 or 4), so at 60 fps a frame is valid for less than 50 ms after its publish. Read
 it before then, or copy it (`tensor.clone()`, `arr.copy()`) to keep it longer. A read that
 takes longer gets a mix of two frames. The first read after `Importer.open()` can be slow,
-because torch and CuPy build their kernels on first use (CuPy compiles one per dtype).
+because torch and CuPy build their kernels on first use (CuPy compiles them per dtype).
+`close()` (also the end of a `with` block) and a reconnect (`RECONNECTING`) unmap all slots
+at once, so an uncopied view is invalid after them.
 `get_frame_numpy()` copies into a host buffer that the importer uses again on each call, so
-its array is valid until the next `get_frame_numpy()` call. Use `array.copy()` to keep it.
+its array is valid until the next `get_frame_numpy()` call. `close()` and a format change
+free that buffer, and reading the array after them can crash the process. Use
+`array.copy()` to keep it. [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py)
+shows the zero-copy rule in a real loop.
 
 **What a TD source arrives as.** 8-bit RGBA TOPs arrive in **B, G, R, A** channel order
 (that is how TD's `cudaMemory()` returns them; the Sender sets `FLAGS_BGRA` in the SHM
