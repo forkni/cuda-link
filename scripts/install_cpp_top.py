@@ -92,11 +92,17 @@ def repo_record(dll_dir: Path, now: _dt.datetime | None = None) -> object:
     cuda = info.get("cuda toolkit") or _grep(
         dll_dir / "CMakeCache.txt", r"^CUDAToolkit_BIN_DIR:PATH=.*?[\\/]v(\d+\.\d+)[\\/]"
     )
+    # A build configured before the BUILD_INFO parse fix wrote the whole C++ line here: use the
+    # sidecar value only when it is the number.
+    # "unknown" when the header is missing too: make_record would fall back to the bad text.
+    td_header = info.get("td header OP_CommonAPIVersion", "")
+    if not td_header.isdigit():
+        td_header = _grep(_TD_HEADER, r"OP_CommonAPIVersion\s*=\s*(\d+)") or "unknown"
     return tp.make_record(
         dll_dir,
         version=info.get("cuda-link") or _grep(_INIT_PY, r"^__version__\s*=\s*[\"']([^\"']+)"),
         protocol=protocol_text(_SHM_PY),
-        td_header=info.get("td header OP_CommonAPIVersion") or _grep(_TD_HEADER, r"OP_CommonAPIVersion\s*=\s*(\d+)"),
+        td_header=td_header,
         cuda_toolkit=cuda,
         now=now,
     )

@@ -99,6 +99,16 @@ jobs:
         working-directory: cpp_top
         run: cmake --build --preset ninja-tooling
 
+      - name: BUILD_INFO.txt has the version and a numeric td header line
+        # The release wheel check (scripts/check_wheel_plugins.py) runs only at a tag; this
+        # catches a broken CMake parse on the PR. Default shell on this runner is pwsh.
+        working-directory: cpp_top
+        run: |
+          $info = Get-Content build/BUILD_INFO.txt
+          $info
+          if ($info[0] -notmatch '^cuda-link \S+$') { throw 'BUILD_INFO.txt: no cuda-link version line' }
+          if (-not ($info -match '^td header OP_CommonAPIVersion \d+$')) { throw 'BUILD_INFO.txt: no numeric td header line' }
+
       - name: topcore_tests (golden-byte parity, CTest)
         working-directory: cpp_top
         run: ctest --preset ninja-tooling
