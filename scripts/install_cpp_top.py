@@ -5,10 +5,12 @@ Layout (docs/CPP_TOP.md, "Install: system Plugins folder"):
     <Documents>\\Derivative\\Plugins\\CudaLink\\
         CudaLinkOutTOP.dll
         CudaLinkInTOP.dll
-        VERSION.txt
+        VERSION.txt            the install record (ADR-0016)
 
 Commands:
     python scripts\\install_cpp_top.py install [--dll-dir DIR]   copy both DLLs, write VERSION.txt
+                                    (DIR: a cpp_top build, or <site-packages>\\cuda_link\\td_plugins)
+    python scripts\\install_cpp_top.py install --from-wheel      copy the DLLs of the installed wheel
     python scripts\\install_cpp_top.py status                    show the installed copy
     python scripts\\install_cpp_top.py uninstall                 move the folder OUT of Plugins
 
@@ -23,76 +25,50 @@ Common flags:
     --plugins-dir DIR   use DIR instead of <Documents>\\Derivative\\Plugins (tests, odd setups)
     --dry-run           print what would happen, change nothing
     --force             skip the "TouchDesigner is running" check
+
+The work is done by cuda_link.td_plugin (src/cuda_link/td_plugin.py), loaded by path so this
+script needs no installed package. install_td_library.py uses the same module.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import hashlib
-import os
+import importlib.util
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
-DLL_NAMES = ("CudaLinkOutTOP.dll", "CudaLinkInTOP.dll")
-VENDOR_FOLDER = "CudaLink"
-VERSION_FILE = "VERSION.txt"
 DEFAULT_DLL_DIR = ROOT / "cpp_top" / "build"
+_TD_PLUGIN_PY = ROOT / "src" / "cuda_link" / "td_plugin.py"
 _INIT_PY = ROOT / "src" / "cuda_link" / "__init__.py"
 _SHM_PY = ROOT / "src" / "cuda_link" / "shm_protocol.py"
 _TD_HEADER = ROOT / "cpp_top" / "vendor" / "td" / "2025" / "CPlusPlus_Common.h"
 
 
-def documents_dir() -> Path:
-    """The user's real Documents folder (FOLDERID_Documents; follows a OneDrive redirect)."""
-    if os.name == "nt":
-        import ctypes
-        import uuid
-        from ctypes import wintypes
-
-        class _GUID(ctypes.Structure):
-            _fields_ = [
-                ("d1", wintypes.DWORD),
-                ("d2", wintypes.WORD),
-                ("d3", wintypes.WORD),
-                ("d4", ctypes.c_ubyte * 8),
-            ]
-
-        u = uuid.UUID("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}")  # FOLDERID_Documents
-        g = _GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
-        out = ctypes.c_wchar_p()
-        shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
-        if shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
-            try:
-                return Path(out.value or "")
-            finally:
-                ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
-    return Path.home() / "Documents"
+def load_td_plugin(path: Path = _TD_PLUGIN_PY) -> ModuleType:
+    """Load cuda_link/td_plugin.py by path (no package import, no dependencies)."""
+    name = "_cuda_link_td_plugin"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # before exec: dataclasses look the module up
+    spec.loader.exec_module(module)
+    return module
 
 
-def default_plugins_dir() -> Path:
-    return documents_dir() / "Derivative" / "Plugins"
-
-
-def td_running() -> bool:
-    """True when a TouchDesigner.exe process exists (Windows only; False elsewhere)."""
-    if os.name != "nt":
-        return False
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq TouchDesigner.exe", "/NH"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "touchdesigner.exe" in out.lower()
+tp = load_td_plugin()
+DLL_NAMES = tp.DLL_FILES
+VENDOR_FOLDER = tp.VENDOR_FOLDER
+VERSION_FILE = tp.RECORD_FILE
+documents_dir = tp.documents_dir
+default_plugins_dir = tp.default_plugins_dir
+td_running = tp.td_running
 
 
 def _grep(path: Path, pattern: str) -> str | None:
@@ -103,108 +79,97 @@ def _grep(path: Path, pattern: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def protocol_text(shm_py: Path) -> str:
+    """ "v0.6 (magic 0x...)" from a shm_protocol.py (the repo's, or an installed package's)."""
+    magic = _grep(shm_py, r"^PROTOCOL_MAGIC[^=]*=\s*(0x[0-9A-Fa-f]+)")
+    return f"v0.6 (magic {magic or 'unknown'})"
 
 
-def version_text(dll_dir: Path, now: _dt.datetime | None = None) -> str:
-    """Contents of VERSION.txt for the DLLs in dll_dir."""
-    now = now or _dt.datetime.now()
-    cuda = _grep(dll_dir / "CMakeCache.txt", r"^CUDAToolkit_BIN_DIR:PATH=.*?[\\/]v(\d+\.\d+)[\\/]")
-    version = _grep(_INIT_PY, r"^__version__\s*=\s*[\"']([^\"']+)")
-    magic = _grep(_SHM_PY, r"^PROTOCOL_MAGIC[^=]*=\s*(0x[0-9A-Fa-f]+)")
-    api = _grep(_TD_HEADER, r"OP_CommonAPIVersion\s*=\s*(\d+)")
-    lines = [
-        f"cuda-link {version or 'unknown'}",
-        f"protocol v0.6 (magic {magic or 'unknown'})",
-        f"td header OP_CommonAPIVersion {api or 'unknown'}",
-        f"cuda toolkit {cuda or 'unknown'}",
-        f"installed {now.isoformat(timespec='seconds')} from {dll_dir}",
-    ]
-    lines += [f"sha256 {n} {_sha256(dll_dir / n)}" for n in DLL_NAMES]
-    return "\n".join(lines) + "\n"
+def repo_record(dll_dir: Path, now: _dt.datetime | None = None) -> object:
+    """The install record for a local cpp_top build: BUILD_INFO.txt first, the repo files and
+    CMakeCache.txt for what an older build has no sidecar for."""
+    info = tp.read_build_info(dll_dir)
+    cuda = info.get("cuda toolkit") or _grep(
+        dll_dir / "CMakeCache.txt", r"^CUDAToolkit_BIN_DIR:PATH=.*?[\\/]v(\d+\.\d+)[\\/]"
+    )
+    return tp.make_record(
+        dll_dir,
+        version=info.get("cuda-link") or _grep(_INIT_PY, r"^__version__\s*=\s*[\"']([^\"']+)"),
+        protocol=protocol_text(_SHM_PY),
+        td_header=info.get("td header OP_CommonAPIVersion") or _grep(_TD_HEADER, r"OP_CommonAPIVersion\s*=\s*(\d+)"),
+        cuda_toolkit=cuda,
+        now=now,
+    )
 
 
-def _say(msg: str) -> None:
-    print(msg, flush=True)
+def installed_package_dir() -> Path | None:
+    """The cuda_link package of the running Python's install (no import), or None."""
+    spec = importlib.util.find_spec("cuda_link")
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    return Path(next(iter(spec.submodule_search_locations)))
+
+
+def wheel_record(package_dir: Path, now: _dt.datetime | None = None) -> object:
+    """The install record for the DLLs a wheel installed in ``package_dir``."""
+    dll_dir = package_dir / tp.PLUGIN_DIR_NAME
+    return tp.make_record(dll_dir, protocol=protocol_text(package_dir / "shm_protocol.py"), now=now)
 
 
 def install(plugins_dir: Path, dll_dir: Path, dry_run: bool = False) -> int:
-    missing = [n for n in DLL_NAMES if not (dll_dir / n).is_file()]
-    if missing:
-        _say(f"[ERROR] Not found in {dll_dir}: {', '.join(missing)}. Build cpp_top first or pass --dll-dir.")
+    if not all((dll_dir / n).is_file() for n in DLL_NAMES):
+        print(f"[ERROR] Not found in {dll_dir}: build cpp_top first or pass --dll-dir.", flush=True)
         return 2
-    dest = plugins_dir / VENDOR_FOLDER
-    if dest.exists():
-        extra = sorted(p.name for p in dest.iterdir() if p.name not in (*DLL_NAMES, VERSION_FILE))
-        if extra:
-            _say(f"[ERROR] {dest} holds other files ({', '.join(extra)}). Keep only the CUDA Link files there.")
-            return 2
-    _say(f"Install: {dll_dir} -> {dest}")
-    if dry_run:
-        return 0
-    dest.mkdir(parents=True, exist_ok=True)
-    for n in DLL_NAMES:
-        shutil.copy2(dll_dir / n, dest / n)
-    (dest / VERSION_FILE).write_text(version_text(dll_dir), encoding="utf-8")
-    _say("[OK] Installed. Open TouchDesigner and approve the two plugin prompts.")
-    _say("     Remove any copy in a project's Plugins folder: two copies give a blocking load error.")
-    return 0
+    return tp.install(plugins_dir, dll_dir, source_record(dll_dir), dry_run=dry_run)
+
+
+def source_record(dll_dir: Path) -> object:
+    """The record for ``dll_dir``: an installed package's td_plugins/ folder (the wheel), or a
+    cpp_top build folder."""
+    package_dir = dll_dir.parent
+    if dll_dir.name == tp.PLUGIN_DIR_NAME and (package_dir / "shm_protocol.py").is_file():
+        return wheel_record(package_dir)
+    return repo_record(dll_dir)
+
+
+def install_from_wheel(plugins_dir: Path, dry_run: bool = False) -> int:
+    package_dir = installed_package_dir()
+    if package_dir is None:
+        print("[ERROR] cuda_link is not installed in this Python.", flush=True)
+        return 2
+    dll_dir = package_dir / tp.PLUGIN_DIR_NAME
+    if not all((dll_dir / n).is_file() for n in DLL_NAMES):
+        print(f"[ERROR] The installed wheel carries no TOP DLLs ({dll_dir}): only the cp311 release wheel does.")
+        return 2
+    return tp.install(plugins_dir, dll_dir, wheel_record(package_dir), dry_run=dry_run)
 
 
 def status(plugins_dir: Path) -> int:
-    dest = plugins_dir / VENDOR_FOLDER
-    if not dest.is_dir():
-        _say(f"Not installed: {dest} does not exist.")
-        return 1
-    _say(f"Installed in {dest}:")
-    for n in DLL_NAMES:
-        _say(f"  {n}: {'present' if (dest / n).is_file() else 'MISSING'}")
-    vf = dest / VERSION_FILE
-    _say(vf.read_text(encoding="utf-8").rstrip() if vf.is_file() else f"  {VERSION_FILE}: MISSING")
-    others = sorted(
-        p.name
-        for p in plugins_dir.iterdir()
-        if p.is_dir() and p.name != VENDOR_FOLDER and any((p / n).is_file() for n in DLL_NAMES)
-    )
-    if others:
-        _say(f"[WARN] More CUDA Link DLLs under {plugins_dir}: {', '.join(others)}. TD loads them too.")
-    return 0
+    return tp.status(plugins_dir)
 
 
 def uninstall(plugins_dir: Path, dry_run: bool = False, now: _dt.datetime | None = None) -> int:
-    dest = plugins_dir / VENDOR_FOLDER
-    if not dest.is_dir():
-        _say(f"Nothing to uninstall: {dest} does not exist.")
-        return 1
-    stamp = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
-    target = plugins_dir.parent / f"{VENDOR_FOLDER}.removed-{stamp}"
-    _say(f"Uninstall: move {dest} -> {target} (outside Plugins)")
-    if dry_run:
-        return 0
-    shutil.move(str(dest), str(target))
-    _say("[OK] Removed from Plugins. Saved projects keep their nodes; they error until you install again.")
-    return 0
+    return tp.uninstall(plugins_dir, dry_run=dry_run, now=now)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", nargs="?", default="install", choices=("install", "status", "uninstall"))
-    ap.add_argument("--dll-dir", type=Path, default=DEFAULT_DLL_DIR)
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--dll-dir", type=Path, default=DEFAULT_DLL_DIR)
+    src.add_argument("--from-wheel", action="store_true", help="copy the DLLs of the cuda_link wheel installed here")
     ap.add_argument("--plugins-dir", type=Path, default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args(argv)
     plugins_dir = a.plugins_dir or default_plugins_dir()
     if a.command in ("install", "uninstall") and not a.dry_run and not a.force and td_running():
-        _say("[ERROR] TouchDesigner is running. Close it first: TD locks the plugin DLLs. (--force skips this check)")
+        print("[ERROR] TouchDesigner is running. Close it first: TD locks the plugin DLLs. (--force skips this check)")
         return 3
     if a.command == "install":
-        return install(plugins_dir, a.dll_dir, a.dry_run)
+        return (
+            install_from_wheel(plugins_dir, a.dry_run) if a.from_wheel else install(plugins_dir, a.dll_dir, a.dry_run)
+        )
     if a.command == "status":
         return status(plugins_dir)
     return uninstall(plugins_dir, a.dry_run)

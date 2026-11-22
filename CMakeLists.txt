@@ -102,4 +102,14 @@ if(CUDALINK_TD_PLUGIN_DIR)
     message(STATUS "cuda-link: shipping ${CUDALINK_DLL} ${CUDALINK_WHEEL_VERSION} sha256 ${CUDALINK_DLL_SHA}")
     install(FILES "${CUDALINK_DLL_PATH}" DESTINATION cuda_link/td_plugins)
   endforeach()
+  # cpp_top writes BUILD_INFO.txt (version, build sha, CUDA toolkit) next to the DLLs; the
+  # installer copies it into the install record (ADR-0016).
+  set(CUDALINK_BUILD_INFO "${CUDALINK_TD_PLUGIN_DIR_CMAKE}/BUILD_INFO.txt")
+  file(STRINGS "${CUDALINK_BUILD_INFO}" CUDALINK_BUILD_INFO_VERSION
+       REGEX "^cuda-link ${CUDALINK_WHEEL_VERSION_RE}$" LIMIT_COUNT 1)
+  if(NOT CUDALINK_BUILD_INFO_VERSION)
+    message(FATAL_ERROR "cuda-link: ${CUDALINK_BUILD_INFO} is missing or not for version "
+                        "${CUDALINK_WHEEL_VERSION}. Configure and build cpp_top again from this tree.")
+  endif()
+  install(FILES "${CUDALINK_BUILD_INFO}" DESTINATION cuda_link/td_plugins)
 endif()

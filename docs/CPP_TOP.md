@@ -41,13 +41,18 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
 └── CudaLink\              one folder, nothing else in it
     ├── CudaLinkOutTOP.dll  opType Cudalinkout
     ├── CudaLinkInTOP.dll   opType Cudalinkin
-    └── VERSION.txt         cuda-link version, protocol, TD header API, CUDA toolkit, DLL hashes
+    └── VERSION.txt         the install record: version, build, protocol, TD header API,
+                            CUDA toolkit, source, DLL hashes (ADR-0016)
 ```
 
 - Install: close TouchDesigner, then run `install_cpp_top.cmd` (or
   `python scripts\install_cpp_top.py install --dll-dir <folder with the two DLLs>`). The
   script finds the real Documents folder, also when OneDrive moves it. It refuses while
-  TouchDesigner runs.
+  TouchDesigner runs. `scripts\install_td_library.py` does the same step after pip when the
+  wheel carries the DLLs (see "Install: from the wheel").
+- The install record (`VERSION.txt`, [ADR-0016](adr/0016-install-record.md)) takes the
+  version, build sha and CUDA toolkit from `BUILD_INFO.txt`, which the `cpp_top` build
+  writes next to the DLLs. The `.tox` Info page `Nativetops` row reads its first lines.
 - First start: TD asks to approve each DLL. It asks again after each DLL change. TD writes the
   approvals to `Plugins.json` in the `Plugins` folder, so the folder must be writable.
 - Keep one copy on a machine. With a system copy and a copy in a project's `Plugins/` folder,
@@ -91,6 +96,13 @@ in `cuda_link/td_plugins/`. They are built from the same tree as the Python pack
 its version, so a host that installs the wheel gets one version and one hash for both sides.
 The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
 
+- System install: `scripts\install_td_library.py` copies the wheel's DLLs to
+  `<Documents>\Derivative\Plugins\CudaLink\` after pip and writes the install record
+  (`--no-td-plugins` skips this, `--plugins-dir DIR` changes the folder). When
+  TouchDesigner runs it skips the copy and prints the command to run after you close TD:
+  `python scripts\install_cpp_top.py install --dll-dir <site-packages>\cuda_link\td_plugins`.
+  From the Python that has the wheel, `install_cpp_top.py install --from-wheel` does the same.
+
 - Find them: `cuda_link.td_plugin.plugin_path("out")` and `plugin_path("in")` return the
   absolute DLL paths, or None when the install has no DLLs. Point a CPlusPlus TOP's Plugin
   Path at them. This is the portable form above: an Out TOP needs the `onStart` cook, and the
@@ -103,8 +115,9 @@ The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
   `cuda_link/td_plugin.py` in `src/`. Dev builds carry no DLLs anyway.
 - Build a wheel with the DLLs: build `cpp_top` first (see "Build"), then
   `python -m build --wheel -Ccmake.define.CUDALINK_TD_PLUGIN_DIR=<folder with the two DLLs>`.
-  The build refuses a missing DLL, a DLL stamped with another version (configure `cpp_top`
-  again from the same tree) and the `py3-none-any` build. `release.yml` does this and checks
+  The build refuses a missing DLL, a DLL stamped with another version, a missing or
+  other-version `BUILD_INFO.txt` (configure `cpp_top` again from the same tree) and the
+  `py3-none-any` build. `release.yml` does this and checks
   the wheels with `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the
   script expands the pattern, so it works in PowerShell and cmd too).
 

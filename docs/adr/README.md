@@ -21,19 +21,18 @@ should be revisited. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#design-deci
 | [0013](0013-prebuilt-wheel-distribution.md) | Prebuilt wheel distribution — Windows-only, cp311 native + py3-none-any fallback | Accepted | 2026-07-07 |
 | [0014](0014-project-anchored-install-resolution.md) | Project-anchored install resolution with a mirror version stamp (amends 0003) | Accepted | 2026-09-23 |
 | [0015](0015-shm-protocol-v0-6-slot-meta.md) | SHM protocol v0.6 — per-slot metadata, 8-aligned version, sender process ID | Proposed | 2026-11-16 |
+| [0016](0016-install-record.md) | Install record of the C++ TOPs system install | Accepted | 2026-11-22 |
 | [0017](0017-minimum-td-build-2025-32820.md) | Minimum TD build 2025.32820 | Accepted | 2026-11-21 |
 
-## Numbering gaps (0007, 0016)
+## Numbering gap (0007)
 
-These numbers are not missing. ADR-0007 was written on a feature branch that has not merged,
+This number is not missing. ADR-0007 was written on a feature branch that has not merged,
 and the number stays reserved so references (for example in ADR-0009 and ADR-0012) keep
-resolving. It lands with its branch. ADR-0016 is reserved for the installer's TD install record
-and lands with that work.
+resolving. It lands with its branch.
 
 | # | Title | Branch |
 |---|-------|--------|
 | 0007 | Spout as launcher, not transport | `feat/spout-bridge` |
-| 0016 | TD install record of the installer (planned) | `feat/installer-td-plugins` (not started) |
 
 ## Adding a new ADR
 

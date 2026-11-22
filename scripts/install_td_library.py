@@ -55,6 +55,17 @@ Environment variables (persisted via `setx`, current user, on by default):
     example_receiver_launcher.py's standalone receiver subprocess should use.
     Pass --no-set-env to skip all of these. Note: setx only affects NEW
     processes — restart your terminal / TouchDesigner before the change applies.
+
+TouchDesigner Custom TOPs (the C++ CUDA Link Out / In DLLs):
+    The cp311 release wheel carries both DLLs in cuda_link/td_plugins/. After pip,
+    the installer copies them to <Documents>\\Derivative\\Plugins\\CudaLink\\ and writes the
+    install record VERSION.txt (docs/adr/0016-install-record.md), the same as
+    scripts\\install_cpp_top.py. It skips this, and says why, when the wheel carries no
+    DLLs (py3-none-any), when the site-packages folder is not known, for mode 5, and
+    when TouchDesigner is running (TD locks a loaded DLL: it prints the command to run
+    after you close TD).
+    --no-td-plugins     skip the DLL copy.
+    --plugins-dir DIR   use DIR instead of <Documents>\\Derivative\\Plugins.
 """
 
 from __future__ import annotations
@@ -67,6 +78,9 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+# scripts/ is on sys.path when this file runs as a script (and in the tests).
+import install_cpp_top as _cpp
 
 # Force UTF-8 output on Windows so box-drawing/arrow characters print correctly.
 # reconfigure() is available on Python 3.7+; safe to call on all platforms.
@@ -700,6 +714,37 @@ def run_install(target: InstallTarget, *, dry_run: bool, set_env: bool) -> Path 
     return site_pkgs
 
 
+def install_td_plugins(
+    site_pkgs: Path | None, *, plugins_dir: Path | None, dry_run: bool, td_python: bool = False
+) -> str:
+    """Copy the TOP DLLs of the wheel just installed into <Plugins>/CudaLink, with the install
+    record (ADR-0016). Returns "installed", "skipped" (the reason is printed) or "failed"."""
+    print()
+    print(_bold("  TouchDesigner Custom TOPs (C++ CUDA Link Out / In):"))
+    script = REPO_ROOT / "scripts" / "install_cpp_top.py"
+    if td_python or site_pkgs is None:
+        why = "mode 5 does not install them" if td_python else "the site-packages folder is not known"
+        print(_yellow(f"  [skip] {why}. To install them, run:"))
+        print(f'    python "{script}" install --dll-dir "<site-packages>\\cuda_link\\{_cpp.tp.PLUGIN_DIR_NAME}"')
+        return "skipped"
+    dll_dir = site_pkgs / "cuda_link" / _cpp.tp.PLUGIN_DIR_NAME
+    dest = plugins_dir or _cpp.default_plugins_dir()
+    if not all((dll_dir / n).is_file() for n in _cpp.DLL_NAMES):
+        if dry_run:
+            print(_yellow(f"  [dry-run] After pip: copy the DLLs in {dll_dir} to {dest / _cpp.VENDOR_FOLDER}."))
+        else:
+            print("  [skip] This wheel carries no TOP DLLs (only the cp311 release wheel does).")
+        return "skipped"
+    if not dry_run and _cpp.td_running():
+        print(_yellow("  [skip] TouchDesigner is running, and it locks the plugin DLLs."))
+        print("  Close TouchDesigner, then run:")
+        print(_green(f'    python "{script}" install --dll-dir "{dll_dir}"'))
+        return "skipped"
+    record = _cpp.wheel_record(site_pkgs / "cuda_link")
+    rc = _cpp.tp.install(dest, dll_dir, record, dry_run=dry_run, say=lambda msg: print(f"  {msg}"))
+    return "installed" if rc == 0 else "failed"
+
+
 # ─── Install modes ─────────────────────────────────────────────────────────────
 
 
@@ -944,7 +989,7 @@ def _interactive_menu() -> int:
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Install cuda-link into a Python environment accessible from TouchDesigner.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -977,6 +1022,17 @@ def main() -> None:
         help="Don't persist CUDALINK_WAIT_BACKEND (any mode) / "
         "CUDALINK_RECEIVER_PYTHON_EXE (modes 2, 4) as current-user Windows environment "
         "variables via setx (set by default otherwise).",
+    )
+    parser.add_argument(
+        "--no-td-plugins",
+        action="store_true",
+        help="Don't copy the wheel's TouchDesigner Custom TOP DLLs into the Plugins folder.",
+    )
+    parser.add_argument(
+        "--plugins-dir",
+        metavar="DIR",
+        type=Path,
+        help="Plugins folder for the TOP DLLs (default: <Documents>\\Derivative\\Plugins).",
     )
     args = parser.parse_args()
 
@@ -1016,8 +1072,15 @@ def main() -> None:
         4: lambda: mode_4_system_python(args.python, args.wheel, args.build, args.non_interactive, args.dry_run),
         5: lambda: mode_5_td_python(args.td_python, args.wheel, args.build, args.non_interactive, args.dry_run),
     }
-    run_install(modes[mode](), dry_run=args.dry_run, set_env=set_env)
+    target = modes[mode]()
+    site_pkgs = run_install(target, dry_run=args.dry_run, set_env=set_env)
+    if args.no_td_plugins:
+        return 0
+    outcome = install_td_plugins(
+        site_pkgs, plugins_dir=args.plugins_dir, dry_run=args.dry_run, td_python=target.td_python
+    )
+    return 1 if outcome == "failed" else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

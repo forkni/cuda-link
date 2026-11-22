@@ -7,9 +7,10 @@ Rules (docs/CPP_TOP.md "Install: from the wheel"):
 
 - A ``py3-none-any`` wheel carries no ``cuda_link/td_plugins/`` entry.
 - A platform wheel carries either no DLLs, or exactly ``CudaLinkOutTOP.dll`` and
-  ``CudaLinkInTOP.dll``, each stamped with the package version. That is ``__version__`` from
-  the wheel's ``cuda_link/__init__.py`` (the string cpp_top stamps), not the PEP 440 form in
-  the file name.
+  ``CudaLinkInTOP.dll``, each stamped with the package version, plus ``BUILD_INFO.txt``
+  whose first line is ``cuda-link <version>``. The version is ``__version__`` from the
+  wheel's ``cuda_link/__init__.py`` (the string cpp_top stamps), not the PEP 440 form in the
+  file name.
 - ``--require-plugins``: every platform wheel must carry both DLLs (release builds).
 
 Usage:
@@ -31,6 +32,8 @@ from pathlib import Path
 
 DLL_NAMES = ("CudaLinkOutTOP.dll", "CudaLinkInTOP.dll")
 PLUGIN_PREFIX = "cuda_link/td_plugins/"
+#: cpp_top's build sidecar (version, build sha, CUDA toolkit), read into the install record.
+BUILD_INFO = "BUILD_INFO.txt"
 _VERSION_LINE = re.compile(rb'^__version__ = "([^"]+)"', re.MULTILINE)
 
 
@@ -62,12 +65,17 @@ def check_wheel(wheel: Path, require_plugins: bool = False) -> list[str]:
         if not entries:
             return [f"{wheel.name}: no {PLUGIN_PREFIX} (release wheels need both DLLs)"] if require_plugins else []
         problems = []
-        if sorted(entries) != sorted(DLL_NAMES):
-            problems.append(f"{wheel.name}: {PLUGIN_PREFIX} holds {sorted(entries)}, expected {sorted(DLL_NAMES)}")
+        expected = sorted((*DLL_NAMES, BUILD_INFO))
+        if sorted(entries) != expected:
+            problems.append(f"{wheel.name}: {PLUGIN_PREFIX} holds {sorted(entries)}, expected {expected}")
         stamp = b"\x00" + version.encode("ascii") + b"\x00"
         for name in DLL_NAMES:
             if name in entries and stamp not in zf.read(entries[name]):
                 problems.append(f"{wheel.name}: {name} does not carry version {version}")
+        if BUILD_INFO in entries:
+            first = zf.read(entries[BUILD_INFO]).decode("utf-8", "replace").splitlines()[:1]
+            if first != [f"cuda-link {version}"]:
+                problems.append(f"{wheel.name}: {BUILD_INFO} is not for version {version}")
         return problems
 
 

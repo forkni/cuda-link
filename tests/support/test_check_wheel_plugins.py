@@ -33,7 +33,10 @@ def _wheel(tmp_path: Path, name: str, plugins: dict[str, bytes], init: str = "")
 
 
 def _both(version: str = _VERSION) -> dict[str, bytes]:
-    return {n: _dll(version) for n in cwp.DLL_NAMES}
+    """Both DLLs and the BUILD_INFO.txt sidecar, as cpp_top writes them."""
+    files = {n: _dll(version) for n in cwp.DLL_NAMES}
+    files[cwp.BUILD_INFO] = f"cuda-link {version}\nbuild bd1d7e1\ncuda toolkit 12.6\n".encode()
+    return files
 
 
 def test_platform_wheel_with_both_stamped_dlls_passes(tmp_path: Path) -> None:
@@ -63,20 +66,20 @@ def test_extra_file_fails(tmp_path: Path) -> None:
 
 
 def test_dll_of_another_version_fails(tmp_path: Path) -> None:
-    plugins = {"CudaLinkOutTOP.dll": _dll(), "CudaLinkInTOP.dll": _dll("1.14.1")}
+    plugins = {**_both(), "CudaLinkInTOP.dll": _dll("1.14.1")}
     problems = cwp.check_wheel(_wheel(tmp_path, _PLATFORM, plugins))
     assert problems == [f"{_PLATFORM}: CudaLinkInTOP.dll does not carry version {_VERSION}"]
 
 
 def test_version_must_be_a_whole_string(tmp_path: Path) -> None:
-    # A "2.0.0.dev0" stamp in a 2.0.0 wheel fails ...
+    # A "2.0.0.dev0" stamp in a 2.0.0 wheel fails (both DLLs and BUILD_INFO.txt) ...
     wheel = _wheel(tmp_path, "cuda_link-2.0.0-cp311-cp311-win_amd64.whl", _both())
-    assert len(cwp.check_wheel(wheel)) == 2
+    assert len(cwp.check_wheel(wheel)) == 3
 
 
 def test_version_must_be_a_whole_string_other_way(tmp_path: Path) -> None:
     # ... and a "2.0.0" stamp in a 2.0.0.dev0 wheel fails too.
-    assert len(cwp.check_wheel(_wheel(tmp_path, _PLATFORM, _both("2.0.0")))) == 2
+    assert len(cwp.check_wheel(_wheel(tmp_path, _PLATFORM, _both("2.0.0")))) == 3
 
 
 def test_raw_package_version_wins_over_the_file_name(tmp_path: Path) -> None:
@@ -112,3 +115,14 @@ def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
 def test_bad_file_name_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a wheel file name"):
         cwp.wheel_tags(tmp_path / "cuda_link.whl")
+
+
+def test_missing_build_info_fails(tmp_path: Path) -> None:
+    plugins = {n: _dll() for n in cwp.DLL_NAMES}
+    assert "expected" in cwp.check_wheel(_wheel(tmp_path, _PLATFORM, plugins))[0]
+
+
+def test_build_info_of_another_version_fails(tmp_path: Path) -> None:
+    plugins = {**_both(), cwp.BUILD_INFO: b"cuda-link 1.14.1\nbuild x\n"}
+    problems = cwp.check_wheel(_wheel(tmp_path, _PLATFORM, plugins))
+    assert problems == [f"{_PLATFORM}: {cwp.BUILD_INFO} is not for version {_VERSION}"]
