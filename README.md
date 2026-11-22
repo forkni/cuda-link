@@ -164,6 +164,16 @@ importer.close()
 
 > ▶ Runnable version: [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py) — spawns its own demo producer, so no TouchDesigner is needed to try it.
 
+**How long a zero-copy frame stays valid.** `get_frame()` and `get_frame_cupy()` return a
+view of one slot of the producer's ring buffer, not a copy. The producer writes that slot
+again when it publishes its `num_slots`-th next frame. The default is 3 slots (the TD Senders
+offer 2, 3 or 4), so at 60 fps a frame is valid for less than 50 ms after its publish. Read
+it before then, or copy it (`tensor.clone()`, `arr.copy()`) to keep it longer. A read that
+takes longer gets a mix of two frames. The first read after `Importer.open()` can be slow,
+because torch and CuPy build their kernels on first use (CuPy compiles one per dtype).
+`get_frame_numpy()` copies into a host buffer that the importer uses again on each call, so
+its array is valid until the next `get_frame_numpy()` call. Use `array.copy()` to keep it.
+
 **What a TD source arrives as.** 8-bit RGBA TOPs arrive in **B, G, R, A** channel order
 (that is how TD's `cudaMemory()` returns them; the Sender sets `FLAGS_BGRA` in the SHM
 header). 16-bit and 32-bit RGBA arrive as R, G, B, A. **Float16 TOPs arrive as `float32`**:
