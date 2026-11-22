@@ -174,31 +174,37 @@ class TDHost(Protocol):
         """
         ...
 
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        """Set the condition ``key`` to a "warning" or an "error" with ``msg``.
+
+        Each key holds one condition until clear_condition(key). The COMP shows the most severe
+        one (an error over a warning; of equal ones, the one set last): its tint, and
+        "WARNING: msg" or "ERROR: msg" in the Status par. Keys: STATUS_ENGINE, STATUS_LIBRARY,
+        STATUS_NATIVE_TOPS.
+        """
+        ...
+
+    def clear_condition(self, key: str) -> None:
+        """Remove the condition ``key``. The next one shows, or the info text and default color."""
+        ...
+
     def set_warning_status(self, msg: str) -> None:
-        """Tint ownerComp yellow to signal a recoverable warning (e.g. bad pixel format)."""
+        """set_condition(STATUS_ENGINE, "warning", msg): a recoverable engine warning."""
         ...
 
     def set_error_status(self, msg: str) -> None:
-        """Tint ownerComp red and emit a persistent script-error badge for fatal failures."""
+        """set_condition(STATUS_ENGINE, "error", msg): an engine error, with a script-error badge."""
         ...
 
     def clear_status(self) -> None:
-        """Restore ownerComp to its original color and clear any script-error badges.
+        """Clear the engine condition and reset the info text to "Idle".
 
-        With a standing warning set (set_standing_warning), show that warning instead.
+        Conditions of other keys stay (for example C++ TOPs of another version).
         """
         ...
 
     def set_info_status(self, msg: str) -> None:
-        """Write an informational status message to the Status par (no tint/cook side effects)."""
-        ...
-
-    def set_standing_warning(self, msg: str | None) -> None:
-        """Set (msg) or remove (None) a warning that clear_status() does not remove.
-
-        For a condition that lasts for the whole session, for example C++ TOPs of another
-        version. Show it now; clear_status() shows it again instead of the default color.
-        """
+        """Set the info text: the Status par shows it while no condition is set. No tint."""
         ...
 
     def abs_frame(self) -> int | None:
@@ -303,6 +309,12 @@ class RealTOPHandle(TOPHandle):
             return False
 
 
+# Status condition keys (TDHost.set_condition). Each holds one warning or error.
+STATUS_ENGINE = "engine"  # the Sender/Receiver engine: set_warning_status / set_error_status
+STATUS_LIBRARY = "library"  # cuda_link not loaded (CUDAIPCExtension._notify_library_unavailable)
+STATUS_NATIVE_TOPS = "native_tops"  # C++ TOPs of another version (the Info page)
+_SEVERITY = {"warning": 1, "error": 2}
+
 _WARNING_COLOR: tuple[float, float, float] = (0.9137, 1.0, 0.0)
 _ERROR_COLOR: tuple[float, float, float] = (0.7, 0.0, 0.0)
 _DEFAULT_NODE_COLOR: tuple[float, float, float] = (0.55, 0.55, 0.55)
@@ -340,10 +352,12 @@ class RealTDHost(TDHost):
         # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
         self._warning_emitter: Any = None  # lazily resolved; None = not found yet, look again
-        self._status_msg: str | None = None  # current stored status; drives cook-on-transition
+        self._status_msg: str | None = None  # the condition now shown ("WARNING: .."); drives cook-on-transition
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
         self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
-        self._standing_warning: str | None = None  # shown again by clear_status()
+        # key -> (kind, msg). Insertion order is set order: of equal severity, the last set shows.
+        self._conditions: dict[str, tuple[str, str]] = {}
+        self._info_msg = "Idle"  # shown in the Status par while no condition is set
         self._reset_stale_tint()
         self._reset_stale_status_par()
 
@@ -469,43 +483,66 @@ class RealTDHost(TDHost):
         if self._default_color is None:
             self._default_color = _DEFAULT_NODE_COLOR
 
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        if kind not in _SEVERITY:
+            raise ValueError(f"kind must be 'warning' or 'error', not {kind!r}")
+        if self._conditions.get(key) != (kind, msg):
+            self._conditions.pop(key, None)  # re-insert: it is now the latest set
+            self._conditions[key] = (kind, msg)
+        self._show()
+
+    def clear_condition(self, key: str) -> None:
+        self._conditions.pop(key, None)
+        self._show()
+
     def set_warning_status(self, msg: str) -> None:
-        self._capture_default_color()
-        full_msg = f"WARNING: {msg}"
-        if self._status_msg == full_msg:
-            # Called every cook while the condition lasts. The COMP is already marked; only the
-            # Status par can have moved on (set_info_status), and the write dedups when it has not.
-            self._write_status_par(full_msg)
-            return
-        with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.color = _WARNING_COLOR
-            if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
-                self._comp.clearScriptErrors(error="*")  # drop the badge the earlier error left
-            self._comp.store("cuda_link_status_msg", full_msg)
-            self._status_msg = full_msg  # last, so a failed write above is retried next cook
-        self._write_status_par(full_msg)
-        self._cook_warning_emitter()
+        self.set_condition(STATUS_ENGINE, "warning", msg)
 
     def set_error_status(self, msg: str) -> None:
-        self._capture_default_color()
-        full_msg = f"ERROR: {msg}"
-        if self._status_msg == full_msg:
-            self._write_status_par(full_msg)  # see set_warning_status
+        self.set_condition(STATUS_ENGINE, "error", msg)
+
+    def clear_status(self) -> None:
+        self._info_msg = "Idle"
+        self.clear_condition(STATUS_ENGINE)
+
+    def set_info_status(self, msg: str) -> None:
+        self._info_msg = msg
+        if not self._conditions:
+            self._write_status_par(msg)
+
+    def _top_condition(self) -> tuple[str, str] | None:
+        """The condition to show: the most severe; of equal ones, the one set last."""
+        top: tuple[str, str] | None = None
+        for condition in self._conditions.values():
+            if top is None or _SEVERITY[condition[0]] >= _SEVERITY[top[0]]:
+                top = condition
+        return top
+
+    def _show(self) -> None:
+        top = self._top_condition()
+        if top is None:
+            self._show_no_condition()
             return
+        kind, msg = top
+        full_msg = f"{kind.upper()}: {msg}"
+        if self._status_msg == full_msg:
+            # Set again every cook while the condition lasts. The COMP is already marked; only
+            # the Status par can differ, and the write dedups when it does not.
+            self._write_status_par(full_msg)
+            return
+        self._capture_default_color()
         with contextlib.suppress(AttributeError, RuntimeError):
-            self._comp.color = _ERROR_COLOR
+            self._comp.color = _ERROR_COLOR if kind == "error" else _WARNING_COLOR
             if self._status_msg is not None and self._status_msg.startswith("ERROR:"):
-                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the previous badge
+                self._comp.clearScriptErrors(error="*")  # replace, don't stack, the earlier badge
             self._comp.store("cuda_link_status_msg", full_msg)
-            self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
+            if kind == "error":
+                self._comp.addScriptError(msg)  # after store: a failure above leaves no badge to duplicate
             self._status_msg = full_msg  # last, so a failed write above is retried next cook
         self._write_status_par(full_msg)
         self._cook_warning_emitter()
 
-    def clear_status(self) -> None:
-        if self._standing_warning is not None:
-            self.set_warning_status(self._standing_warning)
-            return
+    def _show_no_condition(self) -> None:
         needs_cook = self._status_msg is not None
         self._status_msg = None
         with contextlib.suppress(AttributeError, RuntimeError):
@@ -513,25 +550,6 @@ class RealTDHost(TDHost):
                 self._comp.color = self._default_color
             self._comp.clearScriptErrors(error="*")
             self._comp.unstore("cuda_link_status_msg")
-        self._write_status_par("Idle")
+        self._write_status_par(self._info_msg)
         if needs_cook:
             self._cook_warning_emitter()
-
-    def set_info_status(self, msg: str) -> None:
-        if self._standing_warning is not None:
-            standing = f"WARNING: {self._standing_warning}"
-            if self._status_msg == standing:
-                # The COMP is yellow for the standing warning: keep its reason in Status, not
-                # the per-frame info text.
-                self._write_status_par(standing)
-                return
-        self._write_status_par(msg)
-
-    def set_standing_warning(self, msg: str | None) -> None:
-        previous = self._standing_warning
-        self._standing_warning = msg or None
-        if self._standing_warning is not None:
-            self.set_warning_status(self._standing_warning)
-        elif previous is not None and self._status_msg == f"WARNING: {previous}":
-            # Clear only the standing warning itself, not another warning or error now shown.
-            self.clear_status()

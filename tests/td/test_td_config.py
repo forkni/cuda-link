@@ -211,11 +211,12 @@ def test_make_engine_receiver_mode_passes_receiver_config() -> None:
     """_make_engine() in Receiver mode injects TDReceiverConfig(), not TDSenderConfig (S-B)."""
     from unittest.mock import MagicMock
 
-    from CUDAIPCExtension import CUDAIPCExtension
+    from CUDAIPCExtension import CUDAIPCExtension, LoadState
     from TDConfig import TDReceiverConfig, TDRuntimeState, TDSenderConfig
 
     # Build extension instance without __init__ to avoid TD-host side-effects.
     ext = object.__new__(CUDAIPCExtension)
+    ext._load = LoadState.read()
     ext._host = MagicMock()
     ext._config = TDSenderConfig()
     ext._receiver_config = TDReceiverConfig(report_every=7)

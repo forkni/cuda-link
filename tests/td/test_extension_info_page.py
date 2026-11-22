@@ -1,9 +1,9 @@
-"""The .tox Info page: live version label, C++ TOPs row, and the standing warning.
+"""The .tox Info page: live version label, C++ TOPs row, and the C++ TOPs condition.
 
 The label and the row come from the loaded code on every init (a saved par value in a .toe goes
 stale, a label written on load does not). The C++ TOPs row reads the VERSION.txt that
 scripts/install_cpp_top.py writes. A version that differs from this .tox tints the COMP yellow
-through a standing warning, which clear_status() does not remove.
+through the STATUS_NATIVE_TOPS condition, which the engine's clear_status() does not remove.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import CUDAIPCExtension
 import pytest
 from fakes import FakeTDHost
-from TDHost import _WARNING_COLOR, RealTDHost
+from TDHost import _ERROR_COLOR, _WARNING_COLOR, STATUS_LIBRARY, STATUS_NATIVE_TOPS, RealTDHost
 
 
 def _version_txt(tmp_path: Path, version: str, cuda: str = "12.8") -> Path:
@@ -94,25 +94,25 @@ def _make_ext(monkeypatch: pytest.MonkeyPatch, version_file: Path) -> FakeTDHost
 def test_init_sets_live_header_label(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = _make_ext(monkeypatch, tmp_path / "missing.txt")
     label = host.param_labels[CUDAIPCExtension.INFO_HEADER_PAR]
-    assert label.startswith(f"CUDA-Link {CUDAIPCExtension._mirror_version() or 'unknown'} (")
+    assert label.startswith(f"CUDA-Link {CUDAIPCExtension.LoadState.read().version or 'unknown'} (")
 
 
 def test_init_writes_native_tops_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = _make_ext(monkeypatch, tmp_path / "missing.txt")
     assert (CUDAIPCExtension.NATIVE_TOPS_PAR, "not installed") in host.param_writes
-    assert not [c for c in host.status_calls if c[0] == "standing"]
+    assert STATUS_NATIVE_TOPS not in host.conditions
 
 
-def test_init_other_version_sets_standing_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_init_other_version_sets_the_native_tops_condition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = _make_ext(monkeypatch, _version_txt(tmp_path, "0.9.9"))
-    standing = [msg for kind, msg in host.status_calls if kind == "standing"]
-    assert len(standing) == 1
-    assert "0.9.9" in (standing[0] or "")
+    kind, msg = host.conditions[STATUS_NATIVE_TOPS]
+    assert kind == "warning"
+    assert "0.9.9" in msg
 
 
 def test_init_same_version_sets_no_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    host = _make_ext(monkeypatch, _version_txt(tmp_path, CUDAIPCExtension._mirror_version()))
-    assert not [c for c in host.status_calls if c[0] == "standing"]
+    host = _make_ext(monkeypatch, _version_txt(tmp_path, CUDAIPCExtension.LoadState.read().version))
+    assert STATUS_NATIVE_TOPS not in host.conditions
 
 
 def test_init_survives_a_failing_status_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,7 +128,7 @@ def test_init_survives_a_failing_status_read(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ---------------------------------------------------------------------------
-# RealTDHost: set_param_label and the standing warning
+# RealTDHost: set_param_label and the keyed conditions
 # ---------------------------------------------------------------------------
 
 
@@ -172,10 +172,10 @@ def test_real_host_label_on_missing_par_is_noop() -> None:
     assert comp.par.Cudalinkheader.label == "old"
 
 
-def test_standing_warning_survives_clear_status() -> None:
+def test_native_tops_condition_survives_clear_status() -> None:
     comp = _Comp()
     host = RealTDHost(comp)
-    host.set_standing_warning("C++ TOPs differ")
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
     assert comp.color == _WARNING_COLOR
     host.set_warning_status("unsupported pixel format")
     host.clear_status()
@@ -183,38 +183,81 @@ def test_standing_warning_survives_clear_status() -> None:
     assert comp.par.Status == "WARNING: C++ TOPs differ"
 
 
-def test_standing_warning_removed_restores_default() -> None:
+def test_last_condition_removed_restores_default() -> None:
     comp = _Comp()
     host = RealTDHost(comp)
-    host.set_standing_warning("C++ TOPs differ")
-    host.set_standing_warning(None)
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
+    host.clear_condition(STATUS_NATIVE_TOPS)
     assert comp.color == (0.55, 0.55, 0.55)
     assert comp.par.Status == "Idle"
 
 
-def test_info_status_keeps_the_standing_reason() -> None:
+def test_info_status_keeps_the_condition_reason() -> None:
     comp = _Comp()
     host = RealTDHost(comp)
-    host.set_standing_warning("C++ TOPs differ")
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
     host.set_info_status("1920x1080 rgba8")
     assert comp.par.Status == "WARNING: C++ TOPs differ"
 
 
-def test_info_status_still_shows_without_standing_warning() -> None:
+def test_info_status_shows_without_a_condition() -> None:
     comp = _Comp()
     host = RealTDHost(comp)
     host.set_info_status("1920x1080 rgba8")
     assert comp.par.Status == "1920x1080 rgba8"
 
 
-def test_removing_standing_warning_keeps_another_warning() -> None:
+def test_two_conditions_clear_one_the_other_stays() -> None:
     comp = _Comp()
     host = RealTDHost(comp)
-    host.set_standing_warning("C++ TOPs differ")
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
     host.set_warning_status("unsupported pixel format")
-    host.set_standing_warning(None)
+    assert comp.par.Status == "WARNING: unsupported pixel format"  # of equal ones, the last set shows
+    host.clear_condition(STATUS_NATIVE_TOPS)
     assert comp.color == _WARNING_COLOR
     assert comp.par.Status == "WARNING: unsupported pixel format"
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
+    host.clear_status()
+    assert comp.color == _WARNING_COLOR
+    assert comp.par.Status == "WARNING: C++ TOPs differ"
+
+
+def test_a_later_warning_does_not_hide_an_error() -> None:
+    # The deferred C++ TOPs warning arrives 5 frames after init. An engine error set before
+    # it stays shown (no error -> yellow -> error flicker on the next cook).
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_error_status("Initialization failed: x")
+    host.set_condition(STATUS_NATIVE_TOPS, "warning", "C++ TOPs differ")
+    assert comp.color == _ERROR_COLOR
+    assert comp.par.Status == "ERROR: Initialization failed: x"
+    host.clear_status()
+    assert comp.color == _WARNING_COLOR
+    assert comp.par.Status == "WARNING: C++ TOPs differ"
+
+
+def test_info_text_waits_under_a_condition_and_shows_after_it() -> None:
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_condition(STATUS_LIBRARY, "warning", "cuda_link not found")
+    host.set_info_status("1920x1080 rgba8")
+    assert comp.par.Status == "WARNING: cuda_link not found"
+    host.clear_condition(STATUS_LIBRARY)
+    assert comp.par.Status == "1920x1080 rgba8"
+    assert comp.color == (0.55, 0.55, 0.55)
+
+
+def test_clear_status_resets_the_info_text() -> None:
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_info_status("1920x1080 rgba8")
+    host.clear_status()
+    assert comp.par.Status == "Idle"
+
+
+def test_unknown_condition_kind_raises() -> None:
+    with pytest.raises(ValueError, match="'warning' or 'error'"):
+        RealTDHost(_Comp()).set_condition(STATUS_LIBRARY, "info", "x")
 
 
 class _Emitter:
@@ -245,7 +288,7 @@ def test_emitter_missing_at_first_lookup_is_found_later() -> None:
     assert comp.emitter.cooks == 1
 
 
-def test_standing_warning_is_deferred_in_td(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_native_tops_condition_is_deferred_in_td(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     scheduled: list[tuple] = []
 
     def _run(script: str, *args: object, **kwargs: object) -> None:
@@ -257,10 +300,10 @@ def test_standing_warning_is_deferred_in_td(monkeypatch: pytest.MonkeyPatch, tmp
     deferred = [s for s in scheduled if s[0] == "args[0](args[1])"]
     assert len(deferred) == 1
     assert deferred[0][2]["delayFrames"] == 5
-    assert not [c for c in host.status_calls if c[0] == "standing"]  # not set during init
+    assert STATUS_NATIVE_TOPS not in host.conditions  # not set during init
     callback, warning = deferred[0][1]
     callback(warning)
-    assert [m for k, m in host.status_calls if k == "standing"] == [warning]
+    assert host.conditions[STATUS_NATIVE_TOPS] == ("warning", warning)
 
 
 def test_deferred_warning_on_a_deleted_comp_does_not_raise(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -270,23 +313,23 @@ def test_deferred_warning_on_a_deleted_comp_does_not_raise(monkeypatch: pytest.M
     class _DeadOpError(Exception):  # stands in for td.tdError, which is not a RuntimeError
         pass
 
-    def _dead(_msg: str | None) -> None:
+    def _dead(*_a: object) -> None:
         raise _DeadOpError("operator was deleted")
 
-    monkeypatch.setattr(host, "set_standing_warning", _dead)
-    ext._apply_standing_warning("C++ TOPs differ")  # must not raise
-    assert not [c for c in host.status_calls if c[0] == "standing"]
+    monkeypatch.setattr(host, "set_condition", _dead)
+    ext._apply_native_tops_warning("C++ TOPs differ")  # must not raise
+    assert STATUS_NATIVE_TOPS not in host.conditions
 
 
 def test_schedule_failure_sets_the_warning_at_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def _run(script: str, *_a: object, **_k: object) -> None:
-        if script == "args[0](args[1])":  # only the standing warning; not the library notice
+        if script == "args[0](args[1])":  # only the C++ TOPs warning; not the library notice
             raise RuntimeError("no TDResources")
 
     monkeypatch.setattr(CUDAIPCExtension, "run", _run, raising=False)
     monkeypatch.setattr(CUDAIPCExtension, "op", SimpleNamespace(TDResources=object()), raising=False)
     host = _make_ext(monkeypatch, _version_txt(tmp_path, "0.9.9"))
-    assert len([c for c in host.status_calls if c[0] == "standing"]) == 1
+    assert host.conditions[STATUS_NATIVE_TOPS][0] == "warning"
 
 
 def test_extension_tests_never_read_the_real_record(monkeypatch: pytest.MonkeyPatch) -> None:

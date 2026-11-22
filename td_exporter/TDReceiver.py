@@ -408,6 +408,20 @@ class TDReceiverEngine:
             return td_format_string(self._format)
         return None
 
+    # --- Sender verbs: no-ops here, so the facade calls the engine in either mode ---
+    # (CUDAIPCExtension._Engine). Each returns what the facade returned in Receiver mode.
+
+    def initialize(
+        self, width: int, height: int, channels: int = 4, buffer_size: int | None = None, extra_flags: int = 0
+    ) -> bool:
+        return False
+
+    def export_frame(self, top_op: object = None) -> bool:
+        return False
+
+    def _check_deferred_cleanup(self) -> None:
+        return None
+
     # --- Core API ---
 
     def is_ready(self) -> bool:

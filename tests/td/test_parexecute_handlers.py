@@ -27,9 +27,8 @@ class _Ext:
         self.cleanups = 0
         self.status_cleared = 0
         self.verbose_performance = None
-        self._host = types.SimpleNamespace(clear_status=self._clear_status)
 
-    def _clear_status(self) -> None:
+    def clear_status(self) -> None:
         self.status_cleared += 1
 
     def _log(self, msg: str, force: bool = False) -> None:

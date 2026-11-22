@@ -176,14 +176,14 @@ def test_set_info_status_dedup() -> None:
     assert after == before
 
 
-def test_set_info_status_after_warning_overwrites_par() -> None:
+def test_set_info_status_under_a_warning_keeps_the_warning() -> None:
+    # The Status par shows the condition while it is set; the info text shows after it.
     host, comp = _make_host()
     host.set_warning_status("bad format")
     host.set_info_status("1920x1080 float32 4ch")
     writes = [v for n, v in comp.par_writes if n == "Status"]
-    assert "WARNING: bad format" in writes
-    assert "1920x1080 float32 4ch" in writes
-    assert writes[-1] == "1920x1080 float32 4ch"
+    assert writes[-1] == "WARNING: bad format"
+    assert "1920x1080 float32 4ch" not in writes
 
 
 def test_set_info_status_does_not_tint_comp() -> None:
