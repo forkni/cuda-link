@@ -1,4 +1,4 @@
-# Multi-stream sync kit (cuda-link 2.0.0.dev0, Phase 5)
+# Multi-stream sync kit (cuda-link 2.0.0, Phase 5)
 
 This kit is for two TouchDesigner instances on one machine:
 
