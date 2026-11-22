@@ -10,7 +10,7 @@ Owns only the genuinely TD-specific concerns:
   - HolderBarrier lifecycle (holder role: pauses the Python Exporter during TD init)
   - Host status side-effects (set_warning_status, clear_status)
 
-All GPU ring-buffer allocation, IPC handle export, SHM writes, CUDA graph capture,
+All GPU ring-buffer allocation, IPC handle export, SHM writes,
 event handling, publish, and 7-step cleanup delegate to the canonical Exporter
 (td_exporter/Exporter.py — auto-derived from src/cuda_link/exporter.py).
 
