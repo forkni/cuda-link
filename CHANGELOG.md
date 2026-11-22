@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.tox` Info page shows the loaded version and the C++ TOPs**: on each init the extension
   sets the Info page header label to `CUDA-Link <version> (<load mode>)` from the loaded code,
   so a saved project never shows a stale version. The new read-only `Nativetops` par shows the
-  installed C++ TOPs from `VERSION.txt` in the Plugins folder (`<version> (build <sha>)` or
-  `not installed`). C++ TOPs of another version tint the COMP yellow with a warning that
+  installed C++ TOPs from `VERSION.txt` in the Plugins folder (`<version> (CUDA <x.y>)`, or
+  `<version> (build <sha>)` once the install record has a build line; `not installed`). C++ TOPs of another version tint the COMP yellow with a warning that
   `clear_status()` keeps. A `.tox` without these pars is not changed. See
   `docs/TOX_BUILD_GUIDE.md` "Info page".
 

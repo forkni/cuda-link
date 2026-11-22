@@ -172,3 +172,19 @@ def _allow_in_process_peer(request: pytest.FixtureRequest, monkeypatch: pytest.M
         module = sys.modules.get(name)
         if module is not None and hasattr(module, "_current_pid"):
             monkeypatch.setattr(module, "_current_pid", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_native_tops_record(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Point the .tox Info page at an empty Documents folder, never the real one.
+
+    CUDAIPCExtension reads <Documents>/Derivative/Plugins/CudaLink/VERSION.txt on init. On a
+    dev box with C++ TOPs of another version installed, that would add a standing warning to
+    every extension test. A test that needs a record patches native_tops_version_file.
+    """
+    import sys
+
+    module = sys.modules.get("CUDAIPCExtension")
+    if module is not None and hasattr(module, "_documents_dir"):
+        documents = tmp_path_factory.getbasetemp() / "no-documents"  # never created: no record
+        monkeypatch.setattr(module, "_documents_dir", lambda: documents)

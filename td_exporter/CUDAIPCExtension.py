@@ -181,9 +181,9 @@ def _bootstrap_failure_kind() -> str:
 # Info page: live version label and the C++ TOPs row
 # ---------------------------------------------------------------------------
 
-#: Header par on the Info page. Its label is set from the loaded code on every init: TD
-#: saves a par *value* in the .toe/.tox (a stale Semverversion showed 1.10.2 in a 1.14.1
-#: project), but this label is written again on each load, so it cannot go stale.
+#: Header par on the Info page. Its label is set from the loaded code on every init. TD saves
+#: the label in the .toe/.tox too, but nothing reads the saved one: each load writes it again,
+#: so it cannot go stale the way the saved Semverversion value did (1.10.2 in a 1.14.1 project).
 INFO_HEADER_PAR = "Cudalinkheader2"  # the Info page header; Cudalinkheader is on Settings
 INFO_HEADER_TAGLINE = "Zero-copy GPU texture sharing via CUDA IPC"
 #: Read-only string par on the Info page: are the C++ TOPs installed, and which version.
@@ -216,12 +216,13 @@ def _documents_dir() -> Path:
             g = _GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
             out = ctypes.c_wchar_p()
             shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
-            if shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
-                try:
-                    if out.value:
-                        return Path(out.value)
-                finally:
-                    ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
+            try:
+                hr = shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out))
+                if hr == 0 and out.value:
+                    return Path(out.value)
+            finally:
+                # The caller frees the buffer on success and on failure (NULL is a no-op).
+                ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
     return Path.home() / "Documents"
 
 
@@ -430,10 +431,27 @@ class CUDAIPCExtension:
             text, warning = native_tops_status(version)
             self._host.set_param_value(NATIVE_TOPS_PAR, text)
             if warning:
-                self._host.set_standing_warning(warning)
                 self._log(warning, force=True)
+                self._schedule_standing_warning(warning)
         except Exception as e:  # noqa: BLE001 -- the Info page must never break the extension
             self._log(f"Info page update failed: {type(e).__name__}: {e}", force=True)
+
+    def _schedule_standing_warning(self, warning: str) -> None:
+        """Set the standing warning 5 frames after init, as the library notice does.
+
+        The warning tint cooks the warning_emitter child, which may not be loaded yet while
+        the extension initializes. Outside TD (no ``run`` global) it is set at once.
+        """
+        try:
+            run(  # noqa: F821  -- td global
+                "args[0](args[1])",
+                self._host.set_standing_warning,
+                warning,
+                delayFrames=5,
+                delayRef=op.TDResources,  # noqa: F821
+            )
+        except NameError:
+            self._host.set_standing_warning(warning)
 
     # ------------------------------------------------------------------
     # Library availability detection + install banner

@@ -190,3 +190,81 @@ def test_standing_warning_removed_restores_default() -> None:
     host.set_standing_warning(None)
     assert comp.color == (0.55, 0.55, 0.55)
     assert comp.par.Status == "Idle"
+
+
+def test_info_status_keeps_the_standing_reason() -> None:
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_standing_warning("C++ TOPs differ")
+    host.set_info_status("1920x1080 rgba8")
+    assert comp.par.Status == "WARNING: C++ TOPs differ"
+
+
+def test_info_status_still_shows_without_standing_warning() -> None:
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_info_status("1920x1080 rgba8")
+    assert comp.par.Status == "1920x1080 rgba8"
+
+
+def test_removing_standing_warning_keeps_another_warning() -> None:
+    comp = _Comp()
+    host = RealTDHost(comp)
+    host.set_standing_warning("C++ TOPs differ")
+    host.set_warning_status("unsupported pixel format")
+    host.set_standing_warning(None)
+    assert comp.color == _WARNING_COLOR
+    assert comp.par.Status == "WARNING: unsupported pixel format"
+
+
+class _Emitter:
+    def __init__(self) -> None:
+        self.cooks = 0
+
+    def cook(self, force: bool = False) -> None:
+        self.cooks += 1
+
+
+class _LateEmitterComp(_Comp):
+    """warning_emitter appears only after the first lookup, as during a .toe load."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.emitter: _Emitter | None = None
+
+    def op(self, name: str) -> _Emitter | None:  # type: ignore[override]
+        return self.emitter if name == "warning_emitter" else None
+
+
+def test_emitter_missing_at_first_lookup_is_found_later() -> None:
+    comp = _LateEmitterComp()
+    host = RealTDHost(comp)
+    host.set_warning_status("first")  # emitter not loaded yet
+    comp.emitter = _Emitter()
+    host.set_warning_status("second")
+    assert comp.emitter.cooks == 1
+
+
+def test_standing_warning_is_deferred_in_td(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    scheduled: list[tuple] = []
+
+    def _run(script: str, *args: object, **kwargs: object) -> None:
+        scheduled.append((script, args, kwargs))
+
+    monkeypatch.setattr(CUDAIPCExtension, "run", _run, raising=False)
+    monkeypatch.setattr(CUDAIPCExtension, "op", SimpleNamespace(TDResources=object()), raising=False)
+    host = _make_ext(monkeypatch, _version_txt(tmp_path, "0.9.9"))
+    deferred = [s for s in scheduled if s[0] == "args[0](args[1])"]
+    assert len(deferred) == 1
+    assert deferred[0][2]["delayFrames"] == 5
+    assert not [c for c in host.status_calls if c[0] == "standing"]  # not set during init
+    callback, warning = deferred[0][1]
+    callback(warning)
+    assert [m for k, m in host.status_calls if k == "standing"] == [warning]
+
+
+def test_extension_tests_never_read_the_real_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The autouse conftest fixture points Documents at a folder that does not exist.
+    host = FakeTDHost(params={"Mode": "Receiver", "Active": False})
+    CUDAIPCExtension.CUDAIPCExtension(SimpleNamespace(path="/project1/info_iso"), host=host)
+    assert (CUDAIPCExtension.NATIVE_TOPS_PAR, "not installed") in host.param_writes

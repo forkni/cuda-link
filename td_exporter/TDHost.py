@@ -339,7 +339,7 @@ class RealTDHost(TDHost):
         # _reset_stale_tint() clears any visible managed-colour tint immediately
         # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
-        self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
+        self._warning_emitter: Any = None  # lazily resolved; None = not found yet, look again
         self._status_msg: str | None = None  # current stored status; drives cook-on-transition
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
         self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
@@ -420,7 +420,9 @@ class RealTDHost(TDHost):
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:
             with contextlib.suppress(AttributeError, RuntimeError):
-                self._warning_emitter = self._comp.op("warning_emitter") or False
+                # A miss is not cached: during a .toe load the child may not exist yet, and a
+                # cached miss would drop every later badge on this COMP for the session.
+                self._warning_emitter = self._comp.op("warning_emitter") or None
         if self._warning_emitter:
             with contextlib.suppress(AttributeError, RuntimeError):
                 self._warning_emitter.cook(force=True)
@@ -516,11 +518,20 @@ class RealTDHost(TDHost):
             self._cook_warning_emitter()
 
     def set_info_status(self, msg: str) -> None:
+        if self._standing_warning is not None:
+            standing = f"WARNING: {self._standing_warning}"
+            if self._status_msg == standing:
+                # The COMP is yellow for the standing warning: keep its reason in Status, not
+                # the per-frame info text.
+                self._write_status_par(standing)
+                return
         self._write_status_par(msg)
 
     def set_standing_warning(self, msg: str | None) -> None:
+        previous = self._standing_warning
         self._standing_warning = msg or None
         if self._standing_warning is not None:
             self.set_warning_status(self._standing_warning)
-        else:
+        elif previous is not None and self._status_msg == f"WARNING: {previous}":
+            # Clear only the standing warning itself, not another warning or error now shown.
             self.clear_status()
