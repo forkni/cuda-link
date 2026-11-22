@@ -1163,9 +1163,9 @@ there is the resistance to refactoring the rewrite buys.
 
 ### Phase J, Windows follow-up (2026-11-18)
 
-Items A1-A5 of [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md), run on the Windows
-box at `c21fa14`: RTX 4090, driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept:
-`uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
+Items A1-A5 of the Phase J plan ([`TESTING_PHASE_J_PLAN.md`](https://github.com/forkni/cuda-link/blob/82ad70847a9227891390d4bade602a59848be4e4/docs/TESTING_PHASE_J_PLAN.md),
+removed from the tree at the 2.0.0 release), run on the Windows box at `c21fa14`: RTX 4090,
+driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept: `uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
 
 | Item | Command | Result |
 |------|---------|--------|
@@ -1190,7 +1190,8 @@ against the v0.6 rows, re-run once and not blocking. Tables and notes:
 ### Still open
 
 The full list, with the Windows-only checks and a ready-to-paste message for the agent that
-finishes them, is [docs/TESTING_PHASE_J_PLAN.md](docs/TESTING_PHASE_J_PLAN.md).
+finishes them, is the Phase J plan,
+[`TESTING_PHASE_J_PLAN.md`](https://github.com/forkni/cuda-link/blob/82ad70847a9227891390d4bade602a59848be4e4/docs/TESTING_PHASE_J_PLAN.md) (commit `82ad708`).
 
 | Item | What | Notes |
 |------|------|-------|
