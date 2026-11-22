@@ -619,6 +619,7 @@ class TDSenderEngine:
             self._host.clear_status()
             self._log("Source pixel format now supported — transfer resumed", force=True)
             self._warned_format = False
+            self._error_shown = False  # clear_status() cleared any engine error too
 
         if self._exporter is None or not self._initialized:
             # Lazy init: probe geometry from the first available frame, then skip this
@@ -943,6 +944,7 @@ class TDSenderEngine:
         self._last_fmt_needs_conv = False
         self._warned_dtype_size = False
         self._warned_format = False
+        self._error_shown = False  # the clear_status() below clears it
         self._f16_convert_to = None
 
         # Reset windowed-report state so the next activation starts with a fresh window.

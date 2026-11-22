@@ -117,6 +117,36 @@ def test_reopen_failure_drops_exporter_and_reinitializes(
     assert engine._error_shown is False
 
 
+def test_cleanup_after_an_error_leaves_no_clear_for_the_next_session(
+    fake_exporter_open: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    top = _top("rgba8fixed", 4)
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(host)
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine.export_frame() is True
+
+    # A reopen fails and shows its error, then the COMP is turned off (cleanup clears it).
+    top._width, top._height, top._cuda_size = 128, 128, 128 * 128 * 4
+    working_open = Exporter.open
+
+    def _failing_open(spec, *, policy=None, cuda=None, barrier=None):  # noqa: ANN001, ARG001
+        raise OSError("simulated SHM create failure")
+
+    monkeypatch.setattr(Exporter, "open", _failing_open)
+    assert engine.export_frame() is False
+    assert engine._error_shown is True
+    engine.cleanup()
+    assert engine._error_shown is False
+    cleaned_at = len(host.status_calls)
+
+    # The next session inits cleanly: the error is gone already, so no second clear.
+    monkeypatch.setattr(Exporter, "open", working_open)
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine.export_frame() is True
+    assert ("clear", None) not in host.status_calls[cleaned_at:]
+
+
 def test_a_healthy_sender_never_clears_a_status_it_did_not_set(fake_exporter_open: None) -> None:
     host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": _top("rgba8fixed", 4)})
     engine = _make_engine(host)
