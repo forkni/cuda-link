@@ -157,6 +157,7 @@ TOXES/CUDAIPCLink_v1.12.1.tox
 TOXES/CUDAIPCLink_v1.12.2.tox
 TOXES/CUDAIPCLink_v1.13.0.tox
 TOXES/CUDAIPCLink_v1.14.0.tox
+TOXES/CUDAIPCLink_v1.14.1.tox
 # Unreleased dev builds (feature branches): never tracked; the dev .tox is saved under local/.
 TOXES/*dev*.tox
 local/
