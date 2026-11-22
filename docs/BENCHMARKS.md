@@ -281,8 +281,8 @@ Python<->Python  export / get_numpy /    873 us / 2.54 ms / 179 us   N/A -- C++ 
 [1] Different measurement domain than the Original's Python-side `copy=` — the In TOP's
 `copy_us` is the op's own D2D-copy timing, not a Python-process read.
 
-[2] Per the `export_us` line of `td_exporter/example_sender_python.py`, this window (`export_us = (now - t0) * 1e6`)
-bundles the synchronous H2D staging fill (`_fill_ctypes`) *and* `exporter.export()`, excluding
+[2] Per the `export_us` line of `td_exporter/example_sender_python.py`, this window
+(`export_us = (now - t0) * 1e6`) bundles the synchronous H2D staging fill (`_fill_ctypes`) *and* `exporter.export()`, excluding
 the frame-pacing sleep. It is **not** comparable to the Original's TD-side `export=` line, which
 only times the extension's own export path.
 

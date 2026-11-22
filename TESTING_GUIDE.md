@@ -1168,7 +1168,8 @@ there is the resistance to refactoring the rewrite buys.
 
 Items A1-A5 of the Phase J plan ([`TESTING_PHASE_J_PLAN.md`](https://github.com/forkni/cuda-link/blob/82ad70847a9227891390d4bade602a59848be4e4/docs/TESTING_PHASE_J_PLAN.md),
 removed from the tree at the 2.0.0 release), run on the Windows box at `c21fa14`: RTX 4090,
-driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept: `uv run --no-sync`; `hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
+driver 621.24, Python 3.12.11, torch 2.11.0+cu128 (CUDA build kept: `uv run --no-sync`;
+`hypothesis==6.170.15` installed from the lock with `uv pip`, not `uv sync`).
 
 | Item | Command | Result |
 |------|---------|--------|
