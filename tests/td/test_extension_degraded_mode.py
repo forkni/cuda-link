@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import CUDAIPCExtension as ext_module  # noqa: N813
 import pytest
 from fakes import FakeTDHost
+from TDHost import STATUS_LIBRARY
 
 
 def _degraded_host(mode: str = "Sender") -> FakeTDHost:
@@ -167,6 +168,25 @@ def test_notify_library_unavailable_status_names_version_and_how_to_install(monk
     assert "restart" in msg.lower()
     assert "Libpath" not in msg
     assert "StreamDiffusionTD" not in msg
+    # The library condition, not the engine status: deactivation must not clear it.
+    assert host.conditions[STATUS_LIBRARY] == (kind, msg)
+
+
+def test_ext_clear_status_clears_the_engine_status_and_keeps_the_library_condition(
+    monkeypatch: object,
+) -> None:
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
+    monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: No module named 'SHMProtocol'")
+    host = _degraded_host()
+    ext = ext_module.CUDAIPCExtension(None, host=host)
+    ext._notify_library_unavailable()
+    library = host.conditions[STATUS_LIBRARY]
+
+    ext.clear_status()
+
+    assert host.status_calls[-1] == ("clear", None)
+    assert ("clear_condition", STATUS_LIBRARY) not in host.status_calls
+    assert host.conditions[STATUS_LIBRARY] == library
 
 
 def test_notify_library_unavailable_status_names_the_mismatched_version(monkeypatch: object) -> None:

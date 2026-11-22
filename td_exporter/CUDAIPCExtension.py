@@ -317,8 +317,9 @@ class _NullEngine:
 
     verbose_performance = False
 
-    def __init__(self, mode: str = "Sender") -> None:
+    def __init__(self, mode: str = "Sender", error: str = "") -> None:
         self._mode = mode
+        self._error = error  # LoadState.library_error
 
     def initialize(self, *a, **k) -> bool:
         return False
@@ -364,7 +365,7 @@ class _NullEngine:
         return None
 
     def get_stats(self) -> dict:
-        return {"ready": False, "error": LIBRARY_ERROR}
+        return {"ready": False, "error": self._error}
 
     def slot_meta_channels(self) -> dict:
         return {}
@@ -602,7 +603,7 @@ class CUDAIPCExtension:
 
     def _make_engine(self) -> _Engine:
         if not self._load.library_ready:
-            return _NullEngine(self._mode)
+            return _NullEngine(self._mode, self._load.library_error)
         # Reached only when the cuda_link import above succeeded, so TDSenderEngine /
         # TDReceiverEngine / *Config are the real classes here, never the None / stand-in
         # fallbacks bound in the except branch -- pyrefly can't see that control-flow

@@ -219,6 +219,8 @@ class FakeTDHost(TDHost):
         self.status_calls.append(("info", msg))
 
     def set_condition(self, key: str, kind: str, msg: str) -> None:
+        if kind not in ("warning", "error"):  # as RealTDHost: catches swapped key and kind
+            raise ValueError(f"kind must be 'warning' or 'error', not {kind!r}")
         self.status_calls.append((kind, msg))
         self.conditions[key] = (kind, msg)
 
