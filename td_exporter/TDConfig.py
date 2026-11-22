@@ -49,7 +49,7 @@ class TDSenderConfig:
     def from_env(cls) -> TDSenderConfig:
         """Build a config from environment variables (production path)."""
         return cls(
-            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → async (default)
+            export_sync=env_bool_opt("CUDALINK_EXPORT_SYNC"),  # None → blocking (default)
             export_profile=env_bool("CUDALINK_EXPORT_PROFILE", default=False),
             export_flush_probe=env_bool("CUDALINK_EXPORT_FLUSH_PROBE", default=True),
             stream_high_prio=env_str("CUDALINK_TD_STREAM_PRIO", default="normal") == "high",
