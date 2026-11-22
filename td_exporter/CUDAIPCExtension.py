@@ -22,7 +22,7 @@ import contextlib
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
@@ -268,6 +268,34 @@ def native_tops_status(tox_version: str, version_file: Path | None = None) -> tu
     return text, ""
 
 
+class _Engine(Protocol):
+    """What the facade calls on its engine, in either mode.
+
+    TDSenderEngine and TDReceiverEngine both satisfy it: each has the other role's verbs as
+    no-ops, so the facade calls the engine without a mode check. _NullEngine satisfies it
+    while cuda_link is unresolved.
+    """
+
+    verbose_performance: bool
+
+    def initialize(self, width: int, height: int, channels: int = 4, buffer_size: int | None = None) -> bool: ...
+    def initialize_receiver(self) -> bool: ...
+    def export_frame(self, top_op: object = None) -> bool: ...
+    def import_frame(self, handle: object) -> bool: ...
+    def has_new_frame(self) -> bool: ...
+    def wait_for_new_frame(self) -> bool: ...
+    def is_ready(self) -> bool: ...
+    def _check_deferred_cleanup(self) -> None: ...
+    def update_receiver_resolution(self, handle: object) -> object: ...
+    def update_receiver_format(self, handle: object) -> object: ...
+    def request_immediate_reconnect(self) -> None: ...
+    def consume_pending_resolution(self) -> tuple | None: ...
+    def consume_pending_format(self) -> str | None: ...
+    def cleanup(self) -> None: ...
+    def get_stats(self) -> dict: ...
+    def slot_meta_channels(self) -> dict: ...
+
+
 class _NullEngine:
     """Inert engine used when cuda_link is unresolved.
 
@@ -276,6 +304,9 @@ class _NullEngine:
     """
 
     verbose_performance = False
+
+    def __init__(self, mode: str = "Sender") -> None:
+        self._mode = mode
 
     def initialize(self, *a, **k) -> bool:
         return False
@@ -290,7 +321,8 @@ class _NullEngine:
         return False
 
     def has_new_frame(self) -> bool:
-        return False  # receiver loop does nothing
+        # Sender: True, as from TDSenderEngine. Receiver: False, so the receiver loop does nothing.
+        return self._mode != "Receiver"
 
     def wait_for_new_frame(self, *a, **k) -> bool:
         return False
@@ -382,7 +414,7 @@ class CUDAIPCExtension:
         if _hide_val is not None:
             self._host.show_custom_only(bool(_hide_val))
 
-        self._engine: TDSenderEngine | TDReceiverEngine | _NullEngine = self._make_engine()
+        self._engine: _Engine = self._make_engine()
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
@@ -555,9 +587,9 @@ class CUDAIPCExtension:
     # Engine factory
     # ------------------------------------------------------------------
 
-    def _make_engine(self) -> TDSenderEngine | TDReceiverEngine | _NullEngine:
+    def _make_engine(self) -> _Engine:
         if not LIBRARY_READY:
-            return _NullEngine()
+            return _NullEngine(self._mode)
         # Reached only when the cuda_link import above succeeded, so TDSenderEngine /
         # TDReceiverEngine / *Config are the real classes here, never the None / stand-in
         # fallbacks bound in the except branch -- pyrefly can't see that control-flow
@@ -612,24 +644,19 @@ class CUDAIPCExtension:
         return self._engine.initialize(width, height, channels, buffer_size)
 
     def export_frame(self, top_op: TOP | None = None) -> bool:
-        if self._mode != "Sender":
-            return False
         return self._engine.export_frame(top_op)
 
+    def _handle(self, import_buffer: TOP | None) -> object:
+        return self._host.wrap_top(import_buffer) if import_buffer is not None else None
+
     def import_frame(self, import_buffer: TOP) -> bool:
-        if self._mode != "Receiver":
-            return False
-        handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
-        return self._engine.import_frame(handle)
+        return self._engine.import_frame(self._handle(import_buffer))
 
     def _check_deferred_cleanup(self) -> None:
-        if self._mode == "Sender":
-            self._engine._check_deferred_cleanup()
+        self._engine._check_deferred_cleanup()
 
     def update_receiver_resolution(self, import_buffer: TOP) -> None:
-        if self._mode == "Receiver":
-            handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
-            self._engine.update_receiver_resolution(handle)
+        self._engine.update_receiver_resolution(self._handle(import_buffer))
 
     def update_receiver_format(self, import_buffer: TOP) -> None:
         """Update ImportBuffer Script TOP pixel format after a dtype change.
@@ -638,9 +665,7 @@ class CUDAIPCExtension:
         par.format is updated before the next copyCUDAMemory cook. Changing par.format
         causes TD to reallocate the output texture at the correct bit depth.
         """
-        if self._mode == "Receiver":
-            handle = self._host.wrap_top(import_buffer) if import_buffer is not None else None
-            self._engine.update_receiver_format(handle)
+        self._engine.update_receiver_format(self._handle(import_buffer))
 
     def sync_mono_alpha_fix(self, import_buffer: TOP, fmt: str) -> None:
         """Set the MonoAlphaFix Reorder TOP for the pixel format ``fmt`` of ImportBuffer.
@@ -661,8 +686,6 @@ class CUDAIPCExtension:
         Delegates to TDReceiverEngine.has_new_frame() in Receiver mode.
         Always returns True in Sender mode (unused code path there).
         """
-        if self._mode != "Receiver":
-            return True
         return self._engine.has_new_frame()
 
     def wait_for_new_frame(self) -> bool:
@@ -671,8 +694,6 @@ class CUDAIPCExtension:
         Call after has_new_frame() returned False. True means a frame (or a version
         change / shutdown) came within the budget and ImportBuffer must cook.
         """
-        if self._mode != "Receiver":
-            return False
         return self._engine.wait_for_new_frame()
 
     def initialize_receiver(self) -> bool:
@@ -735,8 +756,7 @@ class CUDAIPCExtension:
 
     def request_immediate_reconnect(self) -> None:
         """Force next import_frame to attempt reconnection (called from parexecute callbacks)."""
-        if self._mode == "Receiver":
-            self._engine.request_immediate_reconnect()
+        self._engine.request_immediate_reconnect()
 
     def reconfigure_and_reinit(self, field_name: str, new_value: object) -> None:
         """Update a runtime config field and immediately recreate the engine.
@@ -748,17 +768,14 @@ class CUDAIPCExtension:
         self.cleanup()
         self._runtime_state.update(field_name, new_value)
         self._engine = self._make_engine()
-        if self._mode == "Receiver":
-            self.request_immediate_reconnect()
+        self.request_immediate_reconnect()  # a no-op in Sender mode
 
     def consume_pending_resolution(self) -> tuple | None:
         """Return (width, height) if resolution update is pending, else None.
 
         Called from script_top_callbacks.onCook to drive ImportBuffer Script TOP par updates.
         """
-        if self._mode == "Receiver":
-            return self._engine.consume_pending_resolution()
-        return None
+        return self._engine.consume_pending_resolution()
 
     def consume_pending_format(self) -> str | None:
         """Return the TD par.format string if a pixel-format update is pending, else None.
@@ -767,6 +784,4 @@ class CUDAIPCExtension:
         that were triggered mid-stream by _refresh_on_version_change.  Mirrors
         consume_pending_resolution — same consume-and-clear semantics.
         """
-        if self._mode == "Receiver":
-            return self._engine.consume_pending_format()
-        return None
+        return self._engine.consume_pending_format()

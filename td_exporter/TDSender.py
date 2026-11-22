@@ -266,6 +266,36 @@ class TDSenderEngine:
         """True when Exporter is open and all ring-buffer slots are allocated."""
         return self._initialized and self._exporter is not None and self._exporter.is_ready()
 
+    # --- Receiver verbs: no-ops here, so the facade calls the engine in either mode ---
+    # (CUDAIPCExtension._Engine). Each returns what the facade returned in Sender mode.
+
+    def initialize_receiver(self) -> bool:
+        return False
+
+    def import_frame(self, handle: object) -> bool:
+        return False
+
+    def has_new_frame(self) -> bool:
+        return True  # the Sender cooks every frame
+
+    def wait_for_new_frame(self, wait_ms: int | None = None) -> bool:
+        return False
+
+    def update_receiver_resolution(self, handle: object) -> None:
+        return None
+
+    def update_receiver_format(self, handle: object) -> None:
+        return None
+
+    def request_immediate_reconnect(self) -> None:
+        return None
+
+    def consume_pending_resolution(self) -> tuple | None:
+        return None
+
+    def consume_pending_format(self) -> str | None:
+        return None
+
     def _stream_id(self) -> int:
         """Streamid par as a slot meta stream_id; 0 when the par is missing or invalid."""
         value = self._host.param_value("Streamid")
