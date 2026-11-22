@@ -706,6 +706,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 **Build Date**: 2026-05-29
 **Component Version**: 1.14.1
-**TouchDesigner Version**: 2025.32820 or later. Save the release `.tox` in TD 2025.32820, so
+**TouchDesigner Version**: 2025.32820 or later, for 2.0.0 and later (the build date and
+component version above are of 1.14.1 and change at the 2.0.0 release cut). Save the release
+`.tox` in TD 2025.32820, so
 the `td_build` column of `TOXES/RELEASES.tsv` names the minimum build
 ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).

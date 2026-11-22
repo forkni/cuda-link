@@ -58,7 +58,8 @@ Sender on TD 2025.32820 at 1080p"): two 32820 instances at 1920x1080 at the same
 
 ## Consequences
 
-- README, `docs/TOX_BUILD_GUIDE.md` and `docs/CPP_TOP.md` name 2025.32820 as the minimum.
+- README, `td_exporter/HELP_DOC.md`, `docs/TOX_BUILD_GUIDE.md` and `docs/CPP_TOP.md` name
+  2025.32820 as the minimum. The `.tox` shows the new `HELP_DOC.md` text after its next export.
 - Users on 2023.x or older 2025 builds are not supported by 2.0.0. They can stay on 1.14.1,
   whose files were saved in 2025.33230 (`TOXES/RELEASES.tsv` of that release).
 - A plugin feature that needs `saveData`/`loadData` or another `OP_CommonAPIVersion` 3 API
