@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -97,9 +98,39 @@ except Exception as _library_error:  # noqa: BLE001 -- any cuda_link load failur
             return cls()
 
 
-def _bootstrap_active() -> bool:
-    """True when CUDALinkBootstrap resolved cuda_link.  Never raises (module may be absent)."""
-    return bool(getattr(CUDALinkBootstrap, "_active", False))
+@dataclass(frozen=True)
+class LoadState:
+    """How this COMP's code was loaded, read once from CUDALinkBootstrap and this module.
+
+    ``LoadState.read()`` never raises: the sibling CUDALinkBootstrap DAT may be absent, or an
+    older one may lack a field (then it reads as "").
+    """
+
+    library_ready: bool  # the cuda_link glue imported (LIBRARY_READY)
+    library_error: str  # why it did not (LIBRARY_ERROR), else ""
+    active: bool  # CUDALinkBootstrap resolved an installed cuda_link (library mode)
+    version: str  # the version CUDALinkBootstrap requires an install to match (MIRROR_VERSION)
+    failure_kind: str  # why the bootstrap gave up: "missing", "mismatch", "rival", "broken" or ""
+    detail: str  # the bootstrap's full reason (last_error): every layer it tried and why
+
+    @classmethod
+    def read(cls) -> LoadState:
+        bootstrap = CUDALinkBootstrap
+        return cls(
+            library_ready=LIBRARY_READY,
+            library_error=LIBRARY_ERROR,
+            active=bool(getattr(bootstrap, "_active", False)),
+            version=str(getattr(bootstrap, "MIRROR_VERSION", "") or ""),
+            failure_kind=str(getattr(bootstrap, "failure_kind", "") or ""),
+            detail=str(getattr(bootstrap, "last_error", "") or ""),
+        )
+
+    @property
+    def mode(self) -> str:
+        """The load mode the Info page header names."""
+        if not self.library_ready:
+            return "not loaded"
+        return "library mode" if self.active else "classic mode"
 
 
 def _foreign_alias_error(shm_module: object) -> str:
@@ -131,7 +162,7 @@ def _foreign_alias_error(shm_module: object) -> str:
 # other cuda_link install in this process, the import above still "succeeds": it silently
 # binds to that other install's protocol code instead of failing.  A real engine built on
 # it would then run wrong-version SHM framing.  Detect that case and force degraded mode.
-if LIBRARY_READY and not _bootstrap_active():
+if LIBRARY_READY and not LoadState.read().active:
     _rival_error = _foreign_alias_error(sys.modules.get("SHMProtocol"))
     if _rival_error:
         LIBRARY_READY = False
@@ -156,25 +187,6 @@ __all__ = [
 # CuPy deferred import flag (tests may patch this)
 CUPY_AVAILABLE: bool = False
 cp = None
-
-
-# Session-level dedup guard: track which COMP paths have already shown the install banner.
-# Prevents the banner firing twice when an extension is re-compiled in the same TD session.
-def _bootstrap_error() -> str:
-    return str(getattr(CUDALinkBootstrap, "last_error", "") or "")
-
-
-def _mirror_version() -> str:
-    """The version CUDALinkBootstrap requires an install to match.  Never raises (the
-    sibling DAT may be absent)."""
-    return str(getattr(CUDALinkBootstrap, "MIRROR_VERSION", "") or "")
-
-
-def _bootstrap_failure_kind() -> str:
-    """The specific reason CUDALinkBootstrap gave up: "missing", "mismatch", "rival",
-    "broken" (a matching-version install was found but raised on import), or "" (active,
-    or an older/absent bootstrap that does not track this).  Never raises."""
-    return str(getattr(CUDALinkBootstrap, "failure_kind", "") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +392,8 @@ class CUDAIPCExtension:
         self._config: TDSenderConfig = config if config is not None else TDSenderConfig.from_env()
         # Resolved once here, like the sender config: a mode switch does not read the environment again.
         self._receiver_config: TDReceiverConfig = TDReceiverConfig.from_env()
+        # Read once: the bootstrap ran when this module compiled, and nothing changes it later.
+        self._load = LoadState.read()
 
         _mode_val = self._host.param_value("Mode")
         self._mode: str = str(_mode_val) if _mode_val is not None else "Sender"
@@ -431,7 +445,7 @@ class CUDAIPCExtension:
         # Scheduled on every init, also after Re-Init Extensions: the new RealTDHost starts
         # with a clean tint and Status, so a library that is still missing must be reported
         # again.  _claim_notice_once keeps the Textport lines to one per process.
-        if (not LIBRARY_READY or not _bootstrap_active()) and not self._sibling_mirrors_available():
+        if (not self._load.library_ready or not self._load.active) and not self._sibling_mirrors_available():
             with contextlib.suppress(NameError):
                 run(  # noqa: F821  -- td global; NameError suppressed (non-TD context)
                     "args[0]()",
@@ -444,21 +458,16 @@ class CUDAIPCExtension:
     # Info page
     # ------------------------------------------------------------------
 
-    def _load_mode(self) -> str:
-        if not LIBRARY_READY:
-            return "not loaded"
-        return "library mode" if _bootstrap_active() else "classic mode"
-
     def _show_build_info(self) -> None:
         """Set the Info header label and the C++ TOPs row from the loaded code. Never raises.
 
         A .tox without these pars (older builds) is left as it is: the host writes are no-ops.
         """
         try:
-            version = _mirror_version()
+            version = self._load.version
             self._host.set_param_label(
                 INFO_HEADER_PAR,
-                f"CUDA-Link {version or 'unknown'} ({self._load_mode()})   |   {INFO_HEADER_TAGLINE}",
+                f"CUDA-Link {version or 'unknown'} ({self._load.mode})   |   {INFO_HEADER_TAGLINE}",
             )
             text, warning = native_tops_status(version)
             self._host.set_param_value(NATIVE_TOPS_PAR, text)
@@ -549,10 +558,11 @@ class CUDAIPCExtension:
         tint + Status par + warning_emitter badge; the textport line and the status bar
         fire once per process across all sibling COMPs.
         """
-        ver = _mirror_version()
+        load = self._load
+        ver = load.version
         version_clause = f"cuda_link {ver}" if ver else "cuda_link"
-        kind = _bootstrap_failure_kind()
-        if _bootstrap_active() and not LIBRARY_READY:
+        kind = load.failure_kind
+        if load.active and not load.library_ready:
             short = f"{version_clause} loaded but the component failed to import it (see Textport)"
         elif kind == "broken":
             short = f"{version_clause} found but failed to import (see Textport)"
@@ -567,8 +577,8 @@ class CUDAIPCExtension:
                 f"{version_clause} not found - install it next to this .toe or set CUDALINK_LIB_PATH, then restart TD"
             )
 
-        bootstrap_detail = _bootstrap_error()
-        extension_detail = LIBRARY_ERROR
+        bootstrap_detail = load.detail
+        extension_detail = load.library_error
         detail = bootstrap_detail or extension_detail or "cuda_link unavailable"
 
         with contextlib.suppress(AttributeError, RuntimeError):
@@ -588,7 +598,7 @@ class CUDAIPCExtension:
     # ------------------------------------------------------------------
 
     def _make_engine(self) -> _Engine:
-        if not LIBRARY_READY:
+        if not self._load.library_ready:
             return _NullEngine(self._mode)
         # Reached only when the cuda_link import above succeeded, so TDSenderEngine /
         # TDReceiverEngine / *Config are the real classes here, never the None / stand-in
@@ -637,7 +647,7 @@ class CUDAIPCExtension:
     @property
     def library_ready(self) -> bool:
         """False while this instance is running inert (cuda_link was unresolved at compile)."""
-        return LIBRARY_READY and not isinstance(self._engine, _NullEngine)
+        return self._load.library_ready and not isinstance(self._engine, _NullEngine)
 
     def initialize(self, width: int, height: int, channels: int = 4, buffer_size: int | None = None) -> bool:
         """Delegate to sender engine's initialize() (kept for test injection)."""

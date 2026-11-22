@@ -92,24 +92,34 @@ def test_library_ready_true_when_engine_is_real(monkeypatch: object) -> None:
     assert ext.library_ready is True
 
 
-def test_bootstrap_helpers_survive_missing_bootstrap_module(monkeypatch: object) -> None:
-    """_bootstrap_active/_bootstrap_error must not raise even when CUDALinkBootstrap is absent
+def test_load_state_survives_missing_bootstrap_module(monkeypatch: object) -> None:
+    """LoadState.read() must not raise even when CUDALinkBootstrap is absent
     (the sibling Text DAT does not exist as a COMP-local import)."""
     monkeypatch.setattr(ext_module, "CUDALinkBootstrap", None)
-    assert ext_module._bootstrap_active() is False
-    assert ext_module._bootstrap_error() == ""
+    state = ext_module.LoadState.read()
+    assert (state.active, state.detail, state.version, state.failure_kind) == (False, "", "", "")
 
 
-def test_bootstrap_helpers_read_real_bootstrap_state(monkeypatch: object) -> None:
-    fake_bootstrap = SimpleNamespace(_active=True, last_error="")
+def test_load_state_reads_real_bootstrap_state(monkeypatch: object) -> None:
+    fake_bootstrap = SimpleNamespace(_active=True, last_error="", MIRROR_VERSION="2.0.0")
     monkeypatch.setattr(ext_module, "CUDALinkBootstrap", fake_bootstrap)
-    assert ext_module._bootstrap_active() is True
-    assert ext_module._bootstrap_error() == ""
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", True)
+    state = ext_module.LoadState.read()
+    assert (state.active, state.detail, state.version, state.mode) == (True, "", "2.0.0", "library mode")
 
     fake_bootstrap._active = False
     fake_bootstrap.last_error = "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
-    assert ext_module._bootstrap_active() is False
-    assert ext_module._bootstrap_error() == "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
+    fake_bootstrap.failure_kind = "missing"
+    state = ext_module.LoadState.read()
+    assert (state.active, state.failure_kind, state.mode) == (False, "missing", "classic mode")
+    assert state.detail == "CUDA-Link could not be resolved -- CUDALINK_LIB_PATH: not set"
+
+
+def test_load_state_mode_not_loaded(monkeypatch: object) -> None:
+    monkeypatch.setattr(ext_module, "LIBRARY_READY", False)
+    monkeypatch.setattr(ext_module, "LIBRARY_ERROR", "ModuleNotFoundError: x")
+    state = ext_module.LoadState.read()
+    assert (state.mode, state.library_error) == ("not loaded", "ModuleNotFoundError: x")
 
 
 def test_foreign_alias_error_flags_a_file_backed_shm_module() -> None:

@@ -94,7 +94,7 @@ def _make_ext(monkeypatch: pytest.MonkeyPatch, version_file: Path) -> FakeTDHost
 def test_init_sets_live_header_label(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = _make_ext(monkeypatch, tmp_path / "missing.txt")
     label = host.param_labels[CUDAIPCExtension.INFO_HEADER_PAR]
-    assert label.startswith(f"CUDA-Link {CUDAIPCExtension._mirror_version() or 'unknown'} (")
+    assert label.startswith(f"CUDA-Link {CUDAIPCExtension.LoadState.read().version or 'unknown'} (")
 
 
 def test_init_writes_native_tops_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ def test_init_other_version_sets_standing_warning(monkeypatch: pytest.MonkeyPatc
 
 
 def test_init_same_version_sets_no_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    host = _make_ext(monkeypatch, _version_txt(tmp_path, CUDAIPCExtension._mirror_version()))
+    host = _make_ext(monkeypatch, _version_txt(tmp_path, CUDAIPCExtension.LoadState.read().version))
     assert not [c for c in host.status_calls if c[0] == "standing"]
 
 
