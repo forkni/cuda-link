@@ -1993,6 +1993,18 @@ class Importer:
         Returns:
             ImportResult[torch.Tensor] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, RECONNECTING, or TIMEOUT.
+
+        Frame lifetime:
+            The tensor is a view of one slot of the producer's ring buffer, not a
+            copy. The producer starts to write that slot again during its
+            ``num_slots``-th next export (3 slots by default: less than 50 ms after
+            the publish at 60 fps, and less from the time you get it). Read
+            the tensor before then, or copy it with ``tensor.clone()`` to keep it
+            longer. A read that takes longer shows a mix of two frames. A first
+            read can be slow: torch builds its kernels on first use.
+            close() and a reconnect (RECONNECTING) unmap all slots at once. A GPU
+            read of an uncopied tensor after them, even with no new frame, can
+            raise an illegal-address error that stops all later CUDA work.
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required for get_frame(). Use get_frame_numpy() instead.")
@@ -2014,6 +2026,11 @@ class Importer:
         frame with +1 frame latency, hiding D2H copy time behind consumer CPU work.
         A producer restart re-primes: the first call after RECONNECTING returns
         NO_FRAME again rather than the previous session's last frame.
+
+        The array is a host buffer that the importer uses again: the next call
+        writes into it. close() and a format change free the buffer, so reading
+        the array after them can crash the process. Use ``array.copy()`` to keep
+        a frame past the next call or past close().
         """
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for get_frame_numpy()")
@@ -2035,6 +2052,14 @@ class Importer:
         Returns:
             ImportResult[cp.ndarray] with outcome NEW_FRAME, NO_FRAME,
             SHUTDOWN, or RECONNECTING.
+
+        Frame lifetime:
+            The array is a view of one ring slot, as for get_frame(). Read it
+            before the producer starts its ``num_slots``-th next export, or copy
+            it with ``arr.copy()``. CuPy compiles its kernels per dtype on first
+            use, so the first read after open() can take longer than that.
+            close() and a reconnect (RECONNECTING) unmap all slots at once; a GPU
+            read of the array after them can raise an illegal-address error.
 
         Note:
             TIMEOUT is not reachable via this path — streamWaitEvent is a

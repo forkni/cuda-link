@@ -11,8 +11,10 @@ WHEN TO CHOOSE THIS PATH
     Zero-copy torch/cupy (examples 03/07) is faster, but plenty of consumers
     are CPU code: OpenCV, scikit-image, encoders, disk writers.  A D2H copy
     costs ~0.5-2 ms for a 4K RGBA frame — often perfectly fine at 30-60 fps.
-    Unlike the zero-copy tensor, the numpy array is YOUR private copy: keep
-    it, queue it, mutate it — no ring-buffer lifetime contract to honour.
+    Unlike the zero-copy tensor, the numpy array does not view the producer's
+    ring. But it is the importer's own host buffer, used again on each call:
+    the next get_frame_numpy() writes into it, and close() frees it. To keep
+    or queue a frame, take frame.copy().
 
 HARDWARE
     NVIDIA GPU (falls back to FakeCUDAAdapter with zero-valued pixels if none).
@@ -26,7 +28,8 @@ HOW TO RUN
 
 WHAT IT TEACHES
     * get_frame_numpy(): the safe, dependency-light output mode (only numpy).
-    * Ownership difference vs zero-copy: the returned array is a copy.
+    * Ownership difference vs zero-copy: the array is a host copy of the slot,
+      in a buffer that the next call overwrites (frame.copy() to keep it).
     * RGBA→BGRA conversion — OpenCV's channel order is not TouchDesigner's.
     * Graceful degradation when optional dependencies are missing.
 """
@@ -121,7 +124,7 @@ def main() -> int:
             result = importer.get_frame_numpy()
 
             if result.outcome is ImportOutcome.NEW_FRAME:
-                frame = result.frame  # np.ndarray (H, W, 4) uint8 — your own copy
+                frame = result.frame  # np.ndarray (H, W, 4) uint8; the next call overwrites it
                 assert isinstance(frame, np.ndarray)
                 frames_done += 1
 

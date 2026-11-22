@@ -114,15 +114,15 @@ Click the **+** button to add a new parameter page, name it `"CUDA IPC"`.
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `True` (1) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints avg metrics every ~97 frames). |
-| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2–10 (2–5 recommended/tested; 6–10 supported but less exercised) |
+| `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3 or 4, as in the shipped 1.14.1 and 2.0.0 `.tox` |
 | `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
 | `Mode` | Mode | String (Menu) | `Sender` | Operation mode: Sender exports TD textures to Python; Receiver imports frames from Python back into TD. |
 
 **For `Numslots` menu parameter**:
 
 - Menu Source: **Constant**
-- Menu Names: `2 3 4 5 6 7 8 9 10`
-- Menu Labels: `2 Slots 3 Slots 4 Slots 5 Slots 6 Slots 7 Slots 8 Slots 9 Slots 10 Slots`
+- Menu Names: `2 3 4`
+- Menu Labels: `2 Slots 3 Slots 4 Slots`
 
 **For `Mode` menu parameter**:
 
