@@ -440,18 +440,26 @@ class CUDAIPCExtension:
         """Set the standing warning 5 frames after init, as the library notice does.
 
         The warning tint cooks the warning_emitter child, which may not be loaded yet while
-        the extension initializes. Outside TD (no ``run`` global) it is set at once.
+        the extension initializes. Outside TD (no ``run`` global), or when scheduling fails,
+        it is set at once.
         """
         try:
             run(  # noqa: F821  -- td global
                 "args[0](args[1])",
-                self._host.set_standing_warning,
+                self._apply_standing_warning,
                 warning,
                 delayFrames=5,
                 delayRef=op.TDResources,  # noqa: F821
             )
-        except NameError:
+        except Exception:  # noqa: BLE001 -- NameError outside TD; any failure: set it now
+            self._apply_standing_warning(warning)
+
+    def _apply_standing_warning(self, warning: str) -> None:
+        """Set the standing warning. Never raises: the COMP may be gone after the delay."""
+        try:
             self._host.set_standing_warning(warning)
+        except Exception as e:  # noqa: BLE001 -- td.tdError on a deleted COMP is not RuntimeError
+            self._log(f"C++ TOPs warning not shown: {type(e).__name__}: {e}", force=True)
 
     # ------------------------------------------------------------------
     # Library availability detection + install banner

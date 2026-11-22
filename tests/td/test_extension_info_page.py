@@ -263,6 +263,32 @@ def test_standing_warning_is_deferred_in_td(monkeypatch: pytest.MonkeyPatch, tmp
     assert [m for k, m in host.status_calls if k == "standing"] == [warning]
 
 
+def test_deferred_warning_on_a_deleted_comp_does_not_raise(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    host = _make_ext(monkeypatch, tmp_path / "missing.txt")
+    ext = CUDAIPCExtension.CUDAIPCExtension(SimpleNamespace(path="/project1/info_gone"), host=host)
+
+    class _DeadOpError(Exception):  # stands in for td.tdError, which is not a RuntimeError
+        pass
+
+    def _dead(_msg: str | None) -> None:
+        raise _DeadOpError("operator was deleted")
+
+    monkeypatch.setattr(host, "set_standing_warning", _dead)
+    ext._apply_standing_warning("C++ TOPs differ")  # must not raise
+    assert not [c for c in host.status_calls if c[0] == "standing"]
+
+
+def test_schedule_failure_sets_the_warning_at_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _run(script: str, *_a: object, **_k: object) -> None:
+        if script == "args[0](args[1])":  # only the standing warning; not the library notice
+            raise RuntimeError("no TDResources")
+
+    monkeypatch.setattr(CUDAIPCExtension, "run", _run, raising=False)
+    monkeypatch.setattr(CUDAIPCExtension, "op", SimpleNamespace(TDResources=object()), raising=False)
+    host = _make_ext(monkeypatch, _version_txt(tmp_path, "0.9.9"))
+    assert len([c for c in host.status_calls if c[0] == "standing"]) == 1
+
+
 def test_extension_tests_never_read_the_real_record(monkeypatch: pytest.MonkeyPatch) -> None:
     # The autouse conftest fixture points Documents at a folder that does not exist.
     host = FakeTDHost(params={"Mode": "Receiver", "Active": False})
