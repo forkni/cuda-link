@@ -96,6 +96,9 @@ jobs:
         # which needs a loaded cudart and can't run on these GPU-less runners.
         shell: pwsh
         run: |
+          # Stop on the first failing python/pip line: without this, pwsh runs on and the step
+          # takes the exit code of the last line only (pwsh 7.3+).
+          $PSNativeCommandUseErrorActionPreference = $true
           $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
           python -m pip install "$($wheel.FullName)"
           python -c "import cuda_link._native_waiter; print('native extension imported OK')"
