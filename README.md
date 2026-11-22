@@ -165,14 +165,16 @@ importer.close()
 > ▶ Runnable version: [examples/03_td_to_pytorch_pipeline.py](examples/03_td_to_pytorch_pipeline.py) — spawns its own demo producer, so no TouchDesigner is needed to try it.
 
 **How long a zero-copy frame stays valid.** `get_frame()` and `get_frame_cupy()` return a
-view of one slot of the producer's ring buffer, not a copy. The producer writes that slot
-again when it publishes its `num_slots`-th next frame. The default is 3 slots (the TD Senders
-offer 2, 3 or 4), so at 60 fps a frame is valid for less than 50 ms after its publish. Read
-it before then, or copy it (`tensor.clone()`, `arr.copy()`) to keep it longer. A read that
-takes longer gets a mix of two frames. The first read after `Importer.open()` can be slow,
-because torch and CuPy build their kernels on first use (CuPy compiles them per dtype).
-`close()` (also the end of a `with` block) and a reconnect (`RECONNECTING`) unmap all slots
-at once, so an uncopied view is invalid after them.
+view of one slot of the producer's ring buffer, not a copy. The producer starts to write that
+slot again during its `num_slots`-th next export. The default is 3 slots, so at 60 fps a frame
+is valid for less than 50 ms after its publish; with 2 slots, less than 33 ms. The `.tox`
+Sender offers 2 to 10 slots, the C++ Out TOP 2, 3 or 4. Read the frame before then, or copy
+it (`tensor.clone()`, `arr.copy()`) to keep it longer. A read that takes longer gets a mix of
+two frames. The first read after `Importer.open()` can be slow, because torch and CuPy build
+their kernels on first use (CuPy compiles them per dtype). `close()` (also the end of a
+`with` block) and a reconnect (`RECONNECTING`) unmap all slots at once. A GPU read of an
+uncopied view after them can raise an illegal-address error, which stops all later CUDA work
+in the process.
 `get_frame_numpy()` copies into a host buffer that the importer uses again on each call, so
 its array is valid until the next `get_frame_numpy()` call. `close()` and a format change
 free that buffer, and reading the array after them can crash the process. Use
