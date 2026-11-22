@@ -154,11 +154,13 @@ class FakeTDHost(TDHost):
         self._tops: dict[str, FakeTOPHandle] = dict(tops or {})
         self.param_writes: list[tuple[str, Any]] = []
         self.enable_writes: list[tuple[str, bool]] = []
+        self.param_labels: dict[str, str] = {}  # last label written per par name
         self.custom_only_calls: list[bool] = []
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
         # Records every status/tint side-effect call as (kind, msg); kind is one of
-        # "warning" / "error" / "info" / "clear" (msg is None for clear). Additive —
+        # "warning" / "error" / "info" / "clear" / "standing" (msg is None for clear and
+        # for a standing warning that is removed). Additive —
         # existing callers that ignore the return value (always None) are unaffected.
         self.status_calls: list[tuple[str, str | None]] = []
         # Value abs_frame() returns (None = unknown, like a host outside TD).
@@ -173,6 +175,9 @@ class FakeTDHost(TDHost):
 
     def set_param_enabled(self, name: str, enabled: bool) -> None:
         self.enable_writes.append((name, enabled))
+
+    def set_param_label(self, name: str, label: str) -> None:
+        self.param_labels[name] = label
 
     def show_custom_only(self, value: bool) -> None:
         self.custom_only_calls.append(value)
@@ -210,3 +215,6 @@ class FakeTDHost(TDHost):
 
     def set_info_status(self, msg: str) -> None:
         self.status_calls.append(("info", msg))
+
+    def set_standing_warning(self, msg: str | None) -> None:
+        self.status_calls.append(("standing", msg))

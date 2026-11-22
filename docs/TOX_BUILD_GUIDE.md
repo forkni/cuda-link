@@ -137,6 +137,18 @@ sends `stream_id = 0`.
 
 **Appearance tip**: Use Page Order to arrange parameters in a logical flow (Mode → Ipcmemname → Active → Numslots → Streamid → Debug).
 
+#### Info page
+
+The `Semver*` pars and `Hidebuiltin` on the Info page belong to the embedded Semantic Version
+Control COMP. Two pars on that page belong to cuda-link:
+
+| Name | Label | Type | Read Only | Notes |
+|------|-------|------|-----------|-------|
+| `Cudalinkheader2` | (any) | Header | — | First par of the Info page. On each init the extension sets its label to `CUDA-Link <version> (<library mode \| classic mode \| not loaded>) \| Zero-copy GPU texture sharing via CUDA IPC`. TD saves the label, but each init writes it again, so it cannot go stale. |
+| `Nativetops` | C++ TOPs | String | On | Add it after `Semvertoxsavebuild`. On each init the extension writes the installed C++ TOPs from `<Documents>/Derivative/Plugins/CudaLink/VERSION.txt`: `<version> (build <sha>)` when the record has a `build` line, else `<version> (CUDA <x.y>)` or `<version>`; also `not installed`, `installed, version unknown` or `unreadable: <error>`. A version that differs adds `- differs from <.tox version>` and, 5 frames after init, tints the COMP yellow; the Status par then shows that warning instead of the per-frame text. |
+
+A `.tox` without these pars still works: the extension skips the writes.
+
 ### Step 3: Create Text DATs
 
 **Library mode** (with `cuda_link` installed via `install_td_library.cmd`): create the 6 DATs

@@ -140,6 +140,10 @@ class TDHost(Protocol):
         """Write ownerComp.par.<name>.enable = enabled."""
         ...
 
+    def set_param_label(self, name: str, label: str) -> None:
+        """Write ownerComp.par.<name>.label = label (no-op when the par does not exist)."""
+        ...
+
     def show_custom_only(self, value: bool) -> None:
         """Write ownerComp.showCustomOnly = value."""
         ...
@@ -179,11 +183,22 @@ class TDHost(Protocol):
         ...
 
     def clear_status(self) -> None:
-        """Restore ownerComp to its original color and clear any script-error badges."""
+        """Restore ownerComp to its original color and clear any script-error badges.
+
+        With a standing warning set (set_standing_warning), show that warning instead.
+        """
         ...
 
     def set_info_status(self, msg: str) -> None:
         """Write an informational status message to the Status par (no tint/cook side effects)."""
+        ...
+
+    def set_standing_warning(self, msg: str | None) -> None:
+        """Set (msg) or remove (None) a warning that clear_status() does not remove.
+
+        For a condition that lasts for the whole session, for example C++ TOPs of another
+        version. Show it now; clear_status() shows it again instead of the default color.
+        """
         ...
 
     def abs_frame(self) -> int | None:
@@ -324,10 +339,11 @@ class RealTDHost(TDHost):
         # _reset_stale_tint() clears any visible managed-colour tint immediately
         # so the COMP boots grey regardless of how it was saved.
         self._default_color: tuple[float, float, float] | None = None
-        self._warning_emitter: Any = None  # lazily resolved; False = looked up, not found
+        self._warning_emitter: Any = None  # lazily resolved; None = not found yet, look again
         self._status_msg: str | None = None  # current stored status; drives cook-on-transition
         self._status_par_value: str | None = None  # last value written to Status par; drives dedup
         self._abs_time: Any = None  # td.absTime, resolved on the first abs_frame() call
+        self._standing_warning: str | None = None  # shown again by clear_status()
         self._reset_stale_tint()
         self._reset_stale_status_par()
 
@@ -344,6 +360,12 @@ class RealTDHost(TDHost):
     def set_param_enabled(self, name: str, enabled: bool) -> None:
         with contextlib.suppress(AttributeError):
             getattr(self._comp.par, name).enable = enabled
+
+    def set_param_label(self, name: str, label: str) -> None:
+        with contextlib.suppress(AttributeError, RuntimeError):
+            par = getattr(self._comp.par, name)
+            if par.label != label:
+                par.label = label
 
     def show_custom_only(self, value: bool) -> None:
         with contextlib.suppress(AttributeError):
@@ -398,7 +420,9 @@ class RealTDHost(TDHost):
     def _cook_warning_emitter(self) -> None:
         if self._warning_emitter is None:
             with contextlib.suppress(AttributeError, RuntimeError):
-                self._warning_emitter = self._comp.op("warning_emitter") or False
+                # A miss is not cached: during a .toe load the child may not exist yet, and a
+                # cached miss would drop every later badge on this COMP for the session.
+                self._warning_emitter = self._comp.op("warning_emitter") or None
         if self._warning_emitter:
             with contextlib.suppress(AttributeError, RuntimeError):
                 self._warning_emitter.cook(force=True)
@@ -479,6 +503,9 @@ class RealTDHost(TDHost):
         self._cook_warning_emitter()
 
     def clear_status(self) -> None:
+        if self._standing_warning is not None:
+            self.set_warning_status(self._standing_warning)
+            return
         needs_cook = self._status_msg is not None
         self._status_msg = None
         with contextlib.suppress(AttributeError, RuntimeError):
@@ -491,4 +518,20 @@ class RealTDHost(TDHost):
             self._cook_warning_emitter()
 
     def set_info_status(self, msg: str) -> None:
+        if self._standing_warning is not None:
+            standing = f"WARNING: {self._standing_warning}"
+            if self._status_msg == standing:
+                # The COMP is yellow for the standing warning: keep its reason in Status, not
+                # the per-frame info text.
+                self._write_status_par(standing)
+                return
         self._write_status_par(msg)
+
+    def set_standing_warning(self, msg: str | None) -> None:
+        previous = self._standing_warning
+        self._standing_warning = msg or None
+        if self._standing_warning is not None:
+            self.set_warning_status(self._standing_warning)
+        elif previous is not None and self._status_msg == f"WARNING: {previous}":
+            # Clear only the standing warning itself, not another warning or error now shown.
+            self.clear_status()
