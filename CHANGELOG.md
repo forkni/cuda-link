@@ -141,6 +141,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`BUILD_INFO.txt`: the `td header OP_CommonAPIVersion` line holds the number.** CMake's
+  `file(STRINGS)` escapes the header line's `;`, so the old pattern did not match and the line
+  held the whole C++ declaration (`const int OP_CommonAPIVersion = 1\;`). The install record
+  took that text. `scripts/check_wheel_plugins.py` now fails a wheel whose `BUILD_INFO.txt` has
+  no numeric `td header` line.
 - **`.tox`: parameters set in the same script call as `loadTox()` now reach the extension.**
   The extension reads `Mode`, `Ipcmemname`, `Numslots`, `Debug` and `Hidebuiltin` when it
   starts. After that, only the `parexec1` Parameter Execute DAT tells it about a change, and

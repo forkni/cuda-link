@@ -231,7 +231,10 @@ set_target_properties(CudaLinkOutTOP PROPERTIES PREFIX "" SUFFIX ".dll")
 # file(GENERATE) puts it in the DLLs' own folder for single- and multi-config generators.
 file(STRINGS "${TD_VENDOR_DIR}/CPlusPlus_Common.h" CUDALINK_TD_API_LINE
      REGEX "^const int OP_CommonAPIVersion = [0-9]+;" LIMIT_COUNT 1)
-string(REGEX REPLACE "^const int OP_CommonAPIVersion = ([0-9]+);.*" "\\1" CUDALINK_TD_API "${CUDALINK_TD_API_LINE}")
+# file(STRINGS) returns the line with its ";" escaped as "\;" (a list separator), so a REPLACE
+# pattern that ends in ";" never matches and passes the whole line through: match the number.
+string(REGEX MATCH "OP_CommonAPIVersion = ([0-9]+)" CUDALINK_TD_API_MATCH "${CUDALINK_TD_API_LINE}")
+set(CUDALINK_TD_API "${CMAKE_MATCH_1}")
 if(NOT CUDALINK_TD_API)
     set(CUDALINK_TD_API "unknown")
 endif()

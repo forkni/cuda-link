@@ -73,9 +73,11 @@ def check_wheel(wheel: Path, require_plugins: bool = False) -> list[str]:
             if name in entries and stamp not in zf.read(entries[name]):
                 problems.append(f"{wheel.name}: {name} does not carry version {version}")
         if BUILD_INFO in entries:
-            first = zf.read(entries[BUILD_INFO]).decode("utf-8", "replace").splitlines()[:1]
-            if first != [f"cuda-link {version}"]:
+            lines = zf.read(entries[BUILD_INFO]).decode("utf-8", "replace").splitlines()
+            if lines[:1] != [f"cuda-link {version}"]:
                 problems.append(f"{wheel.name}: {BUILD_INFO} is not for version {version}")
+            if not any(re.fullmatch(r"td header OP_CommonAPIVersion \d+", line) for line in lines):
+                problems.append(f"{wheel.name}: {BUILD_INFO} has no numeric td header line")
         return problems
 
 
