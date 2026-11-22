@@ -84,6 +84,30 @@ This is the main form. The ops then show in the OP Create dialog (Custom tab) as
   saved node or a `.tox` can still use the same name as a 1.x peer. A v0.5 segment is refused
   with a magic error; the two protocols do not mix.
 
+## Install: from the wheel
+
+The release platform wheel (`cuda_link-<version>-cp311-cp311-win_amd64.whl`) carries both DLLs
+in `cuda_link/td_plugins/`. They are built from the same tree as the Python package and carry
+its version, so a host that installs the wheel gets one version and one hash for both sides.
+The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
+
+- Find them: `cuda_link.td_plugin.plugin_path("out")` and `plugin_path("in")` return the
+  absolute DLL paths, or None when the install has no DLLs. Point a CPlusPlus TOP's Plugin
+  Path at them. This is the portable form above: an Out TOP needs the `onStart` cook, and the
+  machine must have no system copy (`install_cpp_top.cmd status` shows one).
+- Update: close TD first. TD keeps a loaded DLL open, so a `pip install` of a new wheel while a
+  TOP from it is loaded can fail, or can succeed while TD keeps using the old DLL until it
+  restarts (the Python side and the TOPs then differ). Close TD, install, start TD, and approve
+  the prompts again.
+- Editable installs (`pip install -e .`) do not find the DLLs: `plugin_path()` looks next to
+  `cuda_link/td_plugin.py` in `src/`. Dev builds carry no DLLs anyway.
+- Build a wheel with the DLLs: build `cpp_top` first (see "Build"), then
+  `python -m build --wheel -Ccmake.define.CUDALINK_TD_PLUGIN_DIR=<folder with the two DLLs>`.
+  The build refuses a missing DLL, a DLL stamped with another version (configure `cpp_top`
+  again from the same tree) and the `py3-none-any` build. `release.yml` does this and checks
+  the wheels with `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the
+  script expands the pattern, so it works in PowerShell and cmd too).
+
 ## Build
 
 The CMake project is `cpp_top/`. Its presets are in `cpp_top/CMakePresets.json`:
