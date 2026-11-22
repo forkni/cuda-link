@@ -43,9 +43,8 @@ constexpr char kInfoHeaderLabel[] = "CUDA-Link " CUDALINK_VERSION " (build " CUD
 constexpr char kInfoAuthorName[] = "Semverauthor";
 constexpr char kInfoHelpName[] = "Semvershowhelp";
 constexpr char kInfoAuthor[] = "forkni (forkni@gmail.com)";
-// The development branch for now: docs/CPP_TOP.md is not on master before the 2.0.0 release.
-// Switch to blob/master at release time.
-constexpr char kInfoHelpUrl[] = "https://github.com/forkni/cuda-link/blob/development/docs/CPP_TOP.md";
+// docs/CPP_TOP.md on master: the page of the latest release.
+constexpr char kInfoHelpUrl[] = "https://github.com/forkni/cuda-link/blob/master/docs/CPP_TOP.md";
 
 // Appends the Info page after the TOP's own page. Call last in setupParameters.
 inline void appendInfoPage(TD::OP_ParameterManager* manager, const char* topName) {
