@@ -159,10 +159,12 @@ class FakeTDHost(TDHost):
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
         # Records every status/tint side-effect call as (kind, msg); kind is one of
-        # "warning" / "error" / "info" / "clear" / "standing" (msg is None for clear and
-        # for a standing warning that is removed). Additive —
+        # "warning" / "error" / "info" / "clear" (msg None), or "clear_condition" (msg = the key).
+        # set_condition records (its kind, msg). Additive —
         # existing callers that ignore the return value (always None) are unaffected.
         self.status_calls: list[tuple[str, str | None]] = []
+        # The conditions set through set_condition, by key (the wrappers do not add here).
+        self.conditions: dict[str, tuple[str, str]] = {}
         # Value abs_frame() returns (None = unknown, like a host outside TD).
         self.abs_frame_value: int | None = None
 
@@ -216,5 +218,10 @@ class FakeTDHost(TDHost):
     def set_info_status(self, msg: str) -> None:
         self.status_calls.append(("info", msg))
 
-    def set_standing_warning(self, msg: str | None) -> None:
-        self.status_calls.append(("standing", msg))
+    def set_condition(self, key: str, kind: str, msg: str) -> None:
+        self.status_calls.append((kind, msg))
+        self.conditions[key] = (kind, msg)
+
+    def clear_condition(self, key: str) -> None:
+        self.status_calls.append(("clear_condition", key))
+        self.conditions.pop(key, None)

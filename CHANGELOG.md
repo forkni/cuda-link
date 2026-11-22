@@ -218,6 +218,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`.tox` status: one condition per source, the most severe shows.** The COMP keeps the
+  engine's warning or error, the "cuda_link not loaded" notice and the C++ TOPs version warning
+  as separate conditions. The tint and the `Status` par show the most severe one (an error
+  over a warning; of equal ones, the last set), and clearing one shows the next. Three visible
+  changes: the deferred C++ TOPs warning no longer turns an error yellow for a frame; the
+  per-frame format text no longer covers a warning in `Status` (it shows when the condition
+  clears); and a Sender that recovers from `Initialization failed` or `Reopen failed` clears
+  that error itself (before, the COMP stayed red). Deactivating the COMP clears only the
+  engine's condition.
+
 - **C++ TOPs: new default `Ipcmemname` `cudalink_ipc_CPP`** (Out TOP and In TOP). The old
   defaults were the example streams (`cudalink_ipc_TD>>Python` for the Out TOP,
   `cudalink_ipc_Python>>TD` for the In TOP), so a new node joined someone else's stream at once.

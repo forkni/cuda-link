@@ -107,10 +107,22 @@ def test_reopen_failure_drops_exporter_and_reinitializes(
 
     # Open works again: the next cook re-initializes via lazy init, then exports.
     monkeypatch.setattr(Exporter, "open", working_open)
+    error_at = max(i for i, (kind, _msg) in enumerate(host.status_calls) if kind == "error")
     assert engine.export_frame() is False  # lazy-init probe at the new size
     assert engine._exporter is not None
     assert (engine._current_spec.width, engine._current_spec.height) == (128, 128)
     assert engine.export_frame() is True
+    # The recovered Sender clears its error: the engine status holds until cleared.
+    assert ("clear", None) in host.status_calls[error_at:]
+    assert engine._error_shown is False
+
+
+def test_a_healthy_sender_never_clears_a_status_it_did_not_set(fake_exporter_open: None) -> None:
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": _top("rgba8fixed", 4)})
+    engine = _make_engine(host)
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine.export_frame() is True
+    assert ("clear", None) not in host.status_calls
 
 
 def test_flags_only_change_triggers_reopen(fake_exporter_open: None) -> None:

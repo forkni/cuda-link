@@ -194,6 +194,7 @@ class TDSenderEngine:
 
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
+        self._error_shown: bool = False  # an init or reopen error is the engine status; cleared on recovery
         self._f16_convert_to: str | None = None  # float32 target while the source is float16
         self._warned_dtype_size: bool = False  # one-shot: unresolvable bytes-per-pixel
         self._export_buffer: object = None
@@ -295,6 +296,19 @@ class TDSenderEngine:
 
     def consume_pending_format(self) -> str | None:
         return None
+
+    def _show_error_status(self, msg: str) -> None:
+        self._host.set_error_status(msg)
+        self._error_shown = True
+
+    def _clear_error_status(self) -> None:
+        """After a successful init or reopen: clear the error an earlier failure set.
+
+        The engine status holds until it is cleared, so a recovered Sender must clear it.
+        """
+        if self._error_shown:
+            self._host.clear_status()
+            self._error_shown = False
 
     def _stream_id(self) -> int:
         """Streamid par as a slot meta stream_id; 0 when the par is missing or invalid."""
@@ -537,13 +551,14 @@ class TDSenderEngine:
             self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
             self._initialized = True
+            self._clear_error_status()
             self._barrier.arm_settle_countdown()
             self._log("Initialization complete — ready for zero-copy GPU transfer", force=True)
             return True
 
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
-            self._host.set_error_status(f"Initialization failed: {e}")
+            self._show_error_status(f"Initialization failed: {e}")
             traceback.print_exc()
             return False
         finally:
@@ -822,9 +837,10 @@ class TDSenderEngine:
                     # frame_count at 0 — reset here, as the successful reopen below does.
                     self._reset_report_window()
                     self._log(f"Exporter reopen after geometry change failed: {open_err}", force=True)
-                    self._host.set_error_status(f"Reopen failed: {open_err}")
+                    self._show_error_status(f"Reopen failed: {open_err}")
                     return False
                 self._current_spec = new_spec
+                self._clear_error_status()
                 self._reset_report_window()  # new Exporter restarts frame_count at 0; stale window → negative FPS
 
                 self._arm_same_stream_ordering()  # re-arm on the new Exporter's IPC stream

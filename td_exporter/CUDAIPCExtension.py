@@ -170,7 +170,7 @@ if LIBRARY_READY and not LoadState.read().active:
 
 # TDHost is stdlib-only (no bare-name cuda_link imports) -- always importable, so
 # RealTDHost.set_warning_status() is available even in degraded mode.
-from TDHost import RealTDHost, TDHost  # noqa: E402
+from TDHost import STATUS_LIBRARY, STATUS_NATIVE_TOPS, RealTDHost, TDHost  # noqa: E402
 
 # Re-export protocol constants for backward compatibility (tests import these from here)
 __all__ = [
@@ -473,12 +473,12 @@ class CUDAIPCExtension:
             self._host.set_param_value(NATIVE_TOPS_PAR, text)
             if warning:
                 self._log(warning, force=True)
-                self._schedule_standing_warning(warning)
+                self._schedule_native_tops_warning(warning)
         except Exception as e:  # noqa: BLE001 -- the Info page must never break the extension
             self._log(f"Info page update failed: {type(e).__name__}: {e}", force=True)
 
-    def _schedule_standing_warning(self, warning: str) -> None:
-        """Set the standing warning 5 frames after init, as the library notice does.
+    def _schedule_native_tops_warning(self, warning: str) -> None:
+        """Set the C++ TOPs warning 5 frames after init, as the library notice does.
 
         The warning tint cooks the warning_emitter child, which may not be loaded yet while
         the extension initializes. Outside TD (no ``run`` global), or when scheduling fails,
@@ -487,18 +487,21 @@ class CUDAIPCExtension:
         try:
             run(  # noqa: F821  -- td global
                 "args[0](args[1])",
-                self._apply_standing_warning,
+                self._apply_native_tops_warning,
                 warning,
                 delayFrames=5,
                 delayRef=op.TDResources,  # noqa: F821
             )
         except Exception:  # noqa: BLE001 -- NameError outside TD; any failure: set it now
-            self._apply_standing_warning(warning)
+            self._apply_native_tops_warning(warning)
 
-    def _apply_standing_warning(self, warning: str) -> None:
-        """Set the standing warning. Never raises: the COMP may be gone after the delay."""
+    def _apply_native_tops_warning(self, warning: str) -> None:
+        """Set the C++ TOPs condition (STATUS_NATIVE_TOPS): the engine's clear_status() keeps it.
+
+        Never raises: the COMP may be gone after the delay.
+        """
         try:
-            self._host.set_standing_warning(warning)
+            self._host.set_condition(STATUS_NATIVE_TOPS, "warning", warning)
         except Exception as e:  # noqa: BLE001 -- td.tdError on a deleted COMP is not RuntimeError
             self._log(f"C++ TOPs warning not shown: {type(e).__name__}: {e}", force=True)
 
@@ -582,7 +585,7 @@ class CUDAIPCExtension:
         detail = bootstrap_detail or extension_detail or "cuda_link unavailable"
 
         with contextlib.suppress(AttributeError, RuntimeError):
-            self._host.set_warning_status(short)
+            self._host.set_condition(STATUS_LIBRARY, "warning", short)
 
         if not self._claim_notice_once((short, detail)):
             return
@@ -689,6 +692,13 @@ class CUDAIPCExtension:
     def is_active(self) -> bool:
         """Delegate to host's active-parameter check (hot-path safe)."""
         return self._host.is_active()
+
+    def clear_status(self) -> None:
+        """Clear the engine's warning or error and reset the Status text (deactivation).
+
+        A C++ TOPs or library condition stays: it holds while the COMP is off too.
+        """
+        self._host.clear_status()
 
     def has_new_frame(self) -> bool:
         """Return True when the receiver engine has new data or needs to run.

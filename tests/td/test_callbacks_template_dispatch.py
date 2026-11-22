@@ -496,7 +496,9 @@ class _HandlerExt(_ResyncExt):
         self._comp_ref = comp_ref
         self.logs: list[str] = []
         self.reinits: list[tuple[str, object]] = []
-        self._host = types.SimpleNamespace(clear_status=lambda: None)
+
+    def clear_status(self) -> None:
+        return None
 
     def _log(self, msg: str, force: bool = False) -> None:
         self.logs.append(msg)
