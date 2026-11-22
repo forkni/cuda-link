@@ -347,7 +347,7 @@ If using TouchDesigner 2025 or later, enable the `modoutsidecook` toggle on the 
 - Removes 1-frame resolution change delay
 - Simplifies data flow (Execute DAT drives import directly)
 
-**Note**: If `modoutsidecook` is OFF or the parameter doesn't exist (TD 2023), the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
+**Note**: If `modoutsidecook` is OFF, the component automatically falls back to the force-cook path via Script TOP onCook. No code changes needed for backward compatibility.
 
 ### Step 6c: Create warning_emitter Script TOP
 
@@ -708,6 +708,5 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 **Component Version**: 1.14.1
 **TouchDesigner Version**: 2025.32820 or later, for 2.0.0 and later (the build date and
 component version above are of 1.14.1 and change at the 2.0.0 release cut). Save the release
-`.tox` in TD 2025.32820, so
-the `td_build` column of `TOXES/RELEASES.tsv` names the minimum build
-([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).
+`.tox` in TD 2025.32820, so the `td_build` column of `TOXES/RELEASES.tsv` names the minimum
+build ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).

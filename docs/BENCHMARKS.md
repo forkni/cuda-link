@@ -707,7 +707,8 @@ This closes the open item of the 2026-11-17 section: in a same-mode, interleaved
 The 2026-11-20 run of the Python `Exporter` was at 1280x720. This run repeats it at 1920x1080:
 `scripts/profiling/profile_export.py --frames 2000 --width 1920 --height 1080 --dtype uint8`,
 `CUDALINK_EXPORT_SYNC=0`, `--no-graphs` for off, 3 runs per state, states interleaved, with the
-three 32820 TD processes above open. `export_frame` median / p95 in µs.
+three 32820 TD processes above open. `cuda_link` from `development` (d8ff756), `torch`
+2.11.0+cu128. `export_frame` median / p95 in µs.
 
 | Graphs | Run 1 | Run 2 | Run 3 |
 |---|---|---|---|
@@ -723,7 +724,8 @@ One TD process (C, the 1.14.1 TD), C's window in front (109 of 110 checks). A `C
 fed by the same 1920x1080 `rgba8fixed` Noise TOP, on its own stream, and the 1.14.1 `.tox`
 Sender alternated, 3 runs each, Active on for one at a time, no Receiver. Each run: 10 s warm-up,
 60 s measured, 3600 frames. `.tox`: a `perf_counter` timer around the extension's
-`export_frame()`, which is the whole send (format checks, `cudaMemory()`, `export()`). Out TOP:
+`export_frame()`, which is the whole send (format checks, `cudaMemory()`, `export()`), with
+Debug on and `CUDALINK_SENDER_REPORT_EVERY=30` as above. Out TOP (installed DLLs, build `852b350-dirty`):
 the Info CHOP `cook_us`, `begin_us`, `copy_us` and `end_us` channels, read once per cook, Debug
 off. Median / p95 in µs.
 
@@ -740,6 +742,6 @@ off. Median / p95 in µs.
 - One more Out TOP run with Debug on gave the GPU copy time: `gpu_ipc_us` median 22.5 µs. Debug
   raises `cook_us` to 294 µs median, so the Debug-on cook times are not comparable.
 - The 1.14.1 `export=` level in this pass (median 558.6 µs in run 1) is higher than in the
-  pass above (about 300 µs). With Active off the Out TOP returns before any GPU work
+  C-in-front pass above (1.14.1 p50 299.8 µs). With Active off the Out TOP returns before any GPU work
   (`CudaLinkOutTOP.cpp`, the `evalActive()` check in `execute()`), so it did not cause this.
   As above: compare only inside one pass.
