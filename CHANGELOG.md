@@ -12,8 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`CUDALINK_USE_GRAPHS`**: the variable is gone and the Python `Exporter` always tries the
   CUDA graph path (legacy path on a capture or launch failure, as before). Measured
   2026-11-20 at 1280x720 uint8: `export_frame` median 13.4 µs with graphs against 22.9 µs
-  without. `ExportPolicy(use_graphs=False)` stays. `CUDALINK_TD_USE_GRAPHS` (the `.tox`
-  Sender, default off) is not changed.
+  without. `ExportPolicy(use_graphs=False)` stays.
+
+- **`CUDALINK_TD_USE_GRAPHS`**: the variable is gone and the `.tox` Sender always uses the
+  plain stream export path (the default before). Measured 2026-11-21 at 1920x1080 on
+  TD 2025.32820: graphs on against off gave `export` p50 +0.1 %, inside the run noise. A value
+  left in the environment has no effect. The `TDSenderConfig.use_graphs` field is also gone:
+  `TDSenderConfig(use_graphs=...)` now raises `TypeError`.
 
 - **`CUDALINK_DOORBELL`**: the variable is gone and the doorbell is always on, in the Python
   `Exporter` and `Importer` and in the `.tox` Sender. Measured 2026-11-20 at 1280x720: off saved

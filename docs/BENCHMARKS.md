@@ -633,10 +633,10 @@ Dev box: RTX 4090, three idle TouchDesigner projects open (GPU load 4-5 %). Pyth
 For an A/B run, `profile_export.py --no-graphs` selects the legacy export path, and
 `bench_doorbell.py` selects polling through `ImportPolicy(doorbell=False)`.
 
-Not measured here: `CUDALINK_TD_USE_GRAPHS` (the `.tox` Sender, default off). It needs two
-TouchDesigner processes on a quiet machine. `CUDALINK_CPP_USE_GRAPHS` was measured on 2026-11-17
-(no gain, see ADR-0010 and ADR-0011). `CUDALINK_TD_USE_GRAPHS` was measured on 2026-11-21: see
-the next section.
+Not measured here: `CUDALINK_TD_USE_GRAPHS` (the `.tox` Sender). It needs two TouchDesigner
+processes on a quiet machine. `CUDALINK_CPP_USE_GRAPHS` was measured on 2026-11-17 (no gain, see
+ADR-0010 and ADR-0011). `CUDALINK_TD_USE_GRAPHS` was measured on 2026-11-21 (the next section)
+and removed in 2.0.0.
 
 ## `.tox` Sender on TD 2025.32820 at 1080p (2026-11-21)
 
@@ -664,8 +664,8 @@ A sends to B; the variable alternated, 3 runs per state, in one pass.
 | off | 540.4 µs | 725.3 µs | 527.1, 541.7, 640.8 | 111.8 µs |
 | on | 541.0 µs | 604.4 µs | 528.8, 540.0, 549.8 | 114.0 µs |
 
-On against off: p50 +0.1 %, inside the 3 % noise band. No gain: the variable goes, the `.tox`
-Sender keeps the plain export path. Not shown by the run: the Sender prints no line that says
+On against off: p50 +0.1 %, inside the 3 % noise band. No gain: the variable was removed in 2.0.0,
+and the `.tox` Sender keeps the plain export path. Not shown by the run: the Sender prints no line that says
 graphs are in use, so the run shows only that the variable was set before each restart.
 
 ### 2.0 against 1.14.1 (Sender only)
@@ -716,7 +716,7 @@ three 32820 TD processes above open. `cuda_link` from `development` (d8ff756), `
 | off | 20.1 / 63.2 | 19.2 / 42.7 | 20.0 / 38.3 |
 
 On is about 6 µs (30 %) faster per frame, as at 1280x720. The Python `Exporter` keeps graphs on.
-This is a different path from the `.tox` Sender, where `CUDALINK_TD_USE_GRAPHS` gave no gain.
+This is a different path from the `.tox` Sender, where `CUDALINK_TD_USE_GRAPHS` (removed in 2.0.0) gave no gain.
 
 ### C++ Out TOP against the 1.14.1 `.tox` Sender
 

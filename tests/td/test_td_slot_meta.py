@@ -57,7 +57,7 @@ class _FakeExporter:
 def _sender(host: FakeTDHost) -> TDSenderEngine:
     return TDSenderEngine(
         host=host,
-        config=TDSenderConfig(activation_barrier=False, use_graphs=False),
+        config=TDSenderConfig(activation_barrier=False),
         cuda=None,
         log_fn=lambda *a, **k: None,
         num_slots=1,
