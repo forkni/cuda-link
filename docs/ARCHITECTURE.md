@@ -950,6 +950,7 @@ See `docs/adr/` for the full Architecture Decision Record index:
 - **ADR-0013** — Prebuilt wheel distribution: Windows-only, cp311 native + py3-none-any fallback; end-user machines never compile
 - **ADR-0014** — Project-anchored install resolution: layered lookup (explicit folder → project folder → `CUDALINK_LIB_PATH` → `sys.path`), `MIRROR_VERSION` stamp checked before import, rival install refused (amends ADR-0003)
 - **ADR-0015** — SHM protocol v0.6: 32 B per-slot meta (`host_timestamp`, `producer_frame`, `stream_id`), 8-aligned `version`, `sender_pid` loop-back check; one wire break from v0.5 (Proposed)
+- **ADR-0017** — Minimum TD build 2025.32820: release `.tox` and `.toe` saved in 32820, C++ DLLs built against the vendored 32820 plugin API (`OP_CommonAPIVersion` 1)
 
 ---
 
