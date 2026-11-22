@@ -250,11 +250,12 @@ def test_a_none_any_wheel_carries_no_dlls(tmp_path: Path, capsys: pytest.Capture
 
 
 def test_the_installer_runs_without_scripts_on_sys_path() -> None:
-    # python -P (and PYTHONSAFEPATH) leave the script's folder off sys.path.
+    # python -P and PYTHONSAFEPATH (3.11+) leave the script's folder off sys.path. -I does too,
+    # on every supported Python, so the test runs on the 3.9/3.10 CI legs as well.
     import subprocess
 
     script = _PROJECT_ROOT / "scripts" / "install_td_library.py"
-    done = subprocess.run([sys.executable, "-P", str(script), "--help"], capture_output=True, text=True, timeout=60)
+    done = subprocess.run([sys.executable, "-I", str(script), "--help"], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert "--no-td-plugins" in done.stdout
 
