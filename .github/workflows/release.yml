@@ -99,6 +99,7 @@ jobs:
           $wheel = Get-ChildItem dist\cuda_link-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
           python -m pip install "$($wheel.FullName)"
           python -c "import cuda_link._native_waiter; print('native extension imported OK')"
+          python -c "from cuda_link import td_plugin as t; assert t.has_plugins(), t.plugin_dir(); print('TOP DLLs found:', t.plugin_path('out'), t.plugin_path('in'))"
           python -m pip install pytest pytest-randomly
           pytest tests/core/test_native_state_machine.py -m requires_native -v
 

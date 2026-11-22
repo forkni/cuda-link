@@ -23,10 +23,10 @@ def _dll(version: str = _VERSION) -> bytes:
     return b"MZ\x00\x00CUDA-Link %s (build %s)\x00" + version.encode() + b"\x00bd1d7e1\x00"
 
 
-def _wheel(tmp_path: Path, name: str, plugins: dict[str, bytes]) -> Path:
+def _wheel(tmp_path: Path, name: str, plugins: dict[str, bytes], init: str = "") -> Path:
     path = tmp_path / name
     with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr("cuda_link/__init__.py", "")
+        zf.writestr("cuda_link/__init__.py", init)
         for file_name, data in plugins.items():
             zf.writestr(cwp.PLUGIN_PREFIX + file_name, data)
     return path
@@ -69,9 +69,35 @@ def test_dll_of_another_version_fails(tmp_path: Path) -> None:
 
 
 def test_version_must_be_a_whole_string(tmp_path: Path) -> None:
-    # "2.0.0" must not match inside "2.0.0.dev0", nor the other way round.
+    # A "2.0.0.dev0" stamp in a 2.0.0 wheel fails ...
     wheel = _wheel(tmp_path, "cuda_link-2.0.0-cp311-cp311-win_amd64.whl", _both())
     assert len(cwp.check_wheel(wheel)) == 2
+
+
+def test_version_must_be_a_whole_string_other_way(tmp_path: Path) -> None:
+    # ... and a "2.0.0" stamp in a 2.0.0.dev0 wheel fails too.
+    assert len(cwp.check_wheel(_wheel(tmp_path, _PLATFORM, _both("2.0.0")))) == 2
+
+
+def test_raw_package_version_wins_over_the_file_name(tmp_path: Path) -> None:
+    # The file name is PEP 440 normalized (2.0.0rc1); the DLL carries __version__ as written.
+    name = "cuda_link-2.0.0rc1-cp311-cp311-win_amd64.whl"
+    wheel = _wheel(tmp_path, name, _both("2.0.0-rc.1"), init='__version__ = "2.0.0-rc.1"\n')
+    assert cwp.check_wheel(wheel, require_plugins=True) == []
+    assert cwp.check_wheel(_wheel(tmp_path, name, _both("2.0.0rc1"), init='__version__ = "2.0.0-rc.1"\n'))
+
+
+def test_main_expands_a_glob_pattern(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _wheel(tmp_path, _PLATFORM, _both())
+    _wheel(tmp_path, _ANY, {})
+    assert cwp.main([str(tmp_path / "*.whl"), "--require-plugins"]) == 0
+    out = capsys.readouterr().out
+    assert f"[OK] {_PLATFORM}" in out and f"[OK] {_ANY}" in out
+
+
+def test_main_reports_a_pattern_with_no_match(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cwp.main([str(tmp_path / "*.whl")]) == 1
+    assert "[FAIL]" in capsys.readouterr().out
 
 
 def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

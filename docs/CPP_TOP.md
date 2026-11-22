@@ -95,13 +95,18 @@ The `py3-none-any` wheel and local or dev CI builds carry no DLLs.
   absolute DLL paths, or None when the install has no DLLs. Point a CPlusPlus TOP's Plugin
   Path at them. This is the portable form above: an Out TOP needs the `onStart` cook, and the
   machine must have no system copy (`install_cpp_top.cmd status` shows one).
-- Update: TD locks a loaded DLL, so `pip install` of a new wheel fails while a TOP from it is
-  loaded. Close TD, install, start TD, and approve the prompts again.
+- Update: close TD first. TD keeps a loaded DLL open, so a `pip install` of a new wheel while a
+  TOP from it is loaded can fail, or can succeed while TD keeps using the old DLL until it
+  restarts (the Python side and the TOPs then differ). Close TD, install, start TD, and approve
+  the prompts again.
+- Editable installs (`pip install -e .`) do not find the DLLs: `plugin_path()` looks next to
+  `cuda_link/td_plugin.py` in `src/`. Dev builds carry no DLLs anyway.
 - Build a wheel with the DLLs: build `cpp_top` first (see "Build"), then
   `python -m build --wheel -Ccmake.define.CUDALINK_TD_PLUGIN_DIR=<folder with the two DLLs>`.
   The build refuses a missing DLL, a DLL stamped with another version (configure `cpp_top`
   again from the same tree) and the `py3-none-any` build. `release.yml` does this and checks
-  the wheels with `python scripts/check_wheel_plugins.py --require-plugins dist/*.whl`.
+  the wheels with `python scripts/check_wheel_plugins.py --require-plugins "dist/*.whl"` (the
+  script expands the pattern, so it works in PowerShell and cmd too).
 
 ## Build
 

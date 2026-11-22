@@ -81,7 +81,9 @@ if(CUDALINK_TD_PLUGIN_DIR)
   if(NOT CUDALINK_WHEEL_VERSION)
     message(FATAL_ERROR "cuda-link: no __version__ line in src/cuda_link/__init__.py")
   endif()
+  # A version holds digits, letters and . + - _ !; of those, . and + are regex operators.
   string(REPLACE "." "\\." CUDALINK_WHEEL_VERSION_RE "${CUDALINK_WHEEL_VERSION}")
+  string(REPLACE "+" "\\+" CUDALINK_WHEEL_VERSION_RE "${CUDALINK_WHEEL_VERSION_RE}")
   # A Windows path with backslashes would turn into escapes in the generated install script.
   file(TO_CMAKE_PATH "${CUDALINK_TD_PLUGIN_DIR}" CUDALINK_TD_PLUGIN_DIR_CMAKE)
   foreach(CUDALINK_DLL IN ITEMS CudaLinkOutTOP.dll CudaLinkInTOP.dll)
