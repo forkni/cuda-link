@@ -65,6 +65,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 # Force UTF-8 output on Windows so box-drawing/arrow characters print correctly.
@@ -604,12 +605,107 @@ def _print_activation(
     print()
 
 
+# ─── Install targets ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class InstallTarget:
+    """One install, built by a ``mode_*`` function and run by :func:`run_install`.
+
+    The mode function asks for and checks the target (prompts, paths, wheel resolution);
+    run_install() runs pip and prints what to do next, the same way for every mode.
+    """
+
+    label: str  # how _print_activation names site_packages ("venv site-packages", ...)
+    wheel: Path
+    pip_args: list[str]
+    site_packages: Path | None = None
+    # Run after pip (not in a dry run) when site_packages is not known up front (modes 3, 4).
+    site_query: list[str] | None = None
+    missing_site_hint: tuple[str, ...] = ()  # printed when site_query finds nothing
+    td_preferences_only: bool = True  # False: mode 1 also shows CUDALINK_LIB_PATH
+    receiver_python: Path | None = None  # persisted as CUDALINK_RECEIVER_PYTHON_EXE (modes 2, 4)
+    td_python: bool = False  # mode 5: TD's own Python, with its own completion text
+
+
+def _query_site_packages(cmd: list[str]) -> Path | None:
+    """site-packages reported by ``cmd`` (a python command running _SITE_PKGS_QUERY), or None."""
+    try:
+        info = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    except (FileNotFoundError, OSError):
+        return None
+    return Path(info.stdout.strip()) if info.returncode == 0 else None
+
+
+def _print_td_python_done() -> None:
+    # TD's Python does not need a path variable — it's already on TD's sys.path
+    print()
+    print(_bold("─" * 60))
+    print(_bold("  INSTALL COMPLETE (TD Python)"))
+    print(_bold("─" * 60))
+    print()
+    print("  cuda_link is now installed into TD's Python.")
+    print("  No CUDALINK_LIB_PATH or TD Preferences change needed.")
+    print()
+    print(_bold("  Verify in TD Textport after restarting TouchDesigner:"))
+    print("    import cuda_link; print(cuda_link.__version__)")
+    print()
+
+
+def run_install(target: InstallTarget, *, dry_run: bool, set_env: bool) -> Path | None:
+    """pip, the activation text, then the setx tail. Returns the site-packages folder (None
+    when not known). A failed pip exits (_run_pip), so nothing after it runs."""
+    _run_pip(target.pip_args, dry_run)
+
+    site_pkgs = target.site_packages
+    if site_pkgs is None and target.site_query and not dry_run:
+        site_pkgs = _query_site_packages(target.site_query)
+
+    if target.td_python:
+        _print_td_python_done()
+    else:
+        _print_activation(
+            site_pkgs,
+            target.label,
+            _wheel_version(target.wheel) or _installed_version(),
+            td_preferences_only=target.td_preferences_only,
+        )
+        if site_pkgs is None:
+            for i, line in enumerate(target.missing_site_hint):
+                print(_yellow(line) if i == 0 else line)
+
+    if set_env and target.receiver_python is not None:
+        # CUDALINK_RECEIVER_PYTHON_EXE: the interpreter example_receiver_launcher.py's
+        # standalone receiver subprocess should use — the one cuda_link was just installed
+        # into. Without this, the launcher falls back to `py -3` resolution, which may pick
+        # a DIFFERENT Python 3 install.
+        print()
+        print(_bold("  Persisting environment variable for the standalone receiver:"))
+        receiver_vars: dict[str, str] = {}
+        if _setx_user("CUDALINK_RECEIVER_PYTHON_EXE", str(target.receiver_python), dry_run):
+            receiver_vars["CUDALINK_RECEIVER_PYTHON_EXE"] = str(target.receiver_python)
+        _print_env_vars_set(receiver_vars)
+
+    # CUDALINK_WAIT_BACKEND: persisted here (not a library code default) after ANY
+    # successful install — a failed pip hit sys.exit() above, so it correctly skips this.
+    # WAIT_BACKEND=auto is explicit (matching the library's own default) so it also
+    # overwrites any stale "python"/"native" value left over from earlier manual testing.
+    if set_env:
+        print()
+        print(_bold("  Persisting the environment variable for the R5 native waiter:"))
+        set_vars: dict[str, str] = {}
+        if _setx_user("CUDALINK_WAIT_BACKEND", "auto", dry_run):
+            set_vars["CUDALINK_WAIT_BACKEND"] = "auto"
+        _print_env_vars_set(set_vars)
+    return site_pkgs
+
+
 # ─── Install modes ─────────────────────────────────────────────────────────────
 
 
 def mode_1_external_folder(
     target: str | None, wheel_override: str | None, allow_build: bool, non_interactive: bool, dry_run: bool
-) -> None:
+) -> InstallTarget:
     """pip install --target <folder>  (default; CUDALINK_LIB_PATH points here)."""
     if not target:
         if non_interactive:
@@ -641,18 +737,12 @@ def mode_1_external_folder(
         "--force-reinstall",
         "--no-deps",
     ]
-    _run_pip(pip, dry_run)
-    _print_activation(dest, "Install folder", _wheel_version(wheel) or _installed_version())
+    return InstallTarget("Install folder", wheel, pip, site_packages=dest, td_preferences_only=False)
 
 
 def mode_2_venv(
-    venv_dir: str | None,
-    wheel_override: str | None,
-    allow_build: bool,
-    non_interactive: bool,
-    dry_run: bool,
-    set_env: bool = True,
-) -> None:
+    venv_dir: str | None, wheel_override: str | None, allow_build: bool, non_interactive: bool, dry_run: bool
+) -> InstallTarget:
     """Install into an existing venv's site-packages."""
     if not venv_dir:
         if non_interactive:
@@ -674,27 +764,18 @@ def mode_2_venv(
     wheel = _resolve_wheel_for([str(python_exe)], wheel_override, dry_run, allow_build)
 
     pip = [str(pip_exe), "install", str(wheel), "--upgrade", "--force-reinstall", "--no-deps"]
-    _run_pip(pip, dry_run)
-    site_pkgs = _find_site_packages_in(venv)
-    _print_activation(
-        site_pkgs, "venv site-packages", _wheel_version(wheel) or _installed_version(), td_preferences_only=True
+    return InstallTarget(
+        "venv site-packages",
+        wheel,
+        pip,
+        site_packages=_find_site_packages_in(venv),
+        receiver_python=python_exe if python_exe.exists() else None,
     )
-
-    if set_env and python_exe.exists():
-        # Same rationale as mode 4: this venv's python.exe is the interpreter
-        # example_receiver_launcher.py's standalone receiver subprocess should
-        # use, since cuda_link was just installed into it.
-        print()
-        print(_bold("  Persisting environment variable for the standalone receiver:"))
-        set_vars: dict[str, str] = {}
-        if _setx_user("CUDALINK_RECEIVER_PYTHON_EXE", str(python_exe), dry_run):
-            set_vars["CUDALINK_RECEIVER_PYTHON_EXE"] = str(python_exe)
-        _print_env_vars_set(set_vars)
 
 
 def mode_3_conda(
     conda_env: str | None, wheel_override: str | None, allow_build: bool, non_interactive: bool, dry_run: bool
-) -> None:
+) -> InstallTarget:
     """Install into a conda environment."""
     if not conda_env:
         if non_interactive:
@@ -717,43 +798,22 @@ def mode_3_conda(
         "--force-reinstall",
         "--no-deps",
     ]
-    _run_pip(pip, dry_run)
-
-    # Try to find the site-packages path from conda info
-    site_pkgs: Path | None = None
-    if not dry_run:
-        try:
-            info = subprocess.run(
-                ["conda", "run", "-n", conda_env, "python", "-c", _SITE_PKGS_QUERY],
-                capture_output=True,
-                text=True,
-                cwd=REPO_ROOT,
-            )
-            if info.returncode == 0:
-                site_pkgs = Path(info.stdout.strip())
-        except FileNotFoundError:
-            pass
-
-    _print_activation(
-        site_pkgs,
+    return InstallTarget(
         "conda env site-packages",
-        _wheel_version(wheel) or _installed_version(),
-        td_preferences_only=True,
+        wheel,
+        pip,
+        site_query=["conda", "run", "-n", conda_env, "python", "-c", _SITE_PKGS_QUERY],
+        missing_site_hint=(
+            "  Could not auto-detect conda site-packages path.",
+            '  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"',
+            "  then add the 'site-packages' entry to TD Preferences.",
+        ),
     )
-    if site_pkgs is None:
-        print(_yellow("  Could not auto-detect conda site-packages path."))
-        print('  Run: conda run -n <env> python -c "import site; print(site.getsitepackages())"')
-        print("  then add the 'site-packages' entry to TD Preferences.")
 
 
 def mode_4_system_python(
-    python_exe: str | None,
-    wheel_override: str | None,
-    allow_build: bool,
-    non_interactive: bool,
-    dry_run: bool,
-    set_env: bool = True,
-) -> None:
+    python_exe: str | None, wheel_override: str | None, allow_build: bool, non_interactive: bool, dry_run: bool
+) -> InstallTarget:
     """Install into a system / parallel Python installation (the official TD docs approach)."""
     if not python_exe:
         if non_interactive:
@@ -792,43 +852,20 @@ def mode_4_system_python(
         "--force-reinstall",
         "--no-deps",
     ]
-    _run_pip(pip, dry_run)
-
-    # Detect site-packages — use _SITE_PKGS_QUERY to filter for the actual site-packages
-    # directory; getsitepackages()[0] can return the Python root on some installations.
-    site_pkgs: Path | None = None
-    if not dry_run:
-        try:
-            info = subprocess.run(
-                [str(py_path), "-c", _SITE_PKGS_QUERY],
-                capture_output=True,
-                text=True,
-            )
-            if info.returncode == 0:
-                site_pkgs = Path(info.stdout.strip())
-        except (FileNotFoundError, OSError):
-            pass
-
-    _print_activation(
-        site_pkgs, "Python site-packages", _wheel_version(wheel) or _installed_version(), td_preferences_only=True
+    # _SITE_PKGS_QUERY filters for the actual site-packages directory;
+    # getsitepackages()[0] can return the Python root on some installations.
+    return InstallTarget(
+        "Python site-packages",
+        wheel,
+        pip,
+        site_query=[str(py_path), "-c", _SITE_PKGS_QUERY],
+        receiver_python=py_path,
     )
-
-    if set_env:
-        # CUDALINK_RECEIVER_PYTHON_EXE: the interpreter example_receiver_launcher.py's
-        # standalone receiver subprocess should use — this IS that interpreter, since
-        # mode 4 just installed cuda_link into it. Without this, the launcher falls
-        # back to `py -3` resolution, which may pick a DIFFERENT Python 3 install.
-        print()
-        print(_bold("  Persisting environment variable for the standalone receiver:"))
-        set_vars: dict[str, str] = {}
-        if _setx_user("CUDALINK_RECEIVER_PYTHON_EXE", str(py_path), dry_run):
-            set_vars["CUDALINK_RECEIVER_PYTHON_EXE"] = str(py_path)
-        _print_env_vars_set(set_vars)
 
 
 def mode_5_td_python(
     td_python_exe: str | None, wheel_override: str | None, allow_build: bool, non_interactive: bool, dry_run: bool
-) -> None:
+) -> InstallTarget:
     """Install directly into TouchDesigner's bundled Python.
 
     DEPRECATED — pip-installing into TD's own interpreter is a known anti-pattern
@@ -876,20 +913,7 @@ def mode_5_td_python(
     print(_yellow("\n  Note: installing cuda_link into TD's Python means CUDALINK_LIB_PATH is NOT needed."))
     print("  cuda_link will be importable in all TD projects automatically.")
     print("  Re-run this after upgrading TouchDesigner.\n")
-    _run_pip(pip, dry_run)
-
-    # TD's Python does not need a path variable — it's already on TD's sys.path
-    print()
-    print(_bold("─" * 60))
-    print(_bold("  INSTALL COMPLETE (TD Python)"))
-    print(_bold("─" * 60))
-    print()
-    print("  cuda_link is now installed into TD's Python.")
-    print("  No CUDALINK_LIB_PATH or TD Preferences change needed.")
-    print()
-    print(_bold("  Verify in TD Textport after restarting TouchDesigner:"))
-    print("    import cuda_link; print(cuda_link.__version__)")
-    print()
+    return InstallTarget("TD Python", wheel, pip, td_python=True)
 
 
 # ─── Interactive menu ──────────────────────────────────────────────────────────
@@ -982,33 +1006,17 @@ def main() -> None:
     # Set unconditionally by --no-set-env: True unless the user opted out.
     set_env = not args.no_set_env
 
-    # Dispatch — each mode resolves its own wheel once it knows its target
-    # interpreter (see _resolve_wheel_for), rather than a single upfront
-    # resolution: the right wheel depends on THAT target's Python version.
-    if mode == 1:
-        mode_1_external_folder(args.target, args.wheel, args.build, args.non_interactive, args.dry_run)
-    elif mode == 2:
-        mode_2_venv(args.venv, args.wheel, args.build, args.non_interactive, args.dry_run, set_env)
-    elif mode == 3:
-        mode_3_conda(args.conda, args.wheel, args.build, args.non_interactive, args.dry_run)
-    elif mode == 4:
-        mode_4_system_python(args.python, args.wheel, args.build, args.non_interactive, args.dry_run, set_env)
-    elif mode == 5:
-        mode_5_td_python(args.td_python, args.wheel, args.build, args.non_interactive, args.dry_run)
-
-    # CUDALINK_WAIT_BACKEND: persisted here (not a library
-    # code default) after ANY successful mode above — a mode function that hit
-    # sys.exit() on error never reaches this point, so a failed install
-    # correctly skips it too. WAIT_BACKEND=auto is explicit (matching the
-    # library's own default) so it also overwrites any stale "python"/"native"
-    # value left over from earlier manual testing on this machine.
-    if set_env:
-        print()
-        print(_bold("  Persisting the environment variable for the R5 native waiter:"))
-        set_vars: dict[str, str] = {}
-        if _setx_user("CUDALINK_WAIT_BACKEND", "auto", args.dry_run):
-            set_vars["CUDALINK_WAIT_BACKEND"] = "auto"
-        _print_env_vars_set(set_vars)
+    # Each mode resolves its own wheel once it knows its target interpreter (see
+    # _resolve_wheel_for), rather than a single upfront resolution: the right wheel
+    # depends on THAT target's Python version.
+    modes = {
+        1: lambda: mode_1_external_folder(args.target, args.wheel, args.build, args.non_interactive, args.dry_run),
+        2: lambda: mode_2_venv(args.venv, args.wheel, args.build, args.non_interactive, args.dry_run),
+        3: lambda: mode_3_conda(args.conda, args.wheel, args.build, args.non_interactive, args.dry_run),
+        4: lambda: mode_4_system_python(args.python, args.wheel, args.build, args.non_interactive, args.dry_run),
+        5: lambda: mode_5_td_python(args.td_python, args.wheel, args.build, args.non_interactive, args.dry_run),
+    }
+    run_install(modes[mode](), dry_run=args.dry_run, set_env=set_env)
 
 
 if __name__ == "__main__":
