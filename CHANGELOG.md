@@ -136,8 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     A new `slot_meta` Script CHOP (`td_exporter/script_chop_callbacks.py`) and Out CHOP
     `out_slot_meta` show the same channels as the In TOP; it is force-cooked after each
     export (Sender) or import (Receiver). See `docs/TOX_BUILD_GUIDE.md` Step 6d.
-- TOX artifact `TOXES/CUDAIPCLink_v2.0.0.tox`, saved in TD 2025.32820 (sha256 in
-  `TOXES/RELEASES.tsv`). It includes the `slot_meta` Script CHOP and `out_slot_meta`.
+- TOX artifact `TOXES/CUDAIPCLink_v2.0.0.tox`: exported with Semantic Version Control in
+  TD 2025.32820 at the release (sha256 in `TOXES/RELEASES.tsv`). It includes the `slot_meta`
+  Script CHOP and `out_slot_meta`. The `2.0.0.dev0` pre-release export of that name (tracked
+  since PR 124) is removed: its bootstrap refuses the 2.0.0 package.
 
 ### Fixed
 
