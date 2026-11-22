@@ -45,7 +45,7 @@ class _FakeExporter:
         pass
 
 
-@pytest.mark.parametrize("env_value", [None, "0", "1"])
+@pytest.mark.parametrize("env_value", [None, "0", "1"], ids=["unset", "off", "on"])
 def test_sender_opens_exporter_without_graphs(monkeypatch: pytest.MonkeyPatch, env_value: str | None) -> None:
     if env_value is None:
         monkeypatch.delenv("CUDALINK_TD_USE_GRAPHS", raising=False)
