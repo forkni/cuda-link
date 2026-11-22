@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **C++ TOP DLLs in the release wheel**: the `cp311-win_amd64` wheel carries
+  `CudaLinkOutTOP.dll` and `CudaLinkInTOP.dll` in `cuda_link/td_plugins/`, built from the same
+  tree and stamped with the wheel version, so a host that installs the wheel (for example a
+  TouchDesigner project venv) gets matching Python and TOP sides. `cuda_link.td_plugin.plugin_path`
+  returns their paths. The build takes the DLL folder from the CMake cache variable
+  `CUDALINK_TD_PLUGIN_DIR` and refuses a missing DLL, a DLL of another version and the
+  `py3-none-any` build. `release.yml` builds the DLLs (CUDA 12.6, windows-2022) and checks both
+  wheels with the new `scripts/check_wheel_plugins.py`. Dev builds carry no DLLs
+  (`docs/CPP_TOP.md` "Install: from the wheel").
+
 - **C++ TOPs honor the Common page** (Out TOP and In TOP): Output Resolution, Resolution,
   Output Aspect, Pixel Format and Input Smoothness now work as on any TOP. The Out TOP resizes and
   converts its input on the GPU and sends what it shows; the In TOP resizes and converts the wire
