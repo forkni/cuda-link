@@ -138,6 +138,110 @@ def test_a_pid_that_is_not_a_process_id_is_not_running(pid: int) -> None:
     assert _process_is_running(pid) is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill is the POSIX branch")
+def test_a_pid_above_the_system_pid_type_is_not_running() -> None:
+    """The header field is 32 bits unsigned; os.kill raises OverflowError for 0xFFFFFFF0."""
+    assert _process_is_running(0xFFFF_FFF0) is False
+
+
+def test_a_pid_that_os_kill_cannot_take_is_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The POSIX branch on any platform: os.kill raising OverflowError means no such process."""
+
+    def kill(pid: int, sig: int) -> None:
+        raise OverflowError("signed integer is greater than maximum")
+
+    monkeypatch.setattr("cuda_link.exporter.sys.platform", "linux")
+    monkeypatch.setattr("cuda_link.exporter.os.kill", kill)
+
+    assert _process_is_running(0xFFFF_FFF0) is False
+
+
+@pytest.mark.parametrize(
+    ("error", "running"),
+    [(PermissionError("not ours"), True), (ProcessLookupError("gone"), False), (None, True)],
+    ids=["not-allowed-to-signal", "no-such-process", "signal-accepted"],
+)
+def test_the_posix_branch_reads_the_answer_of_os_kill(
+    monkeypatch: pytest.MonkeyPatch, error: Exception | None, running: bool
+) -> None:
+    def kill(pid: int, sig: int) -> None:
+        assert (pid, sig) == (4242, 0)
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr("cuda_link.exporter.sys.platform", "linux")
+    monkeypatch.setattr("cuda_link.exporter.os.kill", kill)
+
+    assert _process_is_running(4242) is running
+
+
+class _FakeKernel32:
+    """kernel32 as _process_is_running uses it; records the handles it closed."""
+
+    def __init__(self, *, handle: int, exit_code: int | None) -> None:
+        self._handle = handle
+        self._exit_code = exit_code
+        self.closed: list[int] = []
+        # Plain functions, like ctypes function objects: the caller sets argtypes and restype
+        # on them, and a bound method takes no attributes.
+        self.OpenProcess = lambda *args: self._open_process(*args)
+        self.GetExitCodeProcess = lambda *args: self._get_exit_code_process(*args)
+        self.CloseHandle = lambda *args: self._close_handle(*args)
+
+    def _open_process(self, access: int, inherit: bool, pid: int) -> int:
+        assert (access, inherit, pid) == (0x1000, False, 4242)
+        return self._handle
+
+    def _get_exit_code_process(self, handle: int, exit_code_ref: object) -> int:
+        if self._exit_code is None:
+            return 0
+        exit_code_ref._obj.value = self._exit_code  # type: ignore[attr-defined]
+        return 1
+
+    def _close_handle(self, handle: int) -> int:
+        self.closed.append(handle)
+        return 1
+
+
+def _windows_branch(monkeypatch: pytest.MonkeyPatch, kernel32: _FakeKernel32, last_error: int = 0) -> None:
+    import ctypes
+
+    monkeypatch.setattr("cuda_link.exporter.sys.platform", "win32")
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error: kernel32, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error, raising=False)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "running"),
+    [(259, True), (0, False), (1, False), (None, True)],
+    ids=["still-active", "exited-clean", "exited-with-error", "exit-code-unreadable"],
+)
+def test_the_windows_branch_reads_the_exit_code_and_closes_the_handle(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int | None, running: bool
+) -> None:
+    kernel32 = _FakeKernel32(handle=77, exit_code=exit_code)
+    _windows_branch(monkeypatch, kernel32)
+
+    assert _process_is_running(4242) is running
+    assert kernel32.closed == [77]
+
+
+@pytest.mark.parametrize(
+    ("last_error", "running"),
+    [(5, True), (87, False)],
+    ids=["access-denied", "no-such-process"],
+)
+def test_the_windows_branch_without_a_handle_reads_the_last_error(
+    monkeypatch: pytest.MonkeyPatch, last_error: int, running: bool
+) -> None:
+    """A process this one may not open still exists; any other error means no process."""
+    kernel32 = _FakeKernel32(handle=0, exit_code=None)
+    _windows_branch(monkeypatch, kernel32, last_error)
+
+    assert _process_is_running(4242) is running
+    assert kernel32.closed == []
+
+
 def test_a_process_that_exited_is_not_running() -> None:
     child = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 -- our own interpreter
     child.wait(timeout=60)
@@ -293,6 +397,24 @@ def test_a_segment_that_names_this_process_is_not_a_conflict_by_itself(monkeypat
         _open(spec).close()
 
     assert asked == []
+
+
+def test_a_segment_that_cannot_be_read_is_taken_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header read fails: nothing says that a sender runs, and the open writes a new header."""
+    spec = _spec()
+
+    def unreadable(buf: memoryview) -> int:
+        raise ValueError("released buffer")
+
+    monkeypatch.setattr("cuda_link.exporter.running_sender_pid", unreadable)
+    monkeypatch.setattr("cuda_link.exporter._process_is_running", lambda pid: True)
+
+    with _segment_of_a_sender(spec, sender_pid=_OTHER_PID) as segment:
+        exporter = _open(spec)
+        try:
+            assert read_sender_pid(segment.buf) == os.getpid()
+        finally:
+            exporter.close()
 
 
 def test_a_segment_of_another_protocol_is_taken_over(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -125,7 +125,9 @@ def _process_is_running(pid: int) -> bool:
             kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
+        # OverflowError: the header field is 32 bits unsigned; a value above the system's
+        # pid type is no process id.
         return False
     except PermissionError:
         return True
@@ -291,6 +293,8 @@ class Exporter:
         Raises:
             ValueError: dtype or num_slots invalid, or device mismatch.
             RuntimeError: CUDA or SHM allocation failed.
+            SenderConflictError: a running sender holds spec.shm_name (a RuntimeError;
+                raised before any GPU allocation).
             OSError: SHM create/open failed.
         """
         if policy is None:
@@ -323,6 +327,8 @@ class Exporter:
         - a segment whose header names another process as its sender, with the shutdown
           flag clear, while that process still runs. A sender that closed set the flag; a
           sender that crashed left a pid that no longer runs. Both leave the name free.
+        Not seen: a C++ Out TOP in this same process. Its segment names this process, and
+        it is not in _OPEN_EXPORTERS.
 
         The segment is not ours to unlink: another process may still hold it. (On POSIX
         with Python < 3.13 any attach registers the name with ``resource_tracker``, which
