@@ -132,7 +132,7 @@ def test_reinit_pars_have_state_and_apply() -> None:
 )
 def test_parspec_rejects_a_row_that_does_not_fit_its_policy(policy: str, state: object, apply: object) -> None:
     with pytest.raises(ValueError, match="Somepar"):
-        ParSpec("Somepar", policy, int, state, apply)  # type: ignore[arg-type]
+        ParSpec("Somepar", policy, int, state, apply, help="text")  # type: ignore[arg-type]
 
 
 def test_every_par_the_package_reads_has_a_row() -> None:
