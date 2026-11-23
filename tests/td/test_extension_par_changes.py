@@ -8,10 +8,13 @@ decisions, through the extension's own interface with a FakeTDHost: no `parent()
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import pathlib
+import sys
 
 import pytest
-from CUDAIPCExtension import PARS, CUDAIPCExtension
+from CUDAIPCExtension import PARS, CUDAIPCExtension, ParSpec
 from fakes import FakeTDHost
 
 _SHM = "cuda_a"
@@ -39,6 +42,7 @@ class _Ext(CUDAIPCExtension):
         self.switched_to: list[str] = []
         self.cleanups = 0
         self.status_cleared = 0
+        self.engine_devices: list[int] = []
         self._switch_error = switch_error
         self.host = _host(mode, active)
         super().__init__(None, host=self.host)
@@ -48,6 +52,10 @@ class _Ext(CUDAIPCExtension):
 
     def _log(self, msg: str, force: bool = False) -> None:
         self.logs.append((msg, force))
+
+    def _make_engine(self):  # noqa: ANN202 -- the engine here is the inert one, which has no device
+        self.engine_devices.append(self._device)
+        return super()._make_engine()
 
     def reconfigure_and_reinit(self, field_name: str, new_value: object) -> None:
         self.reconfigured.append((field_name, new_value))
@@ -87,11 +95,116 @@ def _last_enable(host: FakeTDHost, name: str) -> bool | None:
 
 def test_pars_table_names_the_monitored_pars_mode_first() -> None:
     """Mode first: resync_pars walks this order, and the later pars need the new engine."""
-    assert [spec.name for spec in PARS] == ["Mode", "Active", "Ipcmemname", "Numslots", "Debug", "Hidebuiltin"]
+    assert [spec.name for spec in PARS] == [
+        "Mode",
+        "Active",
+        "Ipcmemname",
+        "Numslots",
+        "Cudadevice",
+        "Streamid",
+        "Framewaitms",
+        "Debug",
+        "Hidebuiltin",
+    ]
 
 
-def test_every_par_in_the_table_keeps_a_value_to_resync() -> None:
-    assert [spec.name for spec in PARS if spec.state is None] == []
+def test_live_pars_keep_a_copy_only_for_an_action_to_replay() -> None:
+    """Active: resync_pars must run the cleanup of a deactivation it missed."""
+    live = [spec for spec in PARS if spec.policy == "live"]
+    assert [spec.name for spec in live] == ["Active", "Streamid", "Framewaitms"]
+    assert [spec.name for spec in live if spec.state is not None] == ["Active"]
+
+
+def test_reinit_pars_have_state_and_apply() -> None:
+    reinit = [spec for spec in PARS if spec.policy == "reinit"]
+    assert all(spec.state is not None and spec.apply is not None for spec in reinit)
+
+
+@pytest.mark.parametrize(
+    ("policy", "state", "apply"),
+    [
+        ("reinit", None, None),
+        ("reinit", lambda ext: 0, None),
+        ("live", lambda ext: 0, None),
+        ("sometimes", None, None),
+    ],
+    ids=["reinit-without-state", "reinit-without-apply", "live-with-state", "bad-policy"],
+)
+def test_parspec_rejects_a_row_that_does_not_fit_its_policy(policy: str, state: object, apply: object) -> None:
+    with pytest.raises(ValueError, match="Somepar"):
+        ParSpec("Somepar", policy, int, state, apply, help="text")  # type: ignore[arg-type]
+
+
+def test_every_par_the_package_reads_has_a_row() -> None:
+    """A par read through param_value() with no row has no declared policy (the old Cudadevice)."""
+    source_dir = pathlib.Path(sys.modules[CUDAIPCExtension.__module__].__file__).parent
+    read: set[str] = set()
+    not_literal: list[str] = []
+    for name in ("CUDAIPCExtension.py", "TDSender.py", "TDReceiver.py"):
+        tree = ast.parse((source_dir / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr != "param_value":
+                continue
+            arg = node.args[0] if node.args else None
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                read.add(arg.value)
+            else:
+                not_literal.append(f"{name}:{node.lineno} {ast.unparse(node)}")
+
+    # resync_pars reads each row by its name; every other read names its par in the call.
+    assert [call.split(" ", 1)[1] for call in not_literal] == ["self._host.param_value(spec.name)"], not_literal
+    assert read == {spec.name for spec in PARS} - {"Active"}  # Active has its own reader, is_active()
+
+
+@pytest.mark.parametrize("name", ["Streamid", "Framewaitms"], ids=["streamid", "framewaitms"])
+def test_a_live_par_without_apply_is_logged_and_ignored(name: str) -> None:
+    ext = _Ext()
+
+    ext.on_par_change(name, 5, 0)
+
+    assert (ext.reconfigured, ext.switched_to, ext.cleanups) == ([], [], 0)
+
+
+def test_cudadevice_change_makes_a_new_engine_on_the_new_device() -> None:
+    ext = _Ext()
+    engine = ext._engine
+
+    _change(ext, "Cudadevice", 1, 0)
+
+    assert (ext._device, ext.cleanups) == (1, 1)
+    assert ext._engine is not engine
+    assert ext.engine_devices == [0, 1]  # the load, then the new engine on the new device
+    assert ("device changed - reinitializing", True) in ext.logs
+
+
+@pytest.mark.parametrize("value", ["gpu1", "", None], ids=["text", "empty", "none"])
+def test_cudadevice_that_is_not_a_number_is_rejected(value: object) -> None:
+    """A COMP built by hand can have Cudadevice as a Str par; the Par Execute DAT must not raise."""
+    ext = _Ext()
+
+    _change(ext, "Cudadevice", value, 0)
+
+    assert (ext._device, ext.cleanups, ext.engine_devices) == (0, 0, [0])
+    assert (f"WARNING: Cudadevice={value!r} is not a device index; change rejected", True) in ext.logs
+
+
+def test_cudadevice_unchanged_is_a_noop() -> None:
+    ext = _Ext()
+
+    _change(ext, "Cudadevice", 0, 0)
+
+    assert (ext.cleanups, ext.logs) == (0, [])
+
+
+def test_cudadevice_below_zero_is_rejected() -> None:
+    ext = _Ext()
+
+    _change(ext, "Cudadevice", -1, 0)
+
+    assert (ext._device, ext.cleanups) == (0, 0)
+    assert ("WARNING: Cudadevice=-1 is not a device index; change rejected", True) in ext.logs
 
 
 def test_unknown_par_is_logged_and_ignored() -> None:
@@ -377,11 +490,16 @@ class _Live(CUDAIPCExtension):
     def __init__(self, host: FakeTDHost) -> None:
         self.changes: list[tuple[str, object]] = []
         self.logs: list[str] = []
+        self.engine_devices: list[int] = []
         self.host = host
         super().__init__(None, host=host)
 
     def _log(self, msg: str, force: bool = False) -> None:
         self.logs.append(msg)
+
+    def _make_engine(self):  # noqa: ANN202 -- the engine here is the inert one, which has no device
+        self.engine_devices.append(self._device)
+        return super()._make_engine()
 
     def on_par_change(self, name: str, value: object, prev: object = None) -> None:
         self.changes.append((name, prev))
@@ -442,6 +560,17 @@ def test_resync_with_an_unknown_frame_asks_for_one_call_only() -> None:
 
     assert ext.resync_pars() is False
     assert ext.shm_name == "probe"
+
+
+def test_resync_applies_a_cudadevice_written_after_load() -> None:
+    """Before, Cudadevice was read once in __init__ and a later write was lost."""
+    ext = _loaded(Cudadevice=1)
+
+    ext.resync_pars()
+
+    assert ext.changes == [("Cudadevice", 0)]
+    assert ext._device == 1
+    assert ext.engine_devices == [0, 1]
 
 
 def test_resync_without_drift_changes_nothing() -> None:

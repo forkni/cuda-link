@@ -23,7 +23,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
@@ -793,12 +793,13 @@ class CUDAIPCExtension:
         """Apply a change of one monitored par: PARS says what each one does.
 
         parexecute_callbacks.onValueChange calls this with the par's name, its new value and
-        its previous value. A par that is not in PARS is logged and ignored.
+        its previous value. A par that is not in PARS is logged and ignored. So is a live par
+        with no apply: its reader sees the new value on the next frame.
         """
         self._log(f"Parameter '{name}' changed: {prev} -> {value}", force=False)
         self._dispatched[name] = value
         spec = _PARS_BY_NAME.get(name)
-        if spec is not None:
+        if spec is not None and spec.apply is not None:
             spec.apply(self, value, prev)
 
     def resync_pars(self) -> bool:
@@ -811,7 +812,8 @@ class CUDAIPCExtension:
         on the first callback finds nothing to apply. All the writes of that script are
         visible on the next frame. A host that cannot tell the frame gets one call.
 
-        __init__ reads Mode, Ipcmemname, Numslots, Debug and Hidebuiltin. After that, only the
+        __init__ reads the pars with the "reinit" policy (Mode, Ipcmemname, Numslots,
+        Cudadevice, Debug and Hidebuiltin). After that, only the
         Parameter Execute DAT reports a change, and it reports nothing that happened before it
         first cooked. So a script that sets these pars in the same call as loadTox() or
         create() leaves the extension on the old values, with no error (2026-11-21: a Receiver
@@ -826,7 +828,7 @@ class CUDAIPCExtension:
         again = frame is not None and frame == self._resync_frame
         for spec in PARS:
             if spec.state is None:
-                continue  # nothing kept that can be stale
+                continue  # a live par with no kept copy: nothing that can be stale
             if spec.name == "Debug" and self._config.export_profile:
                 continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
             try:
@@ -885,6 +887,24 @@ class CUDAIPCExtension:
         if new_slots > 5:
             self._log(f"WARNING: Numslots={new_slots} outside recommended range (2-5)", force=True)
         self.reconfigure_and_reinit("num_slots", new_slots)
+
+    def _on_cudadevice_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        try:
+            new_device = int(value)  # type: ignore[call-overload]
+        except (ValueError, TypeError):  # a Str par on a COMP built by hand: text, or empty
+            self._log(f"WARNING: Cudadevice={value!r} is not a device index; change rejected", force=True)
+            return
+        if new_device == self._device:
+            return
+        if new_device < 0:
+            self._log(f"WARNING: Cudadevice={new_device} is not a device index; change rejected", force=True)
+            return
+        # The device is fixed when the engine is made, so make a new engine.
+        self._log("device changed - reinitializing", force=True)
+        self.cleanup()
+        self._device = new_device
+        self._engine = self._make_engine()
+        self.request_immediate_reconnect()  # a no-op in Sender mode
 
     def _on_debug_change(self, value: object, prev: object) -> None:  # noqa: ARG002
         self.verbose_performance = bool(value)
@@ -977,27 +997,176 @@ _MODE_DISPLAY_BUFFER = {"Sender": "ExportBuffer", "Receiver": "ImportBuffer"}
 
 @dataclass(frozen=True)
 class ParSpec:
-    """One custom par that the extension follows.
+    """One custom par that the extension or its engine reads.
 
-    kind:  the type its value and the kept state compare as (resync_pars).
-    state: reads the value the extension keeps for it; None when it keeps nothing.
-    apply: what a change does, as (extension, new value, previous value).
+    policy: "reinit" -- __init__ reads the par and the extension keeps the value. A change
+            needs apply, and resync_pars compares the par with state.
+            "live" -- the reader evaluates the par each time it needs it (Active at each
+            frame, Streamid at each publish, Framewaitms at each waiting frame). A live par
+            keeps a copy only when a change has an action that resync_pars must replay
+            (Active: the cleanup of a deactivation).
+    kind:   the type its value and the kept state compare as (resync_pars).
+    state:  reads the value the extension keeps for it; None when it keeps nothing.
+    apply:  what a change does, as (extension, new value, previous value); None when a
+            change needs no action.
+    help:   the Alt+hover text, without the sentence that says when the par is greyed out:
+            par_help() makes that sentence from par_enable_state.
     """
 
     name: str
+    policy: Literal["reinit", "live"]
     kind: Callable[[Any], Any]
     state: Callable[[CUDAIPCExtension], Any] | None
-    apply: Callable[[CUDAIPCExtension, Any, Any], None]
+    apply: Callable[[CUDAIPCExtension, Any, Any], None] | None
+    help: str
+
+    def __post_init__(self) -> None:
+        if self.policy not in ("reinit", "live"):  # Literal is not checked at runtime
+            raise ValueError(f"{self.name}: policy must be 'reinit' or 'live', not {self.policy!r}")
+        kept = self.state is not None
+        if (self.policy == "reinit" and not kept) or (kept and self.apply is None):
+            raise ValueError(f"{self.name}: a reinit par needs state and apply; a kept state needs apply")
 
 
 # Mode comes first: resync_pars walks this order, and the later pars must see the engine of
 # the new mode.
 PARS: tuple[ParSpec, ...] = (
-    ParSpec("Mode", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
-    ParSpec("Active", bool, lambda ext: ext._active_seen, CUDAIPCExtension._on_active_change),
-    ParSpec("Ipcmemname", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
-    ParSpec("Numslots", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
-    ParSpec("Debug", bool, lambda ext: ext.verbose_performance, CUDAIPCExtension._on_debug_change),
-    ParSpec("Hidebuiltin", bool, lambda ext: ext._custom_only, CUDAIPCExtension._on_hidebuiltin_change),
+    ParSpec(
+        "Mode",
+        "reinit",
+        str,
+        lambda ext: ext.mode,
+        CUDAIPCExtension._on_mode_change,
+        help=(
+            "'Sender' exports TD textures to an external process. \n"
+            "'Receiver' imports frames from an external process into TD."
+        ),
+    ),
+    ParSpec(
+        "Active",
+        "live",
+        bool,
+        lambda ext: ext._active_seen,
+        CUDAIPCExtension._on_active_change,
+        help=(
+            "Enables / disables the CUDA IPC pipeline. \n"
+            "When off, no GPU work is performed and all resources are released."
+        ),
+    ),
+    ParSpec(
+        "Ipcmemname",
+        "reinit",
+        str,
+        lambda ext: ext.shm_name,
+        CUDAIPCExtension._on_ipcmemname_change,
+        help="SharedMemory channel name used to exchange GPU handles.\nMust match exactly on both sender and receiver.",
+    ),
+    ParSpec(
+        "Numslots",
+        "reinit",
+        int,
+        lambda ext: ext.num_slots,
+        CUDAIPCExtension._on_numslots_change,
+        help="Ring buffer depth (2–4 slots). \nMore slots reduce contention risk but use more GPU memory.",
+    ),
+    # Not in the shipped .tox (it uses device 0); a COMP built by hand for a second GPU has it.
+    ParSpec(
+        "Cudadevice",
+        "reinit",
+        int,
+        lambda ext: ext._device,
+        CUDAIPCExtension._on_cudadevice_change,
+        help="CUDA device index that the pipeline uses (0 is the first GPU). \nA change reopens the pipeline.",
+    ),
+    # The clamp and the default of these two are with their readers:
+    # TDSenderEngine._stream_id and TDReceiverEngine.frame_wait_ms.
+    ParSpec(
+        "Streamid",
+        "live",
+        int,
+        None,
+        None,
+        help=(
+            "Sender mode: a number written as stream_id into each frame's slot meta, so one receiver "
+            "network that reads several streams can tell them apart. \n"
+            "A label only: each stream still needs its own Ipcmemname. Applies from the next frame."
+        ),
+    ),
+    ParSpec(
+        "Framewaitms",
+        "live",
+        int,
+        None,
+        None,
+        help=(
+            "Receiver mode: wait up to this time (ms) for the sender's doorbell when no new frame "
+            "is there. 0 turns the wait off. Applies from the next frame."
+        ),
+    ),
+    ParSpec(
+        "Debug",
+        "reinit",
+        bool,
+        lambda ext: ext.verbose_performance,
+        CUDAIPCExtension._on_debug_change,
+        help="Prints average per-frame timing metrics to the Textport every 150 frames. \nToggle safely at any time.",
+    ),
+    ParSpec(
+        "Hidebuiltin",
+        "reinit",
+        bool,
+        lambda ext: ext._custom_only,
+        CUDAIPCExtension._on_hidebuiltin_change,
+        help="Hides built-in TouchDesigner parameters (Common, Extensions), showing only CUDA IPC controls.",
+    ),
 )
 _PARS_BY_NAME = {spec.name: spec for spec in PARS}
+
+# Help of the pars that the component writes and never reads back, so they have no ParSpec.
+_WRITTEN_PAR_HELP = {
+    "Status": (
+        "Live status of the pipeline, written by the component: Idle, the active texture format, "
+        "or a WARNING / ERROR line. Read-only."
+    ),
+    "Nativetops": (
+        "The installed CUDA-Link C++ TOPs (Plugins/CudaLink/VERSION.txt): version and CUDA or "
+        "build, or 'not installed'. Read-only. A version that differs from this component "
+        "tints the COMP yellow."
+    ),
+}
+_MODES = ("Sender", "Receiver")
+
+
+def _enable_sentence(name: str) -> str:
+    """Say when par_enable_state greys out *name*; '' for a par it never greys out.
+
+    Raises ValueError for a rule shape that has no sentence yet, so a new rule cannot leave
+    the help text behind.
+    """
+    states = {(mode, active): par_enable_state(mode, active).get(name) for mode in _MODES for active in (False, True)}
+    if all(state is None or state for state in states.values()):
+        return ""  # not in the rule, or enabled in each mode and Active state
+    on_modes = [mode for mode in _MODES if states[(mode, False)]]
+    if len(on_modes) == 1 and not any(
+        states[(mode, False)] or states[(mode, True)] for mode in _MODES if mode != on_modes[0]
+    ):
+        mode = on_modes[0]
+        if states[(mode, True)]:
+            other = next(m for m in _MODES if m != mode)
+            return f"Greyed out in {other} mode."
+        return f"Only editable in {mode} mode while inactive."
+    raise ValueError(f"{name}: no help sentence for this enable rule")
+
+
+def par_help() -> dict[str, str]:
+    """Alt+hover help of each custom par, by par name. scripts/tox_par_help.py writes it.
+
+    TouchDesigner stores par.help only inside the .tox, so this is the source that a rebuilt
+    or repaired .tox gets its help from. The Semver* pars are not here: the Semantic Version
+    Control tool owns them. Header pars have no help.
+    """
+    out = dict(_WRITTEN_PAR_HELP)
+    for spec in PARS:
+        sentence = _enable_sentence(spec.name)
+        out[spec.name] = f"{spec.help} \n{sentence}" if sentence else spec.help
+    return out
