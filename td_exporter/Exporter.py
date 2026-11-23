@@ -1087,8 +1087,12 @@ class Exporter:
         return bool(self._cuda.query_event(event))
 
     def drain(self) -> None:
-        """CPU-blocking wait until every copy queued on the IPC stream has completed."""
-        if self.ipc_stream:
+        """CPU-blocking wait until every copy queued on the IPC stream has completed.
+
+        No-op on a closed Exporter: close() leaves ``ipc_stream`` set when the CUDA context
+        was not valid, and that stream must not be used again.
+        """
+        if not self._closed and self.ipc_stream:
             self._cuda.stream_synchronize(self.ipc_stream)
 
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:

@@ -237,6 +237,7 @@ class TDSenderEngine:
         # copy may still be queued. The ref holds TD's CUDAMemory object, so TD cannot give the
         # block to a later cudaMemory() call before the copy has read it.
         self._held_sources: deque = deque()
+        self._hold_check_failed: bool = False  # the release check raised: logged one time
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -732,7 +733,15 @@ class TDSenderEngine:
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
             if self._held_sources:
-                self._release_done_sources()
+                try:
+                    self._release_done_sources()
+                except (OSError, RuntimeError) as cuda_err:
+                    # A sticky CUDA error: keep the blocks held (the copies may still be
+                    # queued) and skip the frame. cleanup() or a reopen drops them.
+                    if not self._hold_check_failed:
+                        self._log(f"Async copy check failed: {cuda_err}", force=True)
+                        self._hold_check_failed = True
+                    return False
             try:
                 _t_cm = time.perf_counter()
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
@@ -881,6 +890,7 @@ class TDSenderEngine:
                 with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
                     self._exporter.close()
                 self._held_sources.clear()  # close() waited for the queued copies
+                self._hold_check_failed = False
                 new_spec = FrameSpec(
                     shm_name=self.shm_name,
                     height=cm.height,
@@ -1005,6 +1015,7 @@ class TDSenderEngine:
                 self._exporter.close()
             self._exporter = None
         self._held_sources.clear()  # after close(): it waited for the queued copies
+        self._hold_check_failed = False
 
         self._initialized = False
         self._closed = True

@@ -242,3 +242,29 @@ def test_async_export_holds_the_owner_when_export_raises(fake_exporter_open: Non
 
     assert [slot for slot, _ in engine._held_sources] == [0]
     assert _alive(top)[first:] == [True]
+
+
+def test_async_release_check_error_skips_the_frame_and_keeps_the_owners(fake_exporter_open: None) -> None:
+    """A sticky CUDA error makes the release check raise. export_frame() must not raise into
+    the cook callback: it logs one time, keeps the blocks held and returns False."""
+    engine, top = _setup(export_sync=False)
+    logs: list[str] = []
+    engine._log = lambda msg, force=False: logs.append(msg)
+    first = len(top.owner_refs)
+    assert engine.export_frame() is True  # slot 0 held
+
+    def boom(slot: int) -> bool:
+        raise RuntimeError("CUDA error 719")
+
+    engine._exporter.slot_copy_done = boom
+
+    assert engine.export_frame() is False
+    assert engine.export_frame() is False
+
+    assert [slot for slot, _ in engine._held_sources] == [0]
+    assert _alive(top)[first:] == [True], "No new cudaMemory() call, and the held block stays."
+    assert [m for m in logs if "Async copy check failed" in m] == ["Async copy check failed: CUDA error 719"]
+
+    engine.cleanup()
+    assert len(engine._held_sources) == 0
+    assert engine._hold_check_failed is False
