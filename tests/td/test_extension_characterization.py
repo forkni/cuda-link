@@ -375,19 +375,16 @@ def _last_enable(host: FakeTDHost, name: str) -> bool | None:
     return states[-1] if states else None
 
 
-@pytest.mark.parametrize(
-    ("mode", "streamid_enabled", "framewaitms_enabled"),
-    [("Sender", True, False), ("Receiver", False, True)],
-)
-def test_init_greys_out_the_par_the_mode_ignores(mode: str, streamid_enabled: bool, framewaitms_enabled: bool) -> None:
+@pytest.mark.parametrize("mode", ["Sender", "Receiver"])
+def test_init_greys_out_the_par_the_mode_ignores(mode: str) -> None:
     """Streamid is a Sender par and Framewaitms a Receiver par: the other mode greys it out."""
     from CUDAIPCExtension import CUDAIPCExtension
 
     host = _make_sender_host("dummy_shm") if mode == "Sender" else _make_receiver_host("dummy_shm")
     CUDAIPCExtension(None, host=host)
 
-    assert _last_enable(host, "Streamid") is streamid_enabled
-    assert _last_enable(host, "Framewaitms") is framewaitms_enabled
+    assert _last_enable(host, "Streamid") is (mode == "Sender")
+    assert _last_enable(host, "Framewaitms") is (mode == "Receiver")
 
 
 @pytest.mark.parametrize(("start", "target"), [("Sender", "Receiver"), ("Receiver", "Sender")])

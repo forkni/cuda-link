@@ -61,22 +61,15 @@ PAR_HELP: dict[str, str] = {
 }
 
 
-def _custom_par(comp: Any, name: str) -> Any:
-    """The custom par *name* on *comp*, or None when the COMP does not have it."""
-    for par in comp.customPars:
-        if par.name == name:
-            return par
-    return None
-
-
 def apply(comp: Any) -> list[str]:
     """Write PAR_HELP into *comp*'s custom pars; return the names whose help changed.
 
     A par the COMP does not have (an older .tox) is skipped.
     """
+    pars = {par.name: par for par in comp.customPars}
     changed: list[str] = []
     for name, text in PAR_HELP.items():
-        par = _custom_par(comp, name)
+        par = pars.get(name)
         if par is not None and par.help != text:
             par.help = text
             changed.append(name)
