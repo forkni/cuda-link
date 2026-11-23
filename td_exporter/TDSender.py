@@ -484,9 +484,6 @@ class TDSenderEngine:
             self._log("Already initialized")
             return True
 
-        # Lock Numslots while active — changing slot count at runtime causes array-size mismatch.
-        self._host.set_param_enabled("Numslots", False)
-
         try:
             # HolderBarrier: signal the Python Exporter (CheckerBarrier) to pause pushes
             # during this Sender's WDDM-saturating init burst.
@@ -661,7 +658,7 @@ class TDSenderEngine:
                 )
             return False  # skip this frame; next cook exports normally
 
-        # Defense in depth: parexecute_callbacks.handle_numslots_change rejects Numslots > 10,
+        # Defense in depth: CUDAIPCExtension._on_numslots_change rejects Numslots > 10,
         # but self.num_slots can also arrive via direct TDSenderEngine construction (e.g. a
         # stale out-of-range value loaded from a .tox on first Activate, before any "change"
         # event fires). The extra `% len(...)` keeps this a label lookup, never an IndexError,
@@ -951,4 +948,3 @@ class TDSenderEngine:
         self._reset_report_window()
 
         self._host.clear_status()
-        self._host.set_param_enabled("Numslots", True)

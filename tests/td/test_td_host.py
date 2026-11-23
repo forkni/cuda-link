@@ -284,6 +284,25 @@ def test_real_td_host_set_param_enabled() -> None:
     assert comp.par._attrs["Numslots"].enable is False
 
 
+def test_real_td_host_set_display_buffer_retargets_the_viewer_select() -> None:
+    from TDHost import VIEWER_SELECT_NAME, RealTDHost
+
+    comp = _TDComp()
+    viewer_select = _TDTOP()
+    viewer_select.par = _TDPar(top="ExportBuffer")
+    comp._ops[VIEWER_SELECT_NAME] = viewer_select
+
+    assert RealTDHost(comp).set_display_buffer("ImportBuffer") is True
+    assert viewer_select.par.top.eval() == "ImportBuffer"
+
+
+def test_real_td_host_set_display_buffer_without_a_viewer_select() -> None:
+    """A COMP built without the bg Select TOP: nothing to retarget, and no error."""
+    from TDHost import RealTDHost
+
+    assert RealTDHost(_TDComp()).set_display_buffer("ImportBuffer") is False
+
+
 def test_real_td_host_show_custom_only() -> None:
     """show_custom_only() writes ownerComp.showCustomOnly."""
     from TDHost import RealTDHost
