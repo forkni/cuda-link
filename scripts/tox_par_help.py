@@ -23,7 +23,10 @@ from typing import Any
 
 def par_help(comp: Any) -> dict[str, str]:
     """The help text by par name, from the CUDAIPCExtension DAT of *comp*."""
-    module = getattr(comp.op("CUDAIPCExtension"), "module", None)
+    try:
+        module = comp.op("CUDAIPCExtension").module
+    except Exception:  # noqa: BLE001 -- no such DAT, or a DAT that does not compile (a TD error)
+        module = None
     build = getattr(module, "par_help", None)
     if build is None:
         raise RuntimeError("the CUDAIPCExtension DAT of this COMP has no par_help(); update the DAT text first")

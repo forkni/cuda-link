@@ -1132,14 +1132,14 @@ _MODES = ("Sender", "Receiver")
 
 
 def _enable_sentence(name: str) -> str:
-    """Say when par_enable_state greys out *name*; '' for a par the rule does not cover.
+    """Say when par_enable_state greys out *name*; '' for a par it never greys out.
 
     Raises ValueError for a rule shape that has no sentence yet, so a new rule cannot leave
     the help text behind.
     """
     states = {(mode, active): par_enable_state(mode, active).get(name) for mode in _MODES for active in (False, True)}
-    if all(state is None for state in states.values()):
-        return ""
+    if all(state is None or state for state in states.values()):
+        return ""  # not in the rule, or enabled in each mode and Active state
     on_modes = [mode for mode in _MODES if states[(mode, False)]]
     if len(on_modes) == 1 and not any(
         states[(mode, False)] or states[(mode, True)] for mode in _MODES if mode != on_modes[0]

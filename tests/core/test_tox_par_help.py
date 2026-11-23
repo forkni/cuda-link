@@ -91,6 +91,39 @@ def test_a_changed_enable_rule_changes_the_sentence(monkeypatch: pytest.MonkeyPa
     assert _enable_sentence("Framewaitms") == ""
 
 
+def test_a_par_the_rule_always_enables_has_no_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(extension_module, "par_enable_state", lambda mode, active: {"Debug": True})
+
+    assert _enable_sentence("Debug") == ""
+    assert par_help()["Debug"] == next(spec.help for spec in PARS if spec.name == "Debug")
+
+
+def test_every_par_in_the_enable_rule_has_a_row() -> None:
+    """par_help() makes the sentence for the pars in PARS only; a rule key outside it is lost."""
+    assert set(extension_module.par_enable_state("Sender", False)) <= {spec.name for spec in PARS}
+
+
+def test_apply_reports_a_comp_whose_extension_dat_does_not_compile(script: dict) -> None:
+    class _BrokenDAT:
+        @property
+        def module(self) -> object:
+            raise SyntaxError("the DAT text does not compile")
+
+    comp = _Comp(_TOX_PARS)
+    comp.op = lambda name: _BrokenDAT()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="par_help"):
+        script["apply"](comp)
+
+
+def test_apply_reports_a_comp_without_the_extension_dat(script: dict) -> None:
+    comp = _Comp(_TOX_PARS)
+    comp.op = lambda name: None  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="par_help"):
+        script["apply"](comp)
+
+
 def test_an_enable_rule_with_no_sentence_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A new rule shape must get a sentence, not a silent gap in the help."""
     monkeypatch.setattr(extension_module, "par_enable_state", lambda mode, active: {"Streamid": active})
