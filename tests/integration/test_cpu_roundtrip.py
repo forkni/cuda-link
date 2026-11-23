@@ -24,7 +24,7 @@ import cuda_link.importer as _imp_mod
 from cuda_link._cuda_adapters import FakeCUDAAdapter
 from cuda_link._exporter_port import ExportPolicy, FrameSpec, GpuFrame
 from cuda_link._importer_port import ImportOutcome, ImportPolicy, ImportSpec
-from cuda_link.exporter import Exporter
+from cuda_link.exporter import _OPEN_EXPORTERS, Exporter
 from cuda_link.importer import Importer
 from cuda_link.shm_protocol import (
     PROTOCOL_MAGIC,
@@ -88,6 +88,18 @@ def _open_exporter(
     spec = FrameSpec(shm_name=shm_name, height=h, width=w, channels=4, dtype=dtype, num_slots=num_slots)
     exp = Exporter.open(spec, policy=ExportPolicy.for_testing(), cuda=fake)
     return exp, fake
+
+
+def _restart_producer(shm_name: str) -> tuple[Exporter, FakeCUDAAdapter]:
+    """Open a new Exporter on a segment whose first producer never closed it.
+
+    Stands for a producer that died without close() and was started again: the segment is
+    still there (a receiver holds it), with the shutdown flag clear. The first Exporter of
+    the test is still open in this process, so take it out of the record of open senders;
+    with it there, the second open is a SenderConflictError (tests/core/test_second_sender.py).
+    """
+    _OPEN_EXPORTERS.pop(shm_name, None)
+    return _open_exporter(shm_name)
 
 
 def _open_importer(
@@ -306,8 +318,8 @@ def test_real_importer_full_path_no_gpu(temp_shm_name: str, shared_memory_cleanu
 def test_version_changed_when_producer_reopens_live_segment(
     temp_shm_name: str, shared_memory_cleanup: list[str]
 ) -> None:
-    """Opening a second Exporter on the same SHM name while the first is open bumps
-    the version; a raw acquire_slot call returns VERSION_CHANGED.
+    """A producer restarted on a segment that its first run never closed bumps the
+    version; a raw acquire_slot call returns VERSION_CHANGED.
 
     _initialize() attaches to the existing segment (exporter.py:309-314);
     _write_handles_to_shm() calls bump_version (exporter.py:349).
@@ -320,8 +332,8 @@ def test_version_changed_when_producer_reopens_live_segment(
         try:
             assert read_version(obs.buf) == 1
 
-            # Open a second exporter on the same SHM segment while A is still open.
-            exp_b, _ = _open_exporter(temp_shm_name)
+            # Restart the producer on the same SHM segment; A never closed it.
+            exp_b, _ = _restart_producer(temp_shm_name)
             try:
                 assert read_version(obs.buf) == 2
 
@@ -357,8 +369,8 @@ def test_importer_reconnecting_on_version_change(temp_shm_name: str, shared_memo
             assert r1.outcome is ImportOutcome.NEW_FRAME
             assert imp._last_write_idx == 1  # consumed frame #1
 
-            # Open exporter B on the same SHM → version bumps to 2, write_idx reset to 0.
-            exp_b, _ = _open_exporter(temp_shm_name)
+            # Restart the producer on the same SHM → version bumps to 2, write_idx reset to 0.
+            exp_b, _ = _restart_producer(temp_shm_name)
             try:
                 # Next call sees VERSION_CHANGED and triggers _reinitialize → RECONNECTING.
                 r2 = imp.get_frame_numpy()
@@ -429,7 +441,7 @@ def test_pipelined_drains_and_reprimes_on_reconnect(temp_shm_name: str, shared_m
             assert r2.outcome is ImportOutcome.NEW_FRAME
 
             # Producer restart: exporter B on the same SHM bumps the version.
-            exp_b, _ = _open_exporter(temp_shm_name)
+            exp_b, _ = _restart_producer(temp_shm_name)
             try:
                 fake.ops.clear()
                 r3 = imp.get_frame_numpy()

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
+  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
+  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
+  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
+
 ### Changed
 
 - **`.tox` greys out the parameter its mode does not read.** `Streamid` (read only by the
@@ -39,6 +46,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A second sender on a name that a running sender holds is now refused.** Before,
+  `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
+  and IPC handles over the first sender's. Neither sender got an error, and the receivers
+  read a mix of the two. `Exporter.open()` now raises `SenderConflictError` (a
+  `CudaIpcError`) before any GPU allocation in two cases: this process already has an open
+  `Exporter` on the name, or the segment names another process as its sender, that sender
+  did not close, and the process still runs. In TouchDesigner the Sender shows the error,
+  tries again on each cook, and starts by itself when the name is free. It logs the error
+  one time, with no traceback. A sender that closed, or one that crashed, leaves the name
+  free, so a restart on the same name works as before. Not covered: the C++ Out TOP does not make
+  this check yet. A Sender COMP and a C++ Out TOP in the same TouchDesigner process are not
+  told apart, because they have the same process id. The check trusts the process id in the
+  segment, so a crashed sender whose id the system gave to a new process blocks the name
+  until that process exits.
+
 - **`.tox`: a `Cudadevice` change after load had no effect.** The extension read `Cudadevice`
   once at load. A later change, or a write in the same script as `loadTox()`, left it on the
   old device with no message. A change now makes a new engine on the new device, the same as
@@ -53,13 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one rule, `par_enable_state(mode, active)` in `CUDAIPCExtension`, applied at load, on a
   `Mode` switch and on an `Active` change. The Sender and Receiver engines no longer write it.
   A Sender saved with `Active` on now loads with `Numslots` locked.
-
-### Added
-
-- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
-  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
-  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
-  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
 
 ## [2.0.0] - 2026-11-22
 
