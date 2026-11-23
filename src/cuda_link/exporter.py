@@ -1073,6 +1073,23 @@ class Exporter:
         """True if open() succeeded and close() has not been called."""
         return self._initialized and not self._closed and all(ptr is not None for ptr in self.dev_ptrs)
 
+    def slot_copy_done(self, slot: int) -> bool:
+        """Non-blocking: True when the copy last queued for ``slot`` has completed.
+
+        For a producer that exports async (``export_sync=False``) and must keep the source
+        buffer alive until the queued copy has read it. A slot with no IPC event is always
+        done: export() blocks on the stream for such a slot.
+        """
+        event = self.ipc_events[slot] if 0 <= slot < len(self.ipc_events) else None
+        if not event:
+            return True
+        return bool(self._cuda.query_event(event))
+
+    def drain(self) -> None:
+        """CPU-blocking wait until every copy queued on the IPC stream has completed."""
+        if self.ipc_stream:
+            self._cuda.stream_synchronize(self.ipc_stream)
+
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer

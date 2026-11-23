@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections import deque
 import time
 import traceback
 from typing import Any, Callable
@@ -232,6 +233,10 @@ class TDSenderEngine:
         self._prep_acc_s: float = 0.0
         self._post_acc_s: float = 0.0
         self._rest_acc_n: int = 0
+        # Async export only (CUDALINK_EXPORT_SYNC=0): (slot, CUDAMemoryRef) of each frame whose
+        # copy may still be queued. The ref holds TD's CUDAMemory object, so TD cannot give the
+        # block to a later cudaMemory() call before the copy has read it.
+        self._held_sources: deque = deque()
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -422,6 +427,21 @@ class TDSenderEngine:
         self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
         self._cm_acc_s, self._cm_acc_n = 0.0, 0
         self._reset_rest_acc()
+
+    def _release_done_sources(self) -> None:
+        """Drop the held source blocks whose copy has completed, oldest first.
+
+        The copies run in order on one stream, so the first slot that is not done ends the
+        scan. At the cap (one entry per ring slot) wait for the stream and drop them all:
+        the hold is bounded in memory, and a slot's event is never read after the ring
+        has come back to that slot.
+        """
+        held = self._held_sources
+        while held and self._exporter.slot_copy_done(held[0][0]):
+            held.popleft()
+        if len(held) >= self.num_slots:
+            self._exporter.drain()
+            held.clear()
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -711,6 +731,8 @@ class TDSenderEngine:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
+            if self._held_sources:
+                self._release_done_sources()
             try:
                 _t_cm = time.perf_counter()
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
@@ -858,6 +880,7 @@ class TDSenderEngine:
                 _steady = False
                 with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
                     self._exporter.close()
+                self._held_sources.clear()  # close() waited for the queued copies
                 new_spec = FrameSpec(
                     shm_name=self.shm_name,
                     height=cm.height,
@@ -934,6 +957,10 @@ class TDSenderEngine:
                 producer_frame=self._host.abs_frame(),
                 stream_id=self._stream_id(),
             )
+            if not self._policy.export_sync:
+                # Hold before export(): if export() raises after it queued the copy, the block
+                # is still held. export() writes this frame to slot write_idx % num_slots.
+                self._held_sources.append((self._exporter.write_idx % self.num_slots, cm))
             _t_export = time.perf_counter()
             outcome = self._exporter.export(frame)
 
@@ -977,6 +1004,7 @@ class TDSenderEngine:
             with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort shutdown; partial close is acceptable on teardown
                 self._exporter.close()
             self._exporter = None
+        self._held_sources.clear()  # after close(): it waited for the queued copies
 
         self._initialized = False
         self._closed = True
