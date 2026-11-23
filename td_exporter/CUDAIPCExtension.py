@@ -438,6 +438,13 @@ class CUDAIPCExtension:
 
         # The Hidebuiltin value last applied; None while the par was never read.
         self._custom_only: bool | None = None
+        # The Active value last applied. The frame path reads Active live (is_active); this
+        # copy is only for resync_pars, to run the deactivation cleanup of a missed change.
+        self._active_seen: bool = self._host.is_active()
+        # The value on_par_change last got for each par. resync_pars runs on more than one
+        # callback: it must not send again a value that a handler already got and rejected,
+        # or one that the Parameter Execute DAT already reported.
+        self._dispatched: dict[str, Any] = {}
         # TD absolute frame of the first resync_pars() call; None before it.
         self._resync_frame: int | None = None
         _hide_val = self._host.param_value("Hidebuiltin")
@@ -790,6 +797,7 @@ class CUDAIPCExtension:
         with no apply: its reader sees the new value on the next frame.
         """
         self._log(f"Parameter '{name}' changed: {prev} -> {value}", force=False)
+        self._dispatched[name] = value
         spec = _PARS_BY_NAME.get(name)
         if spec is not None and spec.apply is not None:
             spec.apply(self, value, prev)
@@ -820,15 +828,17 @@ class CUDAIPCExtension:
         again = frame is not None and frame == self._resync_frame
         for spec in PARS:
             if spec.state is None:
-                continue  # a live par: nothing kept that can be stale
+                continue  # a live par with no kept copy: nothing that can be stale
             if spec.name == "Debug" and self._config.export_profile:
                 continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
             try:
                 value = self._host.param_value(spec.name)
                 if value is None:
                     continue  # a COMP without the par
+                if spec.name in self._dispatched and spec.kind(self._dispatched[spec.name]) == spec.kind(value):
+                    continue  # a handler already got this value (and may have rejected it)
                 seen = spec.state(self)
-                if spec.kind(value) != spec.kind(seen):
+                if seen is None or spec.kind(value) != spec.kind(seen):
                     self.on_par_change(spec.name, value, seen)
             except Exception:  # noqa: BLE001,S112 -- isolate each par
                 continue
@@ -836,6 +846,7 @@ class CUDAIPCExtension:
         return again
 
     def _on_active_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        self._active_seen = bool(value)
         if value:
             self._log("Component activated", force=True)
             if self._mode == "Sender":
@@ -987,10 +998,11 @@ class ParSpec:
     policy: "reinit" -- __init__ reads the par and the extension keeps the value. A change
             needs apply, and resync_pars compares the par with state.
             "live" -- the reader evaluates the par each time it needs it (Active at each
-            frame, Streamid at each publish, Framewaitms at each waiting frame). Nothing is
-            kept, so there is nothing to resync.
+            frame, Streamid at each publish, Framewaitms at each waiting frame). A live par
+            keeps a copy only when a change has an action that resync_pars must replay
+            (Active: the cleanup of a deactivation).
     kind:   the type its value and the kept state compare as (resync_pars).
-    state:  reads the value the extension keeps for it; None for a live par.
+    state:  reads the value the extension keeps for it; None when it keeps nothing.
     apply:  what a change does, as (extension, new value, previous value); None when a
             change needs no action.
     """
@@ -1003,15 +1015,15 @@ class ParSpec:
 
     def __post_init__(self) -> None:
         kept = self.state is not None
-        if (self.policy == "reinit") != kept or (kept and self.apply is None):
-            raise ValueError(f"{self.name}: a reinit par needs state and apply; a live par has no state")
+        if (self.policy == "reinit" and not kept) or (kept and self.apply is None):
+            raise ValueError(f"{self.name}: a reinit par needs state and apply; a kept state needs apply")
 
 
 # Mode comes first: resync_pars walks this order, and the later pars must see the engine of
 # the new mode.
 PARS: tuple[ParSpec, ...] = (
     ParSpec("Mode", "reinit", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
-    ParSpec("Active", "live", bool, None, CUDAIPCExtension._on_active_change),
+    ParSpec("Active", "live", bool, lambda ext: ext._active_seen, CUDAIPCExtension._on_active_change),
     ParSpec("Ipcmemname", "reinit", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
     ParSpec("Numslots", "reinit", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
     # Not in the shipped .tox (it uses device 0); a COMP built by hand for a second GPU has it.

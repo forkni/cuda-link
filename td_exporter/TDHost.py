@@ -390,7 +390,7 @@ class RealTDHost(TDHost):
             self._comp.showCustomOnly = value
 
     def set_display_buffer(self, top_name: str) -> bool:
-        bg_select = self._comp.op("bg")
+        bg_select = self._comp.op(VIEWER_SELECT_NAME)
         if not bg_select:
             return False
         bg_select.par.top = top_name
