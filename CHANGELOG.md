@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
+  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
+  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
+  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
+
+### Changed
+
+- **`.tox` greys out the parameter its mode does not read.** `Streamid` (read only by the
+  Sender) is greyed out in Receiver mode, and `Framewaitms` (read only by the Receiver) in
+  Sender mode. The extension sets this at load and on each `Mode` switch. Before, both
+  parameters could be edited in both modes, and the edit had no effect in the other mode.
+  The C++ TOPs are not affected: each one has only the parameter it reads.
+
+- **`.tox`: the extension owns what a parameter change does.** `CUDAIPCExtension.on_par_change`
+  and its `PARS` table replace the `handle_*` functions of `parexecute_callbacks.py`, and
+  `CUDAIPCExtension.resync_pars` replaces the first-frame resync code of
+  `callbacks_template.py`. Both DATs now only forward to the extension. The behaviour of each
+  parameter is the same, with two differences. The first-frame resync no longer needs a
+  Parameter Execute DAT named `parexec1` or `parexecute`. It also runs again on the next
+  frame, because TouchDesigner runs Frame Start inside `loadTox()`, before the script
+  writes its parameters. A `.tox` built by hand must take
+  the two callback DATs and the extension from the same version.
+
+- **`.tox`: each parameter the Python side reads has a declared read policy.** `PARS` now has
+  a row for all nine parameters, with `policy` set to `reinit` (read at load, kept, a change
+  needs an action) or `live` (read each time it is needed: `Active`, `Streamid`,
+  `Framewaitms`). A test fails when the package reads a parameter that has no row.
+
+- **`.tox`: the parameter help text comes from the `PARS` table.** `par_help()` in
+  `td_exporter/CUDAIPCExtension.py` replaces the `PAR_HELP` dictionary of
+  `scripts/tox_par_help.py`, and it makes the "Greyed out in … mode" sentence from the enable
+  rule, so the help cannot disagree with the rule. The text of each existing parameter is the
+  same. `scripts/tox_par_help.py` now reads the help from the COMP's own `CUDAIPCExtension`
+  DAT: update that DAT before you run `apply()`.
+
 ### Fixed
 
 - **A second sender on a name that a running sender holds is now refused.** Before,
@@ -24,12 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segment, so a crashed sender whose id the system gave to a new process blocks the name
   until that process exits.
 
-### Added
+- **`.tox`: a `Cudadevice` change after load had no effect.** The extension read `Cudadevice`
+  once at load. A later change, or a write in the same script as `loadTox()`, left it on the
+  old device with no message. A change now makes a new engine on the new device, the same as
+  an `Ipcmemname` change. The shipped `.tox` has no `Cudadevice` parameter and uses device 0;
+  this affects a COMP built by hand for a second GPU.
 
-- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
-  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
-  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
-  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
+- **`.tox`: `Numslots` could be edited in an Active Sender.** It stayed editable after a
+  `Mode` switch from Receiver to Sender, or after an `Ipcmemname` change, when the Sender did
+  not open its ring afterwards (cuda_link not resolved, or a source pixel format that
+  `cudaMemory()` rejects). The edit was then refused, and the parameter showed a slot count
+  the Sender did not use. The enable state of `Numslots`, `Streamid` and `Framewaitms` now has
+  one rule, `par_enable_state(mode, active)` in `CUDAIPCExtension`, applied at load, on a
+  `Mode` switch and on an `Active` change. The Sender and Receiver engines no longer write it.
+  A Sender saved with `Active` on now loads with `Numslots` locked.
 
 ## [2.0.0] - 2026-11-22
 
