@@ -11,28 +11,10 @@ Architecture:
 - Receiver: onFrameStart=force-cook ImportBuffer (triggers Script TOP onCook)
 """
 
-import contextlib
 import weakref
 
-# Extension instances whose parameters were checked against their own state after init.
+# Extension instances whose resync after init is done (resync_pars() asked for no more calls).
 _RESYNCED: "weakref.WeakSet[object]" = weakref.WeakSet()
-
-# Names of the Parameter Execute DAT: parexec1 in the shipped .tox, parexecute in
-# docs/TOX_BUILD_GUIDE.md.
-_PAREXEC_NAMES = ("parexec1", "parexecute")
-
-
-# Parameters whose state follows a change only through parexec1's onValueChange:
-# (parameter, read of the state the handler keeps, type to compare as). Mode comes first,
-# so the later handlers see the engine of the new mode. Active is not here: is_active()
-# reads the parameter, and sync_par_enable() applies its enable-state side effect.
-_RESYNC_PARS = (
-    ("Mode", lambda ext, comp: ext.mode, str),
-    ("Ipcmemname", lambda ext, comp: ext.shm_name, str),
-    ("Numslots", lambda ext, comp: ext.num_slots, int),
-    ("Debug", lambda ext, comp: ext.verbose_performance, bool),
-    ("Hidebuiltin", lambda ext, comp: comp.showCustomOnly, bool),
-)
 
 
 def _extension():
@@ -48,48 +30,21 @@ def _extension():
 
 
 def _resync_params_once(ext: object) -> None:
-    """Apply parameter writes that the extension missed, once per extension instance.
+    """Run CUDAIPCExtension.resync_pars until it is done, per extension instance. Never raises.
 
-    The extension reads Mode, Ipcmemname, Numslots, Debug and Hidebuiltin in __init__.
-    After that, only parexec1 tells it about a change, and parexec1 reports nothing that
-    happened before it first cooked. So a script that sets these parameters in the same
-    call as loadTox() or create() leaves the extension on the old values, with no error
-    (2026-11-21: a Receiver set up this way stayed a Sender on the default Ipcmemname).
-    On the first frame (start or end, whichever runs first), each parameter that differs
-    from the state its handler keeps goes through parexec1's onValueChange, the same path
-    as a normal change. One parameter that fails does not stop the others. Last, the
-    enable states follow the Mode and Active of this frame. Never raises.
+    It applies the parameter writes made before the Parameter Execute DAT first cooked, for
+    example in the same call as loadTox(). It runs on each frame callback, start or end,
+    while resync_pars() returns True: that is the frame of the load and the first callback
+    of the next frame. An extension that raises, or returns nothing, gets one call.
     """
     try:
         if ext in _RESYNCED:
             return
         _RESYNCED.add(ext)
-        comp = parent()  # noqa: F821
-        on_change = None
-        for name in _PAREXEC_NAMES:
-            on_change = getattr(getattr(comp.op(name), "module", None), "onValueChange", None)
-            if on_change is not None:
-                break
-        profile = bool(getattr(getattr(ext, "_config", None), "export_profile", False))
+        if ext.resync_pars():
+            _RESYNCED.discard(ext)
     except Exception:  # noqa: BLE001 -- a frame callback must never raise
         return
-    # A COMP without a Parameter Execute DAT has nothing to resync the values through.
-    for par_name, read_state, kind in _RESYNC_PARS if on_change is not None else ():
-        if par_name == "Debug" and profile:
-            continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
-        try:
-            par = getattr(comp.par, par_name, None)
-            if par is None:
-                continue
-            seen = read_state(ext, comp)
-            if kind(par.eval()) == kind(seen):
-                continue
-            on_change(par, seen)  # the extension's value is the handler's `prev`
-        except Exception:  # noqa: BLE001,S112 -- isolate each parameter; never raise
-            continue
-    # Active set in the same call as loadTox(): the extension read it before the write.
-    with contextlib.suppress(Exception):
-        ext.sync_par_enable()
 
 
 def _cook_slot_meta() -> None:

@@ -156,6 +156,8 @@ class FakeTDHost(TDHost):
         self.enable_writes: list[tuple[str, bool]] = []
         self.param_labels: dict[str, str] = {}  # last label written per par name
         self.custom_only_calls: list[bool] = []
+        self.display_buffers: list[str] = []  # set_display_buffer() targets, in call order
+        self.has_display_buffer = True  # False: a COMP with no `bg` Select TOP
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
         # Records every status/tint side-effect call as (kind, msg); kind is one of
@@ -183,6 +185,12 @@ class FakeTDHost(TDHost):
 
     def show_custom_only(self, value: bool) -> None:
         self.custom_only_calls.append(value)
+
+    def set_display_buffer(self, top_name: str) -> bool:
+        if not self.has_display_buffer:
+            return False
+        self.display_buffers.append(top_name)
+        return True
 
     def is_active(self) -> bool:
         return bool(self._params.get("Active", True))

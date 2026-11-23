@@ -134,8 +134,11 @@ Semantic Version Control COMP (see [Info page](#info-page)).
 | `Cudalinkheader` | (any) | Header | — | Last par of the Settings page. |
 
 The Help Text column is a summary. The text that the `.tox` shows on Alt+hover comes from
-`scripts/tox_par_help.py`: run its `apply()` on the COMP in TouchDesigner (the file's
-docstring gives the commands), then check that `missing()` returns an empty list.
+the `PARS` table in `td_exporter/CUDAIPCExtension.py` (`par_help()`), which also makes the
+"greyed out" sentence from the enable rule. To write it into the `.tox`, update the
+`CUDAIPCExtension` DAT, then run `apply()` of `scripts/tox_par_help.py` on the COMP in
+TouchDesigner (the file's docstring gives the commands) and check that `missing()` returns
+an empty list.
 
 **For `Numslots` menu parameter**:
 
