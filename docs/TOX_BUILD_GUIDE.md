@@ -2,7 +2,7 @@
 
 Step-by-step instructions for building the `CUDAIPCLink_v2.1.0.tox` component in TouchDesigner.
 
-> **Older releases**: retired `.tox` builds (`v1.7.2` through `v2.0.0`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each release Semantic Version Control has written (from 2.0.0).
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v2.0.0`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of the current release only.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -466,7 +466,7 @@ released `TOXES\CUDAIPCLink_v2.1.0.tox`. A release `.tox` (2.0.0 and later) is L
 only: it holds the TD glue DATs and no mirror DATs, so it needs an installed `cuda_link` of
 the same version.
 
-**Release manifest**: `TOXES/RELEASES.tsv` has one row per release (Semantic Version Control appends it), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+**Release manifest**: `TOXES/RELEASES.tsv` has the row of the current release (Semantic Version Control appends it; the row of a retired `.tox` is removed with its file, so Verify Releases stays clean), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
 saved from. To verify a download matches the manifest:
 
 ```bash
@@ -727,7 +727,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | File | Location | Purpose |
 |------|----------|---------|
 | `CUDAIPCLink_v2.1.0.tox` | `TOXES/` | Final built .tox component |
-| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build), one row per release from 2.0.0 |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: 1 `pip --target` folder, 2 venv, 3 conda, 4 system/parallel Python (TD Preferences), 5 TD's own Python (deprecated) |
 
