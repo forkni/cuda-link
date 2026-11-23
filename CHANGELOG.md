@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segment, so a crashed sender whose id the system gave to a new process blocks the name
   until that process exits.
 
+### Added
+
+- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
+  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
+  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
+  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
+
 ## [2.0.0] - 2026-11-22
 
 ### Removed
