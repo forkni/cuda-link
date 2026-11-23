@@ -9,9 +9,12 @@ decisions, through the extension's own interface with a FakeTDHost: no `parent()
 from __future__ import annotations
 
 import dataclasses
+import pathlib
+import re
+import sys
 
 import pytest
-from CUDAIPCExtension import PARS, CUDAIPCExtension
+from CUDAIPCExtension import PARS, CUDAIPCExtension, ParSpec
 from fakes import FakeTDHost
 
 _SHM = "cuda_a"
@@ -87,11 +90,85 @@ def _last_enable(host: FakeTDHost, name: str) -> bool | None:
 
 def test_pars_table_names_the_monitored_pars_mode_first() -> None:
     """Mode first: resync_pars walks this order, and the later pars need the new engine."""
-    assert [spec.name for spec in PARS] == ["Mode", "Active", "Ipcmemname", "Numslots", "Debug", "Hidebuiltin"]
+    assert [spec.name for spec in PARS] == [
+        "Mode",
+        "Active",
+        "Ipcmemname",
+        "Numslots",
+        "Cudadevice",
+        "Streamid",
+        "Framewaitms",
+        "Debug",
+        "Hidebuiltin",
+    ]
 
 
-def test_only_active_is_read_live() -> None:
-    assert [spec.name for spec in PARS if spec.state is None] == ["Active"]
+def test_live_pars_keep_no_state() -> None:
+    live = [spec for spec in PARS if spec.policy == "live"]
+    assert [spec.name for spec in live] == ["Active", "Streamid", "Framewaitms"]
+    assert all(spec.state is None for spec in live)
+
+
+def test_reinit_pars_have_state_and_apply() -> None:
+    reinit = [spec for spec in PARS if spec.policy == "reinit"]
+    assert all(spec.state is not None and spec.apply is not None for spec in reinit)
+
+
+@pytest.mark.parametrize(
+    ("policy", "state", "apply"),
+    [("reinit", None, None), ("reinit", lambda ext: 0, None), ("live", lambda ext: 0, None)],
+    ids=["reinit-without-state", "reinit-without-apply", "live-with-state"],
+)
+def test_parspec_rejects_a_row_that_does_not_fit_its_policy(policy: str, state: object, apply: object) -> None:
+    with pytest.raises(ValueError, match="Somepar"):
+        ParSpec("Somepar", policy, int, state, apply)  # type: ignore[arg-type]
+
+
+def test_every_par_the_package_reads_has_a_row() -> None:
+    """A par read through param_value() with no row has no declared policy (the old Cudadevice)."""
+    source_dir = pathlib.Path(sys.modules[CUDAIPCExtension.__module__].__file__).parent
+    read = set()
+    for name in ("CUDAIPCExtension.py", "TDSender.py", "TDReceiver.py"):
+        read |= set(re.findall(r'param_value\("(\w+)"\)', (source_dir / name).read_text(encoding="utf-8")))
+
+    assert read == {spec.name for spec in PARS} - {"Active"}  # Active has its own reader, is_active()
+
+
+@pytest.mark.parametrize("name", ["Streamid", "Framewaitms"], ids=["streamid", "framewaitms"])
+def test_a_live_par_without_apply_is_logged_and_ignored(name: str) -> None:
+    ext = _Ext()
+
+    ext.on_par_change(name, 5, 0)
+
+    assert (ext.reconfigured, ext.switched_to, ext.cleanups) == ([], [], 0)
+
+
+def test_cudadevice_change_makes_a_new_engine_on_the_new_device() -> None:
+    ext = _Ext()
+    engine = ext._engine
+
+    _change(ext, "Cudadevice", 1, 0)
+
+    assert (ext._device, ext.cleanups) == (1, 1)
+    assert ext._engine is not engine
+    assert ("device changed - reinitializing", True) in ext.logs
+
+
+def test_cudadevice_unchanged_is_a_noop() -> None:
+    ext = _Ext()
+
+    _change(ext, "Cudadevice", 0, 0)
+
+    assert (ext.cleanups, ext.logs) == (0, [])
+
+
+def test_cudadevice_below_zero_is_rejected() -> None:
+    ext = _Ext()
+
+    _change(ext, "Cudadevice", -1, 0)
+
+    assert (ext._device, ext.cleanups) == (0, 0)
+    assert ("WARNING: Cudadevice=-1 is not a device index; change rejected", True) in ext.logs
 
 
 def test_unknown_par_is_logged_and_ignored() -> None:
@@ -442,6 +519,16 @@ def test_resync_with_an_unknown_frame_asks_for_one_call_only() -> None:
 
     assert ext.resync_pars() is False
     assert ext.shm_name == "probe"
+
+
+def test_resync_applies_a_cudadevice_written_after_load() -> None:
+    """Before, Cudadevice was read once in __init__ and a later write was lost."""
+    ext = _loaded(Cudadevice=1)
+
+    ext.resync_pars()
+
+    assert ext.changes == [("Cudadevice", 0)]
+    assert ext._device == 1
 
 
 def test_resync_without_drift_changes_nothing() -> None:

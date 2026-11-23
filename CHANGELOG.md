@@ -25,7 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes its parameters. A `.tox` built by hand must take
   the two callback DATs and the extension from the same version.
 
+- **`.tox`: each parameter the Python side reads has a declared read policy.** `PARS` now has
+  a row for all nine parameters, with `policy` set to `reinit` (read at load, kept, a change
+  needs an action) or `live` (read each time it is needed: `Active`, `Streamid`,
+  `Framewaitms`). A test fails when the package reads a parameter that has no row.
+
 ### Fixed
+
+- **`.tox`: a `Cudadevice` change after load had no effect.** The extension read `Cudadevice`
+  once at load. A later change, or a write in the same script as `loadTox()`, left it on the
+  old device with no message. A change now makes a new engine on the new device, the same as
+  an `Ipcmemname` change. The shipped `.tox` has no `Cudadevice` parameter and uses device 0;
+  this affects a COMP built by hand for a second GPU.
 
 - **`.tox`: `Numslots` could be edited in an Active Sender.** It stayed editable after a
   `Mode` switch from Receiver to Sender, or after an `Ipcmemname` change, when the Sender did

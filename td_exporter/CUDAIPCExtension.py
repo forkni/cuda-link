@@ -23,7 +23,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
@@ -786,11 +786,12 @@ class CUDAIPCExtension:
         """Apply a change of one monitored par: PARS says what each one does.
 
         parexecute_callbacks.onValueChange calls this with the par's name, its new value and
-        its previous value. A par that is not in PARS is logged and ignored.
+        its previous value. A par that is not in PARS is logged and ignored. So is a live par
+        with no apply: its reader sees the new value on the next frame.
         """
         self._log(f"Parameter '{name}' changed: {prev} -> {value}", force=False)
         spec = _PARS_BY_NAME.get(name)
-        if spec is not None:
+        if spec is not None and spec.apply is not None:
             spec.apply(self, value, prev)
 
     def resync_pars(self) -> bool:
@@ -803,7 +804,8 @@ class CUDAIPCExtension:
         on the first callback finds nothing to apply. All the writes of that script are
         visible on the next frame. A host that cannot tell the frame gets one call.
 
-        __init__ reads Mode, Ipcmemname, Numslots, Debug and Hidebuiltin. After that, only the
+        __init__ reads the pars with the "reinit" policy (Mode, Ipcmemname, Numslots,
+        Cudadevice, Debug and Hidebuiltin). After that, only the
         Parameter Execute DAT reports a change, and it reports nothing that happened before it
         first cooked. So a script that sets these pars in the same call as loadTox() or
         create() leaves the extension on the old values, with no error (2026-11-21: a Receiver
@@ -818,7 +820,7 @@ class CUDAIPCExtension:
         again = frame is not None and frame == self._resync_frame
         for spec in PARS:
             if spec.state is None:
-                continue  # read live (Active): nothing kept that can be stale
+                continue  # a live par: nothing kept that can be stale
             if spec.name == "Debug" and self._config.export_profile:
                 continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
             try:
@@ -874,6 +876,20 @@ class CUDAIPCExtension:
         if new_slots > 5:
             self._log(f"WARNING: Numslots={new_slots} outside recommended range (2-5)", force=True)
         self.reconfigure_and_reinit("num_slots", new_slots)
+
+    def _on_cudadevice_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        new_device = int(value)  # type: ignore[call-overload]
+        if new_device == self._device:
+            return
+        if new_device < 0:
+            self._log(f"WARNING: Cudadevice={new_device} is not a device index; change rejected", force=True)
+            return
+        # The device is fixed when the engine is made, so make a new engine.
+        self._log("device changed - reinitializing", force=True)
+        self.cleanup()
+        self._device = new_device
+        self._engine = self._make_engine()
+        self.request_immediate_reconnect()  # a no-op in Sender mode
 
     def _on_debug_change(self, value: object, prev: object) -> None:  # noqa: ARG002
         self.verbose_performance = bool(value)
@@ -966,27 +982,45 @@ _MODE_DISPLAY_BUFFER = {"Sender": "ExportBuffer", "Receiver": "ImportBuffer"}
 
 @dataclass(frozen=True)
 class ParSpec:
-    """One custom par that the extension follows.
+    """One custom par that the extension or its engine reads.
 
-    kind:  the type its value and the kept state compare as (resync_pars).
-    state: reads the value the extension keeps for it; None for a par that is read live.
-    apply: what a change does, as (extension, new value, previous value).
+    policy: "reinit" -- __init__ reads the par and the extension keeps the value. A change
+            needs apply, and resync_pars compares the par with state.
+            "live" -- the reader evaluates the par each time it needs it (Active at each
+            frame, Streamid at each publish, Framewaitms at each waiting frame). Nothing is
+            kept, so there is nothing to resync.
+    kind:   the type its value and the kept state compare as (resync_pars).
+    state:  reads the value the extension keeps for it; None for a live par.
+    apply:  what a change does, as (extension, new value, previous value); None when a
+            change needs no action.
     """
 
     name: str
+    policy: Literal["reinit", "live"]
     kind: Callable[[Any], Any]
     state: Callable[[CUDAIPCExtension], Any] | None
-    apply: Callable[[CUDAIPCExtension, Any, Any], None]
+    apply: Callable[[CUDAIPCExtension, Any, Any], None] | None
+
+    def __post_init__(self) -> None:
+        kept = self.state is not None
+        if (self.policy == "reinit") != kept or (kept and self.apply is None):
+            raise ValueError(f"{self.name}: a reinit par needs state and apply; a live par has no state")
 
 
 # Mode comes first: resync_pars walks this order, and the later pars must see the engine of
 # the new mode.
 PARS: tuple[ParSpec, ...] = (
-    ParSpec("Mode", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
-    ParSpec("Active", bool, None, CUDAIPCExtension._on_active_change),
-    ParSpec("Ipcmemname", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
-    ParSpec("Numslots", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
-    ParSpec("Debug", bool, lambda ext: ext.verbose_performance, CUDAIPCExtension._on_debug_change),
-    ParSpec("Hidebuiltin", bool, lambda ext: ext._custom_only, CUDAIPCExtension._on_hidebuiltin_change),
+    ParSpec("Mode", "reinit", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
+    ParSpec("Active", "live", bool, None, CUDAIPCExtension._on_active_change),
+    ParSpec("Ipcmemname", "reinit", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
+    ParSpec("Numslots", "reinit", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
+    # Not in the shipped .tox (it uses device 0); a COMP built by hand for a second GPU has it.
+    ParSpec("Cudadevice", "reinit", int, lambda ext: ext._device, CUDAIPCExtension._on_cudadevice_change),
+    # The clamp and the default of these two are with their readers:
+    # TDSenderEngine._stream_id and TDReceiverEngine.frame_wait_ms.
+    ParSpec("Streamid", "live", int, None, None),
+    ParSpec("Framewaitms", "live", int, None, None),
+    ParSpec("Debug", "reinit", bool, lambda ext: ext.verbose_performance, CUDAIPCExtension._on_debug_change),
+    ParSpec("Hidebuiltin", "reinit", bool, lambda ext: ext._custom_only, CUDAIPCExtension._on_hidebuiltin_change),
 )
 _PARS_BY_NAME = {spec.name: spec for spec in PARS}
