@@ -30,6 +30,8 @@ from __future__ import annotations
 import types
 import uuid
 
+import pytest
+import TDSender
 from Exporter import FrameOutcome
 from fakes import FakeTDHost, FakeTOPHandle, fake_exporter_open  # noqa: F401
 from SHMProtocol import DtypeCodec
@@ -177,7 +179,6 @@ def test_rest_of_export_frame_timed_on_steady_frames_only(fake_exporter_open: No
     assert engine.export_frame() is True
     assert engine.export_frame() is True
     assert engine._rest_acc_n == 2
-    assert min(engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s) >= 0.0
 
     # Shrink to uint8: this frame reopens the Exporter (which resets the window) and publishes.
     top._pixel_format = "8-bit fixed (RGBA)"
@@ -186,3 +187,35 @@ def test_rest_of_export_frame_timed_on_steady_frames_only(fake_exporter_open: No
     assert engine._rest_acc_n == 0, "A reopen frame is not a steady-state sample."
     assert engine.export_frame() is True
     assert engine._rest_acc_n == 1
+
+
+def test_rest_of_export_frame_uses_the_right_time_marks(
+    fake_exporter_open: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One steady frame reads the clock six times: call start, before and after cuda_memory(),
+    before and after export(), and after the status set. pre, prep and post are the three gaps
+    that are not cuda_memory() or export()."""
+    top = FakeTOPHandle(
+        pixel_format="32-bit float (RGBA)",
+        pixel_format_name="rgba32float",
+        width=64,
+        height=64,
+        channels=4,
+        gpu_ptr=0x1000,
+        cuda_size=64 * 64 * 4 * 4,
+    )
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(f"test_marks_{uuid.uuid4().hex[:8]}", host)
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine.export_frame() is True  # first steady frame fills the geometry cache
+    engine._reset_report_window()
+
+    ticks = iter([1.0, 2.0, 5.0, 11.0, 20.0, 34.0])
+    monkeypatch.setattr(TDSender, "time", types.SimpleNamespace(perf_counter=ticks.__next__))
+    assert engine.export_frame() is True
+
+    assert next(ticks, None) is None, "A steady frame reads the clock exactly six times."
+    # pre = 2 - 1, cuda_memory = 5 - 2, prep = 11 - 5, export = 20 - 11, post = 34 - 20
+    assert (engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s) == (1.0, 6.0, 14.0)
+    assert engine._rest_acc_n == 1
+    assert engine._cm_acc_s == 3.0
