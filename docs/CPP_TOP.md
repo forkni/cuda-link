@@ -280,6 +280,28 @@ cook. The `.tox` has a "Hide built-in Parameters" toggle. The DLLs cannot have i
 SDK cannot hide the Common page. The plugin `minorVersion` is 3: 2 added the Info page, and 3
 removed the Version and Build rows.
 
+### Operator help
+
+The operator Help button (**?** in the parameter window) opens this page on GitHub
+(`master`) at the parameter section of the TOP:
+
+| TOP | Opens |
+|---|---|
+| CUDA Link Out (`Cudalinkout`) | `docs/CPP_TOP.md#out-top-parameters` ("Out TOP parameters") |
+| CUDA Link In (`Cudalinkin`) | `docs/CPP_TOP.md#in-top-parameters` ("In TOP parameters") |
+
+`FillTOPPluginInfo` sets the URL in `OP_CustomOPInfo::opHelpURL`, through `setOpHelpUrl` and
+`kInfoHelpUrl` in `cpp_top/src/common/info_page.h`. If you rename one of the two headings,
+change its anchor in `CudaLinkInTOP.cpp` or `CudaLinkOutTOP.cpp`. The URL does not change a
+parameter, so the plugin `minorVersion` stays 3.
+
+The parameters have no Alt+hover help. The TD C++ SDK has no help field for a parameter, and
+TD refuses `par.help = ...` from Python on these parameters ("Custom parameter expected").
+The Help button is the only help that TD opens for these TOPs.
+
+Live check (2026-11-23, TD 2025.33230): the Help button on each TOP opened its section.
+Python cannot press the button: TD has no call for operator help.
+
 ## Common page
 
 TD puts its Common page on every TOP. Both TOPs use it as a normal TOP does: the output has the
