@@ -383,6 +383,7 @@ def _last_enable(host: FakeTDHost, name: str) -> bool | None:
         ("Receiver", False, False, False, True),
         ("Receiver", True, False, False, True),
     ],
+    ids=["sender-inactive", "sender-active", "receiver-inactive", "receiver-active"],
 )
 def test_par_enable_state_table(mode: str, active: bool, numslots: bool, streamid: bool, framewaitms: bool) -> None:
     """Numslots: an inactive Sender only. Streamid: Sender. Framewaitms: Receiver."""
@@ -394,6 +395,7 @@ def test_par_enable_state_table(mode: str, active: bool, numslots: bool, streami
 @pytest.mark.parametrize(
     ("mode", "active", "expected"),
     [("Sender", True, False), ("Sender", False, True), ("Receiver", True, False), ("Receiver", False, False)],
+    ids=["sender-active", "sender-inactive", "receiver-active", "receiver-inactive"],
 )
 def test_init_sets_numslots_enable_from_mode_and_active(mode: str, active: bool, expected: bool) -> None:
     """A Sender saved with Active on loads with Numslots locked, before the first export."""

@@ -281,7 +281,7 @@ def test_active_on_in_receiver_mode_logs_and_syncs_par_enable() -> None:
     assert ext.par_enable_syncs == 1
 
 
-@pytest.mark.parametrize("mode", ["Sender", "Receiver"])
+@pytest.mark.parametrize("mode", ["Sender", "Receiver"], ids=["sender", "receiver"])
 def test_active_off_cleans_up_then_syncs_par_enable(mode: str) -> None:
     """The enable rule is the extension's (par_enable_state); the handler only asks for it."""
     ext = _Ext(mode=mode)
