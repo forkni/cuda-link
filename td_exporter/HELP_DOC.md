@@ -311,7 +311,7 @@ CHOP channels, so a network reads both the same way.
 
 ### TD → Python (Sender mode)
 
-1. Drop `TOXES/CUDAIPCLink_v2.0.0.tox` into your TD network.
+1. Drop `TOXES/CUDAIPCLink_v2.1.0.tox` into your TD network.
 2. Wire your source TOP into the component's input.
 3. Set **Mode** = `Sender`.
 4. Set **Ipcmemname** to a unique name, e.g. `my_pipeline`.
@@ -447,7 +447,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
   v1.10.0 and cannot upgrade immediately, set `CUDALINK_EXPORT_SYNC=1` in the environment
   that launches TouchDesigner as a stopgap.
   See CHANGELOG 1.10.1 for the full root-cause analysis. Upgrade to
-  `CUDAIPCLink_v2.0.0.tox` (current) to have the fix and all subsequent fixes included.
+  `CUDAIPCLink_v2.1.0.tox` (current) to have the fix and all subsequent fixes included.
 
 ---
 

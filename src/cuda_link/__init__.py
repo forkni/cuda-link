@@ -26,7 +26,7 @@ from .shm_protocol import (
     publish_frame,
 )
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __all__ = [
     # Exporter API (v1.5.0+)
     "Exporter",
