@@ -103,10 +103,11 @@ def test_pars_table_names_the_monitored_pars_mode_first() -> None:
     ]
 
 
-def test_live_pars_keep_no_state() -> None:
+def test_live_pars_keep_a_copy_only_for_an_action_to_replay() -> None:
+    """Active: resync_pars must run the cleanup of a deactivation it missed."""
     live = [spec for spec in PARS if spec.policy == "live"]
     assert [spec.name for spec in live] == ["Active", "Streamid", "Framewaitms"]
-    assert all(spec.state is None for spec in live)
+    assert [spec.name for spec in live if spec.state is not None] == ["Active"]
 
 
 def test_reinit_pars_have_state_and_apply() -> None:
@@ -590,15 +591,69 @@ def test_resync_skips_debug_under_export_profile() -> None:
     assert ext.verbose_performance is True
 
 
-def test_resync_active_drift_only_syncs_the_enable_states() -> None:
-    """Active is read live: no change to route, the enable rule is applied again."""
+def test_resync_runs_the_cleanup_of_a_missed_deactivation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A .tox saved Active, set inactive in the same call as loadTox(): the engine it
+    opened inside loadTox() must be released, and the Status cleared."""
     ext = _loaded(Active=False)
+    done: list[str] = []
+    monkeypatch.setattr(ext, "cleanup", lambda: done.append("cleanup"))
+    monkeypatch.setattr(ext, "clear_status", lambda: done.append("clear_status"))
     ext.host.enable_writes.clear()
 
     ext.resync_pars()
 
-    assert ext.changes == []
+    assert ext.changes == [("Active", True)]
+    assert done == ["cleanup", "clear_status"]
     assert _last_enable(ext.host, "Numslots") is True
+
+
+def test_resync_routes_a_missed_activation_once() -> None:
+    ext = _loaded(active=False, Active=True)
+
+    ext.resync_pars()
+    ext.resync_pars()
+
+    assert ext.changes == [("Active", False)]
+    assert _last_enable(ext.host, "Numslots") is False
+
+
+def test_resync_sends_a_rejected_value_once() -> None:
+    """Numslots written on an Active Sender is rejected; the next resync calls stay quiet."""
+    ext = _loaded(Numslots=4)
+
+    ext.resync_pars()
+    ext.resync_pars()
+    ext.resync_pars()
+
+    assert ext.changes == [("Numslots", 3)]
+    assert ext.logs.count("Numslots change ignored while Active (deactivate first)") == 1
+
+
+def test_resync_does_not_repeat_a_change_the_parexec_dat_reported() -> None:
+    """The Receiver writes the sender's slot count into Numslots when it connects, and the
+    Parameter Execute DAT reports that write. The par then differs from num_slots for good."""
+    host = _host(mode="Receiver", active=True)
+    ext = _Live(host)
+    host._params["Numslots"] = 4
+    ext.on_par_change("Numslots", 4, 3)
+    ext.changes.clear()
+
+    ext.resync_pars()
+
+    assert ext.changes == []
+
+
+def test_resync_applies_a_par_that_was_absent_at_load() -> None:
+    """No kept value to compare with: the value the par has now is the change, also False."""
+    host = _host()
+    del host._params["Hidebuiltin"]
+    ext = _Live(host)
+    host._params["Hidebuiltin"] = False
+
+    ext.resync_pars()
+
+    assert ext.changes == [("Hidebuiltin", None)]
+    assert ext._custom_only is False
 
 
 def test_resync_skips_a_par_the_comp_does_not_have() -> None:
