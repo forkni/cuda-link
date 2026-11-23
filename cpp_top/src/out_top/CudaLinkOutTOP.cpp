@@ -74,6 +74,9 @@ void FillTOPPluginInfo(TD::TOP_PluginInfo* info) {
     customInfo.opIcon->setString("CLO");
     customInfo.authorName->setString("forkni");
     customInfo.authorEmail->setString("forkni@gmail.com");
+    // Operator Help button. No minorVersion bump: no parameter changed, and a bump would make
+    // a .toe saved with this DLL ask older DLLs for a newer plugin for no reason.
+    cudalink::common::setOpHelpUrl(customInfo, "out-top-parameters");
 
     customInfo.minInputs = 1;
     customInfo.maxInputs = 1;

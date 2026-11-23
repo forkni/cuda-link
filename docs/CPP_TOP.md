@@ -268,6 +268,11 @@ Info page, so a script that reads one also reads the other.
 The Info DAT of each TOP has the same two values in its last rows, `version` and `build`, for
 scripts.
 
+The parameters have no Alt+hover help. The TD C++ SDK has no help field for a parameter, and
+TD refuses `par.help = ...` from Python on these parameters ("Custom parameter expected", TD
+2025.33230). The operator Help button opens this page at "Out TOP parameters" or "In TOP
+parameters" (`opHelpURL`).
+
 The version and the build are not string parameters. TD saves the value of a custom string
 parameter in the `.toe`, and a saved value beats the default of a newer DLL. So a `Semverversion`
 or `Semverbuild` row showed the build that the file was saved with, not the loaded build. The

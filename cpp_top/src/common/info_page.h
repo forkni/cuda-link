@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "CPlusPlus_Common.h"
 #include "param_util.h"
@@ -45,6 +46,15 @@ constexpr char kInfoHelpName[] = "Semvershowhelp";
 constexpr char kInfoAuthor[] = "forkni (forkni@gmail.com)";
 // docs/CPP_TOP.md on master: the page of the latest release.
 constexpr char kInfoHelpUrl[] = "https://github.com/forkni/cuda-link/blob/master/docs/CPP_TOP.md";
+
+// Sets the operator Help button (OP_CustomOPInfo::opHelpURL) to kInfoHelpUrl#<anchor>, the
+// TOP's parameter section. The TD 2025 SDK has no per-parameter help field (Alt+hover help
+// stays empty), so this page is the only help TD can open. Call from FillTOPPluginInfo.
+inline void setOpHelpUrl(TD::OP_CustomOPInfo& info, const char* anchor) {
+    if (info.opHelpURL == nullptr) return;
+    const std::string url = std::string(kInfoHelpUrl) + "#" + anchor;
+    info.opHelpURL->setString(url.c_str());
+}
 
 // Appends the Info page after the TOP's own page. Call last in setupParameters.
 inline void appendInfoPage(TD::OP_ParameterManager* manager, const char* topName) {
