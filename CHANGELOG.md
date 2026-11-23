@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A second sender on a name that a running sender holds is now refused.** Before,
+  `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
+  and IPC handles over the first sender's. Neither sender got an error, and the receivers
+  read a mix of the two. `Exporter.open()` now raises `SenderConflictError` (a
+  `CudaIpcError`) before any GPU allocation in two cases: this process already has an open
+  `Exporter` on the name, or the segment names another process as its sender, that sender
+  did not close, and the process still runs. In TouchDesigner the Sender shows the error
+  and does not start. A sender that closed, or one that crashed, leaves the name free, so
+  a restart on the same name works as before. Not covered: the C++ Out TOP does not make
+  this check yet, and the check trusts the process id in the segment, so a crashed sender
+  whose id the system gave to a new process blocks the name until that process exits.
+
 ## [2.0.0] - 2026-11-22
 
 ### Removed

@@ -227,6 +227,15 @@ class IPCEventOpenError(CudaIpcError):
     """
 
 
+class SenderConflictError(CudaIpcError):
+    """Another sender that is still running publishes on this SharedMemory name.
+
+    A second sender on the name would write its own IPC handles over the first one's, and
+    the receivers would read a mix of the two. Callers keep catching CudaIpcError /
+    RuntimeError.
+    """
+
+
 class ProtocolError(CudaLinkError, ValueError):
     """The SHM wire protocol was violated (bad magic, version, or field value).
 
