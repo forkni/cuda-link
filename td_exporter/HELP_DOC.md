@@ -155,8 +155,12 @@ Changing this parameter while active is ignored, and a Textport line says so. Ch
 A number that names the stream. Sender mode only: each published frame carries this value
 in its slot metadata as `stream_id`. Give each stream a different value when one receiver
 reads several streams, so the receiver can tell them apart. A value outside the range is
-sent as 0. Receiver mode ignores this parameter; the `slot_meta` CHOP shows the sender's
-value instead.
+sent as 0. Receiver mode ignores this parameter and greys it out; the `slot_meta` CHOP
+shows the sender's value instead.
+
+- Each stream still needs its own `Ipcmemname`. `Streamid` is only a label in the frame
+  metadata: two senders on one `Ipcmemname` write over each other.
+- A change applies from the next published frame. The sender does not restart.
 
 ---
 
@@ -164,9 +168,10 @@ value instead.
 
 **Type:** Integer | **Range:** 0 to 8 | **Default:** 3 (ms)
 
-Receiver mode only. When a frame starts and the sender has not published a new frame, the
-Receiver waits up to this time for the sender's doorbell. It then shows the new frame instead
-of the last frame again. 0 turns the wait off. The C++ In TOP has the same parameter and
+Receiver mode only; Sender mode greys it out. When a frame starts and the sender has not
+published a new frame, the Receiver waits up to this time for the sender's doorbell. It then
+shows the new frame instead of the last frame again. 0 turns the wait off. A change applies
+from the next frame start, with no reconnect. The C++ In TOP has the same parameter and
 default.
 
 - The wait blocks the TD main thread on a frame with no new frame. Dev box, 2026-11-17,

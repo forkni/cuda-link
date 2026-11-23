@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`.tox` greys out the parameter its mode does not read.** `Streamid` (read only by the
+  Sender) is greyed out in Receiver mode, and `Framewaitms` (read only by the Receiver) in
+  Sender mode. The extension sets this at load and on each `Mode` switch. Before, both
+  parameters could be edited in both modes, and the edit had no effect in the other mode.
+  The C++ TOPs are not affected: each one has only the parameter it reads.
+
 ## [2.0.0] - 2026-11-22
 
 ### Removed

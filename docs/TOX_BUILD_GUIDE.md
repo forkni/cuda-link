@@ -128,8 +128,8 @@ Semantic Version Control COMP (see [Info page](#info-page)).
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `False` (0) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3 or 4, as in the shipped 1.14.1 and 2.0.0 `.tox` |
-| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
-| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. |
+| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. The extension greys it out in Receiver mode. |
+| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. The extension greys it out in Sender mode. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints a summary line every 150 published frames). |
 | `Cudalinkheader` | (any) | Header | — | Last par of the Settings page. |
 

@@ -369,6 +369,42 @@ def test_switch_mode_noop_same_mode() -> None:
     assert ext.mode == "Sender"
 
 
+def _last_enable(host: FakeTDHost, name: str) -> bool | None:
+    """The last enable state written for *name*, or None when none was written."""
+    states = [enabled for par, enabled in host.enable_writes if par == name]
+    return states[-1] if states else None
+
+
+@pytest.mark.parametrize(
+    ("mode", "streamid_enabled", "framewaitms_enabled"),
+    [("Sender", True, False), ("Receiver", False, True)],
+)
+def test_init_greys_out_the_par_the_mode_ignores(mode: str, streamid_enabled: bool, framewaitms_enabled: bool) -> None:
+    """Streamid is a Sender par and Framewaitms a Receiver par: the other mode greys it out."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("dummy_shm") if mode == "Sender" else _make_receiver_host("dummy_shm")
+    CUDAIPCExtension(None, host=host)
+
+    assert _last_enable(host, "Streamid") is streamid_enabled
+    assert _last_enable(host, "Framewaitms") is framewaitms_enabled
+
+
+@pytest.mark.parametrize(("start", "target"), [("Sender", "Receiver"), ("Receiver", "Sender")])
+def test_switch_mode_flips_the_mode_specific_pars(start: str, target: str) -> None:
+    """switch_mode() enables the par of the new mode and greys out the other one."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("dummy_shm") if start == "Sender" else _make_receiver_host("dummy_shm")
+    ext = CUDAIPCExtension(None, host=host)
+    host.enable_writes.clear()
+
+    ext.switch_mode(target)
+
+    assert _last_enable(host, "Streamid") is (target == "Sender")
+    assert _last_enable(host, "Framewaitms") is (target == "Receiver")
+
+
 # ---------------------------------------------------------------------------
 # Receiver — graceful failure paths (no CUDA required)
 # ---------------------------------------------------------------------------

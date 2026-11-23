@@ -435,6 +435,7 @@ class CUDAIPCExtension:
 
         if self._mode == "Receiver":
             self._host.set_param_enabled("Numslots", False)
+        self._sync_mode_pars(self._mode)
 
         self._show_build_info()
 
@@ -752,7 +753,16 @@ class CUDAIPCExtension:
                     self._runtime_state.num_slots = int(_ns)
         self._engine = self._make_engine()
         self._host.set_param_enabled("Numslots", new_mode == "Sender")
+        self._sync_mode_pars(new_mode)
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
+
+    def _sync_mode_pars(self, mode: str) -> None:
+        """Grey out the par the mode does not read: Streamid is Sender-only, Framewaitms Receiver-only.
+
+        Numslots is not here: its enable state also depends on Active (parexecute_callbacks).
+        """
+        self._host.set_param_enabled("Streamid", mode == "Sender")
+        self._host.set_param_enabled("Framewaitms", mode == "Receiver")
 
     # ------------------------------------------------------------------
     # Runtime config accessors
