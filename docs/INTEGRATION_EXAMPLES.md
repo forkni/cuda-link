@@ -697,5 +697,5 @@ the GPU event of one slot.
 
 ---
 
-**Last Updated**: 2026-11-22
+**Last Updated**: 2026-11-23
 **Version**: 2.1.0

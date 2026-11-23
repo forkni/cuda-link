@@ -964,5 +964,5 @@ See `docs/adr/` for the full Architecture Decision Record index:
 
 ---
 
-**Last Updated**: 2026-11-22
+**Last Updated**: 2026-11-23
 **Version**: 2.1.0

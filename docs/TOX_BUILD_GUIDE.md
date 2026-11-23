@@ -427,7 +427,7 @@ CUDA IPC Exporter v2.1.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-11-22
+Date: 2026-11-23
 License: MIT
 ```
 
@@ -462,8 +462,9 @@ No code reads this DAT. It only travels with the .tox so the license ships with 
 
 **Development builds**: save a dev build (for example `CUDAIPCLink_v2.2.0.dev0.tox`) to
 `local\` in the project root. `local\` is gitignored. Never save a dev build over the
-released `TOXES\CUDAIPCLink_v2.1.0.tox`. A release `.tox` (2.0.0 and later) is Library mode only: it holds the TD glue DATs and no
-mirror DATs, so it needs an installed `cuda_link` of the same version.
+released `TOXES\CUDAIPCLink_v2.1.0.tox`. A release `.tox` (2.0.0 and later) is Library mode
+only: it holds the TD glue DATs and no mirror DATs, so it needs an installed `cuda_link` of
+the same version.
 
 **Release manifest**: `TOXES/RELEASES.tsv` has one row per release (Semantic Version Control appends it), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
 saved from. To verify a download matches the manifest:
@@ -726,7 +727,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 | File | Location | Purpose |
 |------|----------|---------|
 | `CUDAIPCLink_v2.1.0.tox` | `TOXES/` | Final built .tox component |
-| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
+| `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build), one row per release from 2.0.0 |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: 1 `pip --target` folder, 2 venv, 3 conda, 4 system/parallel Python (TD Preferences), 5 TD's own Python (deprecated) |
 
@@ -740,7 +741,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-11-22
+**Build Date**: 2026-11-23
 **Component Version**: 2.1.0
 **TouchDesigner Version**: 2025.32820 or later, for 2.0.0 and later. Save the release
 `.tox` in TD 2025.32820, so the `td_build` column of `TOXES/RELEASES.tsv` names the minimum
