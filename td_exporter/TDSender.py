@@ -26,7 +26,14 @@ import traceback
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
-from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
+from Exporter import (  # noqa: E402
+    Exporter,
+    ExportPolicy,
+    FrameOutcome,
+    FrameSpec,
+    GpuFrame,
+    SenderConflictError,
+)
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
@@ -195,6 +202,7 @@ class TDSenderEngine:
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
         self._error_shown: bool = False  # an init or reopen error is the engine status; cleared on recovery
+        self._conflict_logged: str = ""  # the sender-conflict message already in the log; "" when none
         self._f16_convert_to: str | None = None  # float32 target while the source is float16
         self._warned_dtype_size: bool = False  # one-shot: unresolvable bytes-per-pixel
         self._export_buffer: object = None
@@ -551,11 +559,22 @@ class TDSenderEngine:
             self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
             self._initialized = True
+            self._conflict_logged = ""
             self._clear_error_status()
             self._barrier.arm_settle_countdown()
             self._log("Initialization complete — ready for zero-copy GPU transfer", force=True)
             return True
 
+        except SenderConflictError as e:
+            # Another sender holds the name: a setup mistake, not a fault in this code.
+            # export_frame() tries again on each cook until the name is free, so the log
+            # gets one line for each different message and no traceback.
+            message = f"Initialization failed: {e}"
+            if message != self._conflict_logged:
+                self._log(message, force=True)
+                self._conflict_logged = message
+            self._show_error_status(message)
+            return False
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
             self._show_error_status(f"Initialization failed: {e}")
@@ -643,10 +662,11 @@ class TDSenderEngine:
                 # ensuring _current_spec uses the correct dtype from the start.
                 _init_size = cm_probe.width * cm_probe.height * _init_ch * DtypeCodec.itemsize(_init_dtype)
                 self._last_pixel_fmt_name = _pf_init  # seed cache — first export frame won't re-override
-                self._log(
-                    f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
-                    force=True,
-                )
+                if not self._conflict_logged:  # a refused sender tries again on each cook
+                    self._log(
+                        f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
+                        force=True,
+                    )
                 self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
                 # Unmapped name (e.g. "useinput"): derive flags from the same dtype guess
@@ -945,6 +965,7 @@ class TDSenderEngine:
         self._warned_dtype_size = False
         self._warned_format = False
         self._error_shown = False  # the clear_status() below clears it
+        self._conflict_logged = ""
         self._f16_convert_to = None
 
         # Reset windowed-report state so the next activation starts with a fresh window.

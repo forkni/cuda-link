@@ -15,9 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read a mix of the two. `Exporter.open()` now raises `SenderConflictError` (a
   `CudaIpcError`) before any GPU allocation in two cases: this process already has an open
   `Exporter` on the name, or the segment names another process as its sender, that sender
-  did not close, and the process still runs. In TouchDesigner the Sender shows the error
-  and does not start. A sender that closed, or one that crashed, leaves the name free, so
-  a restart on the same name works as before. Not covered: the C++ Out TOP does not make
+  did not close, and the process still runs. In TouchDesigner the Sender shows the error,
+  tries again on each cook, and starts by itself when the name is free. It logs the error
+  one time, with no traceback. A sender that closed, or one that crashed, leaves the name
+  free, so a restart on the same name works as before. Not covered: the C++ Out TOP does not make
   this check yet. A Sender COMP and a C++ Out TOP in the same TouchDesigner process are not
   told apart, because they have the same process id. The check trusts the process id in the
   segment, so a crashed sender whose id the system gave to a new process blocks the name
