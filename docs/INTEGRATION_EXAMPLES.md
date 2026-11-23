@@ -483,7 +483,7 @@ with Exporter.open(FrameSpec(shm_name="ai_output_ipc", height=512, width=512)) a
 
 ### TouchDesigner Side (Consumer: `CUDAIPCExtension` in Receiver mode)
 
-1. **Add `TOXES/CUDAIPCLink_v2.0.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
+1. **Add `TOXES/CUDAIPCLink_v2.1.0.tox`** (or build from `td_exporter/CUDAIPCExtension.py`)
 2. **Set Mode parameter** to `Receiver`
 3. **Set `Ipcmemname`** to `"ai_output_ipc"` (must match Python's `shm_name`)
 4. **Use the built-in output**: the component already holds the `ImportBuffer` Script TOP,
@@ -698,4 +698,4 @@ the GPU event of one slot.
 ---
 
 **Last Updated**: 2026-11-22
-**Version**: 2.0.0
+**Version**: 2.1.0
