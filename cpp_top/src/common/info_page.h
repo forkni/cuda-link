@@ -22,8 +22,8 @@
 #include <shellapi.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
-#include <string>
 
 #include "CPlusPlus_Common.h"
 #include "param_util.h"
@@ -50,10 +50,17 @@ constexpr char kInfoHelpUrl[] = "https://github.com/forkni/cuda-link/blob/master
 // Sets the operator Help button (OP_CustomOPInfo::opHelpURL) to kInfoHelpUrl#<anchor>, the
 // TOP's parameter section. The TD 2025 SDK has no per-parameter help field (Alt+hover help
 // stays empty), so this page is the only help TD can open. Call from FillTOPPluginInfo.
-inline void setOpHelpUrl(TD::OP_CustomOPInfo& info, const char* anchor) {
+// FillTOPPluginInfo has no try/catch, and no exception may cross the ABI (ADR-0009), so the URL
+// is built in a stack buffer: no heap, nothing to throw. A null or empty anchor (or one too long
+// for the buffer) gives the page URL without a fragment.
+// tests/support/test_cpp_help_anchors.py checks each anchor against the docs/CPP_TOP.md headings.
+inline void setOpHelpUrl(TD::OP_CustomOPInfo& info, const char* anchor) noexcept {
     if (info.opHelpURL == nullptr) return;
-    const std::string url = std::string(kInfoHelpUrl) + "#" + anchor;
-    info.opHelpURL->setString(url.c_str());
+    char url[160];
+    const int n = (anchor == nullptr || anchor[0] == '\0')
+                      ? -1
+                      : std::snprintf(url, sizeof(url), "%s#%s", kInfoHelpUrl, anchor);
+    info.opHelpURL->setString((n > 0 && n < static_cast<int>(sizeof(url))) ? url : kInfoHelpUrl);
 }
 
 // Appends the Info page after the TOP's own page. Call last in setupParameters.
