@@ -25,6 +25,7 @@ class _Ext:
         self.reconfigured: list[tuple[str, object]] = []
         self.switched_to: list[str] = []
         self.cleanups = 0
+        self.par_enable_syncs = 0
         self.status_cleared = 0
         self.verbose_performance = None
 
@@ -47,6 +48,9 @@ class _Ext:
 
     def cleanup(self) -> None:
         self.cleanups += 1
+
+    def sync_par_enable(self) -> None:
+        self.par_enable_syncs += 1
 
     def messages(self) -> list[str]:
         return [m for m, _ in self.logs]
@@ -257,8 +261,7 @@ def test_mode_change_switch_failure_is_logged_as_error_without_completion(
 # ---------------------------------------------------------------------------
 
 
-def test_active_on_logs_for_current_mode_and_locks_numslots(monkeypatch: pytest.MonkeyPatch) -> None:
-    comp = _install_parent(monkeypatch, _Comp())
+def test_active_on_logs_for_current_mode_and_syncs_par_enable() -> None:
     ext = _Ext(mode="Sender")
 
     cb.handle_active_change(ext, 1, 0)
@@ -266,26 +269,21 @@ def test_active_on_logs_for_current_mode_and_locks_numslots(monkeypatch: pytest.
     assert ("Component activated", True) in ext.logs
     assert ("Sender mode ready - will initialize on first frame export", False) in ext.logs
     assert ext.cleanups == 0
-    assert comp.par.Numslots.enable is False
+    assert ext.par_enable_syncs == 1
 
 
-def test_active_on_in_receiver_mode_keeps_numslots_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    comp = _install_parent(monkeypatch, _Comp())
+def test_active_on_in_receiver_mode_logs_and_syncs_par_enable() -> None:
     ext = _Ext(mode="Receiver")
 
     cb.handle_active_change(ext, True, False)
 
     assert ("Receiver mode activated - will attempt connection", False) in ext.logs
-    assert comp.par.Numslots.enable is False
+    assert ext.par_enable_syncs == 1
 
 
-@pytest.mark.parametrize(
-    ("mode", "numslots_enabled"), [("Sender", True), ("Receiver", False)], ids=["sender", "receiver"]
-)
-def test_active_off_cleans_up_and_enables_numslots_only_for_sender(
-    monkeypatch: pytest.MonkeyPatch, mode: str, numslots_enabled: bool
-) -> None:
-    comp = _install_parent(monkeypatch, _Comp())
+@pytest.mark.parametrize("mode", ["Sender", "Receiver"], ids=["sender", "receiver"])
+def test_active_off_cleans_up_then_syncs_par_enable(mode: str) -> None:
+    """The enable rule is the extension's (par_enable_state); the handler only asks for it."""
     ext = _Ext(mode=mode)
 
     cb.handle_active_change(ext, 0, 1)
@@ -293,16 +291,7 @@ def test_active_off_cleans_up_and_enables_numslots_only_for_sender(
     assert ("Component deactivated - cleaning up", True) in ext.logs
     assert ext.cleanups == 1
     assert ext.status_cleared == 1
-    assert comp.par.Numslots.enable is numslots_enabled
-
-
-def test_active_change_tolerates_missing_numslots_par(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_parent(monkeypatch, types.SimpleNamespace(par=types.SimpleNamespace()))
-    ext = _Ext()
-
-    cb.handle_active_change(ext, 0, 1)
-
-    assert ext.cleanups == 1
+    assert ext.par_enable_syncs == 1
 
 
 def test_ipcmemname_change_reconfigures_shm_name() -> None:

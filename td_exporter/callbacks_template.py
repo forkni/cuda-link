@@ -11,6 +11,7 @@ Architecture:
 - Receiver: onFrameStart=force-cook ImportBuffer (triggers Script TOP onCook)
 """
 
+import contextlib
 import weakref
 
 # Extension instances whose parameters were checked against their own state after init.
@@ -21,26 +22,16 @@ _RESYNCED: "weakref.WeakSet[object]" = weakref.WeakSet()
 _PAREXEC_NAMES = ("parexec1", "parexecute")
 
 
-def _numslots_enabled(ext: object, comp: object) -> bool:
-    return bool(comp.par.Numslots.enable)
-
-
-def _numslots_should_enable(comp: object) -> bool:
-    return not comp.par.Active.eval() and str(comp.par.Mode.eval()) == "Sender"
-
-
 # Parameters whose state follows a change only through parexec1's onValueChange:
-# (parameter, read of the state the handler keeps, type to compare as, wanted value or
-# None for the parameter's own value). Mode comes first, so the later handlers see the
-# engine of the new mode. Active is live (is_active() reads the parameter); only its
-# Numslots.enable side effect can be stale.
+# (parameter, read of the state the handler keeps, type to compare as). Mode comes first,
+# so the later handlers see the engine of the new mode. Active is not here: is_active()
+# reads the parameter, and sync_par_enable() applies its enable-state side effect.
 _RESYNC_PARS = (
-    ("Mode", lambda ext, comp: ext.mode, str, None),
-    ("Active", _numslots_enabled, bool, _numslots_should_enable),
-    ("Ipcmemname", lambda ext, comp: ext.shm_name, str, None),
-    ("Numslots", lambda ext, comp: ext.num_slots, int, None),
-    ("Debug", lambda ext, comp: ext.verbose_performance, bool, None),
-    ("Hidebuiltin", lambda ext, comp: comp.showCustomOnly, bool, None),
+    ("Mode", lambda ext, comp: ext.mode, str),
+    ("Ipcmemname", lambda ext, comp: ext.shm_name, str),
+    ("Numslots", lambda ext, comp: ext.num_slots, int),
+    ("Debug", lambda ext, comp: ext.verbose_performance, bool),
+    ("Hidebuiltin", lambda ext, comp: comp.showCustomOnly, bool),
 )
 
 
@@ -66,7 +57,8 @@ def _resync_params_once(ext: object) -> None:
     (2026-11-21: a Receiver set up this way stayed a Sender on the default Ipcmemname).
     On the first frame (start or end, whichever runs first), each parameter that differs
     from the state its handler keeps goes through parexec1's onValueChange, the same path
-    as a normal change. One parameter that fails does not stop the others. Never raises.
+    as a normal change. One parameter that fails does not stop the others. Last, the
+    enable states follow the Mode and Active of this frame. Never raises.
     """
     try:
         if ext in _RESYNCED:
@@ -78,12 +70,11 @@ def _resync_params_once(ext: object) -> None:
             on_change = getattr(getattr(comp.op(name), "module", None), "onValueChange", None)
             if on_change is not None:
                 break
-        if on_change is None:
-            return  # a COMP without a Parameter Execute DAT has nothing to resync through
         profile = bool(getattr(getattr(ext, "_config", None), "export_profile", False))
     except Exception:  # noqa: BLE001 -- a frame callback must never raise
         return
-    for par_name, read_state, kind, wanted in _RESYNC_PARS:
+    # A COMP without a Parameter Execute DAT has nothing to resync the values through.
+    for par_name, read_state, kind in _RESYNC_PARS if on_change is not None else ():
         if par_name == "Debug" and profile:
             continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
         try:
@@ -91,14 +82,14 @@ def _resync_params_once(ext: object) -> None:
             if par is None:
                 continue
             seen = read_state(ext, comp)
-            target = par.eval() if wanted is None else wanted(comp)
-            if kind(target) == kind(seen):
+            if kind(par.eval()) == kind(seen):
                 continue
-            # A value parameter reports the extension's value as `prev`. Active's handler
-            # does not read `prev`; it gets the opposite of the current state.
-            on_change(par, seen if wanted is None else not par.eval())
+            on_change(par, seen)  # the extension's value is the handler's `prev`
         except Exception:  # noqa: BLE001,S112 -- isolate each parameter; never raise
             continue
+    # Active set in the same call as loadTox(): the extension read it before the write.
+    with contextlib.suppress(Exception):
+        ext.sync_par_enable()
 
 
 def _cook_slot_meta() -> None:

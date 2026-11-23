@@ -203,13 +203,13 @@ def test_initialize_missing_segment_reports_sender_not_ready(monkeypatch: pytest
     assert engine._connection.shm_handle is None
 
 
-def test_initialize_disables_numslots_and_mirrors_sender_slot_count(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialize_mirrors_sender_slot_count_and_writes_no_enable_state(monkeypatch: pytest.MonkeyPatch) -> None:
     rig = _rig(monkeypatch, _segment(num_slots=3))
 
     assert rig.engine.initialize_receiver() is True
 
-    assert ("enabled", "Numslots", False) in rig.params
     assert ("value", "Numslots", 3) in rig.params
+    assert [p for p in rig.params if p[0] == "enabled"] == []  # the extension owns the enable rule
 
 
 @pytest.mark.parametrize(("num_slots", "accepted"), [(10, True), (11, False)], ids=["max-slots", "above-max"])

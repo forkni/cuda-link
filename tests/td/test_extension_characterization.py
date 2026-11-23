@@ -375,6 +375,81 @@ def _last_enable(host: FakeTDHost, name: str) -> bool | None:
     return states[-1] if states else None
 
 
+@pytest.mark.parametrize(
+    ("mode", "active", "numslots", "streamid", "framewaitms"),
+    [
+        ("Sender", False, True, True, False),
+        ("Sender", True, False, True, False),
+        ("Receiver", False, False, False, True),
+        ("Receiver", True, False, False, True),
+    ],
+    ids=["sender-inactive", "sender-active", "receiver-inactive", "receiver-active"],
+)
+def test_par_enable_state_table(mode: str, active: bool, numslots: bool, streamid: bool, framewaitms: bool) -> None:
+    """Numslots: an inactive Sender only. Streamid: Sender. Framewaitms: Receiver."""
+    from CUDAIPCExtension import par_enable_state
+
+    assert par_enable_state(mode, active) == {"Numslots": numslots, "Streamid": streamid, "Framewaitms": framewaitms}
+
+
+@pytest.mark.parametrize(
+    ("mode", "active", "expected"),
+    [("Sender", True, False), ("Sender", False, True), ("Receiver", True, False), ("Receiver", False, False)],
+    ids=["sender-active", "sender-inactive", "receiver-active", "receiver-inactive"],
+)
+def test_init_sets_numslots_enable_from_mode_and_active(mode: str, active: bool, expected: bool) -> None:
+    """A Sender saved with Active on loads with Numslots locked, before the first export."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("dummy_shm") if mode == "Sender" else _make_receiver_host("dummy_shm")
+    host.set_param_value("Active", active)
+    CUDAIPCExtension(None, host=host)
+
+    assert _last_enable(host, "Numslots") is expected
+
+
+def test_switch_mode_to_sender_while_active_keeps_numslots_locked() -> None:
+    """Seen in TD 2026-11-23: Numslots stayed editable in an Active Sender after Receiver -> Sender."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_receiver_host("dummy_shm")
+    ext = CUDAIPCExtension(None, host=host)
+
+    ext.switch_mode("Sender")
+
+    assert [e for name, e in host.enable_writes if name == "Numslots"] == [False, False]
+
+
+def test_reconfigure_while_active_does_not_unlock_numslots() -> None:
+    """Seen in TD 2026-11-23: an Ipcmemname change on an Active Sender whose source format is
+    rejected left Numslots editable, because only a later initialize() locked it again."""
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("dummy_shm")
+    ext = CUDAIPCExtension(None, host=host)
+    host.enable_writes.clear()
+
+    ext.reconfigure_and_reinit("shm_name", "dummy_shm_2")
+    ext.cleanup()
+
+    assert host.enable_writes == []
+
+
+def test_sync_par_enable_follows_active() -> None:
+    from CUDAIPCExtension import CUDAIPCExtension
+
+    host = _make_sender_host("dummy_shm")
+    ext = CUDAIPCExtension(None, host=host)
+
+    host.set_param_value("Active", False)
+    ext.sync_par_enable()
+    assert _last_enable(host, "Numslots") is True
+
+    host.set_param_value("Active", True)
+    ext.sync_par_enable()
+    assert _last_enable(host, "Numslots") is False
+
+
 @pytest.mark.parametrize("mode", ["Sender", "Receiver"], ids=["sender", "receiver"])
 def test_init_greys_out_the_par_the_mode_ignores(mode: str) -> None:
     """Streamid is a Sender par and Framewaitms a Receiver par: the other mode greys it out."""

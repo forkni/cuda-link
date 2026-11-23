@@ -295,6 +295,10 @@ class _ResyncExt(_StubExt):
         self.num_slots = 3
         self.verbose_performance = False
         self._config = types.SimpleNamespace(export_profile=False)
+        self.par_enable_syncs = 0
+
+    def sync_par_enable(self) -> None:
+        self.par_enable_syncs += 1
 
 
 def _make_comp(
@@ -431,19 +435,30 @@ def test_resync_hidebuiltin_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [("Hidebuiltin", True)]
 
 
-def test_resync_active_off_reenables_numslots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Active is read live; only the Numslots.enable side effect of its handler can be stale."""
+def test_resync_active_drift_only_syncs_the_enable_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Active is read live: no handler call, the extension applies its enable rule again."""
     ext = _ResyncExt()
     calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Active=False))
     callbacks_template._resync_params_once(ext)
-    assert calls == [("Active", True)]
+    assert calls == []
+    assert ext.par_enable_syncs == 1
 
 
-def test_resync_active_matching_numslots_enable_calls_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resync_syncs_the_enable_states_without_a_parexec_dat(monkeypatch: pytest.MonkeyPatch) -> None:
     ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Active=False), numslots_enable=True)
+    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"), with_parexec=False)
     callbacks_template._resync_params_once(ext)
     assert calls == []
+    assert ext.par_enable_syncs == 1
+
+
+def test_resync_extension_without_sync_par_enable_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2.0.0 extension under a newer Execute DAT has no sync_par_enable()."""
+    ext = _ResyncExt()
+    ext.sync_par_enable = None
+    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Debug=True))
+    callbacks_template._resync_params_once(ext)
+    assert calls == [("Debug", False)]
 
 
 def test_resync_finds_parexecute_name_from_build_guide(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,6 +527,15 @@ class _HandlerExt(_ResyncExt):
     def reconfigure_and_reinit(self, field: str, value: object) -> None:
         self.reinits.append((field, value))
         setattr(self, field, value)
+
+    def sync_par_enable(self) -> None:
+        from CUDAIPCExtension import par_enable_state
+
+        comp = self._comp_ref[0]
+        for name, enabled in par_enable_state(self.mode, self.is_active()).items():
+            par = getattr(comp.par, name, None)
+            if par is not None:
+                par.enable = enabled
 
 
 def _wire_real_handlers(monkeypatch: pytest.MonkeyPatch, pars: dict[str, object]) -> tuple[_HandlerExt, object]:
