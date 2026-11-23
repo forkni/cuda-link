@@ -51,7 +51,7 @@ PAR_HELP: dict[str, str] = {
         "is there. 0 turns the wait off. Applies from the next frame. \n"
         "Greyed out in Sender mode."
     ),
-    "Debug": ("Prints average per-frame timing metrics to the Textport every 100 frames. \nToggle safely at any time."),
+    "Debug": ("Prints average per-frame timing metrics to the Textport every 150 frames. \nToggle safely at any time."),
     "Nativetops": (
         "The installed CUDA-Link C++ TOPs (Plugins/CudaLink/VERSION.txt): version and CUDA or "
         "build, or 'not installed'. Read-only. A version that differs from this component "

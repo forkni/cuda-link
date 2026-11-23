@@ -760,9 +760,12 @@ class CUDAIPCExtension:
         """Grey out the par the mode does not read: Streamid is Sender-only, Framewaitms Receiver-only.
 
         Numslots is not here: its enable state also depends on Active (parexecute_callbacks).
+        Every mode that is not Sender gets the receiver engine (_make_engine), so the test is
+        on Sender only.
         """
-        self._host.set_param_enabled("Streamid", self._mode == "Sender")
-        self._host.set_param_enabled("Framewaitms", self._mode == "Receiver")
+        is_sender = self._mode == "Sender"
+        self._host.set_param_enabled("Streamid", is_sender)
+        self._host.set_param_enabled("Framewaitms", not is_sender)
 
     # ------------------------------------------------------------------
     # Runtime config accessors
