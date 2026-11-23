@@ -484,9 +484,6 @@ class TDSenderEngine:
             self._log("Already initialized")
             return True
 
-        # Lock Numslots while active — changing slot count at runtime causes array-size mismatch.
-        self._host.set_param_enabled("Numslots", False)
-
         try:
             # HolderBarrier: signal the Python Exporter (CheckerBarrier) to pause pushes
             # during this Sender's WDDM-saturating init burst.
@@ -951,4 +948,3 @@ class TDSenderEngine:
         self._reset_report_window()
 
         self._host.clear_status()
-        self._host.set_param_enabled("Numslots", True)

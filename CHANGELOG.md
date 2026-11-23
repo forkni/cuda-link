@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameters could be edited in both modes, and the edit had no effect in the other mode.
   The C++ TOPs are not affected: each one has only the parameter it reads.
 
+### Fixed
+
+- **`.tox`: `Numslots` could be edited in an Active Sender.** It stayed editable after a
+  `Mode` switch from Receiver to Sender, or after an `Ipcmemname` change, when the Sender did
+  not open its ring afterwards (cuda_link not resolved, or a source pixel format that
+  `cudaMemory()` rejects). The edit was then refused, and the parameter showed a slot count
+  the Sender did not use. The enable state of `Numslots`, `Streamid` and `Framewaitms` now has
+  one rule, `par_enable_state(mode, active)` in `CUDAIPCExtension`, applied at load, on a
+  `Mode` switch and on an `Active` change. The Sender and Receiver engines no longer write it.
+  A Sender saved with `Active` on now loads with `Numslots` locked.
+
 ## [2.0.0] - 2026-11-22
 
 ### Removed

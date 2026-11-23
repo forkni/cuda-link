@@ -9,8 +9,6 @@ Enable the parameters you want to monitor (Active, Ipcmemname, Numslots, Debug, 
 Handles parameter changes with debug logging and triggers appropriate re-initialization.
 """
 
-import contextlib
-
 
 def _extension():
     """Return the CUDAIPCExtension, or None if it is not available.
@@ -88,11 +86,8 @@ def handle_active_change(ext: object, new_value: object, prev: object) -> None:
         ext.cleanup()
         ext.clear_status()
 
-    # Disable Numslots while active to prevent runtime array size mismatch.
-    # Receiver mode always keeps Numslots disabled (sender controls slot count).
-    # Sender mode: editable only when inactive.
-    with contextlib.suppress(AttributeError):
-        parent().par.Numslots.enable = not new_value and ext.mode == "Sender"
+    # Numslots is editable only in an inactive Sender: the extension owns the rule.
+    ext.sync_par_enable()
 
 
 def handle_ipcmemname_change(ext: object, new_value: object, prev: object) -> None:

@@ -371,6 +371,17 @@ class _NullEngine:
         return {}
 
 
+def par_enable_state(mode: str, active: bool) -> dict[str, bool]:
+    """Enable state of the pars that depend on Mode and Active. The one copy of the rule.
+
+    Numslots: the Sender owns the slot count, and it cannot change while the ring is open.
+    Streamid is read only by the Sender, Framewaitms only by the Receiver. Every mode that
+    is not Sender gets the receiver engine (_make_engine), so the test is on Sender only.
+    """
+    sender = mode == "Sender"
+    return {"Numslots": sender and not active, "Streamid": sender, "Framewaitms": not sender}
+
+
 class CUDAIPCExtension:
     """TouchDesigner extension facade for dual-mode CUDA IPC texture sharing.
 
@@ -433,9 +444,7 @@ class CUDAIPCExtension:
 
         self._log(f"Extension initialized on {ownerComp} [Mode: {self._mode}]", force=True)
 
-        if self._mode == "Receiver":
-            self._host.set_param_enabled("Numslots", False)
-        self._sync_mode_pars()
+        self.sync_par_enable()
 
         self._show_build_info()
 
@@ -752,20 +761,17 @@ class CUDAIPCExtension:
                 with contextlib.suppress(ValueError, TypeError):
                     self._runtime_state.num_slots = int(_ns)
         self._engine = self._make_engine()
-        self._host.set_param_enabled("Numslots", new_mode == "Sender")
-        self._sync_mode_pars()
+        self.sync_par_enable()
         self._log(f"Mode switched to {new_mode}. Will initialize on next frame.", force=True)
 
-    def _sync_mode_pars(self) -> None:
-        """Grey out the par the mode does not read: Streamid is Sender-only, Framewaitms Receiver-only.
+    def sync_par_enable(self) -> None:
+        """Apply par_enable_state() for the current Mode and Active.
 
-        Numslots is not here: its enable state also depends on Active (parexecute_callbacks).
-        Every mode that is not Sender gets the receiver engine (_make_engine), so the test is
-        on Sender only.
+        Called at load, on a Mode switch, and by parexecute_callbacks when Active changes.
+        The engines do not write an enable state.
         """
-        is_sender = self._mode == "Sender"
-        self._host.set_param_enabled("Streamid", is_sender)
-        self._host.set_param_enabled("Framewaitms", not is_sender)
+        for name, enabled in par_enable_state(self._mode, self._host.is_active()).items():
+            self._host.set_param_enabled(name, enabled)
 
     # ------------------------------------------------------------------
     # Runtime config accessors

@@ -64,7 +64,7 @@ def test_apply_leaves_no_par_without_help(script: dict) -> None:
 
 
 def test_mode_specific_pars_say_which_mode_greys_them_out(script: dict) -> None:
-    """The help matches the extension's gating (CUDAIPCExtension._sync_mode_pars)."""
+    """The help matches the extension's gating (CUDAIPCExtension.par_enable_state)."""
     help_text = script["PAR_HELP"]
     assert "Greyed out in Receiver mode" in help_text["Streamid"]
     assert "Greyed out in Sender mode" in help_text["Framewaitms"]
