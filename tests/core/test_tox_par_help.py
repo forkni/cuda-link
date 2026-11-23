@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Alexander Korneev
 # SPDX-License-Identifier: MIT
-"""scripts/tox_par_help.py: the help text source for the .tox custom pars."""
+"""scripts/tox_par_help.py and CUDAIPCExtension.par_help: the help of the .tox custom pars."""
 
 from __future__ import annotations
 
 import runpy
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
+import CUDAIPCExtension as extension_module  # noqa: N813 -- the module, not the class
 import pytest
+from CUDAIPCExtension import PARS, _enable_sentence, par_help
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "tox_par_help.py"
 
@@ -47,6 +50,9 @@ class _Comp:
     def help_of(self, name: str) -> str:
         return next(p.help for p in self.customPars if p.name == name)
 
+    def op(self, name: str) -> object | None:
+        return types.SimpleNamespace(module=extension_module) if name == "CUDAIPCExtension" else None
+
 
 @pytest.fixture(scope="module")
 def script() -> dict:
@@ -63,11 +69,43 @@ def test_apply_leaves_no_par_without_help(script: dict) -> None:
     assert script["missing"](comp) == []
 
 
-def test_mode_specific_pars_say_which_mode_greys_them_out(script: dict) -> None:
-    """The help matches the extension's gating (CUDAIPCExtension.par_enable_state)."""
-    help_text = script["PAR_HELP"]
-    assert "Greyed out in Receiver mode" in help_text["Streamid"]
-    assert "Greyed out in Sender mode" in help_text["Framewaitms"]
+def test_every_par_in_the_table_has_help() -> None:
+    assert [spec.name for spec in PARS if not spec.help.strip()] == []
+
+
+def test_the_greyed_out_sentence_comes_from_the_enable_rule() -> None:
+    """The help cannot disagree with CUDAIPCExtension.par_enable_state: it is made from it."""
+    text = par_help()
+    assert text["Streamid"].endswith(" \nGreyed out in Receiver mode.")
+    assert text["Framewaitms"].endswith(" \nGreyed out in Sender mode.")
+    assert text["Numslots"].endswith(" \nOnly editable in Sender mode while inactive.")
+    assert "reyed out" not in text["Mode"]
+
+
+def test_a_changed_enable_rule_changes_the_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        extension_module, "par_enable_state", lambda mode, active: {"Streamid": mode == "Receiver" and not active}
+    )
+
+    assert _enable_sentence("Streamid") == "Only editable in Receiver mode while inactive."
+    assert _enable_sentence("Framewaitms") == ""
+
+
+def test_an_enable_rule_with_no_sentence_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new rule shape must get a sentence, not a silent gap in the help."""
+    monkeypatch.setattr(extension_module, "par_enable_state", lambda mode, active: {"Streamid": active})
+
+    with pytest.raises(ValueError, match="Streamid"):
+        _enable_sentence("Streamid")
+
+
+def test_apply_reports_a_comp_whose_extension_dat_has_no_par_help(script: dict) -> None:
+    """A .tox with the 2.0.0 extension text: the DAT must be updated first."""
+    comp = _Comp(_TOX_PARS)
+    comp.op = lambda name: types.SimpleNamespace(module=types.SimpleNamespace())  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="par_help"):
+        script["apply"](comp)
 
 
 def test_apply_is_idempotent_and_skips_absent_pars(script: dict) -> None:
@@ -76,4 +114,4 @@ def test_apply_is_idempotent_and_skips_absent_pars(script: dict) -> None:
 
     assert script["apply"](comp) == ["Mode"]
     assert script["apply"](comp) == []
-    assert comp.help_of("Mode") == script["PAR_HELP"]["Mode"]
+    assert comp.help_of("Mode") == par_help()["Mode"]

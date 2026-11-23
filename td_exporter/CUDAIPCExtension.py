@@ -993,6 +993,8 @@ class ParSpec:
     state:  reads the value the extension keeps for it; None for a live par.
     apply:  what a change does, as (extension, new value, previous value); None when a
             change needs no action.
+    help:   the Alt+hover text, without the sentence that says when the par is greyed out:
+            par_help() makes that sentence from par_enable_state.
     """
 
     name: str
@@ -1000,6 +1002,7 @@ class ParSpec:
     kind: Callable[[Any], Any]
     state: Callable[[CUDAIPCExtension], Any] | None
     apply: Callable[[CUDAIPCExtension, Any, Any], None] | None
+    help: str
 
     def __post_init__(self) -> None:
         kept = self.state is not None
@@ -1010,17 +1013,142 @@ class ParSpec:
 # Mode comes first: resync_pars walks this order, and the later pars must see the engine of
 # the new mode.
 PARS: tuple[ParSpec, ...] = (
-    ParSpec("Mode", "reinit", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
-    ParSpec("Active", "live", bool, None, CUDAIPCExtension._on_active_change),
-    ParSpec("Ipcmemname", "reinit", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
-    ParSpec("Numslots", "reinit", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
+    ParSpec(
+        "Mode",
+        "reinit",
+        str,
+        lambda ext: ext.mode,
+        CUDAIPCExtension._on_mode_change,
+        help=(
+            "'Sender' exports TD textures to an external process. \n"
+            "'Receiver' imports frames from an external process into TD."
+        ),
+    ),
+    ParSpec(
+        "Active",
+        "live",
+        bool,
+        None,
+        CUDAIPCExtension._on_active_change,
+        help=(
+            "Enables / disables the CUDA IPC pipeline. \n"
+            "When off, no GPU work is performed and all resources are released."
+        ),
+    ),
+    ParSpec(
+        "Ipcmemname",
+        "reinit",
+        str,
+        lambda ext: ext.shm_name,
+        CUDAIPCExtension._on_ipcmemname_change,
+        help="SharedMemory channel name used to exchange GPU handles.\nMust match exactly on both sender and receiver.",
+    ),
+    ParSpec(
+        "Numslots",
+        "reinit",
+        int,
+        lambda ext: ext.num_slots,
+        CUDAIPCExtension._on_numslots_change,
+        help="Ring buffer depth (2–4 slots). \nMore slots reduce contention risk but use more GPU memory.",
+    ),
     # Not in the shipped .tox (it uses device 0); a COMP built by hand for a second GPU has it.
-    ParSpec("Cudadevice", "reinit", int, lambda ext: ext._device, CUDAIPCExtension._on_cudadevice_change),
+    ParSpec(
+        "Cudadevice",
+        "reinit",
+        int,
+        lambda ext: ext._device,
+        CUDAIPCExtension._on_cudadevice_change,
+        help="CUDA device index that the pipeline uses (0 is the first GPU). \nA change reopens the pipeline.",
+    ),
     # The clamp and the default of these two are with their readers:
     # TDSenderEngine._stream_id and TDReceiverEngine.frame_wait_ms.
-    ParSpec("Streamid", "live", int, None, None),
-    ParSpec("Framewaitms", "live", int, None, None),
-    ParSpec("Debug", "reinit", bool, lambda ext: ext.verbose_performance, CUDAIPCExtension._on_debug_change),
-    ParSpec("Hidebuiltin", "reinit", bool, lambda ext: ext._custom_only, CUDAIPCExtension._on_hidebuiltin_change),
+    ParSpec(
+        "Streamid",
+        "live",
+        int,
+        None,
+        None,
+        help=(
+            "Sender mode: a number written as stream_id into each frame's slot meta, so one receiver "
+            "network that reads several streams can tell them apart. \n"
+            "A label only: each stream still needs its own Ipcmemname. Applies from the next frame."
+        ),
+    ),
+    ParSpec(
+        "Framewaitms",
+        "live",
+        int,
+        None,
+        None,
+        help=(
+            "Receiver mode: wait up to this time (ms) for the sender's doorbell when no new frame "
+            "is there. 0 turns the wait off. Applies from the next frame."
+        ),
+    ),
+    ParSpec(
+        "Debug",
+        "reinit",
+        bool,
+        lambda ext: ext.verbose_performance,
+        CUDAIPCExtension._on_debug_change,
+        help="Prints average per-frame timing metrics to the Textport every 150 frames. \nToggle safely at any time.",
+    ),
+    ParSpec(
+        "Hidebuiltin",
+        "reinit",
+        bool,
+        lambda ext: ext._custom_only,
+        CUDAIPCExtension._on_hidebuiltin_change,
+        help="Hides built-in TouchDesigner parameters (Common, Extensions), showing only CUDA IPC controls.",
+    ),
 )
 _PARS_BY_NAME = {spec.name: spec for spec in PARS}
+
+# Help of the pars that the component writes and never reads back, so they have no ParSpec.
+_WRITTEN_PAR_HELP = {
+    "Status": (
+        "Live status of the pipeline, written by the component: Idle, the active texture format, "
+        "or a WARNING / ERROR line. Read-only."
+    ),
+    "Nativetops": (
+        "The installed CUDA-Link C++ TOPs (Plugins/CudaLink/VERSION.txt): version and CUDA or "
+        "build, or 'not installed'. Read-only. A version that differs from this component "
+        "tints the COMP yellow."
+    ),
+}
+_MODES = ("Sender", "Receiver")
+
+
+def _enable_sentence(name: str) -> str:
+    """Say when par_enable_state greys out *name*; '' for a par the rule does not cover.
+
+    Raises ValueError for a rule shape that has no sentence yet, so a new rule cannot leave
+    the help text behind.
+    """
+    states = {(mode, active): par_enable_state(mode, active).get(name) for mode in _MODES for active in (False, True)}
+    if all(state is None for state in states.values()):
+        return ""
+    on_modes = [mode for mode in _MODES if states[(mode, False)]]
+    if len(on_modes) == 1 and not any(
+        states[(mode, False)] or states[(mode, True)] for mode in _MODES if mode != on_modes[0]
+    ):
+        mode = on_modes[0]
+        if states[(mode, True)]:
+            other = next(m for m in _MODES if m != mode)
+            return f"Greyed out in {other} mode."
+        return f"Only editable in {mode} mode while inactive."
+    raise ValueError(f"{name}: no help sentence for this enable rule")
+
+
+def par_help() -> dict[str, str]:
+    """Alt+hover help of each custom par, by par name. scripts/tox_par_help.py writes it.
+
+    TouchDesigner stores par.help only inside the .tox, so this is the source that a rebuilt
+    or repaired .tox gets its help from. The Semver* pars are not here: the Semantic Version
+    Control tool owns them. Header pars have no help.
+    """
+    out = dict(_WRITTEN_PAR_HELP)
+    for spec in PARS:
+        sentence = _enable_sentence(spec.name)
+        out[spec.name] = f"{spec.help} \n{sentence}" if sentence else spec.help
+    return out

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Alexander Korneev
 # SPDX-License-Identifier: MIT
-"""Help text (Alt+hover in TD) of the CUDAIPCLink .tox custom parameters.
+"""Write the help text (Alt+hover in TD) of the CUDAIPCLink .tox custom parameters.
 
-TD stores ``par.help`` only inside the .tox, so this file is the source that a rebuilt or
-repaired .tox gets its help from. The Semver* parameters are not here: the Semantic Version
-Control tool owns them. Header parameters have no help.
+TD stores ``par.help`` only inside the .tox. The text comes from the COMP's own
+CUDAIPCExtension DAT: ``par_help()`` there builds it from the ``PARS`` table and the enable
+rule (``td_exporter/CUDAIPCExtension.py``). So update that DAT first, then run this.
 
 Run inside TouchDesigner (Textport or twozero), with the COMP to update:
 
@@ -20,55 +20,24 @@ from __future__ import annotations
 
 from typing import Any
 
-PAR_HELP: dict[str, str] = {
-    "Status": (
-        "Live status of the pipeline, written by the component: Idle, the active texture format, "
-        "or a WARNING / ERROR line. Read-only."
-    ),
-    "Mode": (
-        "'Sender' exports TD textures to an external process. \n"
-        "'Receiver' imports frames from an external process into TD."
-    ),
-    "Ipcmemname": (
-        "SharedMemory channel name used to exchange GPU handles.\nMust match exactly on both sender and receiver."
-    ),
-    "Active": (
-        "Enables / disables the CUDA IPC pipeline. \nWhen off, no GPU work is performed and all resources are released."
-    ),
-    "Numslots": (
-        "Ring buffer depth (2–4 slots). \n"
-        "More slots reduce contention risk but use more GPU memory. \n"
-        "Only editable in Sender mode while inactive."
-    ),
-    "Streamid": (
-        "Sender mode: a number written as stream_id into each frame's slot meta, so one receiver "
-        "network that reads several streams can tell them apart. \n"
-        "A label only: each stream still needs its own Ipcmemname. Applies from the next frame. \n"
-        "Greyed out in Receiver mode."
-    ),
-    "Framewaitms": (
-        "Receiver mode: wait up to this time (ms) for the sender's doorbell when no new frame "
-        "is there. 0 turns the wait off. Applies from the next frame. \n"
-        "Greyed out in Sender mode."
-    ),
-    "Debug": ("Prints average per-frame timing metrics to the Textport every 150 frames. \nToggle safely at any time."),
-    "Nativetops": (
-        "The installed CUDA-Link C++ TOPs (Plugins/CudaLink/VERSION.txt): version and CUDA or "
-        "build, or 'not installed'. Read-only. A version that differs from this component "
-        "tints the COMP yellow."
-    ),
-    "Hidebuiltin": ("Hides built-in TouchDesigner parameters (Common, Extensions), showing only CUDA IPC controls."),
-}
+
+def par_help(comp: Any) -> dict[str, str]:
+    """The help text by par name, from the CUDAIPCExtension DAT of *comp*."""
+    module = getattr(comp.op("CUDAIPCExtension"), "module", None)
+    build = getattr(module, "par_help", None)
+    if build is None:
+        raise RuntimeError("the CUDAIPCExtension DAT of this COMP has no par_help(); update the DAT text first")
+    return build()
 
 
 def apply(comp: Any) -> list[str]:
-    """Write PAR_HELP into *comp*'s custom pars; return the names whose help changed.
+    """Write par_help(comp) into *comp*'s custom pars; return the names whose help changed.
 
     A par the COMP does not have (an older .tox) is skipped.
     """
     pars = {par.name: par for par in comp.customPars}
     changed: list[str] = []
-    for name, text in PAR_HELP.items():
+    for name, text in par_help(comp).items():
         par = pars.get(name)
         if par is not None and par.help != text:
             par.help = text

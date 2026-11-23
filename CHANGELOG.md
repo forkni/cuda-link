@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs an action) or `live` (read each time it is needed: `Active`, `Streamid`,
   `Framewaitms`). A test fails when the package reads a parameter that has no row.
 
+- **`.tox`: the parameter help text comes from the `PARS` table.** `par_help()` in
+  `td_exporter/CUDAIPCExtension.py` replaces the `PAR_HELP` dictionary of
+  `scripts/tox_par_help.py`, and it makes the "Greyed out in … mode" sentence from the enable
+  rule, so the help cannot disagree with the rule. The text of each existing parameter is the
+  same. `scripts/tox_par_help.py` now reads the help from the COMP's own `CUDAIPCExtension`
+  DAT: update that DAT before you run `apply()`.
+
 ### Fixed
 
 - **`.tox`: a `Cudadevice` change after load had no effect.** The extension read `Cudadevice`
