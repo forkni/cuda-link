@@ -889,7 +889,11 @@ class CUDAIPCExtension:
         self.reconfigure_and_reinit("num_slots", new_slots)
 
     def _on_cudadevice_change(self, value: object, prev: object) -> None:  # noqa: ARG002
-        new_device = int(value)  # type: ignore[call-overload]
+        try:
+            new_device = int(value)  # type: ignore[call-overload]
+        except (ValueError, TypeError):  # a Str par on a COMP built by hand: text, or empty
+            self._log(f"WARNING: Cudadevice={value!r} is not a device index; change rejected", force=True)
+            return
         if new_device == self._device:
             return
         if new_device < 0:
@@ -1017,6 +1021,8 @@ class ParSpec:
     help: str
 
     def __post_init__(self) -> None:
+        if self.policy not in ("reinit", "live"):  # Literal is not checked at runtime
+            raise ValueError(f"{self.name}: policy must be 'reinit' or 'live', not {self.policy!r}")
         kept = self.state is not None
         if (self.policy == "reinit" and not kept) or (kept and self.apply is None):
             raise ValueError(f"{self.name}: a reinit par needs state and apply; a kept state needs apply")
