@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.tox` Sender Debug line itemizes the rest of `export_frame()`.** After `export=` the
+  summary line now prints `pre=`, `prep=` and `post=`: the time before `cudaMemory()`, the
+  time between `cudaMemory()` and the export, and the time after the export. They are
+  per-window averages over published steady-state frames; a frame that reopens the
+  exporter is not counted. The cost is two more clock reads per frame.
 - **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
   opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
   still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD

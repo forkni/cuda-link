@@ -441,7 +441,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 **Sender `export=` windowed average is higher than expected**
 
-- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region; the summary line shows it as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
+- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the export and is not part of `export=`; the summary line shows it apart, as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
 

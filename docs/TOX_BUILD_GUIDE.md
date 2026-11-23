@@ -639,7 +639,8 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
-3. Enable **Debug** in TD and look for `Frame  150 | ... FPS | ... export=... µs avg (write_idx=...)`
+3. Enable **Debug** in TD and look for
+   `Frame  150 | ... FPS | ... cuda_memory=... µs avg | export=... µs avg | pre=... prep=... post=... µs avg (write_idx=...)`
    lines every 150 published frames
 
 ---
