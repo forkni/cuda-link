@@ -265,6 +265,48 @@ def test_async_release_check_error_skips_the_frame_and_keeps_the_owners(fake_exp
     assert _alive(top)[first:] == [True], "No new cudaMemory() call, and the held block stays."
     assert [m for m in logs if "Async copy check failed" in m] == ["Async copy check failed: CUDA error 719"]
 
+    errors = [m for kind, m in engine._host.status_calls if kind == "error"]
+    assert len(errors) == 1 and "Async copy check failed" in errors[0]
+
     engine.cleanup()
     assert len(engine._held_sources) == 0
     assert engine._hold_check_failed is False
+
+
+def test_async_failed_export_waits_for_the_stream_before_the_release(fake_exporter_open: None) -> None:
+    """export() can return FAILED after it queued the copy and before it recorded the slot's
+    event. The slot's old event then says done, so the Sender must wait for the stream."""
+    engine, _top = _setup(export_sync=False)
+    engine._exporter.export = lambda frame: FrameOutcome.FAILED
+
+    assert engine.export_frame() is False
+
+    assert engine._exporter.drain_calls == 1
+    assert len(engine._held_sources) == 0
+
+
+def test_async_failed_export_keeps_the_owner_when_the_wait_fails(fake_exporter_open: None) -> None:
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+    engine._exporter.export = lambda frame: FrameOutcome.FAILED
+
+    def boom() -> None:
+        raise RuntimeError("CUDA error 719")
+
+    engine._exporter.drain = boom
+
+    assert engine.export_frame() is False
+    assert engine.export_frame() is False  # stopped: no new cudaMemory() call
+
+    assert len(top.owner_refs) == first + 1
+    assert _alive(top)[first:] == [True], "The block stays held: its copy may still be queued."
+    assert engine._hold_check_failed is True
+
+
+def test_blocking_failed_export_does_not_wait(fake_exporter_open: None) -> None:
+    engine, _top = _setup(export_sync=None)
+    engine._exporter.export = lambda frame: FrameOutcome.FAILED
+
+    assert engine.export_frame() is False
+
+    assert engine._exporter.drain_calls == 0

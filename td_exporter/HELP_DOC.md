@@ -240,7 +240,8 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
   `cuda_memory=` is TD's `top.cudaMemory()` call before the export: it waits for TD's GPU work
   on the source texture, so a slow source network shows here. `export=` is the copy and
   publish. `pre=`, `prep=` and `post=` are the rest of `export_frame()`: `pre` is the time from
-  the call's start to `cudaMemory()` (operator lookup, Active and pixel-format checks), `prep`
+  the call's start to `cudaMemory()` (operator lookup, Active and pixel-format checks, and with
+  `CUDALINK_EXPORT_SYNC=0` the check of which earlier copies have completed), `prep`
   is from `cudaMemory()` to the export (geometry check, frame metadata), and `post` is after
   the export (activation barrier, status text). The five figures add up to about the full
   `export_frame()` call. A frame that reopens the exporter is not in `pre`/`prep`/`post`.

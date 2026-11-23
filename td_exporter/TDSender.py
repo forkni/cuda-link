@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections import deque
 import time
 import traceback
+from collections import deque
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
@@ -237,7 +237,9 @@ class TDSenderEngine:
         # copy may still be queued. The ref holds TD's CUDAMemory object, so TD cannot give the
         # block to a later cudaMemory() call before the copy has read it.
         self._held_sources: deque = deque()
-        self._hold_check_failed: bool = False  # the release check raised: logged one time
+        # A CUDA error left the state of the queued copies unknown: the blocks stay held and
+        # the Sender stops until cleanup() (Active off and on).
+        self._hold_check_failed: bool = False
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -443,6 +445,17 @@ class TDSenderEngine:
         if len(held) >= self.num_slots:
             self._exporter.drain()
             held.clear()
+
+    def _fail_source_hold(self, err: Exception) -> None:
+        """A CUDA error in the async copy check: stop, with the blocks held, until cleanup().
+
+        The state of the queued copies is not known, so no block may be released. Logs and
+        sets the error status one time.
+        """
+        if not self._hold_check_failed:
+            self._hold_check_failed = True
+            self._log(f"Async copy check failed: {err}", force=True)
+            self._show_error_status(f"Async copy check failed: {err} - toggle Active")
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -732,15 +745,13 @@ class TDSenderEngine:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
+            if self._hold_check_failed:
+                return False
             if self._held_sources:
                 try:
                     self._release_done_sources()
                 except (OSError, RuntimeError) as cuda_err:
-                    # A sticky CUDA error: keep the blocks held (the copies may still be
-                    # queued) and skip the frame. cleanup() or a reopen drops them.
-                    if not self._hold_check_failed:
-                        self._log(f"Async copy check failed: {cuda_err}", force=True)
-                        self._hold_check_failed = True
+                    self._fail_source_hold(cuda_err)
                     return False
             try:
                 _t_cm = time.perf_counter()
@@ -996,6 +1007,15 @@ class TDSenderEngine:
                     self._rest_acc_n += 1
                 self._maybe_report_stats(self._exporter.write_idx, now=_now)
                 return True
+            if outcome is FrameOutcome.FAILED and not self._policy.export_sync:
+                # export() can fail after it queued the copy and before it recorded the
+                # slot's event. The next copy check would then read the slot's old event
+                # and release this block too early: wait for the stream now.
+                try:
+                    self._exporter.drain()
+                    self._held_sources.clear()
+                except (OSError, RuntimeError) as cuda_err:
+                    self._fail_source_hold(cuda_err)
             return False
 
         finally:

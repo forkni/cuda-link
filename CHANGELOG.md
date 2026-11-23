@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Exporter.slot_copy_done(slot)` and `Exporter.drain()`.** For a producer that exports
+  with `export_sync=False` and must keep its source buffer alive until the queued copy has
+  read it. `slot_copy_done()` is a non-blocking query of the slot's copy; `drain()` waits
+  for the IPC stream and does nothing on a closed `Exporter`.
 - **`.tox` Sender Debug line itemizes the rest of `export_frame()`.** After `export=` the
   summary line now prints `pre=`, `prep=` and `post=`: the time before `cudaMemory()`, the
   time between `cudaMemory()` and the export, and the time after the export. They are
@@ -51,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.tox` Sender keeps TD's `CUDAMemory` object until the copy has read it.** TD gives a
+  new block per `top.cudaMemory()` call, and the block lives only as long as the Python
+  object. The Sender kept only the pointer, so the block was released before the copy was
+  queued. The object is now held for the whole `export()` call. With
+  `CUDALINK_EXPORT_SYNC=0` it is held until the copy of its slot has completed, with one
+  block per ring slot as the cap. Blocking export stays the default.
 - **A second sender on a name that a running sender holds is now refused.** Before,
   `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
   and IPC handles over the first sender's. Neither sender got an error, and the receivers
