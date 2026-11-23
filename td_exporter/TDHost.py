@@ -148,6 +148,10 @@ class TDHost(Protocol):
         """Write ownerComp.showCustomOnly = value."""
         ...
 
+    def set_display_buffer(self, top_name: str) -> bool:
+        """Point the COMP's `bg` Select TOP at the TOP *top_name*; False when there is no `bg`."""
+        ...
+
     def is_active(self) -> bool:
         """Read ownerComp.par.Active.eval() via cached reference (hot-path safe)."""
         ...
@@ -384,6 +388,13 @@ class RealTDHost(TDHost):
     def show_custom_only(self, value: bool) -> None:
         with contextlib.suppress(AttributeError):
             self._comp.showCustomOnly = value
+
+    def set_display_buffer(self, top_name: str) -> bool:
+        bg_select = self._comp.op("bg")
+        if not bg_select:
+            return False
+        bg_select.par.top = top_name
+        return True
 
     def is_active(self) -> bool:
         if self._active_par is None:

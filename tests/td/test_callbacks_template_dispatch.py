@@ -274,310 +274,83 @@ def test_required_td_callback_stub_exists_and_returns_none(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# One-time parameter resync (writes made before parexec1 first cooked)
+# One-time parameter resync: the Execute DAT only starts it. What it does is the
+# extension's (CUDAIPCExtension.resync_pars, tests/td/test_extension_par_changes.py).
 # ---------------------------------------------------------------------------
 
 
-class _StubPar:
-    def __init__(self, name: str, value: object, enable: bool = True) -> None:
-        self.name = name
-        self.value = value
-        self.enable = enable
-
-    def eval(self) -> object:  # TD Par.eval(), not builtins.eval
-        return self.value
-
-
 class _ResyncExt(_StubExt):
-    def __init__(self, mode: str = "Sender", shm_name: str = "cudalink_ipc_TD>>TD") -> None:
+    def __init__(self, mode: str = "Sender", resync_to_mode: str | None = None) -> None:
         super().__init__(mode=mode)
-        self.shm_name = shm_name
-        self.num_slots = 3
-        self.verbose_performance = False
-        self._config = types.SimpleNamespace(export_profile=False)
-        self.par_enable_syncs = 0
+        self.resyncs = 0
+        self._resync_to_mode = resync_to_mode
 
-    def sync_par_enable(self) -> None:
-        self.par_enable_syncs += 1
-
-
-def _make_comp(
-    ext: object,
-    pars: dict[str, object],
-    parexec: object = None,
-    parexec_name: str = "parexec1",
-    numslots_enable: bool = False,
-    show_custom_only: bool = True,
-) -> types.SimpleNamespace:
-    par_ns = types.SimpleNamespace(**{name: _StubPar(name, v) for name, v in pars.items()})
-    par_ns.Numslots.enable = numslots_enable
-    ops: dict[str, object] = {parexec_name: parexec} if parexec is not None else {}
-    comp = types.SimpleNamespace(
-        ext=types.SimpleNamespace(CUDAIPCExtension=ext),
-        par=par_ns,
-        showCustomOnly=show_custom_only,
-        op=ops.get,
-    )
-    ops["bg"] = types.SimpleNamespace(par=types.SimpleNamespace(top="ExportBuffer"))
-    return comp
+    def resync_pars(self) -> None:
+        self.resyncs += 1
+        if self._resync_to_mode is not None:
+            self.mode = self._resync_to_mode
 
 
-def _patch_comp(
-    monkeypatch: pytest.MonkeyPatch,
-    ext: object,
-    pars: dict[str, object],
-    with_parexec: bool = True,
-    **comp_kwargs: object,
-) -> tuple[list[tuple[str, object]], types.SimpleNamespace]:
-    """Patch `parent()` with a COMP that has pars and a parexec1 recorder.
-
-    Returns the recorded (par name, previous value) calls and the parexec1 module.
-    """
-    calls: list[tuple[str, object]] = []
-    module = types.SimpleNamespace(onValueChange=lambda par, prev: calls.append((par.name, prev)))
-    parexec = types.SimpleNamespace(module=module) if with_parexec else None
-    comp = _make_comp(ext, pars, parexec, **comp_kwargs)
-    monkeypatch.setattr(callbacks_template, "parent", lambda: comp, raising=False)
-    return calls, module
-
-
-# A saved Sender .tox, Active on: Numslots greyed out, built-in parameters hidden.
-_IN_SYNC = {
-    "Mode": "Sender",
-    "Active": True,
-    "Ipcmemname": "cudalink_ipc_TD>>TD",
-    "Numslots": 3,
-    "Debug": False,
-    "Hidebuiltin": True,
-}
-
-
-def test_resync_routes_drift_through_parexec_mode_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 2026-11-21 case: Mode and Ipcmemname set in the same call as loadTox()."""
+def test_resync_runs_once_per_extension() -> None:
     ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver", Ipcmemname="probe"))
-    callbacks_template._resync_params_once(ext)
-    assert calls == [("Mode", "Sender"), ("Ipcmemname", "cudalink_ipc_TD>>TD")]
-
-
-def test_resync_without_drift_calls_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC))
-    callbacks_template._resync_params_once(ext)
-    assert calls == []
-
-
-def test_resync_runs_once_per_extension(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Numslots=5))
     callbacks_template._resync_params_once(ext)
     callbacks_template._resync_params_once(ext)
-    assert calls == [("Numslots", 3)]
+    assert ext.resyncs == 1
 
 
-def test_resync_new_extension_instance_checks_again(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resync_repeats_while_the_extension_asks_for_it() -> None:
+    """TD runs Frame Start inside loadTox(): the extension asks for calls until the next frame."""
+
+    class _Again(_StubExt):
+        answers = [True, True, False]
+        resyncs = 0
+
+        def resync_pars(self) -> bool:
+            self.resyncs += 1
+            return self.answers[self.resyncs - 1]
+
+    ext = _Again()
+    for _ in range(5):
+        callbacks_template._resync_params_once(ext)
+    assert ext.resyncs == 3
+
+
+def test_resync_new_extension_instance_checks_again() -> None:
     """An extension re-init (a new instance) gets its own check."""
     first, second = _ResyncExt(), _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, first, dict(_IN_SYNC, Debug=True))
     callbacks_template._resync_params_once(first)
     callbacks_template._resync_params_once(second)
-    assert calls == [("Debug", False), ("Debug", False)]
+    assert (first.resyncs, second.resyncs) == (1, 1)
 
 
-def test_resync_skips_debug_under_export_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    ext.verbose_performance = True  # forced on by CUDALINK_EXPORT_PROFILE
-    ext._config.export_profile = True
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC))
-    callbacks_template._resync_params_once(ext)
-    assert calls == []
+def test_resync_error_does_not_raise() -> None:
+    class _Boom(_StubExt):
+        def resync_pars(self) -> None:
+            raise RuntimeError("resync failed")
+
+    assert callbacks_template._resync_params_once(_Boom()) is None
 
 
-def test_resync_without_parexec_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"), with_parexec=False)
-    callbacks_template._resync_params_once(ext)
-    assert calls == []
-
-
-def test_resync_handler_error_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    _, module = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"))
-
-    def _boom(par: object, prev: object) -> None:
-        raise RuntimeError("handler failed")
-
-    module.onValueChange = _boom
-    assert callbacks_template._resync_params_once(ext) is None
+def test_resync_extension_without_resync_pars_does_not_raise() -> None:
+    """A 2.0.0 extension under a newer Execute DAT has no resync_pars()."""
+    assert callbacks_template._resync_params_once(_StubExt()) is None
 
 
 def test_onframestart_resyncs_before_mode_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """The resync runs first, so a Mode change takes effect on that same frame."""
-    ext = _ResyncExt(mode="Sender")
-    calls, module = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"))
-
-    def _switch(par: _StubPar, prev: object) -> None:
-        calls.append((par.name, prev))
-        ext.mode = str(par.eval())
-
-    module.onValueChange = _switch
+    ext = _ResyncExt(mode="Sender", resync_to_mode="Receiver")
+    _patch_parent(monkeypatch, ext)
     lookups = _patch_op_recorder(monkeypatch, result=None)
     callbacks_template.onFrameStart(1)
-    assert calls == [("Mode", "Sender")]
+    assert ext.resyncs == 1
     assert ext.deferred_cleanup_calls == 0
     assert lookups == ["ImportBuffer"]
 
 
-def test_resync_hidebuiltin_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Hidebuiltin=False))
-    callbacks_template._resync_params_once(ext)
-    assert calls == [("Hidebuiltin", True)]
-
-
-def test_resync_active_drift_only_syncs_the_enable_states(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Active is read live: no handler call, the extension applies its enable rule again."""
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Active=False))
-    callbacks_template._resync_params_once(ext)
-    assert calls == []
-    assert ext.par_enable_syncs == 1
-
-
-def test_resync_syncs_the_enable_states_without_a_parexec_dat(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"), with_parexec=False)
-    callbacks_template._resync_params_once(ext)
-    assert calls == []
-    assert ext.par_enable_syncs == 1
-
-
-def test_resync_extension_without_sync_par_enable_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 2.0.0 extension under a newer Execute DAT has no sync_par_enable()."""
-    ext = _ResyncExt()
-    ext.sync_par_enable = None
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Debug=True))
-    callbacks_template._resync_params_once(ext)
-    assert calls == [("Debug", False)]
-
-
-def test_resync_finds_parexecute_name_from_build_guide(monkeypatch: pytest.MonkeyPatch) -> None:
-    """docs/TOX_BUILD_GUIDE.md names the Parameter Execute DAT `parexecute`."""
-    ext = _ResyncExt()
-    calls, _ = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Numslots=4), parexec_name="parexecute")
-    callbacks_template._resync_params_once(ext)
-    assert calls == [("Numslots", 3)]
-
-
-def test_resync_one_failing_parameter_does_not_stop_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _ResyncExt()
-    calls, module = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver", Debug=True))
-
-    def _mode_fails(par: _StubPar, prev: object) -> None:
-        if par.name == "Mode":
-            raise RuntimeError("switch failed")
-        calls.append((par.name, prev))
-
-    module.onValueChange = _mode_fails
-    callbacks_template._resync_params_once(ext)
-    assert calls == [("Debug", False)]
-
-
 def test_onframeend_resyncs_before_export(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mid-frame loadTox() reaches Frame End first: a Receiver must not export as a Sender."""
-    ext = _ResyncExt(mode="Sender")
-    calls, module = _patch_comp(monkeypatch, ext, dict(_IN_SYNC, Mode="Receiver"))
-
-    def _switch(par: _StubPar, prev: object) -> None:
-        calls.append((par.name, prev))
-        ext.mode = str(par.eval())
-
-    module.onValueChange = _switch
+    """A loadTox() in mid-frame reaches Frame End first: a Receiver must not export."""
+    ext = _ResyncExt(mode="Sender", resync_to_mode="Receiver")
+    _patch_parent(monkeypatch, ext)
     callbacks_template.onFrameEnd(1)
-    assert calls == [("Mode", "Sender")]
+    assert ext.resyncs == 1
     assert ext.export_frame_calls == 0
-
-
-# ---------------------------------------------------------------------------
-# Resync through the real parexecute_callbacks handlers
-# ---------------------------------------------------------------------------
-
-
-class _HandlerExt(_ResyncExt):
-    """Enough of CUDAIPCExtension for parexecute_callbacks' handlers."""
-
-    def __init__(self, comp_ref: list[types.SimpleNamespace]) -> None:
-        super().__init__()
-        self._comp_ref = comp_ref
-        self.logs: list[str] = []
-        self.reinits: list[tuple[str, object]] = []
-
-    def clear_status(self) -> None:
-        return None
-
-    def _log(self, msg: str, force: bool = False) -> None:
-        self.logs.append(msg)
-
-    def is_active(self) -> bool:
-        return bool(self._comp_ref[0].par.Active.eval())
-
-    def switch_mode(self, mode: str) -> None:
-        self.mode = mode
-
-    def reconfigure_and_reinit(self, field: str, value: object) -> None:
-        self.reinits.append((field, value))
-        setattr(self, field, value)
-
-    def sync_par_enable(self) -> None:
-        from CUDAIPCExtension import par_enable_state
-
-        comp = self._comp_ref[0]
-        for name, enabled in par_enable_state(self.mode, self.is_active()).items():
-            par = getattr(comp.par, name, None)
-            if par is not None:
-                par.enable = enabled
-
-
-def _wire_real_handlers(monkeypatch: pytest.MonkeyPatch, pars: dict[str, object]) -> tuple[_HandlerExt, object]:
-    import parexecute_callbacks
-
-    comp_ref: list[types.SimpleNamespace] = []
-    ext = _HandlerExt(comp_ref)
-    comp = _make_comp(ext, pars, types.SimpleNamespace(module=parexecute_callbacks))
-    comp_ref.append(comp)
-    monkeypatch.setattr(callbacks_template, "parent", lambda: comp, raising=False)
-    monkeypatch.setattr(parexecute_callbacks, "parent", lambda: comp, raising=False)
-    return ext, comp
-
-
-def test_real_handlers_receiver_set_in_loadtox_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 2026-11-21 case end to end: Mode and Ipcmemname reach the extension and bg."""
-    ext, comp = _wire_real_handlers(monkeypatch, dict(_IN_SYNC, Mode="Receiver", Ipcmemname="probe"))
-    callbacks_template._resync_params_once(ext)
-    assert (ext.mode, ext.shm_name) == ("Receiver", "probe")
-    assert comp.op("bg").par.top == "ImportBuffer"
-    assert comp.par.Numslots.enable is False
-
-
-def test_real_handlers_inactive_sender_numslots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Active off before the first frame: Numslots applies and the parameter is editable."""
-    ext, comp = _wire_real_handlers(monkeypatch, dict(_IN_SYNC, Active=False, Numslots=5))
-    callbacks_template._resync_params_once(ext)
-    assert ext.reinits == [("num_slots", 5)]
-    assert comp.par.Numslots.enable is True
-
-
-def test_real_handlers_active_sender_numslots_follows_the_active_guard(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same result as a normal write: Numslots does not change while Active is on."""
-    ext, _ = _wire_real_handlers(monkeypatch, dict(_IN_SYNC, Numslots=5))
-    callbacks_template._resync_params_once(ext)
-    assert ext.reinits == []
-    assert any("ignored while Active" in m for m in ext.logs)
-
-
-def test_real_handlers_hidebuiltin(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext, comp = _wire_real_handlers(monkeypatch, dict(_IN_SYNC, Hidebuiltin=False))
-    callbacks_template._resync_params_once(ext)
-    assert comp.showCustomOnly is False

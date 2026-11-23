@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameters could be edited in both modes, and the edit had no effect in the other mode.
   The C++ TOPs are not affected: each one has only the parameter it reads.
 
+- **`.tox`: the extension owns what a parameter change does.** `CUDAIPCExtension.on_par_change`
+  and its `PARS` table replace the `handle_*` functions of `parexecute_callbacks.py`, and
+  `CUDAIPCExtension.resync_pars` replaces the first-frame resync code of
+  `callbacks_template.py`. Both DATs now only forward to the extension. The behaviour of each
+  parameter is the same, with two differences. The first-frame resync no longer needs a
+  Parameter Execute DAT named `parexec1` or `parexecute`. It also runs again on the next
+  frame, because TouchDesigner runs Frame Start inside `loadTox()`, before the script
+  writes its parameters. A `.tox` built by hand must take
+  the two callback DATs and the extension from the same version.
+
 ### Fixed
 
 - **`.tox`: `Numslots` could be edited in an Active Sender.** It stayed editable after a

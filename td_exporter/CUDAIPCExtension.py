@@ -23,7 +23,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     # op, run, ui are TD ambient globals injected into the COMP namespace at runtime.
@@ -436,9 +436,14 @@ class CUDAIPCExtension:
             verbose=_verbose,
         )
 
+        # The Hidebuiltin value last applied; None while the par was never read.
+        self._custom_only: bool | None = None
+        # TD absolute frame of the first resync_pars() call; None before it.
+        self._resync_frame: int | None = None
         _hide_val = self._host.param_value("Hidebuiltin")
         if _hide_val is not None:
-            self._host.show_custom_only(bool(_hide_val))
+            self._custom_only = bool(_hide_val)
+            self._host.show_custom_only(self._custom_only)
 
         self._engine: _Engine = self._make_engine()
 
@@ -774,6 +779,135 @@ class CUDAIPCExtension:
             self._host.set_param_enabled(name, enabled)
 
     # ------------------------------------------------------------------
+    # Parameter changes (Parameter Execute DAT) and the first-frame resync
+    # ------------------------------------------------------------------
+
+    def on_par_change(self, name: str, value: object, prev: object = None) -> None:
+        """Apply a change of one monitored par: PARS says what each one does.
+
+        parexecute_callbacks.onValueChange calls this with the par's name, its new value and
+        its previous value. A par that is not in PARS is logged and ignored.
+        """
+        self._log(f"Parameter '{name}' changed: {prev} -> {value}", force=False)
+        spec = _PARS_BY_NAME.get(name)
+        if spec is not None:
+            spec.apply(self, value, prev)
+
+    def resync_pars(self) -> bool:
+        """Apply the par writes that this extension missed. Return True to be called again.
+
+        The Execute DAT calls this on each frame callback until it returns False. It returns
+        True during the frame of the first call, and False on the first call in a later
+        frame. TouchDesigner runs Frame Start inside loadTox(), before the script that
+        called loadTox() writes its pars (seen in TD 2025.33230, 2026-11-23), so one call
+        on the first callback finds nothing to apply. All the writes of that script are
+        visible on the next frame. A host that cannot tell the frame gets one call.
+
+        __init__ reads Mode, Ipcmemname, Numslots, Debug and Hidebuiltin. After that, only the
+        Parameter Execute DAT reports a change, and it reports nothing that happened before it
+        first cooked. So a script that sets these pars in the same call as loadTox() or
+        create() leaves the extension on the old values, with no error (2026-11-21: a Receiver
+        set up this way stayed a Sender on the default Ipcmemname). Each par in PARS whose
+        value differs from the state the extension keeps goes through on_par_change, the same
+        path as a normal change. One par that fails does not stop the others. Last, the enable
+        states follow the Mode and Active of this frame.
+        """
+        frame = self._host.abs_frame()
+        if self._resync_frame is None:
+            self._resync_frame = frame
+        again = frame is not None and frame == self._resync_frame
+        for spec in PARS:
+            if spec.state is None:
+                continue  # read live (Active): nothing kept that can be stale
+            if spec.name == "Debug" and self._config.export_profile:
+                continue  # CUDALINK_EXPORT_PROFILE forces verbose on; Debug Off must not undo it
+            try:
+                value = self._host.param_value(spec.name)
+                if value is None:
+                    continue  # a COMP without the par
+                seen = spec.state(self)
+                if spec.kind(value) != spec.kind(seen):
+                    self.on_par_change(spec.name, value, seen)
+            except Exception:  # noqa: BLE001,S112 -- isolate each par
+                continue
+        self.sync_par_enable()
+        return again
+
+    def _on_active_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        if value:
+            self._log("Component activated", force=True)
+            if self._mode == "Sender":
+                self._log("Sender mode ready - will initialize on first frame export", force=False)
+            elif self._mode == "Receiver":
+                self._log("Receiver mode activated - will attempt connection", force=False)
+        else:
+            self._log("Component deactivated - cleaning up", force=True)
+            self.cleanup()
+            self.clear_status()
+        self.sync_par_enable()  # Numslots is editable only in an inactive Sender
+
+    def _on_ipcmemname_change(self, value: object, prev: object) -> None:
+        new_name = str(value)
+        if new_name != (str(prev) if prev is not None else ""):
+            self.reconfigure_and_reinit("shm_name", new_name)
+
+    def _on_numslots_change(self, value: object, prev: object) -> None:
+        new_slots = int(value)  # type: ignore[call-overload]  # a menu par gives a str
+        if new_slots == (int(prev) if prev is not None else 0):  # type: ignore[call-overload]
+            return
+        # The slot count comes from the sender through SharedMemory. The par is greyed out in
+        # Receiver mode; a script can still write it.
+        if self._mode == "Receiver":
+            self._log("Numslots change ignored in Receiver mode (controlled by sender)", force=True)
+            return
+        # Greyed out while Active, but a script write does not respect the enable state.
+        if self.is_active():
+            self._log("Numslots change ignored while Active (deactivate first)", force=True)
+            return
+        # Hard bounds: below 2 there is no double buffering. Above 10 fails the receiver's
+        # protocol guard (TDReceiver num_slots > 10) and the 10-entry NVTX slot-name tuple
+        # that TDSender.export_frame indexes by write_idx % num_slots.
+        if new_slots < 2 or new_slots > 10:
+            self._log(f"WARNING: Numslots={new_slots} outside supported range (2-10); change rejected", force=True)
+            return
+        # 2-5 slots is the tested range; 6-10 works but is less exercised.
+        if new_slots > 5:
+            self._log(f"WARNING: Numslots={new_slots} outside recommended range (2-5)", force=True)
+        self.reconfigure_and_reinit("num_slots", new_slots)
+
+    def _on_debug_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        self.verbose_performance = bool(value)
+        self._log("Debug logging ENABLED" if value else "Debug logging DISABLED", force=True)
+
+    def _on_hidebuiltin_change(self, value: object, prev: object) -> None:  # noqa: ARG002
+        self._custom_only = bool(value)
+        self._host.show_custom_only(self._custom_only)
+        self._log(f"Built-in parameters {'hidden' if value else 'visible'}", force=True)
+
+    def _on_mode_change(self, value: object, prev: object) -> None:
+        new_mode = str(value)
+        old_mode = str(prev) if prev is not None else ""
+        if new_mode == old_mode:
+            return
+        self._log(f"Mode switching: {old_mode} -> {new_mode}", force=True)
+        try:
+            self.switch_mode(new_mode)
+            self._log(f"Mode switch complete: now in {new_mode} mode", force=True)
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"ERROR switching mode: {e}", force=True)
+            return
+        # The `bg` Select TOP shows the buffer of the mode. For a Mono+Alpha stream,
+        # TOPHandle.sync_mono_alpha_fix moves it to MonoAlphaFix when the stream connects.
+        buffer = _MODE_DISPLAY_BUFFER.get(new_mode)
+        if buffer is None:
+            return
+        try:
+            if self._host.set_display_buffer(buffer):
+                self._log(f"Updated bg selectTOP -> {buffer}", force=False)
+        except (AttributeError, RuntimeError) as e:
+            self._log(f"Could not update bg selectTOP: {e}", force=False)
+
+    # ------------------------------------------------------------------
     # Runtime config accessors
     # ------------------------------------------------------------------
 
@@ -825,3 +959,34 @@ class CUDAIPCExtension:
         consume_pending_resolution — same consume-and-clear semantics.
         """
         return self._engine.consume_pending_format()
+
+
+_MODE_DISPLAY_BUFFER = {"Sender": "ExportBuffer", "Receiver": "ImportBuffer"}
+
+
+@dataclass(frozen=True)
+class ParSpec:
+    """One custom par that the extension follows.
+
+    kind:  the type its value and the kept state compare as (resync_pars).
+    state: reads the value the extension keeps for it; None for a par that is read live.
+    apply: what a change does, as (extension, new value, previous value).
+    """
+
+    name: str
+    kind: Callable[[Any], Any]
+    state: Callable[[CUDAIPCExtension], Any] | None
+    apply: Callable[[CUDAIPCExtension, Any, Any], None]
+
+
+# Mode comes first: resync_pars walks this order, and the later pars must see the engine of
+# the new mode.
+PARS: tuple[ParSpec, ...] = (
+    ParSpec("Mode", str, lambda ext: ext.mode, CUDAIPCExtension._on_mode_change),
+    ParSpec("Active", bool, None, CUDAIPCExtension._on_active_change),
+    ParSpec("Ipcmemname", str, lambda ext: ext.shm_name, CUDAIPCExtension._on_ipcmemname_change),
+    ParSpec("Numslots", int, lambda ext: ext.num_slots, CUDAIPCExtension._on_numslots_change),
+    ParSpec("Debug", bool, lambda ext: ext.verbose_performance, CUDAIPCExtension._on_debug_change),
+    ParSpec("Hidebuiltin", bool, lambda ext: ext._custom_only, CUDAIPCExtension._on_hidebuiltin_change),
+)
+_PARS_BY_NAME = {spec.name: spec for spec in PARS}
