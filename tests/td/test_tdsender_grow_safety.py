@@ -155,3 +155,34 @@ def test_shrink_reopen_never_skips(fake_exporter_open: None) -> None:
     assert top.cook_calls == [], "Shrink path must not force-cook."
     assert engine._current_spec.dtype == "uint8"
     assert engine._exporter.data_size == 64 * 64 * 4 * 1
+
+
+def test_rest_of_export_frame_timed_on_steady_frames_only(fake_exporter_open: None) -> None:
+    """pre/prep/post get one sample per published steady-state frame; the lazy-init cook and a
+    frame that reopens the Exporter add none."""
+    top = FakeTOPHandle(
+        pixel_format="32-bit float (RGBA)",
+        pixel_format_name="rgba32float",
+        width=64,
+        height=64,
+        channels=4,
+        gpu_ptr=0x1000,
+        cuda_size=64 * 64 * 4 * 4,
+    )
+    host = FakeTDHost(params={"Active": True, "Debug": False}, tops={"ExportBuffer": top})
+    engine = _make_engine(f"test_rest_{uuid.uuid4().hex[:8]}", host)
+
+    assert engine.export_frame() is False  # lazy-init probe
+    assert engine._rest_acc_n == 0
+    assert engine.export_frame() is True
+    assert engine.export_frame() is True
+    assert engine._rest_acc_n == 2
+    assert min(engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s) >= 0.0
+
+    # Shrink to uint8: this frame reopens the Exporter (which resets the window) and publishes.
+    top._pixel_format = "8-bit fixed (RGBA)"
+    top._pixel_format_name = "rgba8fixed"
+    assert engine.export_frame() is True
+    assert engine._rest_acc_n == 0, "A reopen frame is not a steady-state sample."
+    assert engine.export_frame() is True
+    assert engine._rest_acc_n == 1

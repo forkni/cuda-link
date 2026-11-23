@@ -158,6 +158,46 @@ def test_report_shows_cuda_memory_time_apart():
     assert (engine._cm_acc_s, engine._cm_acc_n) == (0.0, 0)
 
 
+def test_report_shows_rest_of_export_frame():
+    """pre/prep/post are reported as per-frame averages after export= and the window resets."""
+    engine, logs = _make_engine(report_every=150, verbose=True)
+    _inject_exporter(engine, frame_count=150)
+    engine._tx_window.start(1.0, 0)
+    engine._tx_window._acc_sum = 0.015
+    engine._tx_window._acc_n = 150
+    engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s = 0.0015, 0.003, 0.0045
+    engine._rest_acc_n = 150  # 10, 20 and 30 µs per frame
+
+    engine._maybe_report_stats(write_idx=150, now=4.0)
+
+    assert len(logs) == 1
+    assert "export=100.0 µs avg | pre=10.0 prep=20.0 post=30.0 µs avg (write_idx=150)" in logs[0]
+    assert (engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s, engine._rest_acc_n) == (0.0, 0.0, 0.0, 0)
+
+
+def test_report_without_rest_samples_keeps_old_line():
+    """With no pre/prep/post sample in the window the line ends as before."""
+    engine, logs = _make_engine(report_every=150, verbose=True)
+    _inject_exporter(engine, frame_count=150)
+    engine._tx_window.start(1.0, 0)
+    engine._tx_window._acc_sum = 0.015
+    engine._tx_window._acc_n = 150
+
+    engine._maybe_report_stats(write_idx=150, now=4.0)
+
+    assert "export=100.0 µs avg (write_idx=150)" in logs[0]
+    assert "pre=" not in logs[0]
+
+
+def test_reset_report_window_clears_rest_accumulators():
+    engine, _ = _make_engine()
+    engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s, engine._rest_acc_n = 1.0, 2.0, 3.0, 7
+
+    engine._reset_report_window()
+
+    assert (engine._pre_acc_s, engine._prep_acc_s, engine._post_acc_s, engine._rest_acc_n) == (0.0, 0.0, 0.0, 0)
+
+
 def test_report_not_emitted_on_frame_zero():
     """frame_count == 0 does not emit even if it is a multiple of report_every=1."""
     engine, logs = _make_engine(report_every=1, verbose=True)

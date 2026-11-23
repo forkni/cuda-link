@@ -226,6 +226,12 @@ class TDSenderEngine:
         # GPU work on the source texture, so a slow source pipeline shows here, not in export.
         self._cm_acc_s: float = 0.0
         self._cm_acc_n: int = 0
+        # Per-window time of the rest of export_frame(), published steady-state frames only:
+        # pre (entry -> cuda_memory()), prep (cuda_memory() -> export()), post (export() -> status set).
+        self._pre_acc_s: float = 0.0
+        self._prep_acc_s: float = 0.0
+        self._post_acc_s: float = 0.0
+        self._rest_acc_n: int = 0
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -382,12 +388,25 @@ class TDSenderEngine:
         _avg_export_us = self._tx_window.avg_and_reset() * 1e6
         _cm = f"cuda_memory={self._cm_acc_s / self._cm_acc_n * 1e6:.1f} µs avg | " if self._cm_acc_n else ""
         self._cm_acc_s, self._cm_acc_n = 0.0, 0
+        _rest = ""
+        if self._rest_acc_n:
+            _k = 1e6 / self._rest_acc_n
+            _rest = (
+                f" | pre={self._pre_acc_s * _k:.1f} prep={self._prep_acc_s * _k:.1f} "
+                f"post={self._post_acc_s * _k:.1f} µs avg"
+            )
+        self._reset_rest_acc()
         spec = self._current_spec
         self._log(
             f"Frame {n:5d} | {_fps:5.1f} FPS | "
             f"shape=({spec.height}, {spec.width}, {spec.channels}) dtype={spec.dtype} | "
-            f"{_cm}export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
+            f"{_cm}export={_avg_export_us:.1f} µs avg{_rest} (write_idx={write_idx})"
         )
+
+    def _reset_rest_acc(self) -> None:
+        """Clear the pre/prep/post accumulators of the current report window."""
+        self._pre_acc_s = self._prep_acc_s = self._post_acc_s = 0.0
+        self._rest_acc_n = 0
 
     def _reset_report_window(self) -> None:
         """Clear windowed-FPS and export-time state so the next report starts a fresh window.
@@ -402,6 +421,7 @@ class TDSenderEngine:
         """
         self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
         self._cm_acc_s, self._cm_acc_n = 0.0, 0
+        self._reset_rest_acc()
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -593,6 +613,8 @@ class TDSenderEngine:
         Returns:
             True if frame was published, False if skipped or failed.
         """
+        _t_enter = time.perf_counter()
+        _steady = True  # False on a frame that reopens the Exporter: not a steady-state sample
         # Resolve ExportBuffer TOP handle (cached; re-looked-up if invalid).
         top_op = self._export_buffer
         if top_op is None or not top_op.is_valid():
@@ -692,7 +714,8 @@ class TDSenderEngine:
             try:
                 _t_cm = time.perf_counter()
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
-                self._cm_acc_s += time.perf_counter() - _t_cm
+                _t_cm_end = time.perf_counter()
+                self._cm_acc_s += _t_cm_end - _t_cm
                 self._cm_acc_n += 1
             except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
@@ -832,6 +855,7 @@ class TDSenderEngine:
                     f" → {cm.width}x{cm.height}x{cm_channels} {resolved_dtype}",
                     force=True,
                 )
+                _steady = False
                 with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
                     self._exporter.close()
                 new_spec = FrameSpec(
@@ -928,6 +952,11 @@ class TDSenderEngine:
                         f"{cm.width}x{cm.height} {_format_label(_pf_name, resolved_dtype, cm_channels)}"
                     )
                 self._host.set_info_status(self._last_pub_status)
+                if _steady:
+                    self._pre_acc_s += _t_cm - _t_enter
+                    self._prep_acc_s += _t_export - _t_cm_end
+                    self._post_acc_s += time.perf_counter() - _now
+                    self._rest_acc_n += 1
                 self._maybe_report_stats(self._exporter.write_idx, now=_now)
                 return True
             return False
