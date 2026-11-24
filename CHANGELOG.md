@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.1.0] - 2026-11-23
+## [2.2.0] - 2026-11-23
 
 ### Added
 
@@ -23,6 +23,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time between `cudaMemory()` and the export, and the time after the export. They are
   per-window averages over published steady-state frames; a frame that reopens the
   exporter is not counted. The cost is two more clock reads per frame.
+
+### Fixed
+
+- **`.tox` Sender keeps TD's `CUDAMemory` object until the copy has read it.** TD gives a
+  new block per `top.cudaMemory()` call, and the block lives only as long as the Python
+  object. The Sender kept only the pointer, so the block was released before the copy was
+  queued. The object is now held for the whole `export()` call. With
+  `CUDALINK_EXPORT_SYNC=0` it is held until the copy of its slot has completed, with one
+  block per ring slot as the cap. Blocking export stays the default.
+- **`.tox` Sender, `CUDALINK_EXPORT_SYNC=0`: a CUDA error no longer frees a block that a
+  queued copy can still read.** After a CUDA error in the copy check or in `export()`, the
+  Sender calls `Exporter.recover()`. With no error after the stream wait, it continues on
+  the same cook. With an error, it stops with the blocks held and shows
+  `Async copy fault: CUDA error N`. For an error that the CUDA header marks as permanent
+  (700, 702, 710, 714 to 719) the text ends with `restart TouchDesigner` and there are no
+  more attempts. For each other error it tries again one time per second and continues
+  by itself when the error is gone. After 3 failed attempts it closes the Exporter and
+  opens a new stream, one time for each fault, as an Active toggle does. If the new
+  stream fails too, the text ends with `toggle Active or restart TouchDesigner`. When the
+  Exporter closes (Active off, or a resolution or format change) and the copies are not
+  proved done, the blocks are kept until TouchDesigner exits: at most one block per ring
+  slot for each such close.
+- **`.tox` Sender, blocking export: a latched CUDA error no longer makes each later export
+  fail.** `export()` only reads the latched error, so one error stopped the stream until
+  the user toggled Active. After a failed `export()` the Sender now calls
+  `Exporter.recover()`, as it does with `CUDALINK_EXPORT_SYNC=0`. The steps are the same:
+  one attempt per second, no more attempts for a permanent error, and a new stream after
+  3 failed attempts. The status text starts with `Export fault: CUDA error N`.
+- **`Exporter.close()` consumes a latched CUDA error.** With an error latched, `close()`
+  skips the GPU cleanup, as before. It left the error latched, and the error is per
+  thread, so the first `export()` of the next Exporter on that thread failed. That cost
+  one frame after each stream restart of the `.tox` Sender.
+
+## [2.1.0] - 2026-11-23
+
+### Added
+
 - **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
   opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
   still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
@@ -60,34 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`.tox` Sender keeps TD's `CUDAMemory` object until the copy has read it.** TD gives a
-  new block per `top.cudaMemory()` call, and the block lives only as long as the Python
-  object. The Sender kept only the pointer, so the block was released before the copy was
-  queued. The object is now held for the whole `export()` call. With
-  `CUDALINK_EXPORT_SYNC=0` it is held until the copy of its slot has completed, with one
-  block per ring slot as the cap. Blocking export stays the default.
-- **`.tox` Sender, `CUDALINK_EXPORT_SYNC=0`: a CUDA error no longer frees a block that a
-  queued copy can still read.** After a CUDA error in the copy check or in `export()`, the
-  Sender calls `Exporter.recover()`. With no error after the stream wait, it continues on
-  the same cook. With an error, it stops with the blocks held and shows
-  `Async copy fault: CUDA error N`. For an error that the CUDA header marks as permanent
-  (700, 702, 710, 714 to 719) the text ends with `restart TouchDesigner` and there are no
-  more attempts. For each other error it tries again one time per second and continues
-  by itself when the error is gone. After 3 failed attempts it closes the Exporter and
-  opens a new stream, one time for each fault, as an Active toggle does. If the new
-  stream fails too, the text ends with `toggle Active or restart TouchDesigner`. When the Exporter closes (Active off, or a
-  resolution or format change) and the copies are not proved done, the blocks are kept
-  until TouchDesigner exits: at most one block per ring slot for each such close.
-- **`.tox` Sender, blocking export: a latched CUDA error no longer makes each later export
-  fail.** `export()` only reads the latched error, so one error stopped the stream until
-  the user toggled Active. After a failed `export()` the Sender now calls
-  `Exporter.recover()`, as it does with `CUDALINK_EXPORT_SYNC=0`. The steps are the same:
-  one attempt per second, no more attempts for a permanent error, and a new stream after
-  3 failed attempts. The status text starts with `Export fault: CUDA error N`.
-- **`Exporter.close()` consumes a latched CUDA error.** With an error latched, `close()`
-  skips the GPU cleanup, as before. It left the error latched, and the error is per
-  thread, so the first `export()` of the next Exporter on that thread failed. That cost
-  one frame after each stream restart of the `.tox` Sender.
 - **A second sender on a name that a running sender holds is now refused.** Before,
   `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
   and IPC handles over the first sender's. Neither sender got an error, and the receivers
