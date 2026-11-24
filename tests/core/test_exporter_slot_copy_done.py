@@ -25,6 +25,7 @@ class _Cuda(FakeCUDAAdapter):
         self.pending: list[Any] = []  # events whose copy has not completed
         self.queried: list[Any] = []
         self.synced: list[Any] = []
+        self.permanent_error = 0  # a code that each stream wait latches again and raises
 
     def query_event(self, event: Any) -> bool:
         self.queried.append(event)
@@ -32,6 +33,9 @@ class _Cuda(FakeCUDAAdapter):
 
     def stream_synchronize(self, stream: Any) -> None:
         self.synced.append(stream)
+        if self.permanent_error:
+            self._sticky_error = self.permanent_error
+            raise RuntimeError(f"CUDA error {self.permanent_error}")
 
 
 def _open() -> tuple[Exporter, _Cuda]:
@@ -114,4 +118,53 @@ def test_drain_after_a_close_with_a_sticky_error_does_not_touch_the_stream() -> 
 
     exp.drain()
 
+    assert cuda.synced == []
+
+
+def test_recover_with_no_error_waits_and_returns_zero() -> None:
+    exp, cuda = _open()
+    try:
+        cuda.synced.clear()
+
+        assert exp.recover() == 0
+        assert len(cuda.synced) == 1 and cuda.synced[0] is exp.ipc_stream
+    finally:
+        exp.close()
+
+
+def test_recover_consumes_an_error_that_is_not_permanent() -> None:
+    """Such an error stays latched until it is read with a clear. export() fails on each
+    frame while it is latched."""
+    exp, cuda = _open()
+    try:
+        cuda._sticky_error = 2
+        cuda.synced.clear()
+
+        assert exp.recover() == 0
+        assert cuda.peek_last_error() == 0
+        assert len(cuda.synced) == 1, "The stream wait is the proof that the copies are done."
+    finally:
+        exp.close()
+
+
+def test_recover_returns_the_code_of_an_error_that_comes_back() -> None:
+    exp, cuda = _open()
+    try:
+        cuda._sticky_error = 719
+        cuda.permanent_error = 719
+
+        assert exp.recover() == 719
+        assert exp.recover() == 719
+    finally:
+        cuda.permanent_error = 0
+        cuda._sticky_error = 0
+        exp.close()
+
+
+def test_recover_on_a_closed_exporter_proves_nothing() -> None:
+    exp, cuda = _open()
+    exp.close()
+    cuda.synced.clear()
+
+    assert exp.recover() == -1
     assert cuda.synced == []

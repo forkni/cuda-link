@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `export_sync=False` and must keep its source buffer alive until the queued copy has
   read it. `slot_copy_done()` is a non-blocking query of the slot's copy; `drain()` waits
   for the IPC stream and does nothing on a closed `Exporter`.
+- **`Exporter.recover()`.** Consumes a latched CUDA error, waits for the IPC stream and
+  returns the error code that is latched after the wait. `0` proves that each queued copy
+  has completed and that the context is usable. It does not raise.
 - **`.tox` Sender Debug line itemizes the rest of `export_frame()`.** After `export=` the
   summary line now prints `pre=`, `prep=` and `post=`: the time before `cudaMemory()`, the
   time between `cudaMemory()` and the export, and the time after the export. They are
@@ -61,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queued. The object is now held for the whole `export()` call. With
   `CUDALINK_EXPORT_SYNC=0` it is held until the copy of its slot has completed, with one
   block per ring slot as the cap. Blocking export stays the default.
+- **`.tox` Sender, `CUDALINK_EXPORT_SYNC=0`: a CUDA error no longer frees a block that a
+  queued copy can still read.** After a CUDA error in the copy check or in `export()`, the
+  Sender calls `Exporter.recover()`. With no error after the stream wait, it continues on
+  the same cook. With an error, it stops with the blocks held and shows
+  `Async copy fault: CUDA error N`. For an error that the CUDA header marks as permanent
+  (700, 702, 710, 714 to 719) the text ends with `restart TouchDesigner` and there are no
+  more attempts. For each other error it tries again one time per second and continues
+  by itself when the error is gone. After 3 failed attempts it closes the Exporter and
+  opens a new stream, one time for each fault, as an Active toggle does. If the new
+  stream fails too, the text ends with `toggle Active or restart TouchDesigner`. When the Exporter closes (Active off, or a
+  resolution or format change) and the copies are not proved done, the blocks are kept
+  until TouchDesigner exits: at most one block per ring slot for each such close.
 - **A second sender on a name that a running sender holds is now refused.** Before,
   `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
   and IPC handles over the first sender's. Neither sender got an error, and the receivers

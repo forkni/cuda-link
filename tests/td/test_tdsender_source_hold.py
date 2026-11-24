@@ -17,10 +17,13 @@ GPU-free harness: Exporter.open is patched to a fake that records the calls.
 from __future__ import annotations
 
 import contextlib
+import sys
 import types
 import uuid
 import weakref
 
+import pytest
+import TDSender
 from Exporter import FrameOutcome
 from fakes import FakeTDHost, FakeTOPHandle, fake_exporter_open  # noqa: F401
 from SHMProtocol import DtypeCodec
@@ -28,6 +31,19 @@ from TDConfig import TDSenderConfig
 from TDSender import TDSenderEngine
 
 _NUM_SLOTS = 3
+
+
+@pytest.fixture(autouse=True)
+def _drop_kept_sources():
+    """The store of never-freed blocks lives in sys.modules: drop it between tests."""
+    sys.modules.pop(TDSender._KEPT_SOURCES_KEY, None)
+    yield
+    sys.modules.pop(TDSender._KEPT_SOURCES_KEY, None)
+
+
+def _kept() -> list:
+    store = sys.modules.get(TDSender._KEPT_SOURCES_KEY)
+    return list(store.blocks) if store is not None else []
 
 
 class _FakeExporter:
@@ -42,6 +58,8 @@ class _FakeExporter:
         self.pending: set[int] = set()  # slots whose copy has not completed
         self.keep_pending = True  # each export leaves its slot pending
         self.drain_calls = 0
+        self.recover_code = 0  # what recover() finds latched after its stream wait
+        self.recover_calls = 0
         self.closed = False
         self.owners_alive_in_export: list[bool] = []
         self._frame_owner_ref = None
@@ -69,9 +87,17 @@ class _FakeExporter:
         self.drain_calls += 1
         self.pending.clear()
 
+    def recover(self) -> int:
+        self.recover_calls += 1
+        if self.recover_code == 0:
+            self.pending.clear()
+        return self.recover_code
+
     def close(self) -> None:
+        """Like Exporter.close(): returns None, and waits only when no error is latched."""
         self.closed = True
-        self.pending.clear()
+        if self.recover_code == 0:
+            self.pending.clear()
 
 
 class _Owner:
@@ -244,63 +270,178 @@ def test_async_export_holds_the_owner_when_export_raises(fake_exporter_open: Non
     assert _alive(top)[first:] == [True]
 
 
-def test_async_release_check_error_skips_the_frame_and_keeps_the_owners(fake_exporter_open: None) -> None:
-    """A sticky CUDA error makes the release check raise. export_frame() must not raise into
-    the cook callback: it logs one time, keeps the blocks held and returns False."""
+def _check_raises(engine: TDSenderEngine) -> None:
+    def boom(slot: int) -> bool:
+        raise RuntimeError("CUDA error")
+
+    engine._exporter.slot_copy_done = boom
+
+
+def _error_status(engine: TDSenderEngine) -> list[str]:
+    return [m for kind, m in engine._host.status_calls if kind == "error"]
+
+
+def test_check_error_that_clears_costs_no_frame(fake_exporter_open: None) -> None:
+    """The copy check raises, and recover() finds no error after its stream wait: that wait
+    is the proof, so the blocks go and the same cook exports."""
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+    assert engine.export_frame() is True  # slot 0 held
+    _check_raises(engine)
+
+    assert engine.export_frame() is True
+
+    assert engine._exporter.recover_calls == 1
+    assert _alive(top)[first:] == [False, True]
+    assert engine._hold_fault_code is None
+    assert _error_status(engine) == []
+
+
+def test_check_error_that_stays_stops_the_sender_with_the_owners_held(fake_exporter_open: None) -> None:
+    """export_frame() must not raise into the cook callback: it logs and sets the error
+    status one time, keeps the blocks held and returns False."""
     engine, top = _setup(export_sync=False)
     logs: list[str] = []
     engine._log = lambda msg, force=False: logs.append(msg)
     first = len(top.owner_refs)
     assert engine.export_frame() is True  # slot 0 held
-
-    def boom(slot: int) -> bool:
-        raise RuntimeError("CUDA error 719")
-
-    engine._exporter.slot_copy_done = boom
+    _check_raises(engine)
+    engine._exporter.recover_code = 2  # out of memory: not permanent
 
     assert engine.export_frame() is False
-    assert engine.export_frame() is False
+    assert engine.export_frame() is False  # inside the retry interval: no CUDA call
 
+    assert engine._exporter.recover_calls == 1
     assert [slot for slot, _ in engine._held_sources] == [0]
     assert _alive(top)[first:] == [True], "No new cudaMemory() call, and the held block stays."
-    assert [m for m in logs if "Async copy check failed" in m] == ["Async copy check failed: CUDA error 719"]
+    assert [m for m in logs if "Async copy fault" in m] == ["Async copy fault: CUDA error 2"]
+    assert _error_status(engine) == ["Async copy fault: CUDA error 2 - recovery in progress"]
 
-    errors = [m for kind, m in engine._host.status_calls if kind == "error"]
-    assert len(errors) == 1 and "Async copy check failed" in errors[0]
+
+def test_stopped_sender_recovers_alone_when_the_error_clears(fake_exporter_open: None) -> None:
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+    assert engine.export_frame() is True
+    _check_raises(engine)
+    engine._exporter.recover_code = 2
+    assert engine.export_frame() is False
+    del engine._exporter.slot_copy_done  # the check works again
+
+    engine._hold_next_try = 0.0  # the retry interval has passed
+    assert engine.export_frame() is False, "The error is still latched: stay stopped."
+    assert engine._exporter.recover_calls == 2
+
+    engine._exporter.recover_code = 0  # memory is free again
+    engine._hold_next_try = 0.0
+    assert engine.export_frame() is True
+
+    assert engine._hold_fault_code is None
+    assert _alive(top)[first:] == [False, True]
+
+
+def test_permanent_error_is_not_tried_again(fake_exporter_open: None) -> None:
+    """719 is one of the codes that the CUDA header marks 'the process must be relaunched'."""
+    engine, _top = _setup(export_sync=False)
+    assert engine.export_frame() is True
+    _check_raises(engine)
+    engine._exporter.recover_code = 719
+
+    assert engine.export_frame() is False
+    assert engine._hold_next_try == float("inf")
+    assert [engine.export_frame() for _ in range(5)] == [False] * 5
+
+    assert engine._exporter.recover_calls == 1
+    assert _error_status(engine) == ["Async copy fault: CUDA error 719 - restart TouchDesigner"]
+
+
+def test_cleanup_without_proof_keeps_the_owners_for_the_process_life(fake_exporter_open: None) -> None:
+    """Exporter.close() does not wait for the stream when a CUDA error is latched. An Active
+    toggle must not free a block whose copy can still be queued."""
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+    assert engine.export_frame() is True  # slot 0, copy queued
+    exporter = engine._exporter
+    exporter.recover_code = 719
 
     engine.cleanup()
-    assert len(engine._held_sources) == 0
-    assert engine._hold_check_failed is False
+
+    assert exporter.closed and 0 in exporter.pending, "Precondition: the copy did not complete."
+    assert _alive(top)[first:] == [True]
+    assert len(_kept()) == 1
+    assert len(engine._held_sources) == 0 and engine._hold_fault_code is None
 
 
-def test_async_failed_export_waits_for_the_stream_before_the_release(fake_exporter_open: None) -> None:
+def test_cleanup_with_proof_frees_the_owners(fake_exporter_open: None) -> None:
+    """With no error after the stream wait of recover(), nothing is kept."""
+    engine, top = _setup(export_sync=False)
+    assert engine.export_frame() is True
+    exporter = engine._exporter
+
+    engine.cleanup()
+
+    assert exporter.recover_calls == 1
+    assert not any(_alive(top))
+    assert _kept() == []
+
+
+def test_reopen_without_proof_keeps_the_owners(fake_exporter_open: None) -> None:
+    """The same rule on a geometry change."""
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+    assert engine.export_frame() is True  # slot 0, copy queued
+    old = engine._exporter
+    engine._release_done_sources = lambda: None  # go straight to the reopen
+    old.recover_code = 719
+
+    top._pixel_format = "8-bit fixed (RGBA)"
+    top._pixel_format_name = "rgba8fixed"
+    assert engine.export_frame() is True  # the new Exporter has no error
+
+    assert old.closed and 0 in old.pending
+    assert _alive(top)[first] is True
+    assert len(_kept()) == 1
+
+
+def test_blocking_cleanup_makes_no_recover_call(fake_exporter_open: None) -> None:
+    engine, _top = _setup(export_sync=None)
+    assert engine.export_frame() is True
+    exporter = engine._exporter
+
+    engine.cleanup()
+
+    assert exporter.recover_calls == 0
+
+
+def test_async_failed_export_recovers_before_the_release(fake_exporter_open: None) -> None:
     """export() can return FAILED after it queued the copy and before it recorded the slot's
-    event. The slot's old event then says done, so the Sender must wait for the stream."""
+    event. The slot's old event then says done, so the Sender must wait for the stream. It
+    must also consume the error that export() left latched."""
     engine, _top = _setup(export_sync=False)
+    real_export = engine._exporter.export
     engine._exporter.export = lambda frame: FrameOutcome.FAILED
 
     assert engine.export_frame() is False
 
-    assert engine._exporter.drain_calls == 1
+    assert engine._exporter.recover_calls == 1
     assert len(engine._held_sources) == 0
+    assert engine._hold_fault_code is None
+
+    engine._exporter.export = real_export
+    assert engine.export_frame() is True, "The next cook exports: no stop after a recovered FAILED."
 
 
-def test_async_failed_export_keeps_the_owner_when_the_wait_fails(fake_exporter_open: None) -> None:
+def test_async_failed_export_keeps_the_owner_when_the_error_stays(fake_exporter_open: None) -> None:
     engine, top = _setup(export_sync=False)
     first = len(top.owner_refs)
     engine._exporter.export = lambda frame: FrameOutcome.FAILED
-
-    def boom() -> None:
-        raise RuntimeError("CUDA error 719")
-
-    engine._exporter.drain = boom
+    engine._exporter.recover_code = 719
 
     assert engine.export_frame() is False
     assert engine.export_frame() is False  # stopped: no new cudaMemory() call
 
     assert len(top.owner_refs) == first + 1
     assert _alive(top)[first:] == [True], "The block stays held: its copy may still be queued."
-    assert engine._hold_check_failed is True
+    assert engine._hold_fault_code == 719
 
 
 def test_blocking_failed_export_does_not_wait(fake_exporter_open: None) -> None:
@@ -310,3 +451,75 @@ def test_blocking_failed_export_does_not_wait(fake_exporter_open: None) -> None:
     assert engine.export_frame() is False
 
     assert engine._exporter.drain_calls == 0
+    assert engine._exporter.recover_calls == 0
+
+
+def _fault_until_restart(engine: TDSenderEngine, code: int = 400) -> _FakeExporter:
+    """Stop the Sender on an error that stays, then run attempts until the stream restart."""
+    assert engine.export_frame() is True  # slot 0 held
+    old = engine._exporter
+    _check_raises(engine)
+    old.recover_code = code
+    for _ in range(TDSender._HOLD_RESTART_AFTER):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+    return old
+
+
+def test_error_that_stays_restarts_the_stream_after_the_attempt_limit(fake_exporter_open: None) -> None:
+    """400 (a handle that is not valid) never clears on the same stream. A new stream fixes it."""
+    engine, top = _setup(export_sync=False)
+    first = len(top.owner_refs)
+
+    old = _fault_until_restart(engine)
+
+    assert old.closed and engine._exporter is None
+    assert old.recover_calls == TDSender._HOLD_RESTART_AFTER + 1, "Each attempt, and one before the close."
+    assert _alive(top)[first] is True and len(_kept()) == 1, "No proof: the old block is kept."
+    assert engine._stream_restarted is True
+
+    assert engine.export_frame() is False  # lazy init opens the new Exporter
+    assert engine._exporter is not None and engine._exporter is not old
+    assert engine.export_frame() is True
+    assert engine._stream_restarted is False
+    assert engine._hold_fault_code is None
+
+
+def test_one_stream_restart_per_fault(fake_exporter_open: None) -> None:
+    """The new stream gets the fault before it publishes a frame: no second restart."""
+    engine, _top = _setup(export_sync=False)
+    _fault_until_restart(engine)
+    assert engine.export_frame() is False  # lazy init
+    new = engine._exporter
+    new.export = lambda frame: FrameOutcome.FAILED
+    new.recover_code = 400
+
+    for _ in range(TDSender._HOLD_RESTART_AFTER + 3):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+
+    assert engine._exporter is new and not new.closed
+    assert _error_status(engine)[-1] == "Async copy fault: CUDA error 400 - toggle Active or restart TouchDesigner"
+
+
+def test_stream_restart_that_cannot_open_stops_until_cleanup(
+    fake_exporter_open: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, _top = _setup(export_sync=False)
+    _fault_until_restart(engine)
+    opens: list[int] = []
+
+    def failing_open(spec, *, policy=None, cuda=None, barrier=None):
+        opens.append(1)
+        raise RuntimeError("CUDA error 400")
+
+    monkeypatch.setattr(TDSender.Exporter, "open", failing_open)
+    monkeypatch.setattr(TDSender.traceback, "print_exc", lambda: None)
+
+    assert [engine.export_frame() for _ in range(4)] == [False] * 4
+
+    assert len(opens) == 1, "One open attempt, not one per cook."
+    assert _error_status(engine)[-1] == "Stream restart failed - toggle Active or restart TouchDesigner"
+
+    engine.cleanup()
+    assert engine._restart_init_failed is False and engine._stream_restarted is False
