@@ -474,7 +474,7 @@ class TDSenderEngine:
             held.clear()
 
     def _source_hold_ready(self) -> bool:
-        """Async path, before cudaMemory(): False while a CUDA error stops the Sender."""
+        """Before cudaMemory(): False while a CUDA error stops the Sender."""
         if self._hold_fault_code is not None and (
             time.perf_counter() < self._hold_next_try or not self._recover_source_hold()
         ):
@@ -487,28 +487,32 @@ class TDSenderEngine:
         return True
 
     def _recover_source_hold(self) -> bool:
-        """After a CUDA error in the async path: prove the queued copies are done, or stop.
+        """After a CUDA error: prove the queued copies are done, or stop.
 
         The state of the queued copies is not known after such an error, so no block may be
         released without proof. Exporter.recover() consumes the latched error and waits for
         the stream. 0 from it is the proof: drop the blocks and continue. Any other code
         stops the Sender with the blocks held. A permanent code (the process must restart)
         is not tried again; any other code is tried again each _HOLD_RETRY_S.
+
+        Blocking mode holds no block, but export() fails on each frame while the error is
+        latched, so the same steps apply there.
         """
+        label = "Export fault" if self._policy.export_sync else "Async copy fault"
         code = self._exporter.recover()
         if code == 0:
             self._held_sources.clear()
             if self._hold_fault_code is not None:
                 self._hold_fault_code = None
                 self._hold_attempts = 0
-                self._log("Async copy fault cleared: export continues", force=True)
+                self._log(f"{label} cleared: export continues", force=True)
                 self._clear_error_status()
             return True
         permanent = code in _PERMANENT_CUDA_ERRORS
         if code != self._hold_fault_code:
             action = "restart TouchDesigner" if permanent else "recovery in progress"
-            self._log(f"Async copy fault: CUDA error {code}", force=True)
-            self._show_error_status(f"Async copy fault: CUDA error {code} - {action}")
+            self._log(f"{label}: CUDA error {code}", force=True)
+            self._show_error_status(f"{label}: CUDA error {code} - {action}")
         self._hold_fault_code = code
         self._hold_next_try = float("inf") if permanent else time.perf_counter() + _HOLD_RETRY_S
         if not permanent:
@@ -516,14 +520,12 @@ class TDSenderEngine:
             if self._hold_attempts == _HOLD_RESTART_AFTER:
                 if self._stream_restarted:
                     # The new stream got the fault too, with no frame published between.
-                    self._show_error_status(
-                        f"Async copy fault: CUDA error {code} - toggle Active or restart TouchDesigner"
-                    )
+                    self._show_error_status(f"{label}: CUDA error {code} - toggle Active or restart TouchDesigner")
                 else:
-                    self._restart_stream(code)
+                    self._restart_stream(label, code)
         return False
 
-    def _restart_stream(self, code: int) -> None:
+    def _restart_stream(self, label: str, code: int) -> None:
         """The error stays on this stream (for example a handle that is not valid): open a new one.
 
         Closes the Exporter and lets the next cook open a new one through the lazy-init path,
@@ -531,7 +533,7 @@ class TDSenderEngine:
         not proved done. One restart per fault: _stream_restarted is reset by the next
         published frame.
         """
-        self._log(f"Async copy fault: CUDA error {code} stays - stream restart", force=True)
+        self._log(f"{label}: CUDA error {code} stays - stream restart", force=True)
         self._close_exporter()
         self._exporter = None
         self._initialized = False
@@ -1114,12 +1116,13 @@ class TDSenderEngine:
                     self._rest_acc_n += 1
                 self._maybe_report_stats(self._exporter.write_idx, now=_now)
                 return True
-            if outcome is FrameOutcome.FAILED and not self._policy.export_sync:
+            if outcome is FrameOutcome.FAILED:
                 # export() can fail after it queued the copy and before it recorded the
                 # slot's event. The next copy check would then read the slot's old event
                 # and release this block too early. export() also leaves its CUDA error
                 # latched, and fails on each later frame until the error is consumed.
                 # recover() does both: it consumes the error and waits for the stream.
+                # Blocking mode holds no block, but it has the same latched error.
                 self._recover_source_hold()
             return False
 

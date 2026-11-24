@@ -76,6 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream fails too, the text ends with `toggle Active or restart TouchDesigner`. When the Exporter closes (Active off, or a
   resolution or format change) and the copies are not proved done, the blocks are kept
   until TouchDesigner exits: at most one block per ring slot for each such close.
+- **`.tox` Sender, blocking export: a latched CUDA error no longer makes each later export
+  fail.** `export()` only reads the latched error, so one error stopped the stream until
+  the user toggled Active. After a failed `export()` the Sender now calls
+  `Exporter.recover()`, as it does with `CUDALINK_EXPORT_SYNC=0`. The steps are the same:
+  one attempt per second, no more attempts for a permanent error, and a new stream after
+  3 failed attempts. The status text starts with `Export fault: CUDA error N`.
 - **A second sender on a name that a running sender holds is now refused.** Before,
   `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
   and IPC handles over the first sender's. Neither sender got an error, and the receivers
