@@ -48,9 +48,14 @@ jobs:
           cat .gitattributes
 
       - name: Update branches from remote
+        # `git fetch origin <b>:<b>` refuses to update the branch that is checked out, so the
+        # old form failed for a run started from `master` and from `development`. Fetch the
+        # remote-tracking refs, then point both local branches at them. `checkout -B` also
+        # works for the branch that is checked out. The step ends on `master`.
         run: |
-          git fetch origin development:development
-          git fetch origin master:master
+          git fetch origin development master
+          git checkout -B development origin/development
+          git checkout -B master origin/master
 
       - name: Create backup tag
         if: ${{ inputs.create_backup == true && inputs.dry_run == false }}
