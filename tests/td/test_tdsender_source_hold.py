@@ -444,14 +444,101 @@ def test_async_failed_export_keeps_the_owner_when_the_error_stays(fake_exporter_
     assert engine._hold_fault_code == 719
 
 
-def test_blocking_failed_export_does_not_wait(fake_exporter_open: None) -> None:
+def test_blocking_failed_export_consumes_the_latched_error(fake_exporter_open: None) -> None:
+    """export() only reads the latched CUDA error, so it fails on each later frame until the
+    error is consumed. The Sender consumes it after a FAILED export in blocking mode too."""
     engine, _top = _setup(export_sync=None)
+    real_export = engine._exporter.export
     engine._exporter.export = lambda frame: FrameOutcome.FAILED
 
     assert engine.export_frame() is False
 
+    assert engine._exporter.recover_calls == 1
     assert engine._exporter.drain_calls == 0
-    assert engine._exporter.recover_calls == 0
+    assert engine._hold_fault_code is None
+    assert _error_status(engine) == []
+
+    engine._exporter.export = real_export
+    assert engine.export_frame() is True, "The next cook exports: no stop after a recovered FAILED."
+
+
+def test_blocking_error_that_stays_stops_then_recovers_alone(fake_exporter_open: None) -> None:
+    engine, top = _setup(export_sync=None)
+    real_export = engine._exporter.export
+    engine._exporter.export = lambda frame: FrameOutcome.FAILED
+    engine._exporter.recover_code = 2
+
+    assert engine.export_frame() is False
+    calls = len(top.owner_refs)
+    assert engine.export_frame() is False  # stopped, and the next attempt is one second away
+
+    assert len(top.owner_refs) == calls, "A stopped Sender makes no cudaMemory() call."
+    assert engine._exporter.recover_calls == 1
+    assert _error_status(engine)[-1] == "Export fault: CUDA error 2 - recovery in progress"
+    assert len(engine._held_sources) == 0, "Blocking mode holds no block."
+
+    engine._exporter.export = real_export
+    engine._exporter.recover_code = 0
+    engine._hold_next_try = 0.0
+    assert engine.export_frame() is True
+    assert engine._hold_fault_code is None
+
+
+def test_blocking_permanent_error_is_not_tried_again(fake_exporter_open: None) -> None:
+    engine, _top = _setup(export_sync=None)
+    engine._exporter.export = lambda frame: FrameOutcome.FAILED
+    engine._exporter.recover_code = 719
+
+    assert engine.export_frame() is False
+    assert engine._hold_next_try == float("inf"), "No next attempt: not only the one-second wait."
+    assert [engine.export_frame() for _ in range(4)] == [False] * 4
+
+    assert engine._exporter.recover_calls == 1
+    assert engine._hold_attempts == 0, "A permanent error does not count to the stream restart."
+    assert _error_status(engine)[-1] == "Export fault: CUDA error 719 - restart TouchDesigner"
+
+
+def test_blocking_one_stream_restart_per_fault(fake_exporter_open: None) -> None:
+    """The new stream gets the fault before it publishes a frame: no second restart."""
+    engine, _top = _setup(export_sync=None)
+    old = engine._exporter
+    old.export = lambda frame: FrameOutcome.FAILED
+    old.recover_code = 400
+    for _ in range(TDSender._HOLD_RESTART_AFTER):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+    assert engine._exporter is None
+    assert engine.export_frame() is False  # lazy init opens the new Exporter
+    new = engine._exporter
+    new.export = lambda frame: FrameOutcome.FAILED
+    new.recover_code = 400
+
+    for _ in range(TDSender._HOLD_RESTART_AFTER + 3):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+
+    assert engine._exporter is new and not new.closed
+    assert _error_status(engine)[-1] == "Export fault: CUDA error 400 - toggle Active or restart TouchDesigner"
+
+
+def test_blocking_error_that_stays_restarts_the_stream(fake_exporter_open: None) -> None:
+    engine, _top = _setup(export_sync=None)
+    old = engine._exporter
+    old.export = lambda frame: FrameOutcome.FAILED
+    old.recover_code = 400
+
+    for _ in range(TDSender._HOLD_RESTART_AFTER):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+
+    assert old.closed and engine._exporter is None
+    assert old.recover_calls == TDSender._HOLD_RESTART_AFTER, "No held block: the close needs no proof."
+    assert _kept() == []
+
+    assert engine.export_frame() is False  # lazy init opens the new Exporter
+    assert engine._exporter is not None and engine._exporter is not old
+    assert engine.export_frame() is True
+    assert engine._stream_restarted is False
 
 
 def _fault_until_restart(engine: TDSenderEngine, code: int = 400) -> _FakeExporter:

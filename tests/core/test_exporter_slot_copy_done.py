@@ -168,3 +168,15 @@ def test_recover_on_a_closed_exporter_proves_nothing() -> None:
 
     assert exp.recover() == -1
     assert cuda.synced == []
+
+
+def test_close_with_a_latched_error_consumes_it() -> None:
+    """close() skips the GPU cleanup when a CUDA error is latched. The error is per thread, so
+    it must not stay for the next Exporter: its first export() would fail on it."""
+    exp, cuda = _open()
+    cuda._sticky_error = 2
+
+    exp.close()
+
+    assert exp.ipc_stream, "The faulted close() still skips the GPU cleanup."
+    assert cuda.peek_last_error() == 0
