@@ -232,14 +232,18 @@ Enables verbose performance logging to the TouchDesigner Textport. Behaviour dif
   **Windowed summary line** (every 150 frames, configurable via `CUDALINK_SENDER_REPORT_EVERY`, always active when Debug=On — no `EXPORT_PROFILE` required):
 
   ```text
-  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | cuda_memory=310.4 µs avg | export=45.2 µs avg (write_idx=150)
+  [CUDAIPCExtension:Sender] Frame  150 |  59.4 FPS | shape=(1080, 1920, 4) dtype=uint8 | cuda_memory=310.4 µs avg | export=45.2 µs avg | pre=12.3 prep=8.1 post=20.4 µs avg (write_idx=150)
   ```
 
-  The `cuda_memory=` and `export=` figures are **windowed (~150-frame) averages** that reset
-  with each report; they reflect the current session's performance, not a lifetime mean.
+  The figures are **windowed (~150-frame) averages** that reset with each report; they reflect
+  the current session's performance, not a lifetime mean.
   `cuda_memory=` is TD's `top.cudaMemory()` call before the export: it waits for TD's GPU work
   on the source texture, so a slow source network shows here. `export=` is the copy and
-  publish.
+  publish. `pre=`, `prep=` and `post=` are the rest of `export_frame()`: `pre` is the time from
+  the call's start to `cudaMemory()` (operator lookup, Active and pixel-format checks), `prep`
+  is from `cudaMemory()` to the export (geometry check, frame metadata), and `post` is after
+  the export (activation barrier, status text). The five figures add up to about the full
+  `export_frame()` call. A frame that reopens the exporter is not in `pre`/`prep`/`post`.
 
 #### Receiver mode
 
@@ -437,7 +441,7 @@ producer-side write alone 4–19× faster. Numbers from `docs/BENCHMARKS.md`
 
 **Sender `export=` windowed average is higher than expected**
 
-- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the timed `export_frame()` region; the summary line shows it as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
+- The `top_op.cudaMemory()` Vulkan→CUDA interop call happens *before* the export and is not part of `export=`; the summary line shows it apart, as `cuda_memory=`. It is not controllable by this component and is normal for large textures or when the GPU is under heavy load. If `export=` itself (or the `[PROFILE]` `memcpy=`/`sync=` fields) is high, that points to the D2D copy or blocking sync instead.
 
 **Consumer crashes with CUDA 719 / `cudaErrorLaunchFailure` after receiving IPC frames**
 
