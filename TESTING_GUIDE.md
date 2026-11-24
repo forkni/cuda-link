@@ -821,6 +821,10 @@ the real `SHMLayout` and `Metadata` (a fake CUDA runtime is the only double); on
 real `SharedMemory` segment. The handler tests record calls on a stub extension. Every
 parametrize carries `ids=`.
 
+The figures below are from that campaign. Since then the handlers moved into
+`CUDAIPCExtension.on_par_change`, and their tests into `tests/td/test_extension_par_changes.py`;
+`test_parexecute_handlers.py` no longer exists.
+
 | Measure | Before | After |
 |---------|--------|-------|
 | No-GPU selection | 1423 passed + 1 skipped | 1490 passed + 1 skipped (+67) |

@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 class CUDAMemoryRef:
     """Wraps the raw CUDAMemory object returned by TOP.cudaMemory().
 
-    All fields are plain Python types — no TD types leak out.
+    The geometry fields are plain Python types. ``owner`` is the one TD object kept: the
+    CUDAMemory block lives only as long as that object, so whoever reads ``ptr`` must hold
+    this ref (or ``owner``) until the read has completed. Never read attributes from it.
     """
 
     ptr: int  # GPU pointer as plain int
@@ -39,6 +41,7 @@ class CUDAMemoryRef:
     channels: int  # shape.numComps
     size: int
     data_type: Any = field(default=None)  # shape.dataType (TD-specific; forwarded opaquely)
+    owner: Any = field(default=None, repr=False, compare=False)  # TD CUDAMemory: keeps ptr valid
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +151,10 @@ class TDHost(Protocol):
         """Write ownerComp.showCustomOnly = value."""
         ...
 
+    def set_display_buffer(self, top_name: str) -> bool:
+        """Point the COMP's `bg` Select TOP at the TOP *top_name*; False when there is no `bg`."""
+        ...
+
     def is_active(self) -> bool:
         """Read ownerComp.par.Active.eval() via cached reference (hot-path safe)."""
         ...
@@ -249,6 +256,7 @@ class RealTOPHandle(TOPHandle):
             channels=int(shape.numComps),
             size=int(cm.size),
             data_type=getattr(shape, "dataType", None),
+            owner=cm,
         )
 
     @property
@@ -384,6 +392,13 @@ class RealTDHost(TDHost):
     def show_custom_only(self, value: bool) -> None:
         with contextlib.suppress(AttributeError):
             self._comp.showCustomOnly = value
+
+    def set_display_buffer(self, top_name: str) -> bool:
+        bg_select = self._comp.op(VIEWER_SELECT_NAME)
+        if not bg_select:
+            return False
+        bg_select.par.top = top_name
+        return True
 
     def is_active(self) -> bool:
         if self._active_par is None:

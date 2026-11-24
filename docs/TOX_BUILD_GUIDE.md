@@ -1,8 +1,8 @@
 # TouchDesigner .tox Build Guide
 
-Step-by-step instructions for building the `CUDAIPCLink_v2.0.0.tox` component in TouchDesigner.
+Step-by-step instructions for building the `CUDAIPCLink_v2.2.0.tox` component in TouchDesigner.
 
-> **Older releases**: retired `.tox` builds (`v1.7.2` through `v1.14.1`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of each release Semantic Version Control has written (from 2.0.0).
+> **Older releases**: retired `.tox` builds (`v1.7.2` through `v2.0.0`) are attached to their GitHub Release tags; `TOXES/RELEASES.tsv` lists the sha256 of the current release only.
 
 **⚠️ Important**: `.tox` files are TouchDesigner's binary component format and cannot be generated from code. This guide provides manual assembly instructions.
 
@@ -128,10 +128,17 @@ Semantic Version Control COMP (see [Info page](#info-page)).
 | `Ipcmemname` | IPC Memory Name | String | `cudalink_ipc_TD>>Python` (Sender) / `cudalink_ipc_Python>>TD` (Receiver) | SharedMemory name for IPC handle transfer. Must match Python's `shm_name`. |
 | `Active` | Active | Toggle | `False` (0) | Enable/disable IPC export. When off, export_frame() returns immediately. |
 | `Numslots` | Ring Buffer Slots | Int (Menu) | `3` | Number of ring buffer slots for pipelining. Menu: 2, 3 or 4, as in the shipped 1.14.1 and 2.0.0 `.tox` |
-| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. |
-| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. |
+| `Streamid` | Stream ID | Int | `0` | Sender mode: written as `stream_id` into the slot meta of each frame. Range 0 to 2^32 − 1; a value outside it is sent as 0. The extension greys it out in Receiver mode. |
+| `Framewaitms` | Frame Wait (ms) | Int | `3` | Receiver mode: on a frame start with no new frame, wait up to this time for the sender's doorbell. Range 0 to 8, clamped; 0 turns the wait off. The extension greys it out in Sender mode. |
 | `Debug` | Debug | Toggle | `False` (0) | Enable verbose performance logging (prints a summary line every 150 published frames). |
 | `Cudalinkheader` | (any) | Header | — | Last par of the Settings page. |
+
+The Help Text column is a summary. The text that the `.tox` shows on Alt+hover comes from
+the `PARS` table in `td_exporter/CUDAIPCExtension.py` (`par_help()`), which also makes the
+"greyed out" sentence from the enable rule. To write it into the `.tox`, update the
+`CUDAIPCExtension` DAT, then run `apply()` of `scripts/tox_par_help.py` on the COMP in
+TouchDesigner (the file's docstring gives the commands) and check that `missing()` returns
+an empty list.
 
 **For `Numslots` menu parameter**:
 
@@ -197,15 +204,15 @@ imported; a different `cuda_link` already loaded in the process stops resolution
 Textport — see below) and fallback mode takes effect automatically. See ADR-0014.
 
 > **Library mode verify**: After loading, you should see in the Textport:
-> `[CUDALinkBootstrap] Library mode active — cuda_link 2.0.0 from <folder>`
+> `[CUDALinkBootstrap] Library mode active — cuda_link 2.2.0 from <folder>`
 >
 > **Library mode unavailable**: only when none of the 15 mirror Text DATs are present as COMP
 > siblings does the extension additionally print a cause-specific line, e.g.
-> `[CUDAIPCExtension] cuda_link 2.0.0 not found - install it next to this .toe or set
+> `[CUDAIPCExtension] cuda_link 2.2.0 not found - install it next to this .toe or set
 > CUDALINK_LIB_PATH, then restart TD`, followed by the full per-layer reason (one clause per
 > layer that was tried, e.g. `CUDA-Link could not be resolved -- project folder: not set;
 > CUDALINK_LIB_PATH: not set; sys.path: cuda_link 1.12.1 under C:\... does not match
-> the component's 2.0.0`). The short line names the specific cause — not found, wrong
+> the component's 2.2.0`). The short line names the specific cause — not found, wrong
 > version, a rival install already loaded, or this extension's own glue import failing — and
 > the COMP's Status par mirrors that same short line; the full per-layer reason is
 > Textport-only. When the mirrors ARE present, none of this prints — classic mode falls
@@ -416,11 +423,11 @@ meta channels.
 Create a **Text DAT** named `info` with version/author information:
 
 ```text
-CUDA IPC Exporter v2.0.0
+CUDA IPC Exporter v2.2.0
 Zero-copy GPU texture export via CUDA IPC
 
 Author: StreamDiffusion Performance Team
-Date: 2026-11-22
+Date: 2026-11-23
 License: MIT
 ```
 
@@ -447,22 +454,23 @@ No code reads this DAT. It only travels with the .tox so the license ships with 
 
 1. Right-click the `CUDAIPCExporter` Base COMP
 2. Select **Save Component .tox...**
-3. Save to: `TOXES\CUDAIPCLink_v2.0.0.tox` inside the project root. A release is saved by
+3. Save to: `TOXES\CUDAIPCLink_v2.2.0.tox` inside the project root. A release is saved by
    Semantic Version Control's Release (it writes the file read-only and appends the
    `RELEASES.tsv` row; it never overwrites a file).
 
-**Naming convention**: Use `CUDAIPCLink_v2.0.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
+**Naming convention**: Use `CUDAIPCLink_v2.2.0.tox` (matches version) for clarity. The `TOXES\` subfolder keeps versioned binaries separate from source files.
 
-**Development builds**: save a dev build (for example `CUDAIPCLink_v2.0.0.dev0.tox`) to
+**Development builds**: save a dev build (for example `CUDAIPCLink_v2.2.0.dev0.tox`) to
 `local\` in the project root. `local\` is gitignored. Never save a dev build over the
-released `TOXES\CUDAIPCLink_v2.0.0.tox`. The 2.0.0 release `.tox` is Library mode only: it
-holds the TD glue DATs and no mirror DATs, so it needs an installed `cuda_link` 2.0.0.
+released `TOXES\CUDAIPCLink_v2.2.0.tox`. A release `.tox` (2.0.0 and later) is Library mode
+only: it holds the TD glue DATs and no mirror DATs, so it needs an installed `cuda_link` of
+the same version.
 
-**Release manifest**: `TOXES/RELEASES.tsv` has one row per release (Semantic Version Control appends it), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
+**Release manifest**: `TOXES/RELEASES.tsv` has the row of the current release (Semantic Version Control appends it; the row of a retired `.tox` is removed with its file, so Verify Releases stays clean), with `component`, `version`, `file`, `sha256`, `date`, and the TouchDesigner `td_build` it was
 saved from. To verify a download matches the manifest:
 
 ```bash
-sha256sum TOXES/CUDAIPCLink_v2.0.0.tox   # compare with the sha256 column
+sha256sum TOXES/CUDAIPCLink_v2.2.0.tox   # compare with the sha256 column
 ```
 
 ---
@@ -471,7 +479,7 @@ sha256sum TOXES/CUDAIPCLink_v2.0.0.tox   # compare with the sha256 column
 
 ### Load the .tox
 
-1. Drag `CUDAIPCLink_v2.0.0.tox` from Windows Explorer into your TD network
+1. Drag `CUDAIPCLink_v2.2.0.tox` from Windows Explorer into your TD network
 2. Or use **File → Import Component .tox**
 
 ### Wire a Source TOP
@@ -563,7 +571,7 @@ This error means the extension registration itself is missing. A missing or unre
 
 **Symptom**: The extension accessor exists, but no frames are transferred, and — only when
 none of the 15 mirror Text DATs are present as COMP siblings — the COMP's Status reports a
-cause-specific line, e.g. `cuda_link 2.0.0 not found - install it next to this .toe or set
+cause-specific line, e.g. `cuda_link 2.2.0 not found - install it next to this .toe or set
 CUDALINK_LIB_PATH, then restart TD`. The same short line has its own wording for a version
 mismatch, a rival install already loaded, or this extension's own glue import failing after
 a successful bootstrap.
@@ -632,7 +640,8 @@ After the component compiles with the library available, `ext.library_ready` sho
 
 1. Check TD's **Active** parameter is ON
 2. Verify the source TOP is actually cooking (check its **Cook** performance monitor)
-3. Enable **Debug** in TD and look for `Frame  150 | ... FPS | ... export=... µs avg (write_idx=...)`
+3. Enable **Debug** in TD and look for
+   `Frame  150 | ... FPS | ... cuda_memory=... µs avg | export=... µs avg | pre=... prep=... post=... µs avg (write_idx=...)`
    lines every 150 published frames
 
 ---
@@ -718,7 +727,7 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `CUDAIPCLink_v2.0.0.tox` | `TOXES/` | Final built .tox component |
+| `CUDAIPCLink_v2.2.0.tox` | `TOXES/` | Final built .tox component |
 | `RELEASES.tsv` | `TOXES/` | Release manifest (version, sha256, TD build) for the current `.tox` |
 | `install_td_library.cmd` | repo root | Library-mode installer launcher (runs `scripts/install_td_library.py`) |
 | `scripts/install_td_library.py` | `scripts/` | Multi-target installer — 5 modes: 1 `pip --target` folder, 2 venv, 3 conda, 4 system/parallel Python (TD Preferences), 5 TD's own Python (deprecated) |
@@ -733,8 +742,8 @@ The exporter **automatically re-initializes** when the source TOP resolution cha
 
 ---
 
-**Build Date**: 2026-11-22
-**Component Version**: 2.0.0
+**Build Date**: 2026-11-23
+**Component Version**: 2.2.0
 **TouchDesigner Version**: 2025.32820 or later, for 2.0.0 and later. Save the release
 `.tox` in TD 2025.32820, so the `td_build` column of `TOXES/RELEASES.tsv` names the minimum
 build ([ADR-0017](adr/0017-minimum-td-build-2025-32820.md)).

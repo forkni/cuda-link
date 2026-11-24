@@ -839,9 +839,6 @@ class TDReceiverEngine:
         if self._initialized:
             return True
 
-        # Numslots is always disabled in Receiver mode (sender controls slot count)
-        self._host.set_param_enabled("Numslots", False)
-
         _t0 = time.perf_counter()
         # Tracks whether self._connection was overwritten with this attempt's handles below —
         # the outer except uses this to decide whether a targeted teardown is needed (a raise

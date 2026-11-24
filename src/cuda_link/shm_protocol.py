@@ -497,6 +497,25 @@ def is_same_process_sender(sender_pid: int, own_pid: int) -> bool:
     return sender_pid != 0 and sender_pid == (own_pid & 0xFFFFFFFF)
 
 
+def running_sender_pid(buf: memoryview) -> int:
+    """Process id of the sender that the segment says is publishing now; 0 when it names none.
+
+    0 for a segment of another protocol, one with an invalid slot count, one too short to
+    hold its shutdown flag, one whose sender set the shutdown flag when it closed, and one
+    with no sender pid. The pid is what the sender wrote: it does not prove that the
+    process still runs.
+    """
+    if len(buf) < SHM_HEADER_SIZE or read_magic(buf) != PROTOCOL_MAGIC:
+        return 0
+    num_slots = read_num_slots(buf)
+    if not is_valid_num_slots(num_slots):
+        return 0
+    shutdown_offset = SHMLayout(num_slots).shutdown_offset
+    if shutdown_offset >= len(buf) or buf[shutdown_offset] != 0:
+        return 0
+    return read_sender_pid(buf)
+
+
 def protocol_mismatch_message(magic: int) -> str:
     """Return the receiver error text for a segment whose magic is not PROTOCOL_MAGIC."""
     if magic == PROTOCOL_MAGIC_V05:

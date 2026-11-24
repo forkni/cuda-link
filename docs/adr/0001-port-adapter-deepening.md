@@ -83,6 +83,13 @@ the source is TD's cook-scoped `TOP` texture (`cm.ptr`) — an **externally-owne
 pointer reclaimed by TD the instant the cook returns.  Async export lets TD reclaim the
 source while the queued IPC-stream D2D copy is still executing → reads freed memory → 719.
 
+> **Note of 2026-11-23 (v2.2.0).** A probe in TD 2025.33230 does not agree with this cause.
+> TD gives a new `CUDAMemory` block per `top.cudaMemory()` call, and the block lives as long
+> as the Python object. The Sender kept only `int(cm.ptr)` and dropped the object, so the
+> block was released before the copy was queued, in blocking mode too. v2.2.0 holds the
+> object until the copy has read the block. The decision below (the TD Sender blocks by
+> default) stays: async export with a loaded consumer is not validated again yet.
+
 **Critical distinction — ordering vs. lifetime:**
 
 - `record_source_sync` / `producer_stream` / `_arm_same_stream_ordering` are **pre-copy

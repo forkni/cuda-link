@@ -18,10 +18,9 @@ script_top_callbacks.onCook dispatches by `scriptOp.name`:
   - anything else (the ImportBuffer Script TOP) -> fetch the extension via the global
     parent(), apply any pending resolution/format update, then call ext.import_frame().
 
-parexecute_callbacks.onValueChange dispatches by `par.name` to one of six handlers
-(handle_active_change / handle_ipcmemname_change / handle_numslots_change /
-handle_debug_change / handle_hidebuiltin_change / handle_mode_change) — exactly one
-handler must fire per parameter name, and unrecognized names must dispatch to none.
+parexecute_callbacks.onValueChange forwards each change to
+CUDAIPCExtension.on_par_change, which decides what it does
+(tests/td/test_extension_par_changes.py).
 """
 
 from __future__ import annotations
@@ -238,22 +237,13 @@ def test_format_apply_failure_is_caught_and_logged(monkeypatch: pytest.MonkeyPat
 # parexecute_callbacks.onValueChange
 # ---------------------------------------------------------------------------
 
-_HANDLER_NAMES: tuple[tuple[str, str], ...] = (
-    ("Active", "handle_active_change"),
-    ("Ipcmemname", "handle_ipcmemname_change"),
-    ("Numslots", "handle_numslots_change"),
-    ("Debug", "handle_debug_change"),
-    ("Hidebuiltin", "handle_hidebuiltin_change"),
-    ("Mode", "handle_mode_change"),
-)
-
 
 class _StubExecExt:
     def __init__(self) -> None:
-        self.log_calls: list[str] = []
+        self.changes: list[tuple[str, object, object]] = []
 
-    def _log(self, msg: str, force: bool = False) -> None:  # noqa: ARG002
-        self.log_calls.append(msg)
+    def on_par_change(self, name: str, value: object, prev: object = None) -> None:
+        self.changes.append((name, value, prev))
 
 
 class _StubPar:
@@ -276,24 +266,9 @@ def _patch_exec_parent(monkeypatch: pytest.MonkeyPatch, ext: object | None) -> N
     )
 
 
-def _record_handlers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Replace every handle_* function with a recorder; returns the names that fired."""
-    fired: list[str] = []
-    for _, handler_name in _HANDLER_NAMES:
-        monkeypatch.setattr(
-            parexecute_callbacks,
-            handler_name,
-            (lambda *a, _name=handler_name, **k: fired.append(_name)),  # noqa: ARG005
-        )
-    return fired
-
-
 def test_onvaluechange_ext_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_exec_parent(monkeypatch, None)
-    fired = _record_handlers(monkeypatch)
-    par = _StubPar("Active", True)
-    parexecute_callbacks.onValueChange(par, False)
-    assert fired == []
+    assert parexecute_callbacks.onValueChange(_StubPar("Active", True), False) is None
 
 
 def test_onvaluechange_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,36 +280,19 @@ def test_onvaluechange_ext_raises_is_noop(monkeypatch: pytest.MonkeyPatch) -> No
         lambda: types.SimpleNamespace(ext=_RaisingExt()),
         raising=False,
     )
-    fired = _record_handlers(monkeypatch)
     assert parexecute_callbacks._extension() is None
-    par = _StubPar("Active", True)
-    parexecute_callbacks.onValueChange(par, False)
-    assert fired == []
+    assert parexecute_callbacks.onValueChange(_StubPar("Active", True), False) is None
 
 
-@pytest.mark.parametrize("param_name,expected_handler", _HANDLER_NAMES)
-def test_onvaluechange_dispatches_exactly_one_handler(
-    monkeypatch: pytest.MonkeyPatch, param_name: str, expected_handler: str
-) -> None:
+_FORWARDED_PARS = ["Active", "Ipcmemname", "Numslots", "Debug", "Hidebuiltin", "Mode", "Other"]
+
+
+@pytest.mark.parametrize("param_name", _FORWARDED_PARS, ids=[name.lower() for name in _FORWARDED_PARS])
+def test_onvaluechange_forwards_the_change_to_the_extension(monkeypatch: pytest.MonkeyPatch, param_name: str) -> None:
+    """The DAT decides nothing: name, evaluated value and previous value go to on_par_change."""
     ext = _StubExecExt()
     _patch_exec_parent(monkeypatch, ext)
 
-    fired = _record_handlers(monkeypatch)
+    parexecute_callbacks.onValueChange(_StubPar(param_name, "new_value"), "prev_value")
 
-    par = _StubPar(param_name, "new_value")
-    parexecute_callbacks.onValueChange(par, "prev_value")
-
-    assert fired == [expected_handler], f"par.name={param_name!r} must dispatch to exactly {expected_handler}"
-    assert any(f"'{param_name}' changed" in m for m in ext.log_calls)
-
-
-def test_onvaluechange_unrecognized_name_dispatches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    ext = _StubExecExt()
-    _patch_exec_parent(monkeypatch, ext)
-
-    fired = _record_handlers(monkeypatch)
-
-    par = _StubPar("SomeOtherParam", "value")
-    parexecute_callbacks.onValueChange(par, "prev")
-
-    assert fired == []
+    assert ext.changes == [(param_name, "new_value", "prev_value")]

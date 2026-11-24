@@ -33,8 +33,10 @@ import contextlib
 import logging
 import operator
 import os
+import sys
 import threading
 import time
+import weakref
 from ctypes import c_void_p
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING
@@ -57,6 +59,7 @@ from .cuda_runtime_types import (
     CUDAGraphNode_t,
     CudaIpcError,
     CUDAStream_t,
+    SenderConflictError,
 )
 from .shm_protocol import (
     EMPTY_SLOT_META,
@@ -71,6 +74,7 @@ from .shm_protocol import (
     clear_slot,
     is_valid_num_slots,
     publish_frame,
+    running_sender_pid,
     set_shutdown,
     write_header,
 )
@@ -79,6 +83,56 @@ if TYPE_CHECKING:
     from .nvml_observer import NVMLObserver
 
 logger = logging.getLogger(__name__)
+
+# The open Exporter of each shm_name in this process. The sender pid in the segment cannot
+# tell two senders of one process apart (two sender COMPs in one TouchDesigner), so this is
+# the check for that case. Weak: an Exporter dropped without close() does not block the name.
+_OPEN_EXPORTERS: weakref.WeakValueDictionary[str, Exporter] = weakref.WeakValueDictionary()
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_STILL_ACTIVE = 259
+
+
+def _process_is_running(pid: int) -> bool:
+    """True when a process with this id exists and has not exited.
+
+    The id can belong to a new, unrelated process when the system reused it. A process
+    that this one may not query counts as running.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes  # noqa: PLC0415 -- Windows only
+        from ctypes import wintypes  # noqa: PLC0415
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError):
+        # OverflowError: the header field is 32 bits unsigned; a value above the system's
+        # pid type is no process id.
+        return False
+    except PermissionError:
+        return True
+    return True
+
 
 _NVTX_EXPORTER_SLOT_NAMES: tuple[str, ...] = _nvtx.slot_names("cudalink.exporter.slot")
 
@@ -239,6 +293,8 @@ class Exporter:
         Raises:
             ValueError: dtype or num_slots invalid, or device mismatch.
             RuntimeError: CUDA or SHM allocation failed.
+            SenderConflictError: a running sender holds spec.shm_name (a RuntimeError;
+                raised before any GPU allocation).
             OSError: SHM create/open failed.
         """
         if policy is None:
@@ -261,21 +317,46 @@ class Exporter:
     # Initialization (called only from open())
     # ------------------------------------------------------------------
 
-    def _check_existing_shm_size(self) -> None:
-        """Reject a live segment too small for this layout, before any GPU allocation.
+    def _check_existing_shm(self) -> None:
+        """Reject a name that a running sender holds, or a live segment too small for this
+        layout, before any GPU allocation.
+
+        A second sender would write its IPC handles over the first one's (the open below
+        attaches to an existing segment and then writes the header). Two cases:
+        - an open Exporter of this process on the same name (_OPEN_EXPORTERS);
+        - a segment whose header names another process as its sender, with the shutdown
+          flag clear, while that process still runs. A sender that closed set the flag; a
+          sender that crashed left a pid that no longer runs. Both leave the name free.
+        Not seen: a C++ Out TOP in this same process. Its segment names this process, and
+        it is not in _OPEN_EXPORTERS.
 
         The segment is not ours to unlink: another process may still hold it. (On POSIX
         with Python < 3.13 any attach registers the name with ``resource_tracker``, which
         unlinks it when this process exits; that applies to every attach in the package.)
         """
+        name = self._spec.shm_name
+        other = _OPEN_EXPORTERS.get(name)
+        if other is not None and other is not self:
+            raise SenderConflictError(
+                f"SharedMemory {name!r} already has a sender in this process; close it or use a different shm_name"
+            )
         try:
-            existing = SharedMemory(name=self._spec.shm_name)
+            existing = SharedMemory(name=name)
         except FileNotFoundError:
             return
         try:
             existing_size = existing.size
+            try:
+                sender_pid = running_sender_pid(existing.buf)
+            except (OSError, BufferError, IndexError, ValueError):
+                sender_pid = 0  # unreadable: the open below writes a fresh header
         finally:
             existing.close()
+        if sender_pid not in (0, os.getpid() & 0xFFFFFFFF) and _process_is_running(sender_pid):
+            raise SenderConflictError(
+                f"SharedMemory {name!r} already has a running sender (process {sender_pid}); "
+                "close that sender or use a different shm_name"
+            )
         required = self._layout.total_size
         if existing_size < required:
             raise RuntimeError(
@@ -293,7 +374,7 @@ class Exporter:
                 "cudaSetDevice() with a different index before Exporter.open()."
             )
         logger.info("Loaded CUDA runtime on device %d", actual_device)
-        self._check_existing_shm_size()
+        self._check_existing_shm()
 
         # Raises only when the driver reports CUDA IPC as flatly unsupported on this
         # device; Windows WDDM (this project's normal, undocumented-but-validated
@@ -380,6 +461,7 @@ class Exporter:
         self._write_metadata_to_shm()
         self._write_handles_to_shm()
         self._initialized = True
+        _OPEN_EXPORTERS[self._spec.shm_name] = self
 
         if self._policy.doorbell:
             self._doorbell = _doorbell.create_doorbell(_doorbell.doorbell_event_name(self._spec.shm_name))
@@ -846,6 +928,12 @@ class Exporter:
         self._closed = True
         cuda_valid = self._is_cuda_context_valid()
         self._do_cleanup(cuda_valid=cuda_valid)
+        if not cuda_valid:
+            # The latched error is per thread and has done its work here: the GPU cleanup
+            # was skipped. Left latched, it makes the first export() of the next Exporter on
+            # this thread fail. A permanent error comes back on the next CUDA call.
+            with contextlib.suppress(OSError, RuntimeError, AttributeError):
+                self._cuda.clear_last_error()
 
     def _is_cuda_context_valid(self) -> bool:
         try:
@@ -859,6 +947,9 @@ class Exporter:
             # Nothing was allocated — clean up any barrier SHM only
             self._barrier.close()
             return
+
+        if _OPEN_EXPORTERS.get(self._spec.shm_name) is self:
+            del _OPEN_EXPORTERS[self._spec.shm_name]
 
         if not cuda_valid:
             logger.warning("CUDA context already destroyed — skipping GPU cleanup")
@@ -987,6 +1078,49 @@ class Exporter:
     def is_ready(self) -> bool:
         """True if open() succeeded and close() has not been called."""
         return self._initialized and not self._closed and all(ptr is not None for ptr in self.dev_ptrs)
+
+    def slot_copy_done(self, slot: int) -> bool:
+        """Non-blocking: True when the copy last queued for ``slot`` has completed.
+
+        For a producer that exports async (``export_sync=False``) and must keep the source
+        buffer alive until the queued copy has read it. A slot with no IPC event is always
+        done: export() blocks on the stream for such a slot.
+        """
+        event = self.ipc_events[slot] if 0 <= slot < len(self.ipc_events) else None
+        if not event:
+            return True
+        return bool(self._cuda.query_event(event))
+
+    def drain(self) -> None:
+        """CPU-blocking wait until every copy queued on the IPC stream has completed.
+
+        No-op on a closed Exporter: close() leaves ``ipc_stream`` set when the CUDA context
+        was not valid, and that stream must not be used again.
+        """
+        if not self._closed and self.ipc_stream:
+            self._cuda.stream_synchronize(self.ipc_stream)
+
+    def recover(self) -> int:
+        """Consume a latched CUDA error, then wait for the IPC stream. Returns a CUDA error code.
+
+        0: no error is latched after the wait, so every queued copy has completed and the
+        context is usable. Any other value: the error that is latched now (-1 when the code
+        is not known, and on a closed Exporter, where nothing can be proved). A permanent
+        error such as 719 comes back on the wait; an error that is not permanent does not.
+        Does not raise.
+        """
+        if self._closed or not self.ipc_stream:
+            return -1
+        cuda = self._cuda
+        try:
+            cuda.clear_last_error()
+            cuda.stream_synchronize(self.ipc_stream)
+            return int(cuda.peek_last_error())
+        except (OSError, RuntimeError):
+            try:
+                return int(cuda.peek_last_error()) or -1
+            except (OSError, RuntimeError, AttributeError):
+                return -1
 
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""

@@ -46,7 +46,7 @@ jobs:
       # the shipped DLLs are built the way CI tests them. cudart + nvcc only; no GPU needed.
       - name: Install CUDA toolkit (cudart + nvcc only)
         id: cuda-toolkit
-        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d  # v0.2.19
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
         with:
           cuda: '12.6.2'
           sub-packages: '["cudart","nvcc"]'

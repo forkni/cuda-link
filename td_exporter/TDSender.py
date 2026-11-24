@@ -21,12 +21,22 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import time
 import traceback
+import types
+from collections import deque
 from typing import Any, Callable
 
 from ActivationBarrier import HolderBarrier  # noqa: E402, I001
-from Exporter import Exporter, ExportPolicy, FrameOutcome, FrameSpec, GpuFrame  # noqa: E402
+from Exporter import (  # noqa: E402
+    Exporter,
+    ExportPolicy,
+    FrameOutcome,
+    FrameSpec,
+    GpuFrame,
+    SenderConflictError,
+)
 from FrameProfile import ReportWindow  # noqa: E402
 from NVTXShim import pop_range as _nvtx_pop  # noqa: E402
 from NVTXShim import push_range as _nvtx_push  # noqa: E402
@@ -67,6 +77,23 @@ _EXPORT_BUFFER_NAME = "ExportBuffer"
 
 # Pre-built NVTX range name strings per slot — eliminates f-string allocation on every export_frame call.
 _NVTX_SENDER_SLOT_NAMES: tuple[str, ...] = tuple(f"cudalink.sender.export_frame.slot{i}" for i in range(10))
+
+# cudaError_t values that driver_types.h (CUDA 12.8, 12.9, 13.3) marks with "any further CUDA
+# work will return the same error ... the process must be terminated and relaunched".
+_PERMANENT_CUDA_ERRORS = frozenset({700, 702, 710, 714, 715, 716, 717, 718, 719})
+# Seconds between recovery attempts while a CUDA error that is not permanent stops the Sender.
+_HOLD_RETRY_S = 1.0
+# Failed recovery attempts before the Sender closes the Exporter and opens a new stream.
+_HOLD_RESTART_AFTER = 3
+# sys.modules key of the store for source blocks that must never be freed. Not a module
+# global: TD drops those when it recompiles this DAT.
+_KEPT_SOURCES_KEY = "_cudalink_kept_sources"
+
+
+def _keep_for_process_life(blocks: object) -> None:
+    """Keep the given CUDAMemoryRef objects until the process exits."""
+    store = sys.modules.setdefault(_KEPT_SOURCES_KEY, types.ModuleType(_KEPT_SOURCES_KEY))
+    store.__dict__.setdefault("blocks", []).extend(blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +222,7 @@ class TDSenderEngine:
         # TD-specific per-frame state (not in canonical Exporter)
         self._warned_format: bool = False
         self._error_shown: bool = False  # an init or reopen error is the engine status; cleared on recovery
+        self._conflict_logged: str = ""  # the sender-conflict message already in the log; "" when none
         self._f16_convert_to: str | None = None  # float32 target while the source is float16
         self._warned_dtype_size: bool = False  # one-shot: unresolvable bytes-per-pixel
         self._export_buffer: object = None
@@ -218,6 +246,27 @@ class TDSenderEngine:
         # GPU work on the source texture, so a slow source pipeline shows here, not in export.
         self._cm_acc_s: float = 0.0
         self._cm_acc_n: int = 0
+        # Per-window time of the rest of export_frame(), published steady-state frames only:
+        # pre (entry -> cuda_memory()), prep (cuda_memory() -> export()), post (export() -> status set).
+        self._pre_acc_s: float = 0.0
+        self._prep_acc_s: float = 0.0
+        self._post_acc_s: float = 0.0
+        self._rest_acc_n: int = 0
+        # Async export only (CUDALINK_EXPORT_SYNC=0): (slot, CUDAMemoryRef) of each frame whose
+        # copy may still be queued. The ref holds TD's CUDAMemory object, so TD cannot give the
+        # block to a later cudaMemory() call before the copy has read it.
+        self._held_sources: deque = deque()
+        # Both export modes. Not None: a CUDA error is latched, and in async mode the state
+        # of the queued copies is unknown. The Sender is stopped, with the async blocks held;
+        # it tries Exporter.recover() at _hold_next_try (never, for a permanent error).
+        self._hold_fault_code: int | None = None
+        self._hold_next_try: float = 0.0
+        self._hold_attempts: int = 0  # failed recover() calls of this fault
+        # After _HOLD_RESTART_AFTER failed attempts the Sender opens a new stream, one time.
+        # True from that restart until a frame is published. _restart_init_failed: the new
+        # Exporter did not open; stopped until cleanup().
+        self._stream_restarted: bool = False
+        self._restart_init_failed: bool = False
 
     # ------------------------------------------------------------------
     # Compatibility properties — delegate to Exporter when initialized,
@@ -374,12 +423,25 @@ class TDSenderEngine:
         _avg_export_us = self._tx_window.avg_and_reset() * 1e6
         _cm = f"cuda_memory={self._cm_acc_s / self._cm_acc_n * 1e6:.1f} µs avg | " if self._cm_acc_n else ""
         self._cm_acc_s, self._cm_acc_n = 0.0, 0
+        _rest = ""
+        if self._rest_acc_n:
+            _k = 1e6 / self._rest_acc_n
+            _rest = (
+                f" | pre={self._pre_acc_s * _k:.1f} prep={self._prep_acc_s * _k:.1f} "
+                f"post={self._post_acc_s * _k:.1f} µs avg"
+            )
+        self._reset_rest_acc()
         spec = self._current_spec
         self._log(
             f"Frame {n:5d} | {_fps:5.1f} FPS | "
             f"shape=({spec.height}, {spec.width}, {spec.channels}) dtype={spec.dtype} | "
-            f"{_cm}export={_avg_export_us:.1f} µs avg (write_idx={write_idx})"
+            f"{_cm}export={_avg_export_us:.1f} µs avg{_rest} (write_idx={write_idx})"
         )
+
+    def _reset_rest_acc(self) -> None:
+        """Clear the pre/prep/post accumulators of the current report window."""
+        self._pre_acc_s = self._prep_acc_s = self._post_acc_s = 0.0
+        self._rest_acc_n = 0
 
     def _reset_report_window(self) -> None:
         """Clear windowed-FPS and export-time state so the next report starts a fresh window.
@@ -394,6 +456,117 @@ class TDSenderEngine:
         """
         self._tx_window.reset()  # clears FPS window + _acc_sum / _acc_n
         self._cm_acc_s, self._cm_acc_n = 0.0, 0
+        self._reset_rest_acc()
+
+    def _release_done_sources(self) -> None:
+        """Drop the held source blocks whose copy has completed, oldest first.
+
+        The copies run in order on one stream, so the first slot that is not done ends the
+        scan. At the cap (one entry per ring slot) wait for the stream and drop them all:
+        the hold is bounded in memory, and a slot's event is never read after the ring
+        has come back to that slot.
+        """
+        held = self._held_sources
+        while held and self._exporter.slot_copy_done(held[0][0]):
+            held.popleft()
+        if len(held) >= self.num_slots:
+            self._exporter.drain()
+            held.clear()
+
+    def _source_hold_ready(self) -> bool:
+        """Before cudaMemory(): False while a CUDA error stops the Sender."""
+        if self._hold_fault_code is not None and (
+            time.perf_counter() < self._hold_next_try or not self._recover_source_hold()
+        ):
+            return False
+        if self._held_sources:
+            try:
+                self._release_done_sources()
+            except (OSError, RuntimeError):
+                return self._recover_source_hold()
+        return True
+
+    def _recover_source_hold(self) -> bool:
+        """After a CUDA error: prove the queued copies are done, or stop.
+
+        The state of the queued copies is not known after such an error, so no block may be
+        released without proof. Exporter.recover() consumes the latched error and waits for
+        the stream. 0 from it is the proof: drop the blocks and continue. Any other code
+        stops the Sender with the blocks held. A permanent code (the process must restart)
+        is not tried again; any other code is tried again each _HOLD_RETRY_S.
+
+        Blocking mode holds no block, but export() fails on each frame while the error is
+        latched, so the same steps apply there.
+        """
+        label = "Export fault" if self._policy.export_sync else "Async copy fault"
+        code = self._exporter.recover()
+        if code == 0:
+            self._held_sources.clear()
+            if self._hold_fault_code is not None:
+                self._hold_fault_code = None
+                self._hold_attempts = 0
+                self._log(f"{label} cleared: export continues", force=True)
+                self._clear_error_status()
+            return True
+        permanent = code in _PERMANENT_CUDA_ERRORS
+        if code != self._hold_fault_code:
+            action = "restart TouchDesigner" if permanent else "recovery in progress"
+            self._log(f"{label}: CUDA error {code}", force=True)
+            self._show_error_status(f"{label}: CUDA error {code} - {action}")
+        self._hold_fault_code = code
+        self._hold_next_try = float("inf") if permanent else time.perf_counter() + _HOLD_RETRY_S
+        if not permanent:
+            self._hold_attempts += 1
+            if self._hold_attempts == _HOLD_RESTART_AFTER:
+                if self._stream_restarted:
+                    # The new stream got the fault too, with no frame published between.
+                    self._show_error_status(f"{label}: CUDA error {code} - toggle Active or restart TouchDesigner")
+                else:
+                    self._restart_stream(label, code)
+        return False
+
+    def _restart_stream(self, label: str, code: int) -> None:
+        """The error stays on this stream (for example a handle that is not valid): open a new one.
+
+        Closes the Exporter and lets the next cook open a new one through the lazy-init path,
+        as an Active toggle does. The blocks of the old stream are kept if their copies are
+        not proved done. One restart per fault: _stream_restarted is reset by the next
+        published frame.
+        """
+        self._log(f"{label}: CUDA error {code} stays - stream restart", force=True)
+        self._close_exporter()
+        self._exporter = None
+        self._initialized = False
+        self._reset_report_window()
+        self._stream_restarted = True
+
+    def _close_exporter(self) -> None:
+        """Close the Exporter. Free the held blocks only if their copies are proved done.
+
+        Exporter.close() does not wait for the stream when a CUDA error is latched, and it
+        does not report that. So the proof comes from Exporter.recover() before the close.
+        With no proof the blocks are kept for the life of the process: a copy that is still
+        queued must not read a block that TD has given to a later cudaMemory() call.
+        """
+        exporter = self._exporter
+        proven = not self._held_sources
+        if not proven:
+            try:
+                proven = exporter.recover() == 0
+            except Exception:  # noqa: BLE001  # teardown path: no proof is the safe answer
+                proven = False
+        with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown; must not raise inside a cook callback
+            exporter.close()
+        if not proven:
+            _keep_for_process_life(cm for _slot, cm in self._held_sources)
+            self._log(
+                f"{len(self._held_sources)} source block(s) kept: a CUDA error left their copies not proved done",
+                force=True,
+            )
+        self._held_sources.clear()
+        self._hold_fault_code = None
+        self._hold_next_try = 0.0
+        self._hold_attempts = 0
 
     def _arm_same_stream_ordering(self) -> None:
         """Declare same-stream producer ordering on the current Exporter's IPC stream.
@@ -484,9 +657,6 @@ class TDSenderEngine:
             self._log("Already initialized")
             return True
 
-        # Lock Numslots while active — changing slot count at runtime causes array-size mismatch.
-        self._host.set_param_enabled("Numslots", False)
-
         try:
             # HolderBarrier: signal the Python Exporter (CheckerBarrier) to pause pushes
             # during this Sender's WDDM-saturating init burst.
@@ -551,11 +721,22 @@ class TDSenderEngine:
             self._export_buffer = self._host.find_top(_EXPORT_BUFFER_NAME)
 
             self._initialized = True
+            self._conflict_logged = ""
             self._clear_error_status()
             self._barrier.arm_settle_countdown()
             self._log("Initialization complete — ready for zero-copy GPU transfer", force=True)
             return True
 
+        except SenderConflictError as e:
+            # Another sender holds the name: a setup mistake, not a fault in this code.
+            # export_frame() tries again on each cook until the name is free, so the log
+            # gets one line for each different message and no traceback.
+            message = f"Initialization failed: {e}"
+            if message != self._conflict_logged:
+                self._log(message, force=True)
+                self._conflict_logged = message
+            self._show_error_status(message)
+            return False
         except (OSError, RuntimeError, ValueError) as e:
             self._log(f"Initialization failed: {e}", force=True)
             self._show_error_status(f"Initialization failed: {e}")
@@ -577,6 +758,8 @@ class TDSenderEngine:
         Returns:
             True if frame was published, False if skipped or failed.
         """
+        _t_enter = time.perf_counter()
+        _steady = True  # False on a frame that reopens the Exporter: not a steady-state sample
         # Resolve ExportBuffer TOP handle (cached; re-looked-up if invalid).
         top_op = self._export_buffer
         if top_op is None or not top_op.is_valid():
@@ -624,6 +807,8 @@ class TDSenderEngine:
         if self._exporter is None or not self._initialized:
             # Lazy init: probe geometry from the first available frame, then skip this
             # cook.  The Exporter opens here; the actual export starts on the next cook.
+            if self._restart_init_failed:
+                return False  # the stream restart did not open: stopped until cleanup()
             try:
                 cm_probe = top_op.cuda_memory(**_cm_kwargs)  # stream=None → default stream, safe for probe
             except Exception as e:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
@@ -643,10 +828,11 @@ class TDSenderEngine:
                 # ensuring _current_spec uses the correct dtype from the start.
                 _init_size = cm_probe.width * cm_probe.height * _init_ch * DtypeCodec.itemsize(_init_dtype)
                 self._last_pixel_fmt_name = _pf_init  # seed cache — first export frame won't re-override
-                self._log(
-                    f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
-                    force=True,
-                )
+                if not self._conflict_logged:  # a refused sender tries again on each cook
+                    self._log(
+                        f"Auto-init dtype from pixelFormatName={_pf_init!r}: {_init_dtype}/{_init_ch}ch",
+                        force=True,
+                    )
                 self.initialize(cm_probe.width, cm_probe.height, _init_ch, _init_size, extra_flags=_init_extra_flags)
             else:
                 # Unmapped name (e.g. "useinput"): derive flags from the same dtype guess
@@ -659,9 +845,13 @@ class TDSenderEngine:
                 self.initialize(
                     cm_probe.width, cm_probe.height, cm_probe.channels, cm_probe.size, extra_flags=_init_extra_flags
                 )
+            if self._stream_restarted and not self._initialized and not self._conflict_logged:
+                # No new attempt on each cook: a failed open logs a traceback each time.
+                self._restart_init_failed = True
+                self._show_error_status("Stream restart failed - toggle Active or restart TouchDesigner")
             return False  # skip this frame; next cook exports normally
 
-        # Defense in depth: parexecute_callbacks.handle_numslots_change rejects Numslots > 10,
+        # Defense in depth: CUDAIPCExtension._on_numslots_change rejects Numslots > 10,
         # but self.num_slots can also arrive via direct TDSenderEngine construction (e.g. a
         # stale out-of-range value loaded from a .tox on first Activate, before any "change"
         # event fires). The extra `% len(...)` keeps this a label lookup, never an IndexError,
@@ -672,10 +862,13 @@ class TDSenderEngine:
             # Bridge step 1: request TD texture memory on the Exporter's IPC stream so
             # that TD's CUDA work is enqueued on the same stream as the D2D copy — no
             # explicit event ordering needed.
+            if (self._held_sources or self._hold_fault_code is not None) and not self._source_hold_ready():
+                return False
             try:
                 _t_cm = time.perf_counter()
                 cm = top_op.cuda_memory(stream=int(self._exporter.ipc_stream.value), **_cm_kwargs)
-                self._cm_acc_s += time.perf_counter() - _t_cm
+                _t_cm_end = time.perf_counter()
+                self._cm_acc_s += _t_cm_end - _t_cm
                 self._cm_acc_n += 1
             except Exception as cuda_err:  # noqa: BLE001  # TD cuda_memory() error taxonomy is broad; cook callback must degrade, not crash
                 self._log(f"cudaMemory() failed: {cuda_err}", force=True)
@@ -815,8 +1008,8 @@ class TDSenderEngine:
                     f" → {cm.width}x{cm.height}x{cm_channels} {resolved_dtype}",
                     force=True,
                 )
-                with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort teardown on geometry change; must not raise inside a cook callback
-                    self._exporter.close()
+                _steady = False
+                self._close_exporter()
                 new_spec = FrameSpec(
                     shm_name=self.shm_name,
                     height=cm.height,
@@ -893,6 +1086,10 @@ class TDSenderEngine:
                 producer_frame=self._host.abs_frame(),
                 stream_id=self._stream_id(),
             )
+            if not self._policy.export_sync:
+                # Hold before export(): if export() raises after it queued the copy, the block
+                # is still held. export() writes this frame to slot write_idx % num_slots.
+                self._held_sources.append((self._exporter.write_idx % self.num_slots, cm))
             _t_export = time.perf_counter()
             outcome = self._exporter.export(frame)
 
@@ -904,6 +1101,7 @@ class TDSenderEngine:
                     # (same startup-delay guard the receiver uses) doesn't dilute FPS.
                     self._tx_window.start(_now, self._exporter.frame_count - 1)
                 self._barrier.tick_and_maybe_release(os.getpid(), log_fn=self._log)
+                self._stream_restarted = False
                 if not self._last_pub_status:
                     # Rebuild status string only when geometry changed (fast-path sets it "");
                     # avoids one f-string allocation per frame in steady state.
@@ -911,8 +1109,21 @@ class TDSenderEngine:
                         f"{cm.width}x{cm.height} {_format_label(_pf_name, resolved_dtype, cm_channels)}"
                     )
                 self._host.set_info_status(self._last_pub_status)
+                if _steady:
+                    self._pre_acc_s += _t_cm - _t_enter
+                    self._prep_acc_s += _t_export - _t_cm_end
+                    self._post_acc_s += time.perf_counter() - _now
+                    self._rest_acc_n += 1
                 self._maybe_report_stats(self._exporter.write_idx, now=_now)
                 return True
+            if outcome is FrameOutcome.FAILED:
+                # export() can fail after it queued the copy and before it recorded the
+                # slot's event. The next copy check would then read the slot's old event
+                # and release this block too early. export() also leaves its CUDA error
+                # latched, and fails on each later frame until the error is consumed.
+                # recover() does both: it consumes the error and waits for the stream.
+                # Blocking mode holds no block, but it has the same latched error.
+                self._recover_source_hold()
             return False
 
         finally:
@@ -928,9 +1139,10 @@ class TDSenderEngine:
         self._barrier.close()
 
         if self._exporter is not None:
-            with contextlib.suppress(Exception):  # noqa: BLE001  # best-effort shutdown; partial close is acceptable on teardown
-                self._exporter.close()
+            self._close_exporter()
             self._exporter = None
+        self._stream_restarted = False
+        self._restart_init_failed = False
 
         self._initialized = False
         self._closed = True
@@ -945,10 +1157,10 @@ class TDSenderEngine:
         self._warned_dtype_size = False
         self._warned_format = False
         self._error_shown = False  # the clear_status() below clears it
+        self._conflict_logged = ""
         self._f16_convert_to = None
 
         # Reset windowed-report state so the next activation starts with a fresh window.
         self._reset_report_window()
 
         self._host.clear_status()
-        self._host.set_param_enabled("Numslots", True)

@@ -513,12 +513,12 @@ the WDDM scheduling mode in effect during that capture.
 ## 8. Async Export Path for Python-Sender Topologies
 
 > **⚠️ TD Sender users — stop here.** The TD Sender (`CUDAIPCExtension` Sender COMP)
-> **must remain blocking** (`CUDALINK_EXPORT_SYNC=1`, the default since v1.10.1). TD's
-> source texture (`cm.ptr`) is cook-scoped and reclaimed the moment the cook returns.
-> Setting `CUDALINK_EXPORT_SYNC=0` on the TD Sender lets the IPC-stream D2D copy run
-> after the source is freed → reads freed memory → **CUDA 719** under a loaded consumer.
-> `CUDALINK_EXPORT_SYNC=0` is an unsafe opt-out for TD Sender deployments, not a
-> recommended configuration. See CHANGELOG 1.10.1 and ADR-0001. **This section (§8)
+> **stays blocking by default** (`CUDALINK_EXPORT_SYNC=1`, the default since v1.10.1).
+> In 1.10.0, async export with the TD Sender gave a **CUDA 719** under a loaded consumer.
+> From 2.2.0 the Sender holds TD's `CUDAMemory` object until the copy has read the block,
+> which removes the known cause. `CUDALINK_EXPORT_SYNC=0` with the TD Sender is still not
+> validated with a loaded consumer, and it gave no speed gain at 1280x720. It is not a
+> recommended configuration. See CHANGELOG 2.2.0 and `docs/ARCHITECTURE.md`. **This section (§8)
 > applies only to standalone Python `Exporter` callers with a persistent, caller-owned
 > source buffer.**
 
@@ -528,10 +528,10 @@ Standalone Python-sender deployments where no TD-Sender process shares the CUDA
 context. Validated in the v5 nsys capture (findings documented in `td_pipeline_v5_findings_extended.md` in contributor archives).
 
 > **Note — TD Sender users:** The **TD Sender** (TouchDesigner `CUDAIPCExtension` Sender
-> COMP) defaults to **blocking** export as of v1.10.1 because its source is TD's transient
-> cook-scoped TOP texture (`cm.ptr`), which TD reclaims immediately after the cook.  Async
-> export returns before the D2D copy reads the source, causing reads-freed-memory (CUDA 719)
-> under a loaded consumer.  This section applies only to standalone Python `Exporter` callers
+> COMP) defaults to **blocking** export as of v1.10.1. Its source is a `CUDAMemory` block
+> that lives as long as the Python object; from 2.2.0 the Sender holds that object until the
+> copy has read the block. Async export with the TD Sender is not yet validated with a
+> loaded consumer (CUDA 719 in 1.10.0).  This section applies only to standalone Python `Exporter` callers
 > with a **persistent, caller-owned** source buffer.  See CHANGELOG 1.10.1 and ADR-0001.
 
 ### Flags
@@ -573,7 +573,7 @@ The default differs between the two producer implementations:
 | Producer | Default | Rationale |
 |---|---|---|
 | **Library exporter** (`cuda_link.Exporter`) | `EXPORT_SYNC=0` (async) | Python senders are standalone with a caller-owned persistent source buffer; IPC events provide correct cross-process ordering. Falls back to blocking sync automatically when no IPC event exists for a slot. |
-| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking, **default since v1.10.1**) | The TD source is TD's transient cook-scoped TOP texture (`cm.ptr`): TD reclaims it when the cook returns. Async export lets TD recycle the source while the IPC-stream copy is still queued → reads freed memory → CUDA 719 under a loaded consumer. Blocking ensures the D2D read completes before the cook exits. Set `CUDALINK_EXPORT_SYNC=0` to opt back into async **only** with a guaranteed-stable source. See CHANGELOG 1.10.1. |
+| **TD Sender** (`TDConfig.py`, `TDSender`) | `EXPORT_SYNC=1` (blocking, **default since v1.10.1**) | The TD source is a `CUDAMemory` block that lives as long as the Python object. From v2.2.0 the Sender holds that object until the copy has read the block, in both modes. Blocking stays the default: async export with the TD Sender gave a CUDA 719 under a loaded consumer in 1.10.0 and is not validated again yet. See CHANGELOG 2.2.0. |
 
 > **This section (§8) applies only to the standalone Python `Exporter` callers described above.**
 > For TD Sender deployments, note that `CUDALINK_EXPORT_SYNC=0` is an explicit opt-out from
@@ -596,13 +596,12 @@ The default differs between the two producer implementations:
    ordering** (`record_source_sync` / `require_source_sync`; see "Producer-Stream Ordering"
    in `ARCHITECTURE.md`).
 
-3. **TD Sender source-buffer lifetime race** (fixed since v1.10.1, CUDA 719): TD's TOP
-   texture pointer (`cm.ptr`) is valid only within the cook frame. Async export can delay
-   the IPC-stream copy past cook exit → reads freed memory. Fixed by **TD Sender blocking
-   by default** (`_resolve_export_sync(None) → True`). The `record_source_sync` ordering
-   primitive guarantees the copy starts after the source is fully written but does NOT keep
-   the source live past the D2D read; only blocking export closes the lifetime window for a
-   transient source. See CHANGELOG 1.10.1 and ADR-0001.
+3. **TD Sender source-buffer lifetime race** (CUDA 719): the source block lives as long as
+   TD's `CUDAMemory` object, and before v2.2.0 the Sender dropped that object before the
+   copy. v1.10.1 made the **TD Sender block by default** (`_resolve_export_sync(None) → True`).
+   v2.2.0 holds the object until the copy has read the block. The `record_source_sync`
+   ordering primitive guarantees the copy starts after the source is fully written but does
+   NOT keep the source live past the D2D read. See CHANGELOG 2.2.0 and ADR-0001.
 
 ### Prerequisites
 

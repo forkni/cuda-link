@@ -47,6 +47,7 @@ class FakeCUDAMemoryRef:
         channels: int = 4,
         size: int = 0,
         data_type: Any = None,
+        owner: Any = None,
     ) -> None:
         self.ptr = ptr
         self.width = width
@@ -54,6 +55,7 @@ class FakeCUDAMemoryRef:
         self.channels = channels
         self.size = size or width * height * channels * 4
         self.data_type = data_type
+        self.owner = owner
 
 
 class FakeTOPHandle(TOPHandle):
@@ -107,6 +109,7 @@ class FakeTOPHandle(TOPHandle):
             channels=channels,
             size=size,
             data_type=self._cuda_data_type,
+            owner=object(),  # one new block per call, as TD
         )
 
     @property
@@ -156,6 +159,8 @@ class FakeTDHost(TDHost):
         self.enable_writes: list[tuple[str, bool]] = []
         self.param_labels: dict[str, str] = {}  # last label written per par name
         self.custom_only_calls: list[bool] = []
+        self.display_buffers: list[str] = []  # set_display_buffer() targets, in call order
+        self.has_display_buffer = True  # False: a COMP with no `bg` Select TOP
         self.wrapped_tops: list[Any] = []
         self.cuda_shapes: list[FakeCUDAMemoryShape] = []
         # Records every status/tint side-effect call as (kind, msg); kind is one of
@@ -183,6 +188,12 @@ class FakeTDHost(TDHost):
 
     def show_custom_only(self, value: bool) -> None:
         self.custom_only_calls.append(value)
+
+    def set_display_buffer(self, top_name: str) -> bool:
+        if not self.has_display_buffer:
+            return False
+        self.display_buffers.append(top_name)
+        return True
 
     def is_active(self) -> bool:
         return bool(self._params.get("Active", True))

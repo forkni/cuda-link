@@ -7,6 +7,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-23
+
+### Added
+
+- **`Exporter.slot_copy_done(slot)` and `Exporter.drain()`.** For a producer that exports
+  with `export_sync=False` and must keep its source buffer alive until the queued copy has
+  read it. `slot_copy_done()` is a non-blocking query of the slot's copy; `drain()` waits
+  for the IPC stream and does nothing on a closed `Exporter`.
+- **`Exporter.recover()`.** Consumes a latched CUDA error, waits for the IPC stream and
+  returns the error code that is latched after the wait. `0` proves that each queued copy
+  has completed and that the context is usable. It does not raise.
+- **`.tox` Sender Debug line itemizes the rest of `export_frame()`.** After `export=` the
+  summary line now prints `pre=`, `prep=` and `post=`: the time before `cudaMemory()`, the
+  time between `cudaMemory()` and the export, and the time after the export. They are
+  per-window averages over published steady-state frames; a frame that reopens the
+  exporter is not counted. The cost is two more clock reads per frame.
+
+### Fixed
+
+- **`.tox` Sender keeps TD's `CUDAMemory` object until the copy has read it.** TD gives a
+  new block per `top.cudaMemory()` call, and the block lives only as long as the Python
+  object. The Sender kept only the pointer, so the block was released before the copy was
+  queued. The object is now held for the whole `export()` call. With
+  `CUDALINK_EXPORT_SYNC=0` it is held until the copy of its slot has completed, with one
+  block per ring slot as the cap. Blocking export stays the default.
+- **`.tox` Sender, `CUDALINK_EXPORT_SYNC=0`: a CUDA error no longer frees a block that a
+  queued copy can still read.** After a CUDA error in the copy check or in `export()`, the
+  Sender calls `Exporter.recover()`. With no error after the stream wait, it continues on
+  the same cook. With an error, it stops with the blocks held and shows
+  `Async copy fault: CUDA error N`. For an error that the CUDA header marks as permanent
+  (700, 702, 710, 714 to 719) the text ends with `restart TouchDesigner` and there are no
+  more attempts. For each other error it tries again one time per second and continues
+  by itself when the error is gone. After 3 failed attempts it closes the Exporter and
+  opens a new stream, one time for each fault, as an Active toggle does. If the new
+  stream fails too, the text ends with `toggle Active or restart TouchDesigner`. When the
+  Exporter closes (Active off, or a resolution or format change) and the copies are not
+  proved done, the blocks are kept until TouchDesigner exits: at most one block per ring
+  slot for each such close.
+- **`.tox` Sender, blocking export: a latched CUDA error no longer makes each later export
+  fail.** `export()` only reads the latched error, so one error stopped the stream until
+  the user toggled Active. After a failed `export()` the Sender now calls
+  `Exporter.recover()`, as it does with `CUDALINK_EXPORT_SYNC=0`. The steps are the same:
+  one attempt per second, no more attempts for a permanent error, and a new stream after
+  3 failed attempts. The status text starts with `Export fault: CUDA error N`.
+- **`Exporter.close()` consumes a latched CUDA error.** With an error latched, `close()`
+  skips the GPU cleanup, as before. It left the error latched, and the error is per
+  thread, so the first `export()` of the next Exporter on that thread failed. That cost
+  one frame after each stream restart of the `.tox` Sender.
+
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **Operator Help button on the C++ TOPs**: the Help button of CUDA Link Out and CUDA Link In
+  opens `docs/CPP_TOP.md` on GitHub at the parameter section of that TOP. The parameters
+  still have no Alt+hover help: the TD C++ SDK has no per-parameter help field, and TD
+  refuses `par.help` writes on these parameters. See "Operator help" in `docs/CPP_TOP.md`.
+
+### Changed
+
+- **`.tox` greys out the parameter its mode does not read.** `Streamid` (read only by the
+  Sender) is greyed out in Receiver mode, and `Framewaitms` (read only by the Receiver) in
+  Sender mode. The extension sets this at load and on each `Mode` switch. Before, both
+  parameters could be edited in both modes, and the edit had no effect in the other mode.
+  The C++ TOPs are not affected: each one has only the parameter it reads.
+
+- **`.tox`: the extension owns what a parameter change does.** `CUDAIPCExtension.on_par_change`
+  and its `PARS` table replace the `handle_*` functions of `parexecute_callbacks.py`, and
+  `CUDAIPCExtension.resync_pars` replaces the first-frame resync code of
+  `callbacks_template.py`. Both DATs now only forward to the extension. The behaviour of each
+  parameter is the same, with two differences. The first-frame resync no longer needs a
+  Parameter Execute DAT named `parexec1` or `parexecute`. It also runs again on the next
+  frame, because TouchDesigner runs Frame Start inside `loadTox()`, before the script
+  writes its parameters. A `.tox` built by hand must take
+  the two callback DATs and the extension from the same version.
+
+- **`.tox`: each parameter the Python side reads has a declared read policy.** `PARS` now has
+  a row for all nine parameters, with `policy` set to `reinit` (read at load, kept, a change
+  needs an action) or `live` (read each time it is needed: `Active`, `Streamid`,
+  `Framewaitms`). A test fails when the package reads a parameter that has no row.
+
+- **`.tox`: the parameter help text comes from the `PARS` table.** `par_help()` in
+  `td_exporter/CUDAIPCExtension.py` replaces the `PAR_HELP` dictionary of
+  `scripts/tox_par_help.py`, and it makes the "Greyed out in … mode" sentence from the enable
+  rule, so the help cannot disagree with the rule. The text of each existing parameter is the
+  same. `scripts/tox_par_help.py` now reads the help from the COMP's own `CUDAIPCExtension`
+  DAT: update that DAT before you run `apply()`.
+
+### Fixed
+
+- **A second sender on a name that a running sender holds is now refused.** Before,
+  `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
+  and IPC handles over the first sender's. Neither sender got an error, and the receivers
+  read a mix of the two. `Exporter.open()` now raises `SenderConflictError` (a
+  `CudaIpcError`) before any GPU allocation in two cases: this process already has an open
+  `Exporter` on the name, or the segment names another process as its sender, that sender
+  did not close, and the process still runs. In TouchDesigner the Sender shows the error,
+  tries again on each cook, and starts by itself when the name is free. It logs the error
+  one time, with no traceback. A sender that closed, or one that crashed, leaves the name
+  free, so a restart on the same name works as before. Not covered: the C++ Out TOP does not make
+  this check yet. A Sender COMP and a C++ Out TOP in the same TouchDesigner process are not
+  told apart, because they have the same process id. The check trusts the process id in the
+  segment, so a crashed sender whose id the system gave to a new process blocks the name
+  until that process exits.
+
+- **`.tox`: a `Cudadevice` change after load had no effect.** The extension read `Cudadevice`
+  once at load. A later change, or a write in the same script as `loadTox()`, left it on the
+  old device with no message. A change now makes a new engine on the new device, the same as
+  an `Ipcmemname` change. The shipped `.tox` has no `Cudadevice` parameter and uses device 0;
+  this affects a COMP built by hand for a second GPU.
+
+- **`.tox`: `Numslots` could be edited in an Active Sender.** It stayed editable after a
+  `Mode` switch from Receiver to Sender, or after an `Ipcmemname` change, when the Sender did
+  not open its ring afterwards (cuda_link not resolved, or a source pixel format that
+  `cudaMemory()` rejects). The edit was then refused, and the parameter showed a slot count
+  the Sender did not use. The enable state of `Numslots`, `Streamid` and `Framewaitms` now has
+  one rule, `par_enable_state(mode, active)` in `CUDAIPCExtension`, applied at load, on a
+  `Mode` switch and on an `Active` change. The Sender and Receiver engines no longer write it.
+  A Sender saved with `Active` on now loads with `Numslots` locked.
+
 ## [2.0.0] - 2026-11-22
 
 ### Removed

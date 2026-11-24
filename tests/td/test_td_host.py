@@ -145,6 +145,27 @@ def test_real_top_handle_cuda_memory() -> None:
     assert ref.size == 128 * 64 * 4 * 4
 
 
+def test_real_top_handle_cuda_memory_keeps_the_td_object() -> None:
+    """The ref holds TD's CUDAMemory object: the block lives only as long as that object."""
+    import weakref
+
+    from TDHost import RealTOPHandle
+
+    made: list[weakref.ref] = []
+
+    class _TrackTOP(_TDTOP):
+        def cudaMemory(self, stream: Any = None) -> _TDCUDAMemory:
+            cm = super().cudaMemory(stream=stream)
+            made.append(weakref.ref(cm))
+            return cm
+
+    ref = RealTOPHandle(_TrackTOP()).cuda_memory()
+
+    assert ref.owner is made[0]()
+    del ref
+    assert made[0]() is None, "Nothing but the ref may hold the TD object."
+
+
 def test_real_top_handle_cuda_memory_with_stream() -> None:
     """cuda_memory(stream=...) passes stream kwarg to top.cudaMemory()."""
     from TDHost import RealTOPHandle
@@ -282,6 +303,25 @@ def test_real_td_host_set_param_enabled() -> None:
     host.set_param_enabled("Numslots", False)
 
     assert comp.par._attrs["Numslots"].enable is False
+
+
+def test_real_td_host_set_display_buffer_retargets_the_viewer_select() -> None:
+    from TDHost import VIEWER_SELECT_NAME, RealTDHost
+
+    comp = _TDComp()
+    viewer_select = _TDTOP()
+    viewer_select.par = _TDPar(top="ExportBuffer")
+    comp._ops[VIEWER_SELECT_NAME] = viewer_select
+
+    assert RealTDHost(comp).set_display_buffer("ImportBuffer") is True
+    assert viewer_select.par.top.eval() == "ImportBuffer"
+
+
+def test_real_td_host_set_display_buffer_without_a_viewer_select() -> None:
+    """A COMP built without the bg Select TOP: nothing to retarget, and no error."""
+    from TDHost import RealTDHost
+
+    assert RealTDHost(_TDComp()).set_display_buffer("ImportBuffer") is False
 
 
 def test_real_td_host_show_custom_only() -> None:
