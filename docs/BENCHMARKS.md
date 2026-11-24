@@ -54,8 +54,9 @@ D      0 (async)     1 (on)          13.9      22.7     25.1          0.00      
 **P1 gain (A→B): −27.3 µs p50 (60%)** — eliminates the 17.91 µs `cudaStreamSynchronize`
 on the producer side. `CUDALINK_EXPORT_SYNC=0` enables async mode; `CUDALINK_EXPORT_SYNC=1`
 forces blocking. **As of v1.10.1 the TD Sender defaults to blocking** (Cell A / Cell C) to
-prevent a source-buffer lifetime race with TD's transient cook-scoped TOP texture that causes
-CUDA 719 under a loaded consumer (see CHANGELOG 1.10.1). The Python library `Exporter` keeps
+prevent a source-buffer lifetime race that caused CUDA 719 under a loaded consumer. From
+v2.2.0 the Sender also holds TD's `CUDAMemory` object until the copy has read the block (see
+CHANGELOG 2.2.0). The Python library `Exporter` keeps
 async as its default (Cell D / Cell B). Coexistence safety comes from explicit per-engine
 streams and producer-stream ordering (`record_source_sync` / `require_source_sync`), not from
 blocking export.
