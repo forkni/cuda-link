@@ -47,6 +47,7 @@ class FakeCUDAMemoryRef:
         channels: int = 4,
         size: int = 0,
         data_type: Any = None,
+        owner: Any = None,
     ) -> None:
         self.ptr = ptr
         self.width = width
@@ -54,6 +55,7 @@ class FakeCUDAMemoryRef:
         self.channels = channels
         self.size = size or width * height * channels * 4
         self.data_type = data_type
+        self.owner = owner
 
 
 class FakeTOPHandle(TOPHandle):
@@ -107,6 +109,7 @@ class FakeTOPHandle(TOPHandle):
             channels=channels,
             size=size,
             data_type=self._cuda_data_type,
+            owner=object(),  # one new block per call, as TD
         )
 
     @property

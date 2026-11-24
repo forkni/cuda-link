@@ -1074,6 +1074,49 @@ class Exporter:
         """True if open() succeeded and close() has not been called."""
         return self._initialized and not self._closed and all(ptr is not None for ptr in self.dev_ptrs)
 
+    def slot_copy_done(self, slot: int) -> bool:
+        """Non-blocking: True when the copy last queued for ``slot`` has completed.
+
+        For a producer that exports async (``export_sync=False``) and must keep the source
+        buffer alive until the queued copy has read it. A slot with no IPC event is always
+        done: export() blocks on the stream for such a slot.
+        """
+        event = self.ipc_events[slot] if 0 <= slot < len(self.ipc_events) else None
+        if not event:
+            return True
+        return bool(self._cuda.query_event(event))
+
+    def drain(self) -> None:
+        """CPU-blocking wait until every copy queued on the IPC stream has completed.
+
+        No-op on a closed Exporter: close() leaves ``ipc_stream`` set when the CUDA context
+        was not valid, and that stream must not be used again.
+        """
+        if not self._closed and self.ipc_stream:
+            self._cuda.stream_synchronize(self.ipc_stream)
+
+    def recover(self) -> int:
+        """Consume a latched CUDA error, then wait for the IPC stream. Returns a CUDA error code.
+
+        0: no error is latched after the wait, so every queued copy has completed and the
+        context is usable. Any other value: the error that is latched now (-1 when the code
+        is not known, and on a closed Exporter, where nothing can be proved). A permanent
+        error such as 719 comes back on the wait; an error that is not permanent does not.
+        Does not raise.
+        """
+        if self._closed or not self.ipc_stream:
+            return -1
+        cuda = self._cuda
+        try:
+            cuda.clear_last_error()
+            cuda.stream_synchronize(self.ipc_stream)
+            return int(cuda.peek_last_error())
+        except (OSError, RuntimeError):
+            try:
+                return int(cuda.peek_last_error()) or -1
+            except (OSError, RuntimeError, AttributeError):
+                return -1
+
     def attach_nvml_observer(self, observer: NVMLObserver) -> None:
         """Attach an NVMLObserver for GPU telemetry in get_stats()."""
         self._nvml_observer = observer
