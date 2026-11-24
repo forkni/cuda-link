@@ -403,11 +403,36 @@ unset or `0`). The CUDA IPC event provides correct cross-process GPU ordering; c
 safety relies on explicit per-engine streams + producer-stream ordering, not blocking export.
 
 **TD Sender (v1.10.1+):** defaults to **blocking** (`CUDALINK_EXPORT_SYNC` unset → `1`).
-The TD source is TD's cook-scoped TOP texture (`cm.ptr`) — an externally-owned, transient
-pointer reclaimed the instant the cook returns.  Async export lets TD reclaim the source
-while the queued D2D copy is still executing → reads freed memory → CUDA 719.
-`CUDALINK_EXPORT_SYNC=0` opts into async only when the caller guarantees the source buffer
-outlives the copy (e.g. a stable device ring buffer passed into TD via `copyCUDAMemory`).
+The TD source is a `CUDAMemory` block. TD gives a new block per `top.cudaMemory()` call,
+and the block lives only as long as the Python object (probe in TD 2025.33230: the
+address of a dropped object goes to the next `cudaMemory()` call in the same cook).
+
+**Correction in 2.2.0.** Before 2.2.0 the Sender kept only `int(cm.ptr)` and dropped the
+object, so the block was released before the copy was queued, in blocking mode too. The
+text of 1.10.1 gave the cause of the CUDA 719 as a cook-scoped texture that TD reclaims at
+the end of the cook. That is not what the probe shows. From 2.2.0 the Sender holds the
+object until the copy has read the block:
+
+- With blocking export, for the whole `export()` call.
+- With `CUDALINK_EXPORT_SYNC=0`, until `Exporter.slot_copy_done(slot)` reports that the
+  copy of that slot has completed. The cap is one held block per ring slot; at the cap the
+  Sender calls `Exporter.drain()`.
+
+Blocking stays the default. Async export with the TD Sender is opt-in and is not yet
+validated with a loaded consumer: the control run for the CUDA 719 is still open.
+
+**Fault recovery (2.2.0).** `export()` only reads a latched CUDA error, so one error made
+each later export fail. After a failed export, or a failed copy check, the Sender calls
+`Exporter.recover()`. That call consumes the latched error, waits for the IPC stream and
+returns the code that is latched after the wait; `0` proves that each queued copy has
+completed. With another code the Sender publishes no frames and tries again one time per
+second. It stops for a code that CUDA documents as permanent (700, 702, 710, 714 to 719),
+and after 3 failed attempts it opens a new stream, one time for each fault. A held block
+is released only after a stream wait that succeeded. With no such proof the blocks are
+kept for the life of the TD process. `Exporter.close()` consumes a latched error after a
+close that skipped the GPU cleanup, so the next `Exporter` on the thread does not get it.
+A producer of its own that exports with `export_sync=False` can use the same three
+methods (`slot_copy_done`, `drain`, `recover`) to keep its source buffer alive.
 
 **Critical distinction — ordering vs. lifetime:**
 
@@ -424,12 +449,11 @@ Three distinct stream hazards are each addressed by the correct mechanism:
 - **Producer-side cross-stream race** (fixed v1.9.0) — eliminated by `record_source_sync` /
   `require_source_sync` (see above). These ordering primitives guarantee the source is fully
   written before the copy *starts* — they do not keep the source alive past the queued D2D read.
-- **TD Sender source-buffer lifetime race** (fixed v1.10.1, CUDA 719) — the TD source is TD's
-  transient cook-scoped TOP texture (`cm.ptr`): TD reclaims it when the cook returns. Async
-  export can delay the IPC-stream copy past cook exit → reads freed memory.  Fixed by **TD
-  Sender blocking by default** (post-copy `stream_synchronize`): the source is provably safe to
-  release when `export()` returns.  `CUDALINK_EXPORT_SYNC=0` opts back into async only when the
-  caller guarantees the source buffer outlives the copy.
+- **TD Sender source-buffer lifetime race** (CUDA 719; blocking default since v1.10.1, owner
+  held since v2.2.0) — the source block lives as long as TD's `CUDAMemory` object, and the
+  Sender dropped that object before the copy. v1.10.1 made the TD Sender block by default
+  (post-copy `stream_synchronize`). v2.2.0 holds the object until the copy has read the
+  block, in both modes (see above).
 
 See `docs/PROFILING.md §8 EXPORT_SYNC defaults` for the full hazard analysis and timeline.
 

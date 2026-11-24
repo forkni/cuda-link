@@ -75,16 +75,21 @@ Measured on RTX 4090 / PCIe 4.0 x16 / Windows 11 / driver 596.36. All Python-sid
 
 **Option A: Use the .tox component** (recommended)
 
-1. Drag `TOXES/CUDAIPCLink_v2.2.0.tox` into your TD network
-2. Wire your source TOP to the `input` In TOP
-3. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
-4. Enable `Active` toggle
+1. Install `cuda_link` 2.2.0 where TouchDesigner can find it (see Option C). A release
+   `.tox` (2.0.0 and later) holds no copy of the library, so it needs an installed
+   `cuda_link` of the same version.
+2. Drag `TOXES/CUDAIPCLink_v2.2.0.tox` into your TD network
+3. Wire your source TOP to the `input` In TOP
+4. Set `Ipcmemname` parameter (e.g., `"my_texture_ipc"`)
+5. Enable `Active` toggle
 
 The component displays its transfer state in the read-only **Status** custom parameter:
-`"<W>x<H> <dtype> <ch>ch"` during active transfer, `"WARNING: ..."` or `"ERROR: ..."` on
-faults, and `"Idle"` when inactive. A `warning_emitter` Script TOP inside the COMP also
-shows a local warning badge when the component is open. See [`td_exporter/HELP_DOC.md`](td_exporter/HELP_DOC.md)
-for per-parameter documentation.
+`"<W>x<H> <pixel format>"` during active transfer (for example `1920x1080 rgba8fixed`),
+`"WARNING: ..."` or `"ERROR: ..."` on faults, and `"Idle"` when inactive. The COMP node
+tints yellow on a warning and red on an error. A Sender that gets a CUDA error shows
+`ERROR: Export fault: CUDA error <code> - ...` and recovers by itself when it can (see
+[Troubleshooting](#export-fault-or-async-copy-fault-in-the-sender-status)). See
+[`td_exporter/HELP_DOC.md`](td_exporter/HELP_DOC.md) for per-parameter documentation.
 
 #### Option B: Build from source
 
@@ -92,8 +97,9 @@ See [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUIDE.md) for step-by-step assemb
 
 #### Option C: Library mode (cleaner .tox — fewer Text DATs)
 
-For a leaner `.tox` (package installed once into a Python environment TD can see, instead
-of 15 mirror Text DATs), see [Distribution → For TouchDesigner Integration](#for-touchdesigner-integration).
+The package is installed once into a Python environment that TD can see, and the `.tox`
+holds no mirror Text DATs. The release `.tox` works only in this mode. See
+[Distribution → For TouchDesigner Integration](#for-touchdesigner-integration).
 
 ### 2. Python Side (Importer)
 
@@ -402,7 +408,7 @@ The six variables most consumers reach for:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering. **TD Sender default: `1` (blocking)** — the TD source is a transient cook-scoped TOP texture reclaimed right after the cook, so the D2D read must finish first (CUDA 719 guard; see CHANGELOG 1.10.1). |
+| `CUDALINK_EXPORT_SYNC` | `0` (Python API) / `1` (TD Sender) | Block CPU on the IPC stream after each `export_frame()`. **Python `Exporter` API default: `0` (async)** — the CUDA IPC event provides correct cross-process GPU ordering. **TD Sender default: `1` (blocking)**. TD gives a new `CUDAMemory` block per `top.cudaMemory()` call, and the block lives only as long as the Python object. From 2.2.0 the Sender holds that object until the copy has read the block, in both modes. `0` is opt-in for the TD Sender and is not yet validated with a loaded consumer (the CUDA 719 of 1.10.0; see `docs/ARCHITECTURE.md`). |
 | `CUDALINK_DOORBELL` | (removed) | Removed in 2.0.0. The doorbell is always on: the producer signals a Win32 named event after each publish and a consumer waits on it. Measured 2026-11-20 (1280x720, Python `Exporter`): off saved under 1 µs per publish, inside the run spread, and raised the consumer notify latency from 0.03 ms to 0.93 ms. A value left in the environment has no effect. In code, `ExportPolicy(doorbell=False)` and `ImportPolicy(doorbell=False)` still turn it off. |
 | `CUDALINK_WAIT_BACKEND` | `auto` | R5 native notification-wait backend (compiled into the core wheel on Windows, [ADR-0012](docs/adr/0012-native-extension-in-core-wheel.md)). `auto` uses it when available with silent fallback; `python` forces the pre-R5 path; `native` skips the `auto` gate. Target: p50 < 10 µs vs 136–286 µs poll-sleep baseline. |
 | `CUDALINK_D2H_PIPELINED` | `0` | Opt-in pipelined D2H for `get_frame_numpy()` — overlaps the copy with consumer CPU work at the cost of +1 frame latency. Gain: 1080p −6% / 4K −20% with 5 ms consumer work. |
@@ -439,6 +445,23 @@ importer = Importer.open(ImportSpec(shm_name="my_project_ipc", timeout_ms=10000.
 **Cause**: TD re-exported IPC handles (network reset, resolution change).
 
 **Solution**: The importer automatically detects version changes and re-opens handles. No action needed.
+
+### "Export fault" or "Async copy fault" in the Sender Status
+
+**Cause**: a CUDA error in the `.tox` Sender. The text is `Export fault: CUDA error <code>`
+with blocking export (the default) and `Async copy fault: CUDA error <code>` with
+`CUDALINK_EXPORT_SYNC=0`.
+
+**Solution**: read the end of the Status text. From 2.2.0 the Sender recovers by itself
+when it can.
+
+| Status ends with | What the Sender does | What to do |
+|---|---|---|
+| `recovery in progress` | It publishes no frames and tries again one time per second. After 3 failed attempts it opens a new stream, one time for each fault. A receiver sees no frames for about 2 seconds, then reconnects. | Nothing. Look for the cause if it comes back (for example GPU memory that is full: error 2). |
+| `toggle Active or restart TouchDesigner` | The new stream got the fault too. The Sender stays stopped. | Toggle `Active` Off → On. If the fault stays, restart TouchDesigner. |
+| `restart TouchDesigner` | The error code is one that CUDA documents as permanent for the process (700, 702, 710, 714 to 719). There are no more attempts. | Restart TouchDesigner. |
+
+One fault that clears at once costs one frame and shows no Status text.
 
 ### Red and blue swapped
 
@@ -558,7 +581,8 @@ The `cuda-link` package contains only the **consumer-side** Python code (`src/cu
 
 **Option A: Use the .tox component** (recommended)
 
-Drag `TOXES/CUDAIPCLink_v2.2.0.tox` into your TouchDesigner network.
+Drag `TOXES/CUDAIPCLink_v2.2.0.tox` into your TouchDesigner network. A release `.tox`
+(2.0.0 and later) is Library mode only: install `cuda_link` 2.2.0 first (Option C).
 
 > **Older versions:** Previous `.tox` releases are available as downloadable assets on the
 > [GitHub Releases page](https://github.com/forkni/cuda-link/releases) — pick the tag
@@ -572,7 +596,8 @@ Follow the manual build guide at [`docs/TOX_BUILD_GUIDE.md`](docs/TOX_BUILD_GUID
 
 Install `cuda_link` into a Python environment TouchDesigner can see. The `CUDALinkBootstrap`
 DAT then loads the package automatically — the 15 mirror Text DATs (Env, SHMProtocol,
-Exporter, Importer, …) are no longer needed in the `.tox`. Run the multi-target installer
+Exporter, Importer, …) are not in the release `.tox`, and are needed only in a `.tox` that
+you build from source for classic mode. Run the multi-target installer
 (one-time):
 
 ```bat
