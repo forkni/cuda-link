@@ -489,10 +489,36 @@ def test_blocking_permanent_error_is_not_tried_again(fake_exporter_open: None) -
     engine._exporter.export = lambda frame: FrameOutcome.FAILED
     engine._exporter.recover_code = 719
 
+    assert engine.export_frame() is False
+    assert engine._hold_next_try == float("inf"), "No next attempt: not only the one-second wait."
     assert [engine.export_frame() for _ in range(4)] == [False] * 4
 
     assert engine._exporter.recover_calls == 1
+    assert engine._hold_attempts == 0, "A permanent error does not count to the stream restart."
     assert _error_status(engine)[-1] == "Export fault: CUDA error 719 - restart TouchDesigner"
+
+
+def test_blocking_one_stream_restart_per_fault(fake_exporter_open: None) -> None:
+    """The new stream gets the fault before it publishes a frame: no second restart."""
+    engine, _top = _setup(export_sync=None)
+    old = engine._exporter
+    old.export = lambda frame: FrameOutcome.FAILED
+    old.recover_code = 400
+    for _ in range(TDSender._HOLD_RESTART_AFTER):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+    assert engine._exporter is None
+    assert engine.export_frame() is False  # lazy init opens the new Exporter
+    new = engine._exporter
+    new.export = lambda frame: FrameOutcome.FAILED
+    new.recover_code = 400
+
+    for _ in range(TDSender._HOLD_RESTART_AFTER + 3):
+        engine._hold_next_try = 0.0
+        assert engine.export_frame() is False
+
+    assert engine._exporter is new and not new.closed
+    assert _error_status(engine)[-1] == "Export fault: CUDA error 400 - toggle Active or restart TouchDesigner"
 
 
 def test_blocking_error_that_stays_restarts_the_stream(fake_exporter_open: None) -> None:

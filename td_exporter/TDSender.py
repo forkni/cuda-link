@@ -256,9 +256,9 @@ class TDSenderEngine:
         # copy may still be queued. The ref holds TD's CUDAMemory object, so TD cannot give the
         # block to a later cudaMemory() call before the copy has read it.
         self._held_sources: deque = deque()
-        # Async export only. Not None: a CUDA error left the state of the queued copies
-        # unknown. The blocks stay held and the Sender is stopped; it tries Exporter.recover()
-        # at _hold_next_try (never, for a permanent error).
+        # Both export modes. Not None: a CUDA error is latched, and in async mode the state
+        # of the queued copies is unknown. The Sender is stopped, with the async blocks held;
+        # it tries Exporter.recover() at _hold_next_try (never, for a permanent error).
         self._hold_fault_code: int | None = None
         self._hold_next_try: float = 0.0
         self._hold_attempts: int = 0  # failed recover() calls of this fault

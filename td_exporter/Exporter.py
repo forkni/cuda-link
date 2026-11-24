@@ -929,6 +929,12 @@ class Exporter:
         self._closed = True
         cuda_valid = self._is_cuda_context_valid()
         self._do_cleanup(cuda_valid=cuda_valid)
+        if not cuda_valid:
+            # The latched error is per thread and has done its work here: the GPU cleanup
+            # was skipped. Left latched, it makes the first export() of the next Exporter on
+            # this thread fail. A permanent error comes back on the next CUDA call.
+            with contextlib.suppress(OSError, RuntimeError, AttributeError):
+                self._cuda.clear_last_error()
 
     def _is_cuda_context_valid(self) -> bool:
         try:

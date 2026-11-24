@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Exporter.recover()`, as it does with `CUDALINK_EXPORT_SYNC=0`. The steps are the same:
   one attempt per second, no more attempts for a permanent error, and a new stream after
   3 failed attempts. The status text starts with `Export fault: CUDA error N`.
+- **`Exporter.close()` consumes a latched CUDA error.** With an error latched, `close()`
+  skips the GPU cleanup, as before. It left the error latched, and the error is per
+  thread, so the first `export()` of the next Exporter on that thread failed. That cost
+  one frame after each stream restart of the `.tox` Sender.
 - **A second sender on a name that a running sender holds is now refused.** Before,
   `Exporter.open()` attached to the existing SharedMemory segment and wrote its own header
   and IPC handles over the first sender's. Neither sender got an error, and the receivers
