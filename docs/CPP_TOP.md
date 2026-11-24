@@ -1,7 +1,7 @@
 # C++ Custom TOPs (cpp_top)
 
 This page is the user reference for the `CudaLinkOutTOP` and `CudaLinkInTOP` Custom
-Operator DLLs (protocol v0.6, cuda-link 2.1.0).
+Operator DLLs (protocol v0.6, cuda-link 2.2.0).
 
 ## Topology
 

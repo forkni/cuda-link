@@ -73,7 +73,7 @@ from typing import Any
 # Stamped by scripts/sync_td_wrapper.py from src/cuda_link/__init__.py::__version__.
 # The bootstrap only activates an install whose __version__ equals this value, so the
 # mirrors shipped inside the .tox and the package they alias can never drift apart.
-MIRROR_VERSION = "2.1.0"
+MIRROR_VERSION = "2.2.0"
 
 logger = logging.getLogger("cuda_link.td.bootstrap")
 
