@@ -795,3 +795,44 @@ CPU cook in µs.
   output texture.
 - The C++ In TOP cooked once per frame (cooked = 1.000) and also cooked without the forced cook.
   The built-in receivers cooked only on the forced cook.
+
+## `.tox` Sender: process priority class and window in front (2026-11-23)
+
+Question: does the `ABOVE_NORMAL` process priority class remove the window-in-front effect of the
+2026-11-21 section?
+
+Dev box: RTX 4090, two TD 2025.32820 processes (A and B) with the same project, each with one
+`.tox` Sender on a Noise TOP, 1920x1080 `rgba8fixed`, 60 fps, blocking export, no Receiver. Not
+recorded: the `.tox` version and the driver version.
+
+Method: a script in each TD timed the full `export_frame()` call of the Sender with
+`perf_counter`, one sample per frame. Thus the values include `top.cudaMemory()` and are not
+comparable with the `export=` values of the 2026-11-21 section. Each cell: 5 s warm-up, 25 s
+measured (about 1500 frames), both Senders measured in the same cell. A host script set the
+priority class of both processes (`SetPriorityClass`), moved one window to the front and read the
+window in front 4 times per second. Cell order: normal (A, B, neutral), above normal (A, B,
+neutral), and then the same again. "Neutral" is a third application's window.
+
+| Priority class | Window in front | A p50 | A p95 | B p50 | B p95 |
+|---|---|---|---|---|---|
+| normal | A | 496, 540 | 802, 855 | 475, 670 | 953, 976 |
+| normal | B | 489, 629 | 1002, 956 | 709, 532 | 961, 819 |
+| normal | neutral | 468 [1], 569 | 987 [1], 1035 | 480 [1], 569 | 847 [1], 952 |
+| above normal | A | 507, 512 | 812, 829 | 613, 444 | 955, 956 |
+| above normal | B | 471, 505 | 939, 969 | 504, 493 | 825, 829 |
+| above normal | neutral | 612, 571 | 1052, 1023 | 581, 552 | 999, 940 |
+
+Values in µs, round 1 and round 2. [1] B's window was in front for about 69 % of this cell, so it
+is not a clean neutral cell. Both TDs held 60.0 fps in each cell.
+
+- Priority class: no gain. Mean p50 of the six cells, normal against above normal: A 532 against
+  530 µs, B 573 against 531 µs. The same cell repeated gives p50 values up to 180 µs apart
+  (B: 709 and 532 µs), so the B difference is inside the spread. There is no operator setting to
+  recommend.
+- p50 and the window in front: no relation. The 2026-11-21 pattern (the two Senders slow together
+  or fast together, by the window in front) did not occur again. The p50 moved between about
+  470-510 µs and 570-710 µs with no relation to the window in front or to the priority class.
+- p95 and the window in front: the TD with its window in front has a lower p95, about 800-855 µs
+  against 940-1050 µs for the same TD when its window is not in front. This is true for 7 of the
+  8 cells (the exception: B, 961 µs) and for the two priority classes.
+- Limit: 25 s cells cannot show a p50 difference smaller than about 150 µs.
