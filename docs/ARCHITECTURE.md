@@ -902,8 +902,9 @@ texture memory with swizzled layout) without linearization.
 
 See [`docs/adr/0004-legacy-cuda-ipc-over-vmm.md`](adr/0004-legacy-cuda-ipc-over-vmm.md) for
 the full decision record, including the rejected VMM alternative and the one condition that
-would reopen the decision. A proof-of-concept VMM probe lives at
-`scripts/probe/driver_api_ipc_probe.py`.
+would reopen the decision. The VMM path has never been probed or built.
+`scripts/probe/driver_api_ipc_probe.py` is not a VMM probe: it tests legacy IPC handles
+allocated after `cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent` (primary context).
 
 ---
 

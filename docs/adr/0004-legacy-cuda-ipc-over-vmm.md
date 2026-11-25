@@ -92,8 +92,10 @@ than the runtime API's automatic context; (c) unvalidated on this WDDM/TouchDesi
 VMM buys over legacy IPC on linear memory is virtual address aliasing and SECURITY_ATTRIBUTES — neither is
 needed here.
 
-A proof-of-concept probe (`scripts/probe/driver_api_ipc_probe.py`) was written and confirmed the VMM path
-is available on this hardware, but it was never integrated into production.
+The VMM path has never been probed or built. `scripts/probe/driver_api_ipc_probe.py` is sometimes
+described as a VMM probe, but it is not one: it allocates with `cudaMalloc` after
+`cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent` and shares legacy `cudaIpc*` handles (corrected
+2026-11-25).
 
 ## Consequences
 
@@ -118,5 +120,6 @@ Revisit this decision if **either** of the following occurs:
 2. A future CUDA driver drops support for `cudaIpcGetMemHandle` on Windows WDDM for linear `cudaMalloc`
    allocations.
 
-In either case, the VMM probe script (`scripts/probe/driver_api_ipc_probe.py`) is the starting point for
-the migration path.
+In either case, the first step is a new VMM probe (`cuMemCreate` + `cuMemExportToShareableHandle`
+with `CU_MEM_HANDLE_TYPE_WIN32`, imported in a second TD process). No such probe exists yet;
+`scripts/probe/driver_api_ipc_probe.py` only shows how to load the driver API from Python.
