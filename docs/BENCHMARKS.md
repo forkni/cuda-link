@@ -834,5 +834,5 @@ is not a clean neutral cell. Both TDs held 60.0 fps in each cell.
   445 and 710 µs with no relation to the window in front or to the priority class.
 - p95 and the window in front: the TD with its window in front has a lower p95, about 800-855 µs
   against 940-1050 µs for the same TD when its window is not in front. This is true for 7 of the
-  8 cells (the exception: B, 961 µs) and for the two priority classes.
+  8 non-neutral cells (the exception: B, 961 µs) and for the two priority classes.
 - Limit: 25 s cells cannot show a p50 difference smaller than about 150 µs.
