@@ -826,12 +826,12 @@ Values in µs, round 1 and round 2. [1] B's window was in front for about 69 % o
 is not a clean neutral cell. Both TDs held 60.0 fps in each cell.
 
 - Priority class: no gain. Mean p50 of the six cells, normal against above normal: A 532 against
-  530 µs, B 573 against 531 µs. The same cell repeated gives p50 values up to 180 µs apart
-  (B: 709 and 532 µs), so the B difference is inside the spread. There is no operator setting to
+  530 µs, B 573 against 531 µs. The same cell repeated gives p50 values up to 195 µs apart
+  (B: 475 and 670 µs), so the B difference is inside the spread. There is no operator setting to
   recommend.
 - p50 and the window in front: no relation. The 2026-11-21 pattern (the two Senders slow together
   or fast together, by the window in front) did not occur again. The p50 moved between about
-  470-510 µs and 570-710 µs with no relation to the window in front or to the priority class.
+  445 and 710 µs with no relation to the window in front or to the priority class.
 - p95 and the window in front: the TD with its window in front has a lower p95, about 800-855 µs
   against 940-1050 µs for the same TD when its window is not in front. This is true for 7 of the
   8 cells (the exception: B, 961 µs) and for the two priority classes.
